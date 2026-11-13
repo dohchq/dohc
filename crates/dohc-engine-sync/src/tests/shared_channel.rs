@@ -39,6 +39,16 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         apply_shared_envelope(&mut engine, &channel, &private, &NoFaults),
         Err(SyncError::ShareBoundaryViolation)
     ));
+    let read_mark = envelope(
+        "peer",
+        1,
+        "chat.thread.read.set",
+        json!({"accountUserId":"u","threadId":"t","lastReadCreatedAtMs":1,"lastReadMessageId":"m","atMs":1}),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &channel, &read_mark, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
 }
 
 /// A replicated origin reads its source after `shared:<shareId>:`, so a share
@@ -71,6 +81,246 @@ fn a_share_id_with_a_colon_is_refused() {
             reason: "share_id must not contain ':'"
         })
     ));
+}
+
+#[test]
+fn a_group_a_shared_lane_applies_is_recorded_as_joined() {
+    let (_scratch, _path, mut engine) = open_store();
+    let boundary = ShareBoundary {
+        share_id: "share-joined".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-joined".to_owned()),
+        granted: None,
+    };
+    let channel = envelope(
+        "granter",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-joined",
+            "name": "Joined",
+            "slug": "joined",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "wire-joined"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &channel, &NoFaults),
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            ..
+        })
+    ));
+    let joined: Vec<String> = engine
+        .read_with(|conn| {
+            let mut statement =
+                conn.prepare("SELECT wire_id FROM chat_joined_channels WHERE workspace_id = 'ws'")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<String>, rusqlite::Error>>()
+        })
+        .expect("joined groups");
+    assert_eq!(joined, vec!["wire-joined".to_owned()]);
+}
+
+fn joined_wire_ids(engine: &EngineStore) -> Vec<String> {
+    engine
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT wire_id FROM chat_joined_channels WHERE workspace_id = 'ws' ORDER BY wire_id",
+            )?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<Result<Vec<String>, rusqlite::Error>>()
+        })
+        .expect("joined groups")
+}
+
+fn thread_read_records(engine: &EngineStore) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = 'ws' AND op_kind = 'chat.thread.read.set'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("thread read records")
+}
+
+fn account_marks(engine: &EngineStore) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_account_thread_read_state WHERE workspace_id = 'ws'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("account marks")
+}
+
+/// Ada joins Bob's Group on computer A and replies there. Computer B gets
+/// only Ada's own records through her ordinary sync. Both copies keep local
+/// counts for Bob's Group and journal no account mark.
+#[test]
+fn a_joined_group_stays_joined_on_the_owners_other_computer() {
+    let (_scratch_a, _path_a, mut computer_a) = open_store();
+    let bob = ShareBoundary {
+        share_id: "share-bob".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-bob".to_owned()),
+        granted: None,
+    };
+    for operation in [
+        envelope(
+            "bob-origin",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "c-bob",
+                "name": "Bob Group",
+                "slug": "bob-group",
+                "kind": "channel",
+                "createdAtMs": 1,
+                "wireId": "wire-bob"
+            }),
+        ),
+        envelope(
+            "bob-origin",
+            1,
+            "chat.thread.create",
+            json!({
+                "threadId": "t-bob",
+                "title": "Plans",
+                "createdAtMs": 2,
+                "channelWireId": "wire-bob"
+            }),
+        ),
+        envelope(
+            "bob-origin",
+            2,
+            "chat.message.append",
+            json!({
+                "messageId": "m-bob",
+                "threadId": "t-bob",
+                "authorKind": "human",
+                "authorDisplayName": "Bob",
+                "body": "Saturday?",
+                "createdAtMs": 3
+            }),
+        ),
+    ] {
+        assert!(matches!(
+            apply_shared_envelope(&mut computer_a, &bob, &operation, &NoFaults),
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                ..
+            })
+        ));
+    }
+    let seed_and_read = |engine: &mut EngineStore, now_ms: i64| {
+        let mut chats = LinkedChatStore::new(engine);
+        chats
+            .seed_account_reads("ws", "ada", true, now_ms, &NoFaults)
+            .expect("seed");
+        chats
+            .mark_thread_read(
+                &dohc_engine_domain::MarkThreadRead {
+                    workspace_id: "ws".to_owned(),
+                    thread_id: "t-bob".to_owned(),
+                    up_to_sequence: 99,
+                    expected_revision: None,
+                    replication_owner_user_id: Some("ada".to_owned()),
+                    now_ms: now_ms + 1,
+                },
+                &NoFaults,
+            )
+            .expect("owner-context read")
+    };
+
+    // A: seed, then Ada replies in Bob's Group.
+    seed_and_read(&mut computer_a, 10);
+    LinkedChatStore::new(&mut computer_a)
+        .send_message(
+            &SendMessage {
+                automation: None,
+                workspace_id: "ws".to_owned(),
+                thread_id: "t-bob".to_owned(),
+                message_id: "m-ada".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_owner_display_name: None,
+                author_user_id: Some("ada".to_owned()),
+                parent_message_id: None,
+                origin: None,
+                body: "Yes".to_owned(),
+                needs_decision: false,
+                options: Vec::new(),
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+                author_agent_id: None,
+                author_reported: None,
+                work: None,
+                wake_agent_ids: Vec::new(),
+            },
+            &NoFaults,
+        )
+        .expect("Ada replies");
+
+    // A's ordinary sync carries only its own records.
+    let own_records: Vec<(String, i64, String, String)> = computer_a
+        .read_with(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT origin_id, origin_seq, op_kind, payload_json FROM replication_log \
+                 WHERE workspace_id = 'ws' AND imported = 0 ORDER BY origin_seq",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+        })
+        .expect("A's own records");
+    let exported_thread = own_records
+        .iter()
+        .find(|(_, _, kind, _)| kind == "chat.thread.create")
+        .map(|(_, _, _, payload)| {
+            serde_json::from_str::<serde_json::Value>(payload).expect("payload")
+        })
+        .expect("A exports the thread before its reply");
+    assert_eq!(exported_thread["channelJoined"], json!(true));
+
+    let (_scratch_b, _path_b, mut computer_b) = open_store();
+    for (origin_id, origin_seq, op_kind, payload_json) in &own_records {
+        let payload: serde_json::Value = serde_json::from_str(payload_json).expect("payload");
+        apply_chat_envelope(
+            &mut computer_b,
+            &envelope(origin_id, *origin_seq, op_kind, payload),
+            &NoFaults,
+        )
+        .expect("ordinary replay on B");
+    }
+    assert_eq!(joined_wire_ids(&computer_b), vec!["wire-bob".to_owned()]);
+
+    // B: seed after a local read, then an owner-context read.
+    computer_b
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO chat_thread_read_state \
+                 (workspace_id, thread_id, last_read_sequence, revision, updated_at_ms) \
+                 VALUES ('ws', 't-bob', 1, 1, 1)",
+                [],
+            )
+        })
+        .expect("B's local count");
+    let read = seed_and_read(&mut computer_b, 30);
+    assert_eq!(read.last_read_sequence, 1, "B reads its local count");
+
+    for engine in [&computer_a, &computer_b] {
+        assert_eq!(account_marks(engine), 0);
+        assert_eq!(thread_read_records(engine), 0);
+    }
 }
 
 #[test]

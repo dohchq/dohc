@@ -9,11 +9,12 @@ use dohc_engine_domain::chats::{MAX_REPORTED_AGENT_CHARS, channel_collision_slug
 use dohc_engine_domain::{
     AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
     ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
-    ChatReportedAgent, ChatThreadLane, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput, NoFaults,
-    PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark, SendMessage, SetFollow,
-    SetReaction, StartChannelThread, base32_lowercase_no_padding, bookmark_id_for,
-    channel_slug_for_name, decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
+    ChatReportedAgent, ChatThreadLane, CreateFileThread, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput,
+    MarkThreadRead, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL, ResolveDecision, SaveBookmark,
+    SendMessage, SetFollow, SetReaction, StartChannelThread, base32_lowercase_no_padding,
+    bookmark_id_for, channel_slug_for_name, decode_feed_cursor, encode_feed_cursor,
+    linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
@@ -59,6 +60,23 @@ fn start_thread(
         author_reported: None,
         work: None,
         wake_agent_ids: Vec::new(),
+    }
+}
+
+fn read_mark(
+    thread_id: &str,
+    up_to_sequence: i64,
+    expected_revision: Option<i64>,
+    replication_owner_user_id: Option<&str>,
+    now_ms: i64,
+) -> MarkThreadRead {
+    MarkThreadRead {
+        workspace_id: WS.to_owned(),
+        thread_id: thread_id.to_owned(),
+        up_to_sequence,
+        expected_revision,
+        replication_owner_user_id: replication_owner_user_id.map(str::to_owned),
+        now_ms,
     }
 }
 
@@ -1419,7 +1437,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     );
 
     let read_state = chats
-        .mark_thread_read(WS, "thread-revision", 2, None, 60, &NO_FAULTS)
+        .mark_thread_read(&read_mark("thread-revision", 2, None, None, 60), &NO_FAULTS)
         .expect("mark read");
     assert_eq!(read_state.last_read_sequence, 2);
     assert_eq!(read_state.revision, 1);
@@ -1847,36 +1865,583 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
 
     // Advance to 1 (revision 0 -> 1).
     let r1 = chats
-        .mark_thread_read(WS, "t1", 1, None, 30, &NO_FAULTS)
+        .mark_thread_read(&read_mark("t1", 1, None, None, 30), &NO_FAULTS)
         .expect("r1");
     assert_eq!(r1.last_read_sequence, 1);
     assert_eq!(r1.revision, 1);
 
     // Monotonic: a lower target is a no-op (revision unchanged).
     let r_low = chats
-        .mark_thread_read(WS, "t1", 0, None, 31, &NO_FAULTS)
+        .mark_thread_read(&read_mark("t1", 0, None, None, 31), &NO_FAULTS)
         .expect("low");
     assert_eq!(r_low.last_read_sequence, 1);
     assert_eq!(r_low.revision, 1);
 
     // Clamp: target beyond the 2 messages clamps to 2 (revision -> 2).
     let r_clamp = chats
-        .mark_thread_read(WS, "t1", 99, None, 32, &NO_FAULTS)
+        .mark_thread_read(&read_mark("t1", 99, None, None, 32), &NO_FAULTS)
         .expect("clamp");
     assert_eq!(r_clamp.last_read_sequence, 2);
     assert_eq!(r_clamp.revision, 2);
 
     // Stale CAS: expected revision 0 while current is 2 → mismatch.
     let stale = chats
-        .mark_thread_read(WS, "t1", 2, Some(0), 33, &NO_FAULTS)
+        .mark_thread_read(&read_mark("t1", 2, Some(0), None, 33), &NO_FAULTS)
         .unwrap_err();
     assert_eq!(stale.code(), "read-state-revision-mismatch");
 
     // Correct CAS: expected 2 → no-op advance (already at 2), revision holds.
     let fresh = chats
-        .mark_thread_read(WS, "t1", 2, Some(2), 34, &NO_FAULTS)
+        .mark_thread_read(&read_mark("t1", 2, Some(2), None, 34), &NO_FAULTS)
         .expect("fresh");
     assert_eq!(fresh.revision, 2);
+}
+
+// ------------------------------------------------ account thread read marks
+
+const ACCOUNT: &str = "user-ada";
+
+fn account_mark(store: &EngineStore, thread_id: &str) -> Option<(i64, String)> {
+    store
+        .read_with(|conn| {
+            rusqlite::OptionalExtension::optional(conn.query_row(
+                "SELECT last_read_created_at_ms, last_read_message_id \
+                 FROM chat_account_thread_read_state \
+                 WHERE workspace_id = ?1 AND account_user_id = ?2 AND thread_id = ?3",
+                rusqlite::params![WS, ACCOUNT, thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ))
+        })
+        .expect("account mark")
+}
+
+fn thread_read_ops(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.thread.read.set'",
+                [WS],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("thread read ops")
+}
+
+fn set_local_count(store: &EngineStore, thread_id: &str, count: i64) {
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO chat_thread_read_state \
+                 (workspace_id, thread_id, last_read_sequence, revision, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, 1, 1) \
+                 ON CONFLICT(workspace_id, thread_id) DO UPDATE SET \
+                   last_read_sequence = excluded.last_read_sequence",
+                rusqlite::params![WS, thread_id, count],
+            )
+        })
+        .expect("local count");
+}
+
+fn agent_message(thread_id: &str, message_id: &str, now: i64) -> SendMessage {
+    SendMessage {
+        author_kind: ChatActorKind::Agent,
+        ..send_msg(thread_id, message_id, None, "agent", now)
+    }
+}
+
+fn agent_thread(chats: &mut LinkedChatStore<'_>, thread_id: &str, messages: &[(&str, i64)]) {
+    let ((first_id, first_at), rest) = messages.split_first().expect("a message");
+    chats
+        .start_channel_thread(
+            &start_thread(
+                "gen-1",
+                thread_id,
+                first_id,
+                "agent",
+                ChatActorKind::Agent,
+                *first_at,
+            ),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    for (message_id, at) in rest {
+        chats
+            .send_message(&agent_message(thread_id, message_id, *at), &NO_FAULTS)
+            .expect("send");
+    }
+}
+
+#[test]
+fn account_read_seed_never_hides_a_locally_unread_message() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        agent_thread(&mut chats, "zero", &[("z0", 10)]);
+        agent_thread(&mut chats, "full", &[("f0", 10), ("f1", 30)]);
+        // The read message is newer than the unread one that arrived after it.
+        agent_thread(&mut chats, "late", &[("l0", 200), ("l1", 100)]);
+        // Equal times: the unread message's id sorts first, then last.
+        agent_thread(&mut chats, "tie", &[("t-z", 50), ("t-a", 50)]);
+        agent_thread(&mut chats, "even", &[("e-a", 50), ("e-b", 50)]);
+        agent_thread(&mut chats, "newer", &[("n0", 10), ("n1", 20)]);
+    }
+    set_local_count(&store, "full", 99);
+    set_local_count(&store, "late", 1);
+    set_local_count(&store, "tie", 1);
+    set_local_count(&store, "even", 1);
+    set_local_count(&store, "newer", 1);
+    // Another copy already marked further.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO chat_account_thread_read_state \
+                 (workspace_id, account_user_id, thread_id, last_read_created_at_ms, \
+                  last_read_message_id, updated_at_ms, origin_id, origin_seq) \
+                 VALUES (?1, ?2, 'newer', 20, 'n1', 1, 'other-copy', 0)",
+                rusqlite::params![WS, ACCOUNT],
+            )
+        })
+        .expect("newer mark");
+
+    assert!(
+        LinkedChatStore::new(&mut store)
+            .seed_account_reads(WS, ACCOUNT, true, 500, &NO_FAULTS)
+            .expect("seed")
+    );
+    assert_eq!(account_mark(&store, "zero"), None);
+    assert_eq!(account_mark(&store, "full"), Some((30, "f1".to_owned())));
+    assert_eq!(account_mark(&store, "late"), None);
+    assert_eq!(account_mark(&store, "tie"), None);
+    assert_eq!(account_mark(&store, "even"), Some((50, "e-a".to_owned())));
+    assert_eq!(account_mark(&store, "newer"), Some((20, "n1".to_owned())));
+    // Only the marks that moved journal.
+    assert_eq!(thread_read_ops(&store), 2);
+
+    // Seeding is once per workspace.
+    assert!(
+        !LinkedChatStore::new(&mut store)
+            .seed_account_reads(WS, ACCOUNT, true, 501, &NO_FAULTS)
+            .expect("seed again")
+    );
+    assert_eq!(thread_read_ops(&store), 2);
+
+    // The once-unread messages read unread through the account.
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "gen-1", None, 10)
+        .expect("summaries");
+    let unread = |thread_id: &str| {
+        summaries
+            .iter()
+            .find(|summary| summary.thread.thread_id == thread_id)
+            .map(|summary| summary.unread_count)
+    };
+    assert_eq!(
+        unread("late"),
+        Some(2),
+        "a coordinate seed must not hide l1"
+    );
+    assert_eq!(unread("tie"), Some(2));
+    assert_eq!(unread("even"), Some(1));
+    assert_eq!(unread("full"), Some(0));
+}
+
+#[test]
+fn an_empty_account_seed_still_records_completion() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    assert!(
+        chats
+            .seed_account_reads(WS, ACCOUNT, true, 5, &NO_FAULTS)
+            .expect("empty seed")
+    );
+    assert!(
+        !chats
+            .seed_account_reads(WS, ACCOUNT, true, 6, &NO_FAULTS)
+            .expect("seeded already")
+    );
+    assert_eq!(thread_read_ops(&store), 0);
+}
+
+#[test]
+fn a_server_copy_seed_takes_no_local_count() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        agent_thread(&mut chats, "t1", &[("m0", 10)]);
+    }
+    // A past send on the server advanced its local count.
+    set_local_count(&store, "t1", 1);
+    assert!(
+        LinkedChatStore::new(&mut store)
+            .seed_account_reads(WS, ACCOUNT, false, 20, &NO_FAULTS)
+            .expect("server seed")
+    );
+    assert_eq!(account_mark(&store, "t1"), None);
+    assert_eq!(thread_read_ops(&store), 0);
+    let state = LinkedChatStore::new(&mut store)
+        .read_state(WS, "t1")
+        .expect("read state");
+    assert_eq!(state.last_read_sequence, 0, "the account read nothing yet");
+}
+
+#[test]
+fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reader() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        // Arrival order m0, m1, m2; time order m0, m2, m1.
+        agent_thread(&mut chats, "t1", &[("m0", 100), ("m1", 300), ("m2", 200)]);
+        chats
+            .create_thread(
+                &CreateFileThread {
+                    workspace_id: WS.to_owned(),
+                    thread_id: "file-thread".to_owned(),
+                    title: "About a file".to_owned(),
+                    linked_object_id: "object-1".to_owned(),
+                    linked_path_hint: None,
+                    now_ms: 5,
+                    request_id: "file-thread".to_owned(),
+                },
+                &NO_FAULTS,
+            )
+            .expect("file thread");
+        chats
+            .send_message(&agent_message("file-thread", "fm0", 6), &NO_FAULTS)
+            .expect("file message");
+        assert!(
+            chats
+                .seed_account_reads(WS, ACCOUNT, true, 400, &NO_FAULTS)
+                .expect("seed")
+        );
+    }
+    let channel_unread = |store: &mut EngineStore| {
+        LinkedChatStore::new(store)
+            .list_channels(WS)
+            .expect("channels")
+            .into_iter()
+            .find(|summary| summary.channel.channel_id == "gen-1")
+            .map(|summary| summary.unread_count)
+    };
+    let summary = |store: &mut EngineStore| {
+        let summary = LinkedChatStore::new(store)
+            .list_channel_threads(WS, "gen-1", None, 10)
+            .expect("summaries")
+            .remove(0);
+        (
+            summary.message_count,
+            summary.last_read_sequence,
+            summary.unread_count,
+        )
+    };
+    assert_eq!(channel_unread(&mut store), Some(3));
+
+    // Read set m0; m2 is the earliest unread, so the mark stops at m0. The
+    // place counts m0 and m1, the messages before m2 in arrival order.
+    let marked = LinkedChatStore::new(&mut store)
+        .mark_thread_read(&read_mark("t1", 1, None, None, 401), &NO_FAULTS)
+        .expect("mark one");
+    assert_eq!(marked.last_read_sequence, 2);
+    assert_eq!(account_mark(&store, "t1"), Some((100, "m0".to_owned())));
+    assert_eq!(summary(&mut store), (3, 2, 2));
+    assert_eq!(channel_unread(&mut store), Some(2));
+    assert_eq!(
+        LinkedChatStore::new(&mut store)
+            .read_state(WS, "t1")
+            .expect("read state")
+            .last_read_sequence,
+        2
+    );
+    assert_eq!(thread_read_ops(&store), 0, "no owner context, no journal");
+
+    // Another account's context moves the mark here and journals nothing.
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read(
+            &read_mark("t1", 3, None, Some("someone-else"), 402),
+            &NO_FAULTS,
+        )
+        .expect("mark all as someone else");
+    assert_eq!(account_mark(&store, "t1"), Some((300, "m1".to_owned())));
+    assert_eq!(thread_read_ops(&store), 0);
+    assert_eq!(summary(&mut store), (3, 3, 0));
+    assert_eq!(channel_unread(&mut store), Some(0));
+
+    // A newer message, marked with the owner's context, journals once. An
+    // older mark after it changes nothing.
+    LinkedChatStore::new(&mut store)
+        .send_message(&agent_message("t1", "m3", 500), &NO_FAULTS)
+        .expect("newer message");
+    assert_eq!(summary(&mut store), (4, 3, 1));
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read(&read_mark("t1", 4, None, Some(ACCOUNT), 501), &NO_FAULTS)
+        .expect("owner mark");
+    assert_eq!(account_mark(&store, "t1"), Some((500, "m3".to_owned())));
+    assert_eq!(thread_read_ops(&store), 1);
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read(&read_mark("t1", 1, None, Some(ACCOUNT), 502), &NO_FAULTS)
+        .expect("older mark");
+    assert_eq!(account_mark(&store, "t1"), Some((500, "m3".to_owned())));
+    assert_eq!(thread_read_ops(&store), 1);
+
+    // The file thread's unread comes from the account too.
+    let unread_files = LinkedChatStore::new(&mut store)
+        .list_unread_file_threads(WS, None, 10)
+        .expect("unread files");
+    assert_eq!(
+        unread_files
+            .iter()
+            .map(|row| (
+                row.thread_id.as_str(),
+                row.message_count,
+                row.last_read_sequence
+            ))
+            .collect::<Vec<_>>(),
+        vec![("file-thread", 1, 0)]
+    );
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read(
+            &read_mark("file-thread", 1, None, Some(ACCOUNT), 503),
+            &NO_FAULTS,
+        )
+        .expect("file mark");
+    assert!(
+        LinkedChatStore::new(&mut store)
+            .list_unread_file_threads(WS, None, 10)
+            .expect("no unread files")
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_persons_send_moves_the_account_mark_and_an_agents_does_not() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    assert!(
+        chats
+            .seed_account_reads(WS, ACCOUNT, true, 2, &NO_FAULTS)
+            .expect("seed")
+    );
+    agent_thread(&mut chats, "t1", &[("m0", 10)]);
+    chats
+        .send_message(&send_msg("t1", "m1", None, "mine", 20), &NO_FAULTS)
+        .expect("own message");
+    chats
+        .send_message(&agent_message("t1", "m2", 30), &NO_FAULTS)
+        .expect("agent reply");
+    let local_only = SendMessage {
+        author_user_id: None,
+        ..send_msg("t1", "m3", None, "signed out", 40)
+    };
+    chats
+        .send_message(&local_only, &NO_FAULTS)
+        .expect("local send");
+    let other = SendMessage {
+        author_user_id: Some("user-bob".to_owned()),
+        ..send_msg("t1", "m4", None, "someone else", 50)
+    };
+    chats.send_message(&other, &NO_FAULTS).expect("other send");
+    // A person's thread start moves it too.
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t2", "s0", "mine", ChatActorKind::Human, 60),
+            &NO_FAULTS,
+        )
+        .expect("own start");
+    drop(chats);
+
+    // m1 journaled; the signed-out m3 moved the mark without a journal; the
+    // other account's m4 left it; the agent's m2 never moved it.
+    assert_eq!(account_mark(&store, "t1"), Some((40, "m3".to_owned())));
+    assert_eq!(account_mark(&store, "t2"), Some((60, "s0".to_owned())));
+    assert_eq!(thread_read_ops(&store), 2);
+}
+
+#[test]
+fn a_joined_groups_threads_keep_local_counts_and_take_no_account_mark() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("gen");
+        chats
+            .create_channel(
+                WS,
+                "joined-1",
+                "Bob Group",
+                ChatChannelKind::Channel,
+                1,
+                &NO_FAULTS,
+            )
+            .expect("joined group");
+        agent_thread(&mut chats, "own", &[("o0", 10), ("o1", 20)]);
+        chats
+            .start_channel_thread(
+                &start_thread(
+                    "joined-1",
+                    "theirs",
+                    "b0",
+                    "agent",
+                    ChatActorKind::Agent,
+                    10,
+                ),
+                &NO_FAULTS,
+            )
+            .expect("joined thread");
+        chats
+            .send_message(&agent_message("theirs", "b1", 20), &NO_FAULTS)
+            .expect("joined reply");
+    }
+    // A shared lane applied Bob's Group, as it records on join.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO chat_joined_channels (workspace_id, wire_id) VALUES (?1, 'joined-1')",
+                [WS],
+            )
+        })
+        .expect("joined");
+    set_local_count(&store, "own", 2);
+    set_local_count(&store, "theirs", 1);
+
+    assert!(
+        LinkedChatStore::new(&mut store)
+            .seed_account_reads(WS, ACCOUNT, true, 100, &NO_FAULTS)
+            .expect("seed")
+    );
+    assert_eq!(account_mark(&store, "own"), Some((20, "o1".to_owned())));
+    assert_eq!(
+        account_mark(&store, "theirs"),
+        None,
+        "a joined thread seeds nothing"
+    );
+    assert_eq!(thread_read_ops(&store), 1);
+
+    // The joined thread and its Group read the local count.
+    let theirs = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "joined-1", None, 10)
+        .expect("joined summaries")
+        .remove(0);
+    assert_eq!(
+        (
+            theirs.message_count,
+            theirs.last_read_sequence,
+            theirs.unread_count
+        ),
+        (2, 1, 1)
+    );
+    let unread_by_channel = |store: &mut EngineStore| {
+        LinkedChatStore::new(store)
+            .list_channels(WS)
+            .expect("channels")
+            .into_iter()
+            .map(|summary| (summary.channel.channel_id, summary.unread_count))
+            .collect::<Vec<_>>()
+    };
+    let totals = unread_by_channel(&mut store);
+    assert!(totals.contains(&("gen-1".to_owned(), 0)));
+    assert!(totals.contains(&("joined-1".to_owned(), 1)));
+
+    // A person's message there, and a mark with the owner's context, stay local.
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .send_message(&send_msg("theirs", "b2", None, "mine", 30), &NO_FAULTS)
+        .expect("own message in a joined Group");
+    assert_eq!(
+        chats
+            .read_state(WS, "theirs")
+            .expect("read state")
+            .last_read_sequence,
+        3
+    );
+    let marked = chats
+        .mark_thread_read(&read_mark("theirs", 3, None, Some(ACCOUNT), 40), &NO_FAULTS)
+        .expect("joined mark");
+    assert_eq!(marked.last_read_sequence, 3);
+    drop(chats);
+    assert_eq!(account_mark(&store, "theirs"), None);
+    assert_eq!(thread_read_ops(&store), 1);
+}
+
+#[test]
+fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    assert!(
+        chats
+            .seed_account_reads(WS, ACCOUNT, true, 2, &NO_FAULTS)
+            .expect("seed")
+    );
+    agent_thread(&mut chats, "t1", &[("m0", 10), ("m1", 20)]);
+    // Signed out: the mark moves and journals nothing.
+    chats
+        .mark_thread_read(&read_mark("t1", 2, None, None, 30), &NO_FAULTS)
+        .expect("signed-out mark");
+    drop(chats);
+    assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
+    assert_eq!(thread_read_ops(&store), 0);
+
+    // Signed in at the same place: the mark publishes once.
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 31), &NO_FAULTS)
+        .expect("owner mark");
+    assert_eq!(thread_read_ops(&store), 1);
+    LinkedChatStore::new(&mut store)
+        .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 32), &NO_FAULTS)
+        .expect("owner retry");
+    assert_eq!(thread_read_ops(&store), 1, "a record of the place exists");
+    assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
+}
+
+#[test]
+fn a_workspace_without_an_account_keeps_local_counts_and_journals_no_mark() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("gen");
+    agent_thread(&mut chats, "t1", &[("m0", 100), ("m1", 50)]);
+    let state = chats
+        .mark_thread_read(&read_mark("t1", 1, None, Some(ACCOUNT), 200), &NO_FAULTS)
+        .expect("local mark");
+    assert_eq!(state.last_read_sequence, 1);
+    chats
+        .send_message(&send_msg("t1", "m2", None, "mine", 300), &NO_FAULTS)
+        .expect("own message");
+    drop(chats);
+    assert_eq!(account_mark(&store, "t1"), None);
+    assert_eq!(thread_read_ops(&store), 0);
 }
 
 // -------------------------------------------------- follows + personal feed

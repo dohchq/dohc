@@ -301,6 +301,7 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   // the receiver named by the durable record.
   "chat.follow.set": { kind: "authored", field: "ownerUserId" },
   "chat.feed.read.set": { kind: "authored", field: "ownerUserId" },
+  "chat.thread.read.set": { kind: "authored", field: "accountUserId" },
 };
 
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.

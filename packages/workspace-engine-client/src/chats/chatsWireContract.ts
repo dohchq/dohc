@@ -30,6 +30,7 @@ export const CHATS_METHOD = {
   streamList: "chats.stream.list",
   readStateGet: "chats.readState.get",
   readStateMarkThreadRead: "chats.readState.markThreadRead",
+  readStateSeedAccount: "chats.readState.seedAccount",
   readStateListUnreadFileThreads: "chats.readState.listUnreadFileThreads",
   decisionResolve: "chats.decisions.resolve",
   decisionsListForThread: "chats.decisions.listForThread",
@@ -237,6 +238,14 @@ type ChatReadStateMarkParams = ChatsJsonObject & {
   threadId: string;
   upToSequence: number;
   expectedRevision?: number;
+  // The workspace owner, when the caller holds the owner's replication
+  // context. Only then does an account mark journal.
+  replicationOwnerUserId?: string;
+  nowMs?: number;
+};
+type ChatReadStateSeedAccountParams = ChatsJsonObject & {
+  accountUserId: string;
+  seedLocal: boolean;
   nowMs?: number;
 };
 type ChatUnreadFileThreadsParams = ChatsJsonObject & {
@@ -439,6 +448,7 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.streamList]: ChatStreamListParams;
   [CHATS_METHOD.readStateGet]: ChatThreadParams;
   [CHATS_METHOD.readStateMarkThreadRead]: ChatReadStateMarkParams;
+  [CHATS_METHOD.readStateSeedAccount]: ChatReadStateSeedAccountParams;
   [CHATS_METHOD.readStateListUnreadFileThreads]: ChatUnreadFileThreadsParams;
   [CHATS_METHOD.decisionResolve]: ChatDecisionResolveParams;
   [CHATS_METHOD.decisionsListForThread]: ChatThreadPageParams;
@@ -984,6 +994,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.streamList]: ChatStreamPageSchema,
   [CHATS_METHOD.readStateGet]: ChatThreadReadStateSchema,
   [CHATS_METHOD.readStateMarkThreadRead]: ChatThreadReadStateSchema,
+  [CHATS_METHOD.readStateSeedAccount]: mutableStruct({ recorded: Schema.Boolean }),
   [CHATS_METHOD.readStateListUnreadFileThreads]: Schema.mutable(
     Schema.Array(ChatUnreadFileThreadSchema),
   ),

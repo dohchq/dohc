@@ -26,6 +26,8 @@ export class PhoneWriteEngine implements EngineTransport {
   readonly receipts = new Map<string, Receipt>();
   /** Runs as each chat write reaches the engine, before it changes anything. */
   beforeWrite: () => void = () => undefined;
+  /** Journals the account's read mark with a person's message, as a copy that shows the account's read places does. */
+  readMarks = false;
   private readonly held = new Map<string, { reached(): void; open: Promise<void> }>();
   private originSeq = 0;
 
@@ -133,6 +135,12 @@ export class PhoneWriteEngine implements EngineTransport {
       authorUserId: message.authorUserId ?? null, body: message.body, createdAtMs: message.createdAtMs,
       ...(message.parentMessageId === undefined ? {} : { parentMessageId: message.parentMessageId }),
     })];
+    if (this.readMarks && message.author.kind === "human" && typeof message.authorUserId === "string") {
+      rows.push(row("chat.thread.read.set", {
+        accountUserId: message.authorUserId, threadId: message.threadId,
+        lastReadCreatedAtMs: message.createdAtMs, lastReadMessageId: message.id, atMs: message.createdAtMs,
+      }));
+    }
     // The open question, with its choices as the engine stores them.
     const options = (await read.listThreadDecisions(workspaceId, message.threadId)).find((each) => each.messageId === message.id)?.options ?? [];
     if (params.needsDecision === true || options.length > 0) {

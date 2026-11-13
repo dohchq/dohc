@@ -429,6 +429,10 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
   appPublication?(request: OwnerAppPublicationRequest, agent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
+  // Main's answer to whose account a person's read of this thread journals
+  // under: the owner, checked against the signed-in account and joined
+  // Groups. Absent or undefined, the read stays on this computer.
+  accountReadOwner?(threadId: string): Promise<string | undefined>;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
   // Makes, or finds, the work reference that names `target` in this workspace.
@@ -1047,10 +1051,12 @@ async function markShownThreadRead(
     });
     return;
   }
+  const replicationOwnerUserId = await context.accountReadOwner?.(threadId);
   await context.store.markThreadRead({
     workspaceId: context.workspaceId,
     threadId,
     upToSequence: messageCount,
+    ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
   });
 }
 

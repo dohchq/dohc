@@ -4809,6 +4809,10 @@ fn share_view_never_carries_the_readers_own_state_or_any_other_chat_kind() {
             json!({"ownerUserId":"u","lastSeenCreatedAtMs":1,"lastSeenMessageId":"m","atMs":1}),
         ),
         (
+            "chat.thread.read.set",
+            json!({"accountUserId":"u","threadId":"thread-in","lastReadCreatedAtMs":1,"lastReadMessageId":"m","atMs":1}),
+        ),
+        (
             "chat.channel.create",
             json!({"channelId":"c","name":"General","slug":"general","kind":"channel","createdAtMs":1,"wireId":"wire"}),
         ),

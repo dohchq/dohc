@@ -5419,6 +5419,35 @@ describe("CLI socket server", () => {
     expect(readTargets.at(-1)).toBeUndefined();
   });
 
+  it("marks a person's show under the account main names, and never asks for an agent's", async () => {
+    const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const { thread } = await store!.startChannelThread({
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      body: "Read me",
+    });
+    const accountReadOwner = vi.fn(async (_threadId: string): Promise<string | undefined> => "verified-user-id");
+    context = { ...context, accountReadOwner };
+    const marks = vi.spyOn(store!, "markThreadRead");
+
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target: thread.id, peek: false });
+    expect(accountReadOwner).toHaveBeenCalledExactlyOnceWith(thread.id);
+    expect(marks).toHaveBeenLastCalledWith(expect.objectContaining({
+      threadId: thread.id, replicationOwnerUserId: "verified-user-id",
+    }));
+
+    // A signed-out or joined target gets no owner, and the read stays here.
+    accountReadOwner.mockResolvedValueOnce(undefined);
+    await invoke("show", { cwd: workspaceRoot, actor: "human", target: thread.id, peek: false });
+    expect(marks.mock.calls.at(-1)?.[0]).not.toHaveProperty("replicationOwnerUserId");
+
+    accountReadOwner.mockClear();
+    await invoke("show", { cwd: workspaceRoot, actor: "agent", target: thread.id, peek: false });
+    expect(accountReadOwner).not.toHaveBeenCalled();
+  });
+
   it("round-trips post, reply, and show with main-derived identity and CLI origin", async () => {
     const opened = await post({
       actor: "human",

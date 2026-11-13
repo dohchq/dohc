@@ -393,7 +393,9 @@ import {
 } from "./workspaces/workspaceSummaryProjection";
 import { RELAY_FETCH_TIMEOUT_MS, assertSharedChannelWritable, joinedSharedChannelForWireId, relayFetchWithTimeout } from "./workspaces/sharedChannels";
 import {
+  accountReadReplicationOwner,
   resolveChatRelayIdentity,
+  resolveWorkspaceRelayAuthorId,
   workspaceRemoteMatchesCredentials,
   type ChatRelayIdentityTarget,
 } from "./workspaces/chatRelayIdentity";
@@ -3056,6 +3058,14 @@ function linkedChatStoreFor(
     sessions: desktopEngine.sessions,
       runWithAuthority: (work) =>
         workspaceAuthorities.withBinding(binding, () => work()),
+      // Only the owner's own synced workspace reads by account. A received
+      // share or a local-only workspace keeps its local counts.
+      accountReadOwner: () => {
+        const entry = findWorkspace(binding.workspaceId);
+        return entry && !shareViewIsPresent(entry.shareView)
+          ? resolveWorkspaceRelayAuthorId(entry, cachedCredentials)
+          : undefined;
+      },
     });
     lease.state.linkedChatStore = store;
   return store;
@@ -5126,6 +5136,15 @@ const liveDocumentsForCli = () => {
   return ownerLiveDocumentsForCli;
 };
 const { startDesktopCliServer } = createDesktopCliServer({
+  accountReadOwner: async (workspace, store, threadId) => {
+    await warmCredentialCache();
+    return await accountReadReplicationOwner({
+      workspace: findWorkspace(workspace.workspaceId) ?? workspace,
+      credentials: cachedCredentials,
+      store,
+      threadId,
+    });
+  },
   notices: async (workspaceId) => agentNotices((await noticeStore().list()).notices, workspaceSummaries(), workspaceId),
   shareCopy: shareCopyReader,
   shareLinkAgents: shareLinkAgentsForCli,

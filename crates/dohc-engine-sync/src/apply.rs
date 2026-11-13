@@ -13,16 +13,17 @@ use dohc_engine_domain::chats::{
     replicated_source_origin, truncate_slug_base, upsert_chat_search_index_row, work_report_json,
 };
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup, ChatChannelKind,
-    ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution, FollowTargetKind,
-    FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
-    ThreadMessageResolution, attachment_id_for, channel_slug_for_name, encode_poll_options,
-    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
-    normalize_agent_owner_name, normalize_author_user_id, normalize_body, normalize_channel_group,
-    normalize_channel_name, normalize_display_name, normalize_feed_identity,
-    normalize_poll_options, normalize_reaction_author_id, normalize_replicated_chat_id,
-    parse_mention_handles, replay_ready_pending_chat_coordinates, resolve_feed_coordinate,
-    resolve_follow_target, resolve_thread_message, validate_addressable_plaintext_path,
+    AGENT_CHANNEL_NAME, AccountThreadReadCell, CHAT_THREAD_HEADER_MESSAGE_ID, ChannelGroup,
+    ChatChannelKind, ChatChannelType, ChatThreadLane, DomainError, FeedCoordinateResolution,
+    FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID, ReplicatedMessageAuthor,
+    ThreadMessageResolution, ThreadReadResolution, attachment_id_for, channel_slug_for_name,
+    encode_poll_options, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
+    merge_account_thread_read, normalize_agent_owner_name, normalize_author_user_id,
+    normalize_body, normalize_channel_group, normalize_channel_name, normalize_display_name,
+    normalize_feed_identity, normalize_poll_options, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    resolve_thread_read_coordinate, validate_addressable_plaintext_path,
     validate_replicated_link_author,
 };
 
@@ -785,6 +786,11 @@ struct ThreadCreate {
     /// Absent from ops written before the groups migration: a post.
     #[serde(default)]
     lane: Option<String>,
+    /// Set by an owner's computer when the thread's Group was joined from
+    /// another person's share. Absent on older records and on any record a
+    /// share serves.
+    #[serde(default)]
+    channel_joined: bool,
 }
 
 #[derive(Deserialize)]
@@ -881,6 +887,16 @@ struct FeedReadSet {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ThreadReadSet {
+    account_user_id: String,
+    thread_id: String,
+    last_read_created_at_ms: i64,
+    last_read_message_id: String,
+    at_ms: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AttachmentAdd {
     attachment_id: String,
     thread_id: String,
@@ -936,9 +952,11 @@ fn apply_chat_mutation(
         "chat.channel.create" => none(apply_channel(tx, op, decode(&op.payload)?)),
         "chat.thread.create" => none(apply_thread(tx, op, decode(&op.payload)?)),
         "chat.message.append" => apply_message(tx, op, decode(&op.payload)?),
-        "chat.decision.set" | "chat.reaction.set" | "chat.follow.set" | "chat.feed.read.set" => {
-            none(apply_chat_lww_projection_tx(tx, op))
-        }
+        "chat.decision.set"
+        | "chat.reaction.set"
+        | "chat.follow.set"
+        | "chat.feed.read.set"
+        | "chat.thread.read.set" => none(apply_chat_lww_projection_tx(tx, op)),
         "chat.attachment.add" => none(apply_attachment(tx, op, decode(&op.payload)?)),
         _ => Err(SyncError::UnsupportedOperation),
     }
@@ -953,6 +971,7 @@ pub(crate) fn apply_chat_lww_projection_tx(
         "chat.reaction.set" => apply_reaction(tx, op, decode(&op.payload)?),
         "chat.follow.set" => apply_follow(tx, op, decode(&op.payload)?),
         "chat.feed.read.set" => apply_feed_read(tx, op, decode(&op.payload)?),
+        "chat.thread.read.set" => apply_thread_read(tx, op, decode(&op.payload)?),
         _ => Err(SyncError::UnsupportedOperation),
     }
 }
@@ -1399,6 +1418,20 @@ fn apply_thread(
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked path is invalid",
         });
+    }
+    // A joined Group keeps local read counts on every copy of the owner's
+    // workspace, so the flag is kept even for a thread this copy already has.
+    if payload.channel_joined {
+        let Some(wire_id) = payload.channel_wire_id.as_deref() else {
+            return Err(SyncError::InvalidInput {
+                reason: "chat thread joined flag needs a channel",
+            });
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_joined_channels (workspace_id, wire_id) VALUES (?1, ?2)",
+            params![op.workspace_id, wire_id],
+        )
+        .map_err(SyncError::persist)?;
     }
     let exists: bool = tx
         .query_row(
@@ -2125,6 +2158,68 @@ fn apply_feed_read(
         params![op.workspace_id,owner_user_id,p.last_seen_created_at_ms,p.last_seen_message_id,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+// An account's read mark in one thread. Unlike a feed mark, any thread
+// qualifies, DMs included. The message must sit in the named thread at the
+// named time, and the later coordinate wins.
+fn apply_thread_read(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    p: ThreadReadSet,
+) -> Result<(), SyncError> {
+    if p.thread_id.is_empty()
+        || p.thread_id.encode_utf16().count() > 256
+        || p.last_read_message_id.is_empty()
+        || p.last_read_message_id.encode_utf16().count() > 256
+        || !is_persisted_safe_integer(p.last_read_created_at_ms)
+        || !is_persisted_safe_integer(p.at_ms)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread read payload is invalid",
+        });
+    }
+    let account_user_id = normalize_feed_identity(&p.account_user_id, "Read account")
+        .map_err(|error| map_chat_rule(error, "chat thread read account is invalid"))?;
+    if account_user_id != p.account_user_id {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread read account is invalid",
+        });
+    }
+    let resolution = resolve_thread_read_coordinate(
+        tx,
+        &op.workspace_id,
+        &p.thread_id,
+        p.last_read_created_at_ms,
+        &p.last_read_message_id,
+    )
+    .map_err(|error| map_chat_rule(error, "chat thread read coordinate is invalid"))?;
+    match resolution {
+        ThreadReadResolution::Visible => {}
+        ThreadReadResolution::Missing => {
+            return park_chat_coordinate(tx, op, "thread-read-message", &p.last_read_message_id);
+        }
+        ThreadReadResolution::Disallowed => {
+            return Err(SyncError::InvalidInput {
+                reason: "chat thread read coordinate is not in its thread",
+            });
+        }
+    }
+    merge_account_thread_read(
+        tx,
+        &AccountThreadReadCell {
+            workspace_id: &op.workspace_id,
+            account_user_id: &account_user_id,
+            thread_id: &p.thread_id,
+            created_at_ms: p.last_read_created_at_ms,
+            message_id: &p.last_read_message_id,
+            updated_at_ms: p.at_ms,
+            origin_id: &op.origin_id,
+            origin_seq: op.origin_seq,
+        },
+    )
+    .map_err(|error| map_chat_rule(error, "chat thread read could not be stored"))?;
     Ok(())
 }
 

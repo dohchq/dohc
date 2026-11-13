@@ -3204,6 +3204,187 @@ fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
 }
 
+fn account_thread_mark(engine: &EngineStore, thread_id: &str) -> Option<(i64, String)> {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_read_created_at_ms,last_read_message_id \
+                 FROM chat_account_thread_read_state \
+                 WHERE workspace_id='ws' AND account_user_id='owner' AND thread_id=?1",
+                [thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("account thread mark")
+}
+
+fn thread_read_op(
+    origin: &str,
+    seq: i64,
+    thread_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> ReplicationEnvelope {
+    envelope(
+        origin,
+        seq,
+        "chat.thread.read.set",
+        json!({
+            "accountUserId": "owner",
+            "threadId": thread_id,
+            "lastReadCreatedAtMs": created_at_ms,
+            "lastReadMessageId": message_id,
+            "atMs": 100 + seq
+        }),
+    )
+}
+
+fn later_message_op(origin: &str, message_id: &str, created_at_ms: i64) -> ReplicationEnvelope {
+    envelope(
+        origin,
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": message_id,
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Later",
+            "createdAtMs": created_at_ms
+        }),
+    )
+}
+
+#[test]
+fn imported_thread_read_parks_until_its_message_arrives_then_keeps_the_later_coordinate() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    let late = thread_read_op("phone", 0, "thread-imported", 40, "message-late");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &late, &NoFaults).expect("park thread read"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+
+    apply_chat_envelope(
+        &mut engine,
+        &later_message_op("late-origin", "message-late", 40),
+        &NoFaults,
+    )
+    .expect("late message");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((40, "message-late".to_owned()))
+    );
+
+    // An older mark from another copy, and the same mark again, change nothing.
+    let older = thread_read_op("desktop", 0, "thread-imported", 20, "message-imported");
+    apply_chat_envelope(&mut engine, &older, &NoFaults).expect("older mark");
+    apply_chat_envelope(
+        &mut engine,
+        &thread_read_op("phone", 1, "thread-imported", 40, "message-late"),
+        &NoFaults,
+    )
+    .expect("same mark again");
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((40, "message-late".to_owned()))
+    );
+}
+
+#[test]
+fn two_copies_merge_account_thread_reads_by_the_later_coordinate_in_either_order() {
+    let mut finals = Vec::new();
+    for older_first in [true, false] {
+        let (_scratch, _path, mut engine) = open_store();
+        imported_chat_fixture(&mut engine, "read-fixture");
+        apply_chat_envelope(
+            &mut engine,
+            &later_message_op("late-origin", "message-late", 40),
+            &NoFaults,
+        )
+        .expect("late message");
+        let older = thread_read_op("desktop", 0, "thread-imported", 20, "message-imported");
+        let newer = thread_read_op("phone", 0, "thread-imported", 40, "message-late");
+        let order = if older_first {
+            [older, newer]
+        } else {
+            [newer, older]
+        };
+        for operation in order {
+            apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("apply mark");
+        }
+        finals.push(account_thread_mark(&engine, "thread-imported"));
+    }
+    assert_eq!(finals[0], Some((40, "message-late".to_owned())));
+    assert_eq!(finals[0], finals[1]);
+}
+
+#[test]
+fn imported_thread_read_refuses_a_coordinate_outside_its_thread_and_takes_a_dm() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','dm-channel','Private','private','dm',90,90)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('ws','dm-thread','Private',90,100,'dm-channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,author_user_id,body,created_at_ms) \
+                 VALUES ('ws','dm-thread',0,'dm-message','human','Owner','owner','hi',100)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("dm fixture");
+
+    // Another thread's message, and the right message at the wrong time.
+    let cross_thread = thread_read_op("read-peer", 0, "dm-thread", 20, "message-imported");
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &cross_thread, &NoFaults));
+    let wrong_time = thread_read_op("read-peer", 1, "thread-imported", 21, "message-imported");
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &wrong_time, &NoFaults));
+    let padded = envelope(
+        "read-peer",
+        2,
+        "chat.thread.read.set",
+        json!({
+            "accountUserId": " owner",
+            "threadId": "thread-imported",
+            "lastReadCreatedAtMs": 20,
+            "lastReadMessageId": "message-imported",
+            "atMs": 102
+        }),
+    );
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &padded, &NoFaults));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+    assert_eq!(account_thread_mark(&engine, "dm-thread"), None);
+
+    // Unlike a feed mark, a mark in the owner's DM applies.
+    let dm = thread_read_op("read-peer", 3, "dm-thread", 100, "dm-message");
+    apply_chat_envelope(&mut engine, &dm, &NoFaults).expect("dm mark");
+    assert_eq!(
+        account_thread_mark(&engine, "dm-thread"),
+        Some((100, "dm-message".to_owned()))
+    );
+}
+
 #[test]
 fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
     let (_scratch, _path, mut engine) = open_store();

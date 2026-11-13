@@ -9,6 +9,7 @@ import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
   filterOpForShare,
+  filterOpForShareAppend,
   filterProposedChangeForShare,
   isLiveEditShareSelector,
   parseChatThreadTopic,
@@ -780,6 +781,33 @@ describe("chat share op filter", () => {
     return filterOpForShare(channelShare, opKind, JSON.stringify(payload), resolver);
   }
 
+  it("serves and stores no joined flag from an owner's thread export", () => {
+    const record = {
+      threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared", lane: "chat",
+      channelJoined: true,
+    };
+    for (const decision of [
+      decide("chat.thread.create", record),
+      filterOpForShareAppend(channelShare, "chat.thread.create", JSON.stringify(record), resolver),
+    ]) {
+      expect(decision.allowed).toBe(true);
+      if (!decision.allowed) continue;
+      expect(decision.payload).not.toHaveProperty("channelJoined");
+    }
+  });
+
+  it("never serves or takes an account's thread read mark through a Group or channel share", () => {
+    const mark = JSON.stringify({
+      accountUserId: "user-a", threadId: "thread-in", lastReadCreatedAtMs: 1, lastReadMessageId: "m-1", atMs: 1,
+    });
+    const group = { kind: "group" as const, channelWireId: "wire-shared", paths: ["team"], versionId: null, access: "read-write" as const };
+    for (const selector of [channelShare, { ...channelShare, access: "read-only" as const }, group]) {
+      expect(filterOpForShare(selector, "chat.thread.read.set", mark, resolver).allowed, `read ${JSON.stringify(selector)}`).toBe(false);
+      expect(filterOpForShareAppend(selector, "chat.thread.read.set", mark, resolver).allowed, `append ${JSON.stringify(selector)}`)
+        .toBe(false);
+    }
+  });
+
   it("serves a group's type, purpose, folder, lane and poll choices with their ops", () => {
     const channel = decide("chat.channel.create", {
       channelId: "c1", name: "team", slug: "team", kind: "channel", createdAtMs: 1, wireId: "wire-shared",
@@ -1433,6 +1461,20 @@ describe("file-chat share filter", () => {
           filterOpForShare(share(access), opKind, follow, resolver).allowed,
           `${opKind} @ ${access}`,
         ).toBe(false);
+      }
+    }
+  });
+
+  it("never serves or takes an account's thread read mark through a file or folder share, at any level", () => {
+    const mark = JSON.stringify({
+      accountUserId: "user-a", threadId: "thread-in", lastReadCreatedAtMs: 1, lastReadMessageId: "m-1", atMs: 1,
+    });
+    for (const access of ["view", "comment", "edit"] as const) {
+      const file: ShareSelector = { paths: ["docs/in.md"], versionId: null, access };
+      for (const [name, selector] of [["folder", share(access)], ["file", file]] as const) {
+        expect(filterOpForShare(selector, "chat.thread.read.set", mark, resolver).allowed, `${name} read @ ${access}`).toBe(false);
+        expect(filterOpForShareAppend(selector, "chat.thread.read.set", mark, resolver).allowed, `${name} append @ ${access}`)
+          .toBe(false);
       }
     }
   });

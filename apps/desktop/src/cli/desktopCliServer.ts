@@ -173,6 +173,9 @@ interface DesktopCliServerDependencies<State> {
     getStatus(workspaceId: string): Pick<SyncStatusResult, "syncFailure">;
   };
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
+  // Whose account a person's CLI read of a thread journals under, resolved
+  // by main from the registry and the signed-in account.
+  accountReadOwner(workspace: RegistryEntry, store: DesktopLinkedChatStore, threadId: string): Promise<string | undefined>;
   currentDaemon(): Pick<EngineDaemonLifecycle, "requestWorkspace"> | null;
   agentDispatchStoreHandleFor(workspace: RegistryEntry): Pick<LiveAgentDispatchStoreHandle, "store">;
   sharedViewOf(workspaceId: string): unknown;
@@ -404,6 +407,7 @@ export function createDesktopCliServer<State>(
       automations: dependencies.automations(workspace),
       buttons: dependencies.buttons(workspace),
       store,
+      accountReadOwner: (threadId) => dependencies.accountReadOwner(workspace, store, threadId),
       dispatchStore: agentDispatchStoreHandleFor(workspace).store,
       readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
       makeWorkReference: async (target) => {

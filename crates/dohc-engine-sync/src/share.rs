@@ -207,6 +207,16 @@ pub fn apply_shared_envelope(
             enforce_share_view_chat_boundary(tx, boundary, op)?;
         } else {
             enforce_shared_channel_boundary(tx, boundary, op)?;
+            // A Group this lane carries is joined, so its threads keep local
+            // read counts and never take the owner's account marks.
+            if let Some(wire_id) = boundary.channel_wire_id.as_deref() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO chat_joined_channels (workspace_id, wire_id) \
+                     VALUES (?1, ?2)",
+                    params![op.workspace_id, wire_id],
+                )
+                .map_err(SyncError::persist)?;
+            }
         }
         let applied = crate::apply::apply_chat_tx(tx, op)?;
         replay_refusals = applied.refusals;
@@ -305,8 +315,8 @@ fn enforce_shared_channel_boundary(
 /// relay's own allowlist (`services/sync-relay/src/shareFilter.ts`,
 /// `filterFileChatOpForPathShare`).
 ///
-/// `chat.follow.set` and `chat.feed.read.set` are absent on purpose: they are
-/// the reader's own state, for the same reason written above for the channel
+/// `chat.follow.set`, `chat.feed.read.set`, and `chat.thread.read.set` are
+/// absent on purpose: they are the reader's own state, for the same reason written above for the channel
 /// branch's terminal deny. `chat.channel.create` is a channel's bootstrap and
 /// a file share has no channel. Everything not named here reaches
 /// `enforce_share_view_boundary` and is refused as a kind a share does not
@@ -541,7 +551,8 @@ fn enforce_share_view_boundary(
         // A known kind a share does not carry is a scope decision — a secret
         // op, or a chat kind outside the five in `SHARE_VIEW_CHAT_KINDS`
         // (which never reach here), is outside what any file share covers.
-        // That is where `chat.follow.set` and `chat.feed.read.set` land: the
+        // That is where `chat.follow.set`, `chat.feed.read.set`, and
+        // `chat.thread.read.set` land: the
         // reader's own state, refused by falling through to this deny. A kind
         // this
         // engine cannot interpret is not: no grant admits it, widening the

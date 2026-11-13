@@ -887,8 +887,9 @@ function filterChatOpForChannelShare(
 }
 
 // The exactly five chat kinds a file share carries. The list is an
-// allowlist and nothing falls through it. `chat.follow.set` and
-// `chat.feed.read.set` are the reader's own state and are deliberately absent
+// allowlist and nothing falls through it. `chat.follow.set`,
+// `chat.feed.read.set`, and `chat.thread.read.set` are the reader's own state
+// and are deliberately absent
 // (`crates/dohc-engine-sync/src/share.rs`, the same reason written for the
 // channel branch); `chat.channel.create` is a channel's bootstrap and a file
 // share has no channel.

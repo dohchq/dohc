@@ -988,6 +988,10 @@ impl EngineService {
                 self.chats_read_state_get(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.readState.seedAccount" => {
+                self.chats_read_state_seed_account(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.readState.listUnreadFileThreads" => {
                 self.chats_read_state_list_unread_file_threads(
                     &ctx,
@@ -1745,6 +1749,7 @@ mod tests {
             "chats.readState.get",
             "chats.readState.listUnreadFileThreads",
             "chats.readState.markThreadRead",
+            "chats.readState.seedAccount",
             "chats.stream.list",
             "chats.threads.create",
             "chats.threads.findChannelId",

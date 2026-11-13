@@ -39,7 +39,7 @@ fn journal_test_op(engine: &mut EngineStore, op_kind: &str, payload: &serde_json
     }
 }
 
-fn journal_lww_ops(engine: &mut EngineStore) -> (i64, i64, i64, i64) {
+fn journal_lww_ops(engine: &mut EngineStore) -> (i64, i64, i64, i64, i64) {
     let reaction_seq = journal_test_op(
         engine,
         "chat.reaction.set",
@@ -97,7 +97,24 @@ fn journal_lww_ops(engine: &mut EngineStore) -> (i64, i64, i64, i64) {
             "atMs": 2_005
         }),
     );
-    (reaction_seq, decision_seq, follow_seq, feed_seq)
+    let thread_read_seq = journal_test_op(
+        engine,
+        "chat.thread.read.set",
+        &json!({
+            "accountUserId": "user-1",
+            "threadId": "recovery-thread",
+            "lastReadCreatedAtMs": 2_000,
+            "lastReadMessageId": "safe-message",
+            "atMs": 2_006
+        }),
+    );
+    (
+        reaction_seq,
+        decision_seq,
+        follow_seq,
+        feed_seq,
+        thread_read_seq,
+    )
 }
 
 fn seed_lww_projections(
@@ -107,6 +124,7 @@ fn seed_lww_projections(
     decision_seq: i64,
     follow_seq: i64,
     feed_seq: i64,
+    thread_read_seq: i64,
 ) {
     engine
         .write_with(&NoFaults, |tx| {
@@ -141,6 +159,14 @@ fn seed_lww_projections(
                 params![origin_id, feed_seq],
             )
             .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_account_thread_read_state \
+                 (workspace_id,account_user_id,thread_id,last_read_created_at_ms,last_read_message_id, \
+                  updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','user-1','recovery-thread',2000,'safe-message',2006,?1,?2)",
+                params![origin_id, thread_read_seq],
+            )
+            .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })
         .expect("seed LWW projections");
@@ -171,6 +197,12 @@ fn lww_projection_coordinates(engine: &EngineStore) -> BTreeMap<String, (String,
                     "chat.feed.read.set",
                     "SELECT origin_id,origin_seq FROM chat_feed_read_state \
                      WHERE workspace_id='ws' AND owner_user_id='user-1'",
+                ),
+                (
+                    "chat.thread.read.set",
+                    "SELECT origin_id,origin_seq FROM chat_account_thread_read_state \
+                     WHERE workspace_id='ws' AND account_user_id='user-1' \
+                       AND thread_id='recovery-thread'",
                 ),
             ] {
                 coordinates.insert(
@@ -206,6 +238,7 @@ fn lww_log_coordinates(engine: &EngineStore, origin_id: &str) -> BTreeMap<String
                         | "chat.decision.set"
                         | "chat.follow.set"
                         | "chat.feed.read.set"
+                        | "chat.thread.read.set"
                 ) {
                     continue;
                 }
@@ -816,7 +849,8 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
 fn recover_origin_rebases_each_current_lww_projection_coordinate() {
     let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
-    let (reaction_seq, decision_seq, follow_seq, feed_seq) = journal_lww_ops(&mut engine);
+    let (reaction_seq, decision_seq, follow_seq, feed_seq, thread_read_seq) =
+        journal_lww_ops(&mut engine);
     seed_lww_projections(
         &mut engine,
         "local",
@@ -824,6 +858,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
         decision_seq,
         follow_seq,
         feed_seq,
+        thread_read_seq,
     );
     let recovery = RelaySyncClient::new(PagedRelay::new([(
         0,
@@ -860,6 +895,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
         ("chat.decision.set", 4),
         ("chat.follow.set", 2),
         ("chat.feed.read.set", 3),
+        ("chat.thread.read.set", 5),
     ] {
         assert_eq!(
             projection_coordinates.get(op_kind),

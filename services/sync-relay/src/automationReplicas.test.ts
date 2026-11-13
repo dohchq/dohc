@@ -1192,7 +1192,9 @@ describe("the automation replicas", () => {
     expect(open.params).toMatchObject({ workspaceId: WORKSPACE, captureMode: "none", reconcileCollections: true, rootDir: replica.root,
       relay: { baseUrl: "https://relay.example", bearerToken: deriveAutomationReplicaBearer(storage.currentAutomationWorkspace(WORKSPACE)!, { key, namespace }) } });
     expect(replica.metadataDir.startsWith(replica.root)).toBe(false);
-    expect(engine.methods()).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.fetchPull", "sync.applyPull", "sync.materializePendingCursor", "sync.commitCursor"]);
+    expect(engine.methods()).toEqual(["workspace.open", "chats.readState.seedAccount", "versions.ensureMain", "sync.adoptJoinIdentity", "sync.push", "sync.fetchPull", "sync.applyPull", "sync.materializePendingCursor", "sync.commitCursor"]);
+    expect(engine.sent.find((request) => request.method === "chats.readState.seedAccount")?.params, "a server copy seeds no local count")
+      .toEqual({ accountUserId: "owner", seedLocal: false });
 
     // Nothing changed at the relay: a pass pulls nothing.
     running.reconcile();
@@ -1615,7 +1617,7 @@ describe("the automation replicas", () => {
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     await vi.waitFor(() => expect(errors).toHaveLength(1), { timeout: WAIT_TIMEOUT_MS });
     expect(running.replica(WORKSPACE)).toBeUndefined();
-    expect(engine.methods().slice(0, 4)).toEqual(["workspace.open", "versions.ensureMain", "sync.adoptJoinIdentity", "workspace.close"]);
+    expect(engine.methods().slice(0, 5)).toEqual(["workspace.open", "chats.readState.seedAccount", "versions.ensureMain", "sync.adoptJoinIdentity", "workspace.close"]);
   });
 
   it("keeps opening, pulling, and letting go of the others while one workspace always fails", async () => {

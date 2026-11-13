@@ -395,6 +395,20 @@ describe("ChatLane", () => {
     expect(screen.getByTestId("chats-lane-new-divider")).toBeTruthy();
   });
 
+  it("orders equal-time messages by ID, so the New divider sits above every unread one", async () => {
+    // Arrival is a, z, b at one time. The account read a; the engine's first
+    // unread by (time, ID) is b, two messages in arrival order.
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3, lastReadSequence: 2, unreadCount: 2 })] });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+      message({ id: "a", body: "Read" }), message({ id: "z", body: "Unread z" }), message({ id: "b", body: "Unread b" }),
+    ] });
+    render(lane());
+    const divider = await screen.findByTestId("chats-lane-new-divider");
+    expect(divider.closest("[data-message-id]")?.getAttribute("data-message-id")).toBe("b");
+    const shown = [...new Set([...document.querySelectorAll("[data-message-id]")].map(row => row.getAttribute("data-message-id")))];
+    expect(shown).toEqual(["a", "b", "z"]);
+  });
+
   it("lands on the message a notice named: scrolls to it, washes it once and moves focus there", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [
       message({ id: "m1", body: "Asked" }), message({ id: "m2", body: "The reply" }), message({ id: "m3", body: "Later" }),

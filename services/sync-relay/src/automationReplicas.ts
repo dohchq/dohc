@@ -373,6 +373,13 @@ export async function startAutomationReplicas(options: {
       reconcileCollections: true, recoverRunningDispatches: false, relay: {baseUrl: relay.origin, bearerToken}}) as {workspace?: unknown} | null;
     if (typeof opened?.workspace !== "string" || !opened.workspace) throw new Error("The engine did not open the automation replica.");
     const handle = opened.workspace;
+    // The copy reads by its owner's account. No person reads on it, so its
+    // local counts seed nothing. Until this succeeds, reads keep local counts.
+    try {
+      await request(engineClient, "chats.readState.seedAccount", {accountUserId: row.ownerUserId, seedLocal: false}, handle);
+    } catch (error) {
+      observe(() => options.onError?.(error, row.workspaceId));
+    }
     const closed = new AbortController();
     const release = async () => {
       closed.abort();

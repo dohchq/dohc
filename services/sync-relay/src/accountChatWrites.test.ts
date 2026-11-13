@@ -132,6 +132,19 @@ describe("a phone's chat write through the server's copy", () => {
     expect(f.engine.writes).toHaveLength(1);
   });
 
+  it("saves a post, a reply, and an answer whose receipts also hold the account's read mark", async () => {
+    const f = await fixture();
+    f.engine.readMarks = true;
+    const { planning } = await seed(f.chats);
+    expect(await f.run({ operation: "post", args: { operationId: "op-read-post", groupId: planning.channelId, body: "Where?" } }))
+      .toMatchObject({ ok: true, state: "saved" });
+    expect(await f.run(reply("op-read-reply", "thread-stay"))).toMatchObject({ ok: true, state: "saved" });
+    expect(await f.run(reply("op-read-answer", "thread-stay", { resolves: { messageId: "message-poll", chosenOption: "Alfama" } })))
+      .toMatchObject({ ok: true, state: "saved" });
+    const marks = f.raw.prepare("SELECT count(*) AS n FROM sync_relay_log WHERE op_kind = 'chat.thread.read.set'").get();
+    expect(Number(marks?.n), "each message's receipt held a read mark").toBe(3);
+  });
+
   it("answers with the thread a send joined, when its group already has a running conversation", async () => {
     const f = await fixture();
     const { planning } = await seed(f.chats);

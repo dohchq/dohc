@@ -991,6 +991,19 @@ pub struct StartChannelThread {
     pub request_id: Option<String>,
 }
 
+/// Inputs to [`LinkedChatStore::mark_thread_read`].
+#[derive(Debug, Clone)]
+pub struct MarkThreadRead {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub up_to_sequence: i64,
+    pub expected_revision: Option<i64>,
+    /// The workspace owner, when the caller holds the owner's replication
+    /// context. Only then does an account mark journal.
+    pub replication_owner_user_id: Option<String>,
+    pub now_ms: i64,
+}
+
 /// Inputs to [`LinkedChatStore::send_message`].
 #[derive(Debug, Clone)]
 pub struct SendMessage {
@@ -3161,6 +3174,7 @@ impl<'a> LinkedChatStore<'a> {
                     "Linked chat store is corrupt.",
                 ));
             }
+            let account = account_read_scope(conn, workspace_id)?;
             // CROSS JOIN keeps the bounded page before the thread lookups.
             let mut stmt = conn
                 .prepare_cached(
@@ -3179,15 +3193,29 @@ impl<'a> LinkedChatStore<'a> {
                      FROM page ch \
                      LEFT JOIN ( \
                        SELECT t.workspace_id, t.channel_id, COUNT(*) AS thread_count, \
-                              SUM(MAX( \
+                              SUM(CASE WHEN ?5 IS NULL \
+                                OR EXISTS(SELECT 1 FROM chat_channel_wire_ids jw \
+                                  JOIN chat_joined_channels jc \
+                                    ON jc.workspace_id = jw.workspace_id AND jc.wire_id = jw.wire_id \
+                                  WHERE jw.workspace_id = t.workspace_id AND jw.channel_id = t.channel_id) \
+                              THEN MAX( \
                                 (SELECT COUNT(*) FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id) \
                                 - COALESCE((SELECT rs.last_read_sequence \
                                             FROM chat_thread_read_state rs \
                                             WHERE rs.workspace_id = t.workspace_id \
                                               AND rs.thread_id = t.thread_id), 0), \
-                                0)) AS unread_count \
+                                0) \
+                              ELSE (SELECT COUNT(*) FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
+                                   AND (a.last_read_message_id IS NULL \
+                                     OR (m.created_at_ms, m.message_id) \
+                                        > (a.last_read_created_at_ms, a.last_read_message_id))) \
+                              END) AS unread_count \
                        FROM page selected CROSS JOIN chat_threads t \
+                       LEFT JOIN chat_account_thread_read_state a \
+                         ON a.workspace_id = t.workspace_id AND a.account_user_id = ?5 \
+                        AND a.thread_id = t.thread_id \
                        WHERE t.workspace_id = selected.workspace_id \
                          AND t.channel_id = selected.channel_id \
                        GROUP BY t.workspace_id, t.channel_id \
@@ -3196,7 +3224,7 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, after.map_or(i64::MIN, |value| value.0), after.map_or("", |value| value.1), limit], |row| {
+                .query_map(params![workspace_id, after.map_or(i64::MIN, |value| value.0), after.map_or("", |value| value.1), limit, account], |row| {
                     let channel = map_channel_row(row)?;
                     let thread_count = row.get(11)?;
                     let unread_count = row.get(12)?;
@@ -3729,6 +3757,17 @@ impl<'a> LinkedChatStore<'a> {
                     now,
                 )?;
             }
+            if input.author_kind == ChatActorKind::Human {
+                advance_account_read_for_own_message(
+                    tx,
+                    &input.workspace_id,
+                    thread_id,
+                    &input.message_id,
+                    now,
+                    author_user_c.as_deref(),
+                    now,
+                )?;
+            }
             if input.needs_decision || !options_c.is_empty() {
                 journal_decision_set(
                     tx,
@@ -4109,6 +4148,17 @@ impl<'a> LinkedChatStore<'a> {
                     now,
                 )?;
             }
+            if input.author_kind == ChatActorKind::Human {
+                advance_account_read_for_own_message(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    &input.message_id,
+                    now,
+                    author_user_c.as_deref(),
+                    now,
+                )?;
+            }
             if input.needs_decision || !options_c.is_empty() {
                 journal_decision_set(
                     tx,
@@ -4438,6 +4488,7 @@ impl<'a> LinkedChatStore<'a> {
         let (has_after, after_updated_at_ms, after_thread_id) = chat_after(after);
         self.store.read_with(|conn| {
             let channel = require_channel(conn, workspace_id, channel_id)?;
+            let account = account_read_scope_for_channel(conn, workspace_id, &channel.channel_id)?;
             // One page query carries every per-thread aggregate as a correlated
             // index lookup, so a full page costs a fixed number of statements
             // instead of five point queries per thread.
@@ -4469,8 +4520,31 @@ impl<'a> LinkedChatStore<'a> {
                                 (SELECT m.message_id FROM chat_messages m \
                                  WHERE m.workspace_id = t.workspace_id \
                                    AND m.thread_id = t.thread_id \
-                                 ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
+                                 ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
+                                CASE WHEN ?8 IS NULL THEN NULL ELSE \
+                                (SELECT COUNT(*) FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id \
+                                   AND m.thread_id = t.thread_id \
+                                   AND m.message_order < COALESCE( \
+                                     (SELECT u.message_order FROM chat_messages u \
+                                      WHERE u.workspace_id = t.workspace_id \
+                                        AND u.thread_id = t.thread_id \
+                                        AND (a.last_read_message_id IS NULL \
+                                          OR (u.created_at_ms, u.message_id) \
+                                             > (a.last_read_created_at_ms, a.last_read_message_id)) \
+                                      ORDER BY u.created_at_ms, u.message_id LIMIT 1), \
+                                     9223372036854775807)) END, \
+                                CASE WHEN ?8 IS NULL THEN NULL ELSE \
+                                (SELECT COUNT(*) FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id \
+                                   AND m.thread_id = t.thread_id \
+                                   AND (a.last_read_message_id IS NULL \
+                                     OR (m.created_at_ms, m.message_id) \
+                                        > (a.last_read_created_at_ms, a.last_read_message_id))) END \
                          FROM chat_threads t \
+                         LEFT JOIN chat_account_thread_read_state a \
+                           ON a.workspace_id = t.workspace_id AND a.account_user_id = ?8 \
+                          AND a.thread_id = t.thread_id \
                          WHERE t.workspace_id = ?1 AND t.channel_id = ?2 AND t.lane = ?7 \
                            AND (?3 = 0 OR t.updated_at_ms < ?4 \
                              OR (t.updated_at_ms = ?4 AND t.thread_id < ?5)) \
@@ -4486,7 +4560,8 @@ impl<'a> LinkedChatStore<'a> {
                             after_updated_at_ms,
                             after_thread_id,
                             limit,
-                            lane.as_str()
+                            lane.as_str(),
+                            account
                         ],
                         |row| {
                             let thread = map_thread_row(row)?;
@@ -4494,11 +4569,17 @@ impl<'a> LinkedChatStore<'a> {
                             let stored_read_sequence: Option<i64> = row.get(13)?;
                             let open_decision_count: i64 = row.get(14)?;
                             let opening_message_id: Option<String> = row.get(15)?;
+                            let account_read: Option<(i64, i64)> =
+                                match (row.get::<_, Option<i64>>(16)?, row.get::<_, Option<i64>>(17)?) {
+                                    (Some(position), Some(unread)) => Some((position, unread)),
+                                    _ => None,
+                                };
                             Ok(thread.map(|thread| {
                                 (
                                     thread,
                                     message_count,
                                     stored_read_sequence,
+                                    account_read,
                                     open_decision_count,
                                     opening_message_id,
                                 )
@@ -4509,8 +4590,14 @@ impl<'a> LinkedChatStore<'a> {
                 collect(rows)?
             };
             let mut validated = Vec::with_capacity(page.len());
-            for (thread, message_count, stored_read_sequence, open_decision_count, opening_id) in
-                page
+            for (
+                thread,
+                message_count,
+                stored_read_sequence,
+                account_read,
+                open_decision_count,
+                opening_id,
+            ) in page
             {
                 if !persisted_nonnegative_safe(message_count) {
                     return Err(DomainError::StateCorrupt {
@@ -4523,7 +4610,15 @@ impl<'a> LinkedChatStore<'a> {
                         reason: "channel summary read cursor is corrupt",
                     });
                 }
-                let last_read_sequence = stored_read_sequence.min(message_count);
+                // An account's place counts the messages before its earliest
+                // unread one, so the New divider indexes that message.
+                let (last_read_sequence, unread_count) = match account_read {
+                    Some((position, unread)) => (position.min(message_count), unread.min(message_count)),
+                    None => {
+                        let read = stored_read_sequence.min(message_count);
+                        (read, message_count - read)
+                    }
+                };
                 if !persisted_nonnegative_safe(open_decision_count) {
                     return Err(DomainError::StateCorrupt {
                         reason: "channel summary decision count is corrupt",
@@ -4533,13 +4628,14 @@ impl<'a> LinkedChatStore<'a> {
                     thread,
                     message_count,
                     last_read_sequence,
+                    unread_count,
                     open_decision_count,
                     opening_id,
                 ));
             }
             let opening_ids: Vec<String> = validated
                 .iter()
-                .filter_map(|(_, _, _, _, opening_id)| opening_id.clone())
+                .filter_map(|(_, _, _, _, _, opening_id)| opening_id.clone())
                 .collect();
             let mut opening_messages: HashMap<String, ChatMessage> = if opening_ids.is_empty() {
                 HashMap::new()
@@ -4575,8 +4671,14 @@ impl<'a> LinkedChatStore<'a> {
                 .collect();
             let mut work = stream::thread_work(conn, workspace_id, &thread_ids)?;
             let mut summaries = Vec::with_capacity(validated.len());
-            for (thread, message_count, last_read_sequence, open_decision_count, opening_id) in
-                validated
+            for (
+                thread,
+                message_count,
+                last_read_sequence,
+                unread_count,
+                open_decision_count,
+                opening_id,
+            ) in validated
             {
                 let opening_message = opening_id
                     .and_then(|opening_id| opening_messages.remove(&opening_id))
@@ -4601,7 +4703,7 @@ impl<'a> LinkedChatStore<'a> {
                     thread,
                     message_count,
                     last_read_sequence,
-                    unread_count: message_count - last_read_sequence,
+                    unread_count,
                     open_decision_count,
                     opening_message,
                 });
@@ -5178,21 +5280,24 @@ impl<'a> LinkedChatStore<'a> {
 
     // ------------------------------------------------------------- read state
 
-    /// Mark a thread read up to `up_to_sequence` (`markThreadRead`). The one
-    /// cursor writer: optional CAS against `expected_revision`, monotonic (never
-    /// moves backwards), clamped to the thread's real message count, and it
-    /// repairs a tampered OVER-COUNT cursor in place (revision unchanged on a
-    /// repair). Fails closed with `read-state-revision-mismatch` on a stale CAS.
+    /// Mark a thread read up to `up_to_sequence` (`markThreadRead`). The local
+    /// cursor takes an optional CAS against `expected_revision`, is monotonic
+    /// (never moves backwards), is clamped to the thread's real message count,
+    /// and repairs a tampered OVER-COUNT cursor in place (revision unchanged on
+    /// a repair). Fails closed with `read-state-revision-mismatch` on a stale
+    /// CAS. On a copy that shows an account's read places, the account mark
+    /// also moves forward to the coordinate that keeps the first
+    /// `up_to_sequence` messages read, and the answer's `last_read_sequence`
+    /// is the account's place. It journals `chat.thread.read.set` only when
+    /// `replication_owner_user_id` names that account.
     pub fn mark_thread_read(
         &mut self,
-        workspace_id: &str,
-        thread_id: &str,
-        up_to_sequence: i64,
-        expected_revision: Option<i64>,
-        now_ms: i64,
+        input: &MarkThreadRead,
         faults: &dyn FaultInjector,
     ) -> Result<ChatThreadReadState, DomainError> {
-        let up_to = normalize_read_sequence(up_to_sequence)?;
+        let up_to = normalize_read_sequence(input.up_to_sequence)?;
+        let expected_revision = input.expected_revision;
+        let now_ms = input.now_ms;
         if let Some(rev) = expected_revision
             && rev < 0
         {
@@ -5201,24 +5306,109 @@ impl<'a> LinkedChatStore<'a> {
                 "Expected read-state revision must be a non-negative integer.",
             ));
         }
-        let ws = workspace_id.to_owned();
-        let tid = thread_id.to_owned();
+        let replication_owner_user_id = input
+            .replication_owner_user_id
+            .as_deref()
+            .map(|owner| normalize_feed_identity(owner, "Replication read account"))
+            .transpose()?;
+        let ws = input.workspace_id.clone();
+        let tid = input.thread_id.clone();
         let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             require_thread(tx, &ws, &tid)?;
-            advance_read_cursor(tx, &ws, &tid, up_to, now_ms, expected_revision)
+            let mut state = advance_read_cursor(tx, &ws, &tid, up_to, now_ms, expected_revision)?;
+            if let Some(account) = account_read_scope_for_thread(tx, &ws, &tid)? {
+                if let Some(target) = conservative_read_coordinate(tx, &ws, &tid, up_to)? {
+                    let journal = replication_owner_user_id.as_deref() == Some(account.as_str());
+                    advance_account_thread_read(tx, &ws, &account, &tid, target, now_ms, journal)?;
+                }
+                state.last_read_sequence = account_thread_position(tx, &ws, &account, &tid)?.0;
+            }
+            Ok(state)
         })?;
         committed(outcome)
     }
 
     /// The current read state for a thread (`readStateForThread`), defaulting to
-    /// `(0, 0, 0)` when no row exists.
+    /// `(0, 0, 0)` when no row exists. On a copy that shows an account's read
+    /// places, `last_read_sequence` is the account's place.
     pub fn read_state(
         &self,
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ChatThreadReadState, DomainError> {
-        self.store
-            .read_with(|conn| read_state_for_thread(conn, workspace_id, thread_id))
+        self.store.read_with(|conn| {
+            let mut state = read_state_for_thread(conn, workspace_id, thread_id)?;
+            if let Some(account) = account_read_scope_for_thread(conn, workspace_id, thread_id)? {
+                state.last_read_sequence =
+                    account_thread_position(conn, workspace_id, &account, thread_id)?.0;
+            }
+            Ok(state)
+        })
+    }
+
+    /// Record the account whose read places this copy shows, once per
+    /// workspace. With `seed_local`, each thread this copy read seeds that
+    /// account's mark from its local count, journaled for the account's other
+    /// copies, and merged with any mark already there by the later coordinate.
+    /// The seed keeps every locally unread message unread. A server copy has
+    /// no person reading on it and passes `seed_local = false`. The record and
+    /// the seed commit together. Answers whether this call recorded it.
+    pub fn seed_account_reads(
+        &mut self,
+        workspace_id: &str,
+        account_user_id: &str,
+        seed_local: bool,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, DomainError> {
+        let account = normalize_feed_identity(account_user_id, "Read account")?;
+        let ws = workspace_id.to_owned();
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
+            if account_read_scope(tx, &ws)?.is_some() {
+                return Ok(false);
+            }
+            if seed_local {
+                let read: Vec<(String, i64)> = {
+                    let mut stmt = tx
+                        .prepare(
+                            "SELECT r.thread_id, r.last_read_sequence FROM chat_thread_read_state r \
+                             JOIN chat_threads t \
+                               ON t.workspace_id = r.workspace_id AND t.thread_id = r.thread_id \
+                             WHERE r.workspace_id = ?1 AND r.last_read_sequence > 0 \
+                               AND NOT EXISTS(SELECT 1 FROM chat_channel_wire_ids jw \
+                                 JOIN chat_joined_channels jc \
+                                   ON jc.workspace_id = jw.workspace_id AND jc.wire_id = jw.wire_id \
+                                 WHERE jw.workspace_id = t.workspace_id \
+                                   AND jw.channel_id = t.channel_id) \
+                             ORDER BY r.thread_id",
+                        )
+                        .map_err(DomainError::sql_corrupt)?;
+                    let rows = stmt
+                        .query_map(params![ws], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(DomainError::sql_corrupt)?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(DomainError::sql_corrupt)?
+                };
+                for (thread_id, read_count) in read {
+                    if let Some(target) =
+                        conservative_read_coordinate(tx, &ws, &thread_id, read_count)?
+                    {
+                        advance_account_thread_read(
+                            tx, &ws, &account, &thread_id, target, now_ms, true,
+                        )?;
+                    }
+                }
+            }
+            tx.execute(
+                "INSERT INTO chat_account_read_seeds \
+                 (workspace_id, account_user_id, seeded_local, completed_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![ws, account, seed_local, now_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            Ok(true)
+        })?;
+        committed(outcome)
     }
 
     /// Workspace-wide human unread state for channel-less, file-linked threads.
@@ -5233,6 +5423,9 @@ impl<'a> LinkedChatStore<'a> {
         const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
         self.store.read_with(|conn| {
+            let account = account_read_scope(conn, workspace_id)?;
+            // An account's place counts the messages before its earliest
+            // unread one, and its unread are the messages after its mark.
             let mut statement = conn
                 .prepare_cached(
                     "WITH file_threads AS ( \
@@ -5240,10 +5433,32 @@ impl<'a> LinkedChatStore<'a> {
                             (SELECT COUNT(*) FROM chat_messages m \
                              WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id) \
                                AS message_count, \
-                            COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs \
-                                      WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0) \
-                               AS last_read_sequence \
+                            CASE WHEN ?5 IS NULL THEN \
+                              COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs \
+                                        WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0) \
+                            ELSE \
+                              (SELECT COUNT(*) FROM chat_messages m \
+                               WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
+                                 AND m.message_order < COALESCE( \
+                                   (SELECT u.message_order FROM chat_messages u \
+                                    WHERE u.workspace_id = t.workspace_id AND u.thread_id = t.thread_id \
+                                      AND (a.last_read_message_id IS NULL \
+                                        OR (u.created_at_ms, u.message_id) \
+                                           > (a.last_read_created_at_ms, a.last_read_message_id)) \
+                                    ORDER BY u.created_at_ms, u.message_id LIMIT 1), \
+                                   9223372036854775807)) \
+                            END AS last_read_sequence, \
+                            CASE WHEN ?5 IS NULL THEN NULL ELSE \
+                              (SELECT COUNT(*) FROM chat_messages m \
+                               WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
+                                 AND (a.last_read_message_id IS NULL \
+                                   OR (m.created_at_ms, m.message_id) \
+                                      > (a.last_read_created_at_ms, a.last_read_message_id))) \
+                            END AS account_unread \
                         FROM chat_threads t \
+                        LEFT JOIN chat_account_thread_read_state a \
+                          ON a.workspace_id = t.workspace_id AND a.account_user_id = ?5 \
+                         AND a.thread_id = t.thread_id \
                         WHERE t.workspace_id = ?1 \
                           AND t.channel_id IS NULL \
                           AND t.linked_object_id IS NOT NULL \
@@ -5251,7 +5466,9 @@ impl<'a> LinkedChatStore<'a> {
                     ) \
                     SELECT thread_id, message_count, last_read_sequence \
                     FROM file_threads \
-                    WHERE message_count > MIN(last_read_sequence, message_count) \
+                    WHERE (account_unread IS NULL \
+                           AND message_count > MIN(last_read_sequence, message_count)) \
+                       OR account_unread > 0 \
                        OR thread_id = '' \
                        OR message_count < 0 OR message_count > ?4 \
                        OR last_read_sequence < 0 OR last_read_sequence > ?4 \
@@ -5261,7 +5478,7 @@ impl<'a> LinkedChatStore<'a> {
                 .map_err(DomainError::sql_corrupt)?;
             let rows = statement
                 .query_map(
-                    params![workspace_id, after_thread_id, limit, MAX_SAFE_INTEGER],
+                    params![workspace_id, after_thread_id, limit, MAX_SAFE_INTEGER, account],
                     |row| {
                     Ok(UnreadFileThread {
                         thread_id: row.get(0)?,
@@ -7632,6 +7849,424 @@ fn advance_read_cursor(
     Ok(next)
 }
 
+/// The account whose read places this copy shows. It is `None` until the
+/// first open with the owner's replication context records one, and then the
+/// workspace's human unread counts read that account's marks.
+pub(crate) fn account_read_scope(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Option<String>, DomainError> {
+    conn.query_row(
+        "SELECT account_user_id FROM chat_account_read_seeds WHERE workspace_id = ?1",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Whether a channel is a Group joined from another person's share. Its
+/// threads keep local counts. The SQL readers inline the same test.
+fn channel_is_joined(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_channel_wire_ids w \
+         JOIN chat_joined_channels j \
+           ON j.workspace_id = w.workspace_id AND j.wire_id = w.wire_id \
+         WHERE w.workspace_id = ?1 AND w.channel_id = ?2)",
+        params![workspace_id, channel_id],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// The account whose marks decide one channel's reads: the recorded account,
+/// unless the channel is a joined Group.
+pub(crate) fn account_read_scope_for_channel(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<Option<String>, DomainError> {
+    let Some(account) = account_read_scope(conn, workspace_id)? else {
+        return Ok(None);
+    };
+    Ok((!channel_is_joined(conn, workspace_id, channel_id)?).then_some(account))
+}
+
+/// The account whose marks decide one thread's reads. Every reader and writer
+/// of a single thread asks here, so a joined Group's thread never takes or
+/// shows an account mark.
+fn account_read_scope_for_thread(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<String>, DomainError> {
+    let channel_id: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+            params![workspace_id, thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .flatten();
+    match channel_id {
+        Some(channel_id) => account_read_scope_for_channel(conn, workspace_id, &channel_id),
+        None => account_read_scope(conn, workspace_id),
+    }
+}
+
+/// The account coordinate that keeps a local count's read set read. The read
+/// set is the first `read_count` messages in arrival order. The answer is the
+/// newest of them that sorts below every message after them, so no unread
+/// message is ever hidden. `None` when nothing qualifies.
+fn conservative_read_coordinate(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    read_count: i64,
+) -> Result<Option<(i64, String)>, DomainError> {
+    let read_count = read_count.min(message_count_for_thread(conn, workspace_id, thread_id)?);
+    if read_count <= 0 {
+        return Ok(None);
+    }
+    let boundary: Option<i64> = conn
+        .query_row(
+            "SELECT message_order FROM chat_messages \
+             WHERE workspace_id = ?1 AND thread_id = ?2 \
+             ORDER BY message_order LIMIT 1 OFFSET ?3",
+            params![workspace_id, thread_id, read_count - 1],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some(boundary) = boundary else {
+        return Ok(None);
+    };
+    let first_unread: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT created_at_ms, message_id FROM chat_messages \
+             WHERE workspace_id = ?1 AND thread_id = ?2 AND message_order > ?3 \
+             ORDER BY created_at_ms, message_id LIMIT 1",
+            params![workspace_id, thread_id, boundary],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let (bounded, below_created_at_ms, below_message_id) = match &first_unread {
+        Some((created_at_ms, message_id)) => (true, *created_at_ms, message_id.as_str()),
+        None => (false, 0, ""),
+    };
+    conn.query_row(
+        "SELECT created_at_ms, message_id FROM chat_messages \
+         WHERE workspace_id = ?1 AND thread_id = ?2 AND message_order <= ?3 \
+           AND (?4 = 0 OR (created_at_ms, message_id) < (?5, ?6)) \
+         ORDER BY created_at_ms DESC, message_id DESC LIMIT 1",
+        params![
+            workspace_id,
+            thread_id,
+            boundary,
+            bounded,
+            below_created_at_ms,
+            below_message_id
+        ],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// An account's place in one thread as the human read projections show it:
+/// how many messages come before the earliest unread one in arrival order,
+/// and how many are unread. A message is unread when it sorts after the mark.
+fn account_thread_position(
+    conn: &Connection,
+    workspace_id: &str,
+    account_user_id: &str,
+    thread_id: &str,
+) -> Result<(i64, i64), DomainError> {
+    let (before_first_unread, unread): (i64, i64) = conn
+        .query_row(
+            "SELECT \
+               (SELECT COUNT(*) FROM chat_messages m \
+                WHERE m.workspace_id = ?1 AND m.thread_id = ?3 \
+                  AND m.message_order < COALESCE( \
+                    (SELECT u.message_order FROM chat_messages u \
+                     WHERE u.workspace_id = ?1 AND u.thread_id = ?3 \
+                       AND (a.last_read_message_id IS NULL \
+                         OR (u.created_at_ms, u.message_id) \
+                            > (a.last_read_created_at_ms, a.last_read_message_id)) \
+                     ORDER BY u.created_at_ms, u.message_id LIMIT 1), \
+                    9223372036854775807)), \
+               (SELECT COUNT(*) FROM chat_messages m \
+                WHERE m.workspace_id = ?1 AND m.thread_id = ?3 \
+                  AND (a.last_read_message_id IS NULL \
+                    OR (m.created_at_ms, m.message_id) \
+                       > (a.last_read_created_at_ms, a.last_read_message_id))) \
+             FROM (SELECT 1) one \
+             LEFT JOIN chat_account_thread_read_state a \
+               ON a.workspace_id = ?1 AND a.account_user_id = ?2 AND a.thread_id = ?3",
+            params![workspace_id, account_user_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    if !persisted_nonnegative_safe(before_first_unread) || !persisted_nonnegative_safe(unread) {
+        return Err(DomainError::StateCorrupt {
+            reason: "account read position is corrupt",
+        });
+    }
+    Ok((before_first_unread, unread))
+}
+
+/// Whether an account read coordinate names a message in its own thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadReadResolution {
+    Visible,
+    Missing,
+    Disallowed,
+}
+
+/// Resolve a thread read coordinate. The message must be in the named thread
+/// at exactly that time. Any thread kind qualifies, DMs included.
+pub fn resolve_thread_read_coordinate(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> Result<ThreadReadResolution, DomainError> {
+    let found: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT thread_id, created_at_ms FROM chat_messages \
+             WHERE workspace_id = ?1 AND message_id = ?2",
+            params![workspace_id, message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(match found {
+        None => ThreadReadResolution::Missing,
+        Some((found_thread_id, found_created_at_ms))
+            if found_thread_id == thread_id && found_created_at_ms == created_at_ms =>
+        {
+            ThreadReadResolution::Visible
+        }
+        Some(_) => ThreadReadResolution::Disallowed,
+    })
+}
+
+/// One account read mark as a copy stores it, with the journal coordinate
+/// that set it.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountThreadReadCell<'a> {
+    pub workspace_id: &'a str,
+    pub account_user_id: &'a str,
+    pub thread_id: &'a str,
+    pub created_at_ms: i64,
+    pub message_id: &'a str,
+    pub updated_at_ms: i64,
+    pub origin_id: &'a str,
+    pub origin_seq: i64,
+}
+
+/// Merge an account's read mark in one thread. The later coordinate wins, and
+/// the update time and then the origin break a tie, so copies converge in
+/// any order. Answers whether the stored mark changed.
+pub fn merge_account_thread_read(
+    tx: &Transaction<'_>,
+    cell: &AccountThreadReadCell<'_>,
+) -> Result<bool, DomainError> {
+    let changed = tx
+        .execute(
+            "INSERT INTO chat_account_thread_read_state \
+             (workspace_id, account_user_id, thread_id, last_read_created_at_ms, \
+              last_read_message_id, updated_at_ms, origin_id, origin_seq) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(workspace_id, account_user_id, thread_id) DO UPDATE SET \
+               last_read_created_at_ms = excluded.last_read_created_at_ms, \
+               last_read_message_id = excluded.last_read_message_id, \
+               updated_at_ms = excluded.updated_at_ms, \
+               origin_id = excluded.origin_id, origin_seq = excluded.origin_seq \
+             WHERE (excluded.last_read_created_at_ms, excluded.last_read_message_id, \
+                    excluded.updated_at_ms, excluded.origin_id, excluded.origin_seq) > \
+                   (last_read_created_at_ms, last_read_message_id, updated_at_ms, \
+                    origin_id, origin_seq)",
+            params![
+                cell.workspace_id,
+                cell.account_user_id,
+                cell.thread_id,
+                cell.created_at_ms,
+                cell.message_id,
+                cell.updated_at_ms,
+                cell.origin_id,
+                cell.origin_seq
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+    Ok(changed > 0)
+}
+
+/// Whether the log already holds a read record for exactly this account,
+/// thread, and coordinate, from this copy or another. It reads the record's
+/// kind and payload, never an origin sequence.
+fn thread_read_journaled(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    account_user_id: &str,
+    thread_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log \
+         WHERE workspace_id = ?1 AND op_kind = 'chat.thread.read.set' \
+           AND json_extract(payload_json, '$.accountUserId') = ?2 \
+           AND json_extract(payload_json, '$.threadId') = ?3 \
+           AND json_extract(payload_json, '$.lastReadCreatedAtMs') = ?4 \
+           AND json_extract(payload_json, '$.lastReadMessageId') = ?5)",
+        params![
+            workspace_id,
+            account_user_id,
+            thread_id,
+            created_at_ms,
+            message_id
+        ],
+        |row| row.get(0),
+    )
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Move an account's mark in one thread forward to `target` on this copy, and
+/// publish it when `journal` is set. Moving and publishing are separate: a
+/// mark stored without a record, for example while signed out, is published
+/// by the next authorized mark at the same coordinate. Once a record of the
+/// coordinate exists, a repeat writes nothing. A local-only message never
+/// names a mark in the account's log. Answers whether anything was written.
+fn advance_account_thread_read(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    account_user_id: &str,
+    thread_id: &str,
+    target: (i64, String),
+    now_ms: i64,
+    journal: bool,
+) -> Result<bool, DomainError> {
+    let (created_at_ms, message_id) = target;
+    let current: Option<(i64, String, i64)> = tx
+        .query_row(
+            "SELECT last_read_created_at_ms, last_read_message_id, updated_at_ms \
+             FROM chat_account_thread_read_state \
+             WHERE workspace_id = ?1 AND account_user_id = ?2 AND thread_id = ?3",
+            params![workspace_id, account_user_id, thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let moves = match &current {
+        None => true,
+        Some((current_created_at_ms, current_message_id, _)) => {
+            let stored = (*current_created_at_ms, current_message_id.as_str());
+            let wanted = (created_at_ms, message_id.as_str());
+            if stored > wanted {
+                return Ok(false);
+            }
+            stored < wanted
+        }
+    };
+    let publish = journal
+        && tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_messages \
+                 WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3 \
+                   AND author_user_id IS NOT NULL)",
+                params![workspace_id, thread_id, message_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(DomainError::sql_corrupt)?
+        && (moves
+            || !thread_read_journaled(
+                tx,
+                workspace_id,
+                account_user_id,
+                thread_id,
+                created_at_ms,
+                &message_id,
+            )?);
+    if !moves && !publish {
+        return Ok(false);
+    }
+    // A later update time keeps the stored cell pointing at this write.
+    let at_ms = current.as_ref().map_or(now_ms, |(_, _, updated_at_ms)| {
+        now_ms.max(updated_at_ms.saturating_add(1))
+    });
+    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, at_ms)?;
+    merge_account_thread_read(
+        tx,
+        &AccountThreadReadCell {
+            workspace_id,
+            account_user_id,
+            thread_id,
+            created_at_ms,
+            message_id: &message_id,
+            updated_at_ms: at_ms,
+            origin_id: &origin_id,
+            origin_seq,
+        },
+    )?;
+    if publish {
+        insert_local_replication_op(
+            tx,
+            workspace_id,
+            &origin_id,
+            origin_seq,
+            "chat.thread.read.set",
+            &serde_json::json!({
+                "accountUserId": account_user_id,
+                "threadId": thread_id,
+                "lastReadCreatedAtMs": created_at_ms,
+                "lastReadMessageId": message_id,
+                "atMs": at_ms,
+            }),
+            at_ms,
+        )?;
+    }
+    Ok(true)
+}
+
+/// A person's own message is read for them. On a copy that shows an account's
+/// read places, it moves that account's mark to the message, and journals it
+/// when the message's verified author is that account. Another account's
+/// message leaves the mark alone.
+fn advance_account_read_for_own_message(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    created_at_ms: i64,
+    author_user_id: Option<&str>,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    let Some(account) = account_read_scope_for_thread(tx, workspace_id, thread_id)? else {
+        return Ok(());
+    };
+    if author_user_id.is_some_and(|author| author != account) {
+        return Ok(());
+    }
+    advance_account_thread_read(
+        tx,
+        workspace_id,
+        &account,
+        thread_id,
+        (created_at_ms, message_id.to_owned()),
+        now_ms,
+        author_user_id == Some(account.as_str()),
+    )?;
+    Ok(())
+}
+
 /// Following is implicit: the person who posts, comments, or reacts in a
 /// thread follows it from then on. Writes the same LWW cell `set_follow`
 /// does and journals it so the follow reaches the person's other devices.
@@ -8053,6 +8688,12 @@ fn ensure_thread_structure_exported(
                 "channelWireId".to_owned(),
                 serde_json::json!(channel_wire_id),
             );
+            // The owner's other computers learn that this Group was joined
+            // from someone else's share only from this record, so they keep
+            // local counts there too. A share's filter drops the field.
+            if channel_is_joined(tx, workspace_id, &channel_id)? {
+                payload_object.insert("channelJoined".to_owned(), serde_json::json!(true));
+            }
         }
     } else {
         let linked_object_id = linked_object_id.ok_or(DomainError::StateCorrupt {

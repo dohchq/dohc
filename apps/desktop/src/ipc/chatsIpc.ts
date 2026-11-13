@@ -38,6 +38,7 @@ import { ipcWireError } from "./errorWords";
 import { listFileChatsForIpc } from "./fileChatsIpc";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import {
+  accountReadReplicationOwner,
   resolveWorkspaceRelayAuthorId,
   type ChatRelayIdentityTarget,
   type ResolvedChatRelayIdentity,
@@ -984,12 +985,22 @@ export function registerChatsIpcHandlers<
   });
   const markChatThreadRead: ChatHandler<"markChatThreadRead"> = async (input) => {
     // Read state belongs to this reader, including in a read-only share view.
-    const { workspace, store } = await requireChatScope(input.workspaceId);
+    const scope = await requireChatScope(input.workspaceId);
+    const { workspace, store } = scope;
+    let replicationOwnerUserId: string | undefined;
+    if (scope.kind === "workspace") {
+      await warmCredentialCache();
+      replicationOwnerUserId = await accountReadReplicationOwner({
+        workspace, credentials: currentCredentials(), store, threadId: input.threadId,
+      });
+    }
     const state = await store.markThreadRead({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
       upToSequence: input.upToSequence,
+      ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
     });
+    if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
     return MarkChatThreadReadResult.parse({
       lastReadSequence: state.lastReadSequence,
       revision: state.revision,

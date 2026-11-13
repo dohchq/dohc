@@ -8,6 +8,7 @@ import type {
   RemoteIdentity,
 } from "./registryStore";
 import { joinedSharedChannelForTarget } from "./sharedChannels";
+import { shareViewIsPresent } from "./shareViewMarker";
 import { relayUrlsMatch } from "./syncCode";
 
 export interface ChatRelayIdentityStore {
@@ -87,6 +88,30 @@ export function resolveWorkspaceRelayAuthorId(
     return;
   }
   return remote.ownerUserId;
+}
+
+/**
+ * The owner whose account read mark a person's read journals. Only the
+ * owner's own workspace, signed in as that owner, outside a Group joined from
+ * someone else's share, gets one. Every other read stays on this computer.
+ * Main resolves it for each caller; no caller supplies the identity.
+ */
+export async function accountReadReplicationOwner(input: {
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "pausedRemote" | "sharedChannels" | "shareView">;
+  credentials: CloudCredentials | null;
+  store: ChatRelayIdentityStore;
+  threadId: string;
+}): Promise<string | undefined> {
+  if (shareViewIsPresent(input.workspace.shareView)) return undefined;
+  const owner = resolveWorkspaceRelayAuthorId(input.workspace, input.credentials);
+  if (!owner) return undefined;
+  const joined = await joinedSharedChannelForTarget({
+    workspaceId: input.workspace.workspaceId,
+    sharedChannels: input.workspace.sharedChannels,
+    store: input.store,
+    target: { threadId: input.threadId },
+  });
+  return joined ? undefined : owner;
 }
 
 export function assertSyncEnrollmentCredentials(

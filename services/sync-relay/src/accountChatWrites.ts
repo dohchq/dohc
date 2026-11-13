@@ -202,10 +202,18 @@ const follow = (threadId: string, author: AuthorSnapshot): ExpectedRecord => ({
   optional: true,
 });
 
+// A person's own message is read for their account. The mark moves only
+// forward, so a copy already past it writes none.
+const readMark = (threadId: string, messageId: string, author: AuthorSnapshot): ExpectedRecord => ({
+  kind: "chat.thread.read.set", fields: { accountUserId: author.accountId, threadId, lastReadMessageId: messageId },
+  optional: true,
+});
+
 // What a person's message makes: the thread's structure the first time this
-// copy writes in it, the message, the follow, and an open question or poll
-// with its choices as the engine trims them. The engine names a parent only
-// once it exported the parent, so a named one must be the write's own.
+// copy writes in it, the message, the follow, the account's read mark, and an
+// open question or poll with its choices as the engine trims them. The engine
+// names a parent only once it exported the parent, so a named one must be the
+// write's own.
 function messageRecords(threadId: string, messageId: string, author: AuthorSnapshot, content: ChatMessageContent,
   parentMessageId?: string): ExpectedRecord[] {
   const options = (content.options ?? []).map(engineTrim);
@@ -219,6 +227,7 @@ function messageRecords(threadId: string, messageId: string, author: AuthorSnaps
       messageId, threadId, authorKind: "human", authorDisplayName: author.displayName, authorUserId: author.accountId, body: content.body,
     }, ...(parentMessageId === undefined ? { absent: ["parentMessageId"] } : { whenPresent: { parentMessageId } }) },
     follow(threadId, author),
+    readMark(threadId, messageId, author),
     ...question,
   ];
 }
