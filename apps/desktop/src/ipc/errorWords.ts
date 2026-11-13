@@ -2,6 +2,7 @@ import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 import type { DatasetListRefusal } from "@dohc/cli/dataset";
 import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
+import type { FailureCode, FailureFacts } from "../notices/failure";
 
 // Electron hands a rejected handler's error to the renderer as one string,
 // `error.toString()`: the class survives, the code does not. `ipcWireError`
@@ -261,6 +262,23 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
 
 // When nothing else applies and no caller said what failed.
 export const UNKNOWN_ERROR_WORDS = "dohc could not finish that.";
+
+// The sentence a notice owner's failure starts with, for every failure code.
+// A code with no words here does not compile. The failure's cause adds its own
+// words after this sentence (`withErrorWords`).
+export type FailureWords = { [Code in FailureCode]: (facts: FailureFacts[Code]) => string };
+const VERSIONS_READ_WORDS: Record<FailureFacts["versions-reads"]["read"], string> = {
+  "last-changes": "dohc could not read when each version last changed.",
+  counts: "dohc could not count the files that differ from Main.",
+  conflicts: "dohc could not read which merges have files to decide.",
+  several: "dohc could not finish loading Versions.",
+};
+const FAILURE_WORDS: FailureWords = {
+  "versions-reads": ({ read }) => VERSIONS_READ_WORDS[read],
+};
+export function failureSentence<Code extends FailureCode>(failure: { code: Code; facts: FailureFacts[Code] }): string {
+  return FAILURE_WORDS[failure.code](failure.facts);
+}
 
 // A bare code such as `invalid-input` or `EACCES`, or one that leads a message.
 const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
