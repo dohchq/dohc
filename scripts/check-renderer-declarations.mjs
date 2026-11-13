@@ -6,7 +6,7 @@
 // It refuses a dynamic import whose module is not a string, because it cannot follow one.
 import { existsSync, globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, posix, resolve } from "node:path";
+import { join, posix, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isRendererSource } from "./check-ui-rules.mjs";
 
