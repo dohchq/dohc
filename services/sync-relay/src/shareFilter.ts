@@ -1158,8 +1158,10 @@ function workspaceChatSide(
     const threadId = collectString(record.threadId);
     if (!threadId) return null;
     channelWireId = chat.threadChannelWireId(threadId);
-    // An authoritative create with no channel binds a file's thread.
+    // An authoritative create with no channel binds a file's thread, and so
+    // does a file binding made earlier in the same batch.
     if (channelWireId === null) return "files";
+    if (channelWireId === undefined && chat.threadFileBinding(threadId)) return "files";
   }
   return workspaceGroupReach(selector, channelWireId, chat);
 }

@@ -69,13 +69,14 @@ async function ownerWrite(h: SyncRelayHandler, path: string, text: string): Prom
 // The owner's workspace: a Group, General, a direct message, an agent chat,
 // a message in a channel the log never created, a file, a version fork, and
 // a secret. Everything a member must not see says SENTINEL.
-async function seed(options: { activity?: DiscussionActivityHub } = {}) {
+async function seed(options: { activity?: DiscussionActivityHub; overrides?: Parameters<typeof testHandler>[1] } = {}) {
   resetOpSeq();
   ownerSeq = 0;
   const storage = await testStorage();
   const h = testHandler(storage, {
     lookupUserDisplayName: (userId: string) => `Name ${userId}`,
     ...(options.activity ? { discussionActivity: options.activity } : {}),
+    ...options.overrides,
   });
   expect((await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status).toBe(200);
   await ownerAppend(h, [
@@ -273,6 +274,29 @@ describe("what a member reaches", () => {
     expect((await uploadBlob(h, "ana", shareId, "an edit")).status).toBe(200);
   });
 
+  it("starts a thread with its first message in one batch, on a file or in a Group", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const startThread = (threadId: string, seq: number, create: Record<string, unknown>) =>
+      post(h, "ana", `/sync/shares/${shareId}/log`, {
+        originId: "origin-ana-batch",
+        ops: [
+          { originSeq: seq, opKind: "chat.thread.create", recordedAtMs: 6000 + seq, payload: { threadId, title: "A question", createdAtMs: 6000, ...create } },
+          { ...logOp("chat.message.append", chatMessageAppend(`${threadId}-first`, threadId, "first", { authorUserId: "ana" }).payload), originSeq: seq + 1 },
+        ],
+      });
+    const onFile = await startThread("t-file", 0, { linkedAtMs: 6000, linkedPath: "docs/plan.md" });
+    expect(onFile.status, await onFile.clone().text()).toBe(200);
+    const inGroup = await startThread("t-group", 2, { channelWireId: GROUP, channelSlug: "team" });
+    expect(inGroup.status, await inGroup.clone().text()).toBe(200);
+    for (const [index, linkedPath] of ["notes/.env.local", "docs/missing.md"].entries()) {
+      const refused = await startThread(`t-out-${index}`, 4, { linkedAtMs: 6000, linkedPath });
+      expect(refused.status, linkedPath).toBe(403);
+      expect(await code(refused)).toBe("share_op_rejected");
+    }
+  });
+
   it("refuses the share's generic owner controls; membership changes on the Members page", async () => {
     const { h } = await seed();
     await invited(h, "ana");
@@ -388,6 +412,49 @@ describe("who may change members", () => {
     storage.claimPendingSharesForEmail("new@elsewhere.example", "newcomer");
     expect(await workspaceShare(h, "newcomer")).toMatchObject({ access: "comment" });
     expect((await membersView(h, OWNER)).people.find((person) => person.name === "Name newcomer")?.state).toBe("active");
+  });
+
+  it("gives no authority through a revoked grant, even while its entry is still active", async () => {
+    const { h, storage } = await seed();
+    const ana = await invited(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status).toBe(200);
+    expect((await h(request("ana", `/sync/${WORKSPACE}/members`))).status).toBe(200);
+    (storage as unknown as StorageContext).db.prepare(
+      `UPDATE sync_relay_share_grants SET status = 'revoked', generation = generation + 1, revoked_at_ms = 1
+       WHERE grant_id = (SELECT grant_id FROM sync_relay_workspace_members WHERE member_id = ?)`,
+    ).run(ana);
+    expect((await h(request("ana", `/sync/${WORKSPACE}/members`))).status).toBe(404);
+    expect((await post(h, "ana", `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(404);
+  });
+
+  it("answers with the role the caller holds after its lookups, not the one it started with", async () => {
+    let hold: { release: () => void; started: boolean } | null = null;
+    const { h } = await seed({ overrides: {
+      lookupUserEmail: async (userId: string) => {
+        const held = hold;
+        if (held && !held.started) {
+          held.started = true;
+          await new Promise<void>((resolve) => { held.release = resolve; });
+        }
+        return `${userId}@dohc.test`;
+      },
+    } });
+    const ana = await invited(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status).toBe(200);
+    expect(await inviteLink(h, OWNER, "turn-on")).not.toBeNull();
+
+    const gate = { release: () => undefined, started: false };
+    hold = gate;
+    const pending = h(request("ana", `/sync/${WORKSPACE}/members`));
+    await expect.poll(() => gate.started).toBe(true);
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "member" })).status).toBe(200);
+    gate.release();
+    const response = await pending;
+    expect(response.status).toBe(200);
+    const view = parseWorkspaceMembersView(await response.json())!;
+    expect(view.viewer.role).toBe("member");
+    expect(view.inviteLink).toBeNull();
+    expect(view.people.every((person) => person.email === null)).toBe(true);
   });
 
   it("refuses browser cookies from any origin but the share site", async () => {
@@ -548,6 +615,31 @@ describe("account deletion", () => {
     deleteAccount(storage, OWNER);
     expect((await pull(h, "ana", shareId)).status).toBe(404);
     expect(await workspaceShare(h, "ana")).toBeUndefined();
+  });
+
+  it("ends admin and member authority as soon as the owner's account is fenced, before any purge", async () => {
+    const { h, storage } = await seed();
+    const ana = await invited(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status).toBe(200);
+    const ben = await invited(h, "ben");
+    expect(await inviteLink(h, "ana", "turn-on")).not.toBeNull();
+
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, KEY);
+    fenceAccount(context, KEY, OWNER, `${OWNER}@dohc.test`);
+
+    for (const as of ["ana", "ben"]) {
+      expect((await h(request(as, `/sync/${WORKSPACE}/members`))).status, as).toBe(404);
+      for (const [path, body] of [
+        [`/sync/${WORKSPACE}/members/invites`, { email: "carl@dohc.test" }],
+        [`/sync/${WORKSPACE}/members/level`, { level: "edit" }],
+        [`/sync/${WORKSPACE}/members/invite-link`, { action: "reset" }],
+        [`/sync/${WORKSPACE}/members/${ben}/remove`, {}],
+        [`/sync/${WORKSPACE}/members/${ana}/let-back-in`, {}],
+      ] as const) {
+        expect((await post(h, as, path, body)).status, `${as} ${path}`).toBe(404);
+      }
+    }
   });
 
   it("drops an email invite when the account at that address is deleted, freeing its seat for a new invite", async () => {
