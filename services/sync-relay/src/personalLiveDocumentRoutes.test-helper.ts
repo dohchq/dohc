@@ -81,6 +81,7 @@ export async function personalRouteFixture(defer: (close: () => Promise<void> | 
     unavailable: false,
     blocked: vi.fn((document: { objectId: string }) => blocked.get(document.objectId)),
     holdReason: vi.fn((_document: { objectId: string }): ServiceHostedHold["reason"] | undefined => undefined),
+    failing: vi.fn((_document: { objectId: string }): { word: string; since: number } | undefined => undefined),
     diverged: vi.fn((_row: { workspaceId: string; replicationEpoch: string; streamIdentity: string }) => false),
   };
   const history = createLiveJournalHistoryAuthority({ namespace, reconciled: true });

@@ -15,7 +15,9 @@ import {settlementResponse,settlementPending,type CommittedSettlement} from "./l
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import {liveValidation} from "./liveValidation.js";
 import {serviceOwnerTransport} from "./serviceOwnerTransport";
-import {ServiceActivationBusy,ServiceActivationHistoryOverBudget,ServiceActivationStaleCut,ServiceActivationTooLarge,type ServiceActivationStore} from "./storage/serviceActivation";
+import {ServiceActivationBusy,ServiceActivationCaptureOverBudget,ServiceActivationHistoryOverBudget,ServiceActivationRefused,ServiceActivationStaleCut,ServiceActivationTooLarge,
+  type ServiceActivationStore} from "./storage/serviceActivation";
+import {knownRefusalWord,refusalHead,type KnownRefusalWord} from "./serverLogWords";
 import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
 import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
 import type {DepartedOwnerDelivery} from "./storage/liveCommittedDelivery";
@@ -98,6 +100,15 @@ function answer(value:unknown,statuses:Record<string,readonly string[]>):Record<
   if(typeof status!=="string" || !Object.hasOwn(statuses,status))throw new Error("Invalid live retirement response.");
   return {...configRecord(value,["status",...statuses[status]!]),status};
 }
+// A failed activation's word for its owner and the server log: an engine refusal's code word when the known list has it,
+// otherwise a fixed word for the failure's class. A message never becomes the word, since it can name the document.
+function failureWord(error:unknown,timedOut:boolean):KnownRefusalWord{
+  if(timedOut)return "deadline";
+  if(error instanceof EngineRequestError)return knownRefusalWord(refusalHead(error.message)) ?? "engine-refused";
+  if(error instanceof ServiceActivationRefused)return "activation-refused";
+  if(error instanceof ServiceActivationCaptureOverBudget)return "capture-over-budget";
+  return "relay-error";
+}
 
 export class ServiceActivationDriver {
   readonly #store;
@@ -118,8 +129,9 @@ export class ServiceActivationDriver {
   // One held for released retained work never captures: only the resolution of the binding whose digest it keeps clears it.
   readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|
     {reason:"history-over-budget";checked:number}|{reason:"released-lineage-unsettled";digest:string}>();
-  // Targets whose activation failed, with how many times in a row and when the next try may start.
-  readonly #failures=new Map<string,{count:number;until:number}>();
+  // Targets whose activation failed, with how many times in a row and when the next try may start. `run` is the failures
+  // in that row that have a word: when the first came, how many, the latest one's word, and whether its owner sees them.
+  readonly #failures=new Map<string,{count:number;until:number;run?:{since:number;failures:number;word:KnownRefusalWord;shown:boolean}}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   // How often each target's activation began to retire. An activation that started before then never becomes ready.
@@ -230,8 +242,20 @@ export class ServiceActivationDriver {
   }
   /** Why the hosted pass left this target held, until a capture succeeds. */
   holdReason(target:ServiceActivationTarget):ServiceHostedHold["reason"]|undefined{return this.#held.get(targetKey(target));}
-  /** Allows a blocked target one more capture. Returns whether it was blocked. A hold for released retained work stays. */
-  unblock(target:ServiceActivationTarget){this.#failures.delete(targetKey(target));return this.#unblock(targetKey(target));}
+  /** Why the target's activation keeps failing, once its owner sees it. Passes keep trying it. */
+  failing(target:ServiceActivationTarget){
+    const run=this.#failures.get(targetKey(target))?.run;
+    return run?.shown?{word:run.word,since:run.since}:undefined;
+  }
+  /**
+   * Allows a blocked target one more capture, and a failing one a capture now. Returns whether it was blocked or its owner
+   * saw it failing. A hold for released retained work stays.
+   */
+  unblock(target:ServiceActivationTarget){
+    const key=targetKey(target),shown=this.#failures.get(key)?.run?.shown===true;
+    this.#failures.delete(key);
+    return this.#unblock(key) || shown;
+  }
   #unblock(key:string){return this.#blocked.get(key)?.reason!=="released-lineage-unsettled" && this.#blocked.delete(key);}
   /** The digest of the binding the target is held with for released retained work, if it is. Activation skips it. */
   releasedHold(target:ServiceActivationTarget){
@@ -616,15 +640,27 @@ export class ServiceActivationDriver {
     }catch(error){
       // A document the engine has not readied only waits for it, and a pass that was stopped, or had ended before it reached
       // the document, says nothing about the document. One that ran out of its deadline here counts, so a document that keeps running past it backs off.
-      const stopped=signal.aborted && (endedBefore || !(signal.reason instanceof DOMException && signal.reason.name==="TimeoutError"));
-      if(!isHostedDocumentUnready(error) && !stopped)this.#fail(key);
+      const timedOut=signal.aborted && !endedBefore && signal.reason instanceof DOMException && signal.reason.name==="TimeoutError";
+      if(!isHostedDocumentUnready(error) && (!signal.aborted || timedOut))this.#fail(key,failureWord(error,timedOut));
       throw error;
     }
   }
-  #fail(key:string){
-    const count=(this.#failures.get(key)?.count ?? 0)+1;
+  // A failure with a word counts toward the run its owner sees. One without, a stale cut, only waits.
+  #fail(key:string,word?:KnownRefusalWord){
+    const previous=this.#failures.get(key),count=(previous?.count ?? 0)+1,now=Date.now();
+    let run=previous?.run;
+    if(word!==undefined){
+      run={since:run?.since ?? now,failures:(run?.failures ?? 0)+1,word,shown:run?.shown ?? false};
+      // Two failures in a row that have lasted a minute: a brief engine or relay restart never reaches it.
+      if(!run.shown && run.failures>=2 && now-run.since>=60_000){
+        run.shown=true;
+        // The object ID and word only. The key holds the document's path, which the log never shows.
+        const [workspaceId,path]=JSON.parse(key) as [string,string];
+        console.error(`Live editing cannot start. workspace ${workspaceId} object ${this.#objectId({workspaceId,path}) ?? "unknown"} ${word}`);
+      }
+    }
     // The first retry is the next pass. Each later one waits twice as long as the one before, up to five minutes.
-    this.#failures.set(key,{count,until:count<2?0:Date.now()+Math.min(300_000,1000*2**(count-2))});
+    this.#failures.set(key,{count,until:count<2?0:now+Math.min(300_000,1000*2**(count-2)),...(run?{run}:{})});
   }
   async #activate(target:ServiceActivationTarget,signal:AbortSignal,
     settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp,objectId?:string){

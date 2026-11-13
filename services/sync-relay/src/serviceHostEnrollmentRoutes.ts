@@ -190,10 +190,13 @@ function heldResponse(body: unknown, release: () => void, signal: AbortSignal): 
 }
 
 /** What readiness reads of the self-hosted live host. */
-export type ServiceHostReadinessHost = Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "unavailable" | "blocked" | "holdReason" | "diverged">;
-/** One enrolled document's readiness, as its owner's list and an agent's open answer it. */
+export type ServiceHostReadinessHost = Pick<Awaited<ReturnType<typeof startSelfHostedLiveHost>>, "ready" | "unavailable" | "blocked" | "holdReason" | "failing" | "diverged">;
+/**
+ * One enrolled document's readiness, as its owner's list and an agent's open answer it. `failure` is on a
+ * `live-start-failing` row: the server's word for why, and when its failures began.
+ */
 export type ServiceHostDocumentState =
-  | {path: string; objectId: string; status: "paused" | "preparing" | "unavailable"; reason?: string}
+  | {path: string; objectId: string; status: "paused" | "preparing" | "unavailable"; reason?: string; failure?: {word: string; since: string}}
   | {path: string; objectId: string; status: "ready"; document: {binding: LiveObjectBinding; relayDatabaseNamespace: string}};
 /**
  * Each enrolled document's readiness, from its row, the host, and the metadata
@@ -211,6 +214,13 @@ export function serviceHostReadiness(options: {
   // Each row names its document, so its owner's Stop and Resume act on that document alone.
   function state(row: ServiceHostEnrollment): ServiceHostDocumentState {
     const base = {path: row.path, objectId: row.objectId};
+    // Not live yet. A host that is down says only that. A document whose activation keeps failing says why, while the host keeps trying it.
+    const starting = (): ServiceHostDocumentState => {
+      if (host.unavailable) return {...base, status: "unavailable"};
+      const failing = host.failing(row);
+      return failing ? {...base, status: "unavailable", reason: "live-start-failing", failure: {word: failing.word, since: new Date(failing.since).toISOString()}}
+        : {...base, status: "preparing"};
+    };
     if (diverged(row)) return {...base, status: "unavailable", reason: "session-host-diverged"};
     // A Pause still waiting for its document to unload reads as paused.
     if (!row.enabled || row.ownerStop) return {...base, status: "paused"};
@@ -230,10 +240,10 @@ export function serviceHostReadiness(options: {
       if (!(error instanceof ServiceActivationDamaged)) throw error;
       return {...base, status: "unavailable", reason: "session-host-diverged"};
     }
-    if (!saved?.completed) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
+    if (!saved?.completed) return starting();
     const document = {workspaceId: row.workspaceId, mainVersionId: "main", objectId: saved.objectId, lineageClaimId: saved.lineageClaimId};
     const current = storage.resolveCurrentLiveDocumentBindingFromMetadata({document, actor: {kind: "owner", userId: row.ownerUserId}});
-    if (current.kind !== "current" || !host.ready(document)) return {...base, status: host.unavailable ? "unavailable" : "preparing"};
+    if (current.kind !== "current" || !host.ready(document)) return starting();
     return {...base, path: current.binding.currentPath, status: "ready", document: {binding: current.binding, relayDatabaseNamespace: history.namespace}};
   }
   return {changed, diverged, state};

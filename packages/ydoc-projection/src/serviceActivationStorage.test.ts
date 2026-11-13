@@ -17,8 +17,9 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {openEmptyRelayTestStorage} from '../../../services/sync-relay/src/testing/emptyRelayStorage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
-import {ServiceActivationHistoryOverBudget,ServiceActivationStaleCut,ServiceActivationStore,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
+import {ServiceActivationCaptureOverBudget,ServiceActivationHistoryOverBudget,ServiceActivationRefused,ServiceActivationStaleCut,ServiceActivationStore,ServiceActivationTooLarge} from '../../../services/sync-relay/src/storage/serviceActivation.js'
 import {SyncRelayQuotaExceededError} from '../../../services/sync-relay/src/storage/errors.js'
+import {KNOWN_REFUSAL_WORDS} from '../../../services/sync-relay/src/serverLogWords.js'
 import {readOrdinaryActivationHistory,verifyOrdinaryActivationCut} from '../../../services/sync-relay/src/storage/ordinaryActivationSource.js'
 import {validateOrdinaryActivation,type OrdinaryActivationValidator} from '../../../services/sync-relay/src/storage/ordinaryActivationValidation.js'
 import {createLiveValidationExecutor} from '../../../services/sync-relay/src/liveValidation.js'
@@ -1408,6 +1409,57 @@ it('waits longer before capturing again after a stale cut',async()=>{
     vi.setSystemTime(2999)
     expect(await d.driver.activate(d.target,signal())).toEqual(waiting)
     expect(capture).toHaveBeenCalledTimes(3)
+    // A busy document's cuts go stale while it is fine, so they never tell its owner it can't start.
+    vi.setSystemTime(100_000)
+    expect(await d.driver.activate(d.target,signal())).toEqual(stale)
+    expect(d.driver.failing(d.target)).toBeUndefined()
+  }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
+})
+// A document whose activation keeps failing tells its owner why once two failures in a row have lasted a minute.
+// Passes keep trying it, and Resume tries it now. Neither its word nor the server log names the document.
+it('reports why an activation keeps failing once two failures in a row have lasted a minute',async()=>{
+  const f=fixture();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(0)
+  const logged=vi.spyOn(console,'error').mockImplementation(()=>{})
+  try{
+    const refusal=(message:string)=>new EngineRequestError(1,{code:'CONFLICT',message,retry:'no'} as never,'liveApplication.captureOwnerActivation')
+    let error:unknown=new ServiceActivationRefused('docs/a.md has no lineage')
+    const capture=vi.fn(async(..._args:unknown[]):Promise<NativeOwnerActivation>=>{throw error})
+    const d=activationDriver(f,capture)
+    const fail=async(at:number,signal=new AbortController().signal)=>{
+      vi.setSystemTime(at);await expect(d.driver.activate(d.target,signal)).rejects.toBe(error)
+    }
+    await fail(0)
+    await fail(59_999)
+    expect(d.driver.failing(d.target)).toBeUndefined()
+    expect(logged).not.toHaveBeenCalled()
+    await fail(62_000)
+    expect(d.driver.failing(d.target)).toEqual({word:'activation-refused',since:0})
+    expect(logged.mock.calls).toEqual([[expect.stringMatching(/^Live editing cannot start\. workspace workspace object \S+ activation-refused$/)]])
+    expect(logged.mock.calls[0]![0]).not.toContain('a.md')
+    // The word is the latest failure's. An engine refusal's head becomes the word only when the known list has it, so a
+    // lowercase name never does.
+    const listed=KNOWN_REFUSAL_WORDS[0]
+    const words:Array<[unknown,string]>=[[refusal(`${listed}: docs/a.md`),listed],[refusal('secret-plan: occupied'),'engine-refused'],
+      [refusal('docs/a.md: occupied'),'engine-refused'],[new Error('Native activation identity differs.'),'relay-error'],
+      [new ServiceActivationCaptureOverBudget(),'capture-over-budget']]
+    let at=62_000,wait=2000
+    for(const [next,word] of words){
+      error=next;at+=wait;wait*=2
+      await fail(at)
+      expect(d.driver.failing(d.target)).toEqual({word,since:0})
+    }
+    // The pass deadline ran out while it captured.
+    const pass=new AbortController()
+    error=new DOMException('The pass ran out of time.','TimeoutError')
+    capture.mockImplementationOnce(async()=>{pass.abort(error);throw error})
+    await fail(at+wait,pass.signal)
+    expect(d.driver.failing(d.target)).toEqual({word:'deadline',since:0})
+    expect(logged).toHaveBeenCalledTimes(1)
+    // Resume tries it now and tells its owner live editing changed. A run its owner hasn't seen yet changes nothing for them.
+    expect(d.driver.unblock(d.target)).toBe(true)
+    expect(d.driver.failing(d.target)).toBeUndefined()
+    await fail(at+wait)
+    expect(d.driver.unblock(d.target)).toBe(false)
   }finally{vi.restoreAllMocks();vi.useRealTimers();f.close()}
 })
 // A stale cut whose lease release then fails counts once, not once for the cut and again for the release.

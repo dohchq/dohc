@@ -41,6 +41,7 @@ async function fixture() {
   const blocked = new Map<string, ServiceActivationBlock>(), pending = new Set<string>(), prepared: RetirableServiceActivation[] = [];
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false,
     holdReason: vi.fn((_document: {objectId: string}): ServiceHostedHold["reason"] | undefined => undefined),
+    failing: vi.fn((_document: {objectId: string}): {word: string; since: number} | undefined => undefined),
     blocked: vi.fn((document: {objectId: string}) => blocked.get(document.objectId)),
     unblock: vi.fn((document: {objectId: string}) => blocked.delete(document.objectId)),
     diverged: vi.fn((_row: {workspaceId: string; replicationEpoch: string; streamIdentity: string}) => false),
@@ -588,6 +589,31 @@ it("reports only a conflict-parent hold, after document state and existing block
   expect(await state()).toEqual({...base, status: "unavailable", reason: "document-unavailable"});
   f.raw.prepare("UPDATE sync_relay_workspaces SET replication_epoch='rotated' WHERE workspace_id=?").run(scope.workspaceId);
   expect(await state()).toEqual({...base, status: "unavailable", reason: "workspace-changed"});
+});
+
+// Proves: a document whose activation keeps failing tells its owner why and since when, in place of Preparing.
+// A host that is down, a conflict-parent hold and every block keep their own words.
+it("reports a document whose live start keeps failing, after a down host, holds and blocks", async () => {
+  const f = await fixture(), enrolled = f.storage.ensureOwnedLiveDocument({intent: "share", ...f.input});
+  const state = async () => (await (await f.handle(f.request())).json()).documents[0];
+  const base = {path: binding.currentPath, objectId: binding.objectId};
+  f.host.failing.mockReturnValue({word: "engine-refused", since: Date.parse("2026-11-13T01:00:00.000Z")});
+  expect(await state()).toEqual({...base, status: "unavailable", reason: "live-start-failing",
+    failure: {word: "engine-refused", since: "2026-11-13T01:00:00.000Z"}});
+  f.host.unavailable = true;
+  expect(await state()).toEqual({...base, status: "unavailable"});
+  f.host.unavailable = false;
+  f.host.holdReason.mockReturnValue("hosted-conflict-parent-withheld");
+  expect(await state()).toEqual({...base, status: "unavailable", reason: "conflict-parent-withheld"});
+  f.host.holdReason.mockReturnValue(undefined);
+  for (const [block, reason] of [["without-lineage", "live-document-without-lineage"], ["refused", "session-host-refused"],
+    ["live-edit-unadmitted", "live-edit-unadmitted"], ["history-over-budget", "live-history-over-budget"]] as const) {
+    f.host.block(enrolled.objectId, block);
+    expect(await state()).toEqual({...base, status: "unavailable", reason});
+  }
+  f.host.unblock(enrolled);
+  f.host.failing.mockReturnValue(undefined);
+  expect(await state()).toEqual({...base, status: "preparing"});
 });
 
 // Proves: a document the session host blocked reads as refused until its
