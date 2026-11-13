@@ -854,7 +854,6 @@ export function TurnIntoMenu({
     setSelected(activeIndex >= 0 ? activeIndex : 0);
     menuRef.current?.focus({ preventScroll: true });
     // Only reset when the dropdown opens, not on every editor selection tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Only the list scrolls to show the active option.

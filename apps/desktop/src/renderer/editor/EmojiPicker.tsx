@@ -91,7 +91,6 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
     return rankEmoji(state.query)
       .slice(0, 24)
       .map((x) => x.entry);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open ? state.query : ""]);
 
   function commit(entry: EmojiEntry) {

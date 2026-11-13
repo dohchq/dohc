@@ -618,7 +618,6 @@ export function LiveDocumentsDialog({
     // One page of refusals on open; every later page is asked for by hand.
     performRefusals({ kind: "page" });
     return () => { scope.current.live = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
   useLayoutEffect(() => {
@@ -646,7 +645,6 @@ export function LiveDocumentsDialog({
     revealed.current = `${workspaceId}\n${reveal}`;
     row.scrollIntoView?.({ block: "nearest" });
     (row.querySelector<HTMLElement>("[data-live-document-stop]") ?? row).focus({ preventScroll: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, busy, reveal, workspaceId]);
 
   function close(): void {

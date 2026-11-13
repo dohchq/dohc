@@ -325,7 +325,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       }
     }
     return { rows, items };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned, pages, sketches, collections, appRows, others, collapsed, sectionsKey]);
 
   // The workspace path of the row the active editor shows. An app or a
@@ -336,7 +335,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       for (const row of section.rows) if (row.open === activePath && row.menu) return row.menu.path;
     }
     return null;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned, pages, sketches, collections, appRows, others, sectionsKey, activePath]);
 
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
@@ -518,7 +516,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     for (const [key, item] of nav.items) if (item.row?.menu?.path === editingPath) return key;
     return null;
     // The row it started from is the one focused when it began.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingPath, nav]);
 
   const onKeyDown = (event: KeyboardEvent) => {

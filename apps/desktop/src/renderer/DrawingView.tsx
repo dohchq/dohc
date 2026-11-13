@@ -133,7 +133,6 @@ export function DrawingView({
     editor.setDraft(EMPTY_EXCALIDRAW_DOCUMENT);
     // The accepted disk revision is the trigger. setDraft is intentionally
     // omitted: the autosave hook returns a fresh closure on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor.valueRevision, blankFile, readOnly, truncated, engine.opening]);
   // Local Excalidraw changes update the autosave draft but the mounted canvas
   // already owns that scene. Parse again only when a disk read replaces the
@@ -159,7 +158,6 @@ export function DrawingView({
       };
     }
     // valueRevision advances only when the hook accepts a new disk snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor.valueRevision, truncated]);
 
   useEffect(() => {

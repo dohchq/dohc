@@ -146,7 +146,6 @@ function MemberList(props: {
     if (total > 0) searchRef.current?.focus();
     else addRef.current?.focus();
     // Only as the list first shows.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const needle = query.trim().toLowerCase();
   const members = needle === "" ? props.members : props.members.filter((member) => member.recipientEmail?.toLowerCase().includes(needle));

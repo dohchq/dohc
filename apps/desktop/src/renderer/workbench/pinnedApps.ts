@@ -53,7 +53,6 @@ export function usePinnedApps(
       setRead(new Map(answers.filter((answer) => answer !== null)));
     });
     // The joined key stands for the list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, requests, workspaceId]);
 
   // The same pins and titles answer the same list, so what reads it, such
@@ -69,7 +68,6 @@ export function usePinnedApps(
         };
       }),
     // The joined key stands for the list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, read],
   );
 }

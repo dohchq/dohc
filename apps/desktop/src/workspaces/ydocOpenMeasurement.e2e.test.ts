@@ -248,7 +248,6 @@ it.skipIf(engine.missing)(
         },
       );
     } finally {
-      // eslint-disable-next-line no-console
       console.log(
         `[measure] ydoc.open, bound ${YDOC_OPEN_DEADLINE_MS}ms:\n` +
           measured

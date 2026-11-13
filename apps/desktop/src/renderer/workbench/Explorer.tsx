@@ -1092,7 +1092,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       }
     }
     // Only when the editing TARGET changes — not per keystroke.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
 
   // Optimistic op runner: stage pending changes, run the IPCs, roll back the

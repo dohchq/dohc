@@ -472,7 +472,6 @@ export function MarkdownView(props: {
     setMode("source");
     setJump({ kind: "line", line: props.scrollTarget.line });
     // Applied once per jump: nonce is the identity of one click.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
@@ -837,7 +836,6 @@ export function MarkdownView(props: {
     if (!reloadsItself) return;
     setReloadedItself(true);
     if (!engine.unsavedEditsPending()) reloadChangedOutside();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadsItself, reloadChangedOutside]);
   const changedOutsideNotice = engine.outsideWriteWaiting || engine.changedOutside === "unsaved" ||
     (engine.changedOutside === "saved" && reloadedItself && !reloading);
@@ -849,7 +847,6 @@ export function MarkdownView(props: {
     setReloading(false);
     setReloadedSign((count) => count + 1);
     if (!sameNoteContent(noteContent(engine.doc), replacedText.current)) setReloadedItself(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadedBound]);
   const [reloadedShown, setReloadedShown] = useState(false);
   useEffect(() => {
@@ -867,7 +864,6 @@ export function MarkdownView(props: {
     onButtonError?.(message, new Error(message), () => {
       if (!unmounted.current) reloadChangedOutside();
     }, `outside-write-waiting:${props.workspaceId}:${props.path}`);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine.outsideWriteWaiting]);
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
@@ -1091,7 +1087,6 @@ export function MarkdownView(props: {
       },
     });
     // onPropertiesDraft reads refs and this render's readOnly, checked above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayDoc, onEditorReady, opening, pageEditor, readOnly, surfaceMode]);
   // A record's properties show the ⚡ of the automations that set them. An
   // editable file in a folder asks; main answers none for a folder that is
@@ -1314,7 +1309,6 @@ export function MarkdownView(props: {
       acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
     // The helpers read mutable writer state and the atomic snapshot above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     props.body,
     props.contentHash,
@@ -1340,7 +1334,6 @@ export function MarkdownView(props: {
       setPendingRenderedHeadingIndex(null);
       armedHeadingReplayMode.current = mode === "source" ? "source" : "read";
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.reopenKey]);
   useEffect(() => {
     if (!engineMode && props.switchReadPending) {
@@ -1412,7 +1405,6 @@ export function MarkdownView(props: {
       applyHeadingTarget(replayMode, props.body);
     }
     props.switchUnresyncedRef.current = false;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.switchReadPending]);
   useEffect(() => {
     const applied = applyHeadingTarget();
@@ -1421,7 +1413,6 @@ export function MarkdownView(props: {
     // resolved to no heading, must not be replayed later as if the reader had
     // visited it.
     if (applied) appliedHeadingNonce.current = headingTargetNonce;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [headingTargetNonce]);
   useEffect(() => {
     if (pendingRenderedHeadingIndex === null || surfaceMode !== "read") return;
@@ -2169,7 +2160,6 @@ export function MarkdownView(props: {
     return () => registerDraftFlush?.(null);
     // writeDraftNow and this flush read mutable state through refs plus
     // per-mount-stable props, so the first closure stays correct for the mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
 
   useEffect(() => registerPendingEditorDraft(

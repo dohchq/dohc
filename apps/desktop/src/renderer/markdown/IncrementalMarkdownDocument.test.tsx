@@ -191,7 +191,6 @@ describe("IncrementalMarkdownDocument", () => {
     const openExternalUrl = vi.fn().mockResolvedValue(undefined);
     vi.mocked(bridge).mockReturnValue({
       openExternalUrl,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     const view = render(
       <IncrementalMarkdownDocument

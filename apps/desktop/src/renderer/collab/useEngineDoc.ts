@@ -235,7 +235,6 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     };
     // Re-open only when the workspace, path, gate, kind, retry, or active
     // version changes. Other renders keep the same shared lease.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     input.workspaceId,
     input.path,

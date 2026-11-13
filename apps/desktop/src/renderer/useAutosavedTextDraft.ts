@@ -348,7 +348,6 @@ export function useAutosavedTextDraft(props: {
     acceptLandedRead();
     // acceptSnapshot reads mutable write state and the exact body/hash pair
     // above. The dependencies name the authoritative snapshot identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     props.body,
     props.contentHash,
@@ -716,7 +715,6 @@ export function useAutosavedTextDraft(props: {
     // was itself a write (the lesson, and the adversarial review found
     // the same trap waiting here). The ref carries the current value to a real
     // unmount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, path, localBuffer]);
 
   useEffect(() => {
@@ -769,7 +767,6 @@ export function useAutosavedTextDraft(props: {
     exitFlush.current = flushDraft;
     return () => registerDraftFlush?.(null);
     // writeDraftNow uses refs for the draft; workspace/path are stable per keyed inspector.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registerDraftFlush]);
 
   useEffect(() => registerPendingEditorDraft(
