@@ -331,7 +331,8 @@ function writeReaction(adapter: ChatsLiveAdapter, workspaceId: string, stored: S
 /**
  * The targets the account may see in the copy, by the reads' own rules: a
  * thread is one the secret-file-filtered store lists, and a message one in
- * such a thread. A hidden one answers exactly as a missing one.
+ * such a thread. A hidden one answers exactly as a missing one, after the
+ * same reads, so its answer takes no longer or shorter than a missing one's.
  */
 function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
   const { workspaceId } = copy;
@@ -350,8 +351,14 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       return found;
     },
     async message(messageId: string): Promise<ChatMessage> {
+      const [found, listed] = await Promise.all([rawMessage(messageId), chats.store.listThreads({ workspaceId })]);
+      if (found === null || !listed.some((each) => each.id === found.threadId)) throw messageMissing(messageId);
+      return found;
+    },
+    // A message in a thread the caller already found visible: one in any other thread, hidden or not, is missing.
+    async messageIn(threadId: string, messageId: string): Promise<ChatMessage> {
       const found = await rawMessage(messageId);
-      if (found === null || (await visible(found.threadId)) === undefined) throw messageMissing(messageId);
+      if (found === null || found.threadId !== threadId) throw messageMissing(messageId);
       return found;
     },
     // A post goes to a Group's posts; a send to a Group's chat or a DM.
@@ -943,8 +950,7 @@ export async function runAccountMarkRead(
     try {
       await targets.thread(mark.threadId);
       await input.authorize();
-      const message = await targets.message(mark.messageId);
-      if (message.threadId !== mark.threadId) throw messageMissing(mark.messageId);
+      await targets.messageIn(mark.threadId, mark.messageId);
       await input.authorize();
       await adapter.markAccountThreadRead({
         workspaceId: copy.workspaceId, threadId: mark.threadId, messageId: mark.messageId, replicationOwnerUserId: copy.ownerUserId,

@@ -1,5 +1,6 @@
-// A conversation shows its messages in the order the engine reads a read
-// mark: by time, then by message ID. The engine compares IDs as SQLite text,
+// Messages in the order the engine reads a read mark: by time, then by
+// message ID. The desktop shows a conversation in it, and the phone picks the
+// newest message it marks read by it. The engine compares IDs as SQLite text,
 // byte by byte in UTF-8, which is code point order. JavaScript's `<` compares
 // UTF-16 units and differs for characters past U+FFFF, so this walks code
 // points instead.

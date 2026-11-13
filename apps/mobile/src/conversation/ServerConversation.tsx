@@ -1,8 +1,8 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { LegendList } from "@legendapp/list/react-native";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { AppState, StyleSheet, Text, View } from "react-native";
 import { useAccount } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
@@ -14,13 +14,14 @@ import { EmptyLine, HoldRow, NoWorkspace, ScreenFailure, useWorkspaceGap } from 
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { MessageRow } from "./MessageRow";
 import type { Message } from "./sample";
+import { markShown } from "./readMarks";
 import { conversationItems, serverMessage } from "./serverMessages";
 
 
 // A chat or a thread in a signed-in build, read-only, as the server holds it: oldest at the top, newest at the bottom.
 // A chat's posts open their threads. The phone has no composer yet. The view reads again when the feed reports a change
-// to one of its threads. A thread, and a chat's conversation, are read up to the newest message shown, as on the
-// desktop; a post in a chat is read once its thread opens.
+// to one of its threads. A thread, and a chat's conversation, are read up to the newest message shown while the
+// screen is in front and the app is active, as on the desktop; a post in a chat is read once its thread opens.
 export function ServerConversation() {
   const { id = "", name } = useLocalSearchParams<{ id: string; name?: string }>();
   return id.startsWith("thread-") ? <Thread threadId={id} /> : <Stream groupId={id} name={name ?? ""} />;
@@ -106,20 +107,18 @@ function Conversation({ title, state, messages, retry }: {
 
 const kindOf = (kind: ChatGroupKind): ChatKind => kind === "dm" ? "person" : kind;
 
-/** Marks each thread read at the newest of its messages shown, by time and then ID, as the engine orders them. */
+const subscribeAppState = (listener: () => void) => {
+  const subscription = AppState.addEventListener("change", listener);
+  return () => subscription.remove();
+};
+const appActive = () => AppState.currentState === "active";
+
+/** Marks each thread read at the newest of its messages shown, while this screen is in front and the app is active. */
 function useMarkShown(messages: readonly ChatMessage[] | null) {
   const { data } = useAccount();
-  useEffect(() => {
-    if (!data || !messages) return;
-    const newest = new Map<string, ChatMessage>();
-    for (const message of messages) {
-      const known = newest.get(message.threadId);
-      if (!known || message.createdAtMs > known.createdAtMs || (message.createdAtMs === known.createdAtMs && message.id > known.id)) {
-        newest.set(message.threadId, message);
-      }
-    }
-    for (const message of newest.values()) data.markRead(message.threadId, message.id);
-  }, [data, messages]);
+  const focused = useIsFocused();
+  const active = useSyncExternalStore(subscribeAppState, appActive);
+  useEffect(() => markShown(data, messages, focused && active), [data, messages, focused, active]);
 }
 
 const styles = StyleSheet.create({

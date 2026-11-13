@@ -28,7 +28,7 @@ import type { AgentSetupSummary } from "./ChatsView";
 import { focusMessage, TARGET_FLASH_MS } from "./landOnMessage";
 import { WorkStatus } from "./WorkCard";
 import { neutralPresentation } from "./actorPresentation";
-import { compareMessageOrder } from "./chatOrder";
+import { compareMessageOrder } from "@dohc/workspace-contracts/chat-order";
 
 // The change to a Collection's rules a message asks a person to apply.
 const changeFileOf = (message: ChatMessageRecord) =>

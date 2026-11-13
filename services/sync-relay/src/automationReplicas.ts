@@ -70,6 +70,16 @@ export interface AutomationReplica {
   withRecordWork<T>(work: () => Promise<T>): Promise<T>;
 }
 
+/** Whether `value` is exactly an HTTPS origin, such as `https://relay.example.com`, which the copies sync with. */
+export function isPublicHttpsOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value;
+  } catch {
+    return false;
+  }
+}
+
 const REQUEST_DEADLINE_MS = 30_000;
 // A pass pushes and pulls each copy at most this many rounds, so one busy
 // workspace cannot hold the pass; the next pass carries on where it stopped.
@@ -135,8 +145,8 @@ export async function startAutomationReplicas(options: {
 }) {
   const {storage} = options;
   const nowMs = options.nowMs ?? Date.now;
+  if (!isPublicHttpsOrigin(options.relayOrigin)) throw new Error("Automation replicas need the relay's public HTTPS origin.");
   const relay = new URL(options.relayOrigin);
-  if (relay.protocol !== "https:" || relay.origin !== options.relayOrigin) throw new Error("Automation replicas need the relay's public HTTPS origin.");
   const lifetime = new AbortController();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
   const replicas = new Map<string, AutomationReplica & {

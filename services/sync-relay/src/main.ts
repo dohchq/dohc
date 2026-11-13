@@ -78,7 +78,7 @@ import {authorizeServiceHostReplication} from "./serviceHostCredential";
 import {TokenBucketLimiter} from "@dohc/service-http";
 import {NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_MAX_SENDERS, NOTICE_POST_REFILL_PER_SECOND} from "./noticeRoutes";
 import {automationServerLabel, startAutomationServer} from "./automationServer";
-import {removeAutomationReplicas} from "./automationReplicas";
+import {isPublicHttpsOrigin, removeAutomationReplicas} from "./automationReplicas";
 import {tombstoneSettledOperations} from "./operationPublication";
 import {startServerCopies, type ServerCopies} from "./serverCopies";
 import {AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication} from "./automationReplicaCredential";
@@ -130,19 +130,6 @@ function isLoopbackHostname(hostname: string): boolean {
     /^127(?:\.\d{1,3}){3}$/u.test(hostname) ||
     hostname === "[::1]"
   );
-}
-
-/** Whether `value` is exactly an absolute HTTP(S) origin, such as `https://relay.example.com`. */
-function isHttpOrigin(value: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  return value.trim() === value && (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-    parsed.username === "" && parsed.password === "" && !value.includes("@") && parsed.pathname === "/" &&
-    !value.includes("?") && !value.includes("#");
 }
 
 function validateShareWebOrigin(value: string | undefined): string | undefined {
@@ -365,8 +352,8 @@ if (copiesOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST
   fatal("FATAL: Copies of workspaces on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
 }
 // The copies sync with this origin, and it issues the actor key of each phone write.
-if (copiesOn && !isHttpOrigin(process.env.DOHC_RELAY_PUBLIC_ORIGIN!)) {
-  fatal("FATAL: DOHC_RELAY_PUBLIC_ORIGIN must be an absolute HTTP(S) origin, without credentials, a path, a query, or a fragment.");
+if (copiesOn && !isPublicHttpsOrigin(process.env.DOHC_RELAY_PUBLIC_ORIGIN!)) {
+  fatal("FATAL: DOHC_RELAY_PUBLIC_ORIGIN must be exactly an HTTPS origin, such as https://relay.example.com, with no path or trailing slash.");
 }
 const automationServer = automationsOn ? {label: automationServerLabel(process.env.DOHC_SERVER_NAME)} : undefined;
 const automationReplicaKey = copiesOn ? {key: Buffer.from(linkKey!), namespace: deployment!.history.namespace} : undefined;
