@@ -7638,9 +7638,10 @@ it("reconciles a retirement's applications across work budgets and settles once 
 });
 
 // Proves: a membership update that fails partway, here at another workspace's origin check, still wakes the pass
-// that starts the departure it began, though each later attempt finds that departure already begun. Once the
-// other workspace attaches, the departure is announced and the stopped document retires, with no periodic pass.
-it("starts a stopped document's departure while another workspace's update keeps failing, with passes held", async () => {
+// that starts the departure it began, though each later attempt finds that departure already begun. The departure
+// is announced before that failure, so pulls confirm it and the stopped document retires while the other workspace
+// never attaches, with no periodic pass.
+it("retires a stopped document while another workspace's update keeps failing, with passes held", async () => {
   const polls = heldPolls(), o = await enrolledServiceHost({polls});
   vi.spyOn(console, "error").mockImplementation(() => {});
   const tip = o.tip(), key = retiringKey(o, tip);
@@ -7656,13 +7657,72 @@ it("starts a stopped document's departure while another workspace's update keeps
   expect(o.host.automationLedger("workspace-2")).toBeNull();
   // The pass the first failed update woke settles and publishes what the stopped document applied.
   await vi.waitFor(() => expect(retiringSettles(o, sent)).toContainEqual(["liveApplication.settle", {retirement: key, terminalReceipt: tip}]), {timeout: 10_000});
-  // No pull after an update has confirmed it left, so it stays.
-  expect(o.calls(sent)).not.toContain("liveApplication.releaseActivation");
-  expect(o.host.retains(o.sibling)).toBe(true);
-  o.replies.create = undefined;
-  await update();
+  // A pull after the announcement confirms it left, and it retires.
   await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]);
+  expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
+  expect(o.host.retains(o.sibling)).toBe(false);
+  expect(polls.early()).toBeGreaterThan(0);
+  // The other workspace still cannot attach.
+  await expect(update()).rejects.toThrow("Relay unreachable.");
+  expect(o.host.automationLedger("workspace-2")).toBeNull();
+});
+
+// Proves: a departure that a failing membership update has not taken up yet gets no announcement, so no pull can
+// confirm it gone while the daemon keeps nothing for it. Here a fresh daemon would resume a departure an earlier one
+// left, but another workspace's attach keeps failing first. Once an update succeeds, it resumes and is confirmed gone.
+it("keeps a departure a fresh daemon has not taken up while another workspace's attach keeps failing", async () => {
+  const o = await emptyServiceHost(), workspaces = [o.workspace];
+  await o.host.update({workspaces, documents: [o.sibling], ...stay});
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const second = {...o.workspace, root: join(o.f.root, "workspace-2"), workspaceId: "workspace-2"};
+  await mkdir(second.root);
+  const {restarted} = await restartEmpty(o);
+  let creates = 0;
+  // The first workspace attaches and checks its origin; every create after that fails.
+  const failLaterCreates = (method: string) => {
+    if (method === "sync.createHostedReplica" && ++creates === 2) o.replies.create = new Error("Relay unreachable.");
+  };
+  o.requestListeners.add(failLaterCreates);
+  const update = () => restarted.update({workspaces: [o.workspace, second], documents: [o.other], departing: [o.sibling]});
+  try {
+    await expect(update()).rejects.toThrow("Relay unreachable.");
+    // The first workspace stays attached, so this attempt reaches it before the other's attach fails again.
+    await expect(update()).rejects.toThrow("Relay unreachable.");
+    expect(restarted.automationLedger("workspace")).not.toBeNull();
+    expect(restarted.automationLedger("workspace-2")).toBeNull();
+    await afterPasses(o.f, 3);
+    expect(restarted.retains(o.sibling)).toBe(true);
+  } finally {
+    o.requestListeners.delete(failLaterCreates);
+    o.replies.create = undefined;
+  }
+  await update();
+  await vi.waitFor(() => expect(restarted.retains(o.sibling)).toBe(false), {timeout: 10_000});
+});
+
+// Proves: a ready workspace whose push keeps failing, here while it waits for owner admission, still pulls after
+// each refused push. Those pulls confirm a stopped document left, so the relay asks for its release while the push
+// still fails. The engine keeps the release pending while the document's settled output is unpushed; once a push
+// takes it, the document retires, with no periodic pass.
+it("confirms a stopped document's departure while its ready workspace's push keeps failing, with passes held", async () => {
+  const polls = heldPolls(), o = await enrolledServiceHost({polls});
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const tip = o.tip(), key = retiringKey(o, tip);
+  await vi.waitFor(() => expect(polls.paused()).toBe(true));
+  o.replies.push = {ownerAdmissionPending: [{workspaceId: "workspace", originId: "origin", originSeq: 3, versionId: "main", objectId: "object", path: "docs/a.md"}]};
+  o.stop();
+  const sent = o.ownerCalls().length;
+  await o.depart();
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith("Service activation pass failed.", expect.stringContaining("Hosted publication is waiting for owner admission.")), {timeout: 10_000});
+  await vi.waitFor(() => expect(o.ownerCalls().slice(sent)).toContainEqual(["liveApplication.releaseActivation", key]), {timeout: 10_000});
+  await vi.waitFor(() => expect(log).toHaveBeenCalledWith(...waiting("Waiting for its hosted replica to confirm the document parked.")), {timeout: 10_000});
+  expect(o.engine.unpushed).toBeGreaterThan(0);
+  expect(o.host.retains(o.sibling)).toBe(true);
+  o.replies.push = {};
+  await polls.until(o.f, () => o.host.drained("workspace"));
+  await vi.waitFor(() => expect(o.host.drained("workspace")).toBe(true), {timeout: 10_000});
   expect(retiredRow(o)).toEqual({retired: true, boundary: o.engine.boundary});
   expect(o.host.retains(o.sibling)).toBe(false);
   expect(polls.early()).toBeGreaterThan(0);
