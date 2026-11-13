@@ -2,11 +2,28 @@ import {createNamedLiveProvider, type NamedLiveProviderState} from "@dohc/ydoc-p
 import {yDocToMarkdown} from "@dohc/ydoc-projection";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import type {LinkLiveAgentAccess} from "./linkLiveClient";
+import type {PersonalLiveClient} from "./personalLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
 import {LIVE_UPDATE_REFUSAL_VALUES, parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {parseLiveTicketToken} from "@dohc/live-session-contract/live-ticket";
+import type {LiveAuthorContext} from "@dohc/live-session-contract/live-authorship";
 import {readBoundedJson} from "@dohc/service-http";
+import {asRecord} from "@dohc/workspace-core/records";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
+
+export const LIVE_DOCUMENT_PREPARING = "The document is still starting. Try again shortly.";
+
+/** A personal agent's live access to one workspace, and its MCP's code and words for a relay refusal. */
+export interface PersonalLiveDocumentAccess {
+  client: PersonalLiveClient;
+  workspaceId: string;
+  refused(response: Response, signal: AbortSignal): Promise<{code: string; error: string}>;
+}
+
+/** A refusal before any edit, with the code the agent acts on. */
+class LiveDocumentRefusal extends Error {
+  constructor(readonly code: string, message: string) {super(message);}
+}
 
 async function refusalError(response: Response, signal: AbortSignal): Promise<Error> {
   try {
@@ -33,8 +50,52 @@ function waitFor(provider: Provider, predicate: (state: NamedLiveProviderState) 
   });
 }
 
+/** A ticket for one document, the context its edits record, and how to open its socket. */
+type LiveTicket = {objectId: string; workspaceId?: string; token: string; context?: LiveAuthorContext; open: LinkLiveAgentAccess["open"]};
+
+async function ticketValue(response: Response, keys: string, maxBytes: number, signal: AbortSignal, invalid: string): Promise<Record<string, unknown>> {
+  const value = asRecord(await readBoundedJson(response, maxBytes, signal));
+  if (!value || Object.keys(value).sort().join() !== keys) throw new Error(invalid);
+  parseLiveTicketToken(value.token);
+  if (typeof value.expiresAtMs !== "number" || !Number.isSafeInteger(value.expiresAtMs) || value.expiresAtMs <= Date.now()) throw new Error(invalid);
+  return value;
+}
+
+// A link agent's edits record the public principal its ticket names.
+async function linkTicket(live: LinkLiveAgentAccess, path: string, maxBytes: number, signal: AbortSignal): Promise<LiveTicket> {
+  const document = await live.document(path, signal);
+  if (!document.ok) throw await refusalError(document, signal);
+  const {objectId} = await document.json() as {objectId: string};
+  const ticket = await live.ticket(objectId, signal);
+  if (!ticket.ok) throw await refusalError(ticket, signal);
+  const value = await ticketValue(ticket, "expiresAtMs,publicPrincipalId,token", maxBytes, signal, "Invalid link ticket.");
+  return {objectId, token: value.token as string, context: {kind: "link", publicPrincipalId: parseLiveUpdateIdentifier(value.publicPrincipalId)},
+    open: (token, openSignal, receive) => live.open(token, openSignal, receive)};
+}
+
+// A personal agent's open holds until the document is ready, so nothing here
+// polls. Its edits declare no context: the relay records the agent from its own tables.
+async function personalTicket(live: PersonalLiveDocumentAccess, path: string, maxBytes: number, signal: AbortSignal): Promise<LiveTicket> {
+  const {client, workspaceId} = live;
+  const refusal = async (response: Response) => {const {code, error} = await live.refused(response, signal); return new LiveDocumentRefusal(code, error);};
+  const document = await client.document(workspaceId, path, signal);
+  if (document.status === 202) {
+    await document.body?.cancel().catch(() => {});
+    throw new LiveDocumentRefusal("preparing", LIVE_DOCUMENT_PREPARING);
+  }
+  if (document.status !== 200) throw await refusal(document);
+  const ready = asRecord(await readBoundedJson(document, 64 * 1024, signal));
+  if (ready?.status !== "ready") throw new Error("Live document is unavailable.");
+  const objectId = parseLiveUpdateIdentifier(ready.objectId);
+  const ticket = await client.ticket(workspaceId, objectId, signal);
+  if (!ticket.ok) throw await refusal(ticket);
+  const value = await ticketValue(ticket, "expiresAtMs,token", maxBytes, signal, "Invalid live ticket.");
+  return {objectId, workspaceId, token: value.token as string,
+    open: (token, openSignal, receive) => client.open(workspaceId, token, openSignal, receive)};
+}
+
 export async function remoteLiveDocument(options: {
-  live: LinkLiveAgentAccess;
+  live: LinkLiveAgentAccess | PersonalLiveDocumentAccess;
   limits: NamedLiveBrowserLimits;
   signal: AbortSignal;
 }, path: string, edit?: {find: string; replacement: string}) {
@@ -44,24 +105,16 @@ export async function remoteLiveDocument(options: {
   let route: ReturnType<Provider["connect"]> | undefined;
   let changed = false;
   try {
-    const document = await options.live.document(path, signal);
-    if (!document.ok) throw await refusalError(document, signal);
-    const {objectId} = await document.json() as {objectId: string};
-    const ticket = await options.live.ticket(objectId, signal);
-    if (!ticket.ok) throw await refusalError(ticket, signal);
-    const ticketValue: unknown = await readBoundedJson(ticket, options.limits.maxHttpResponseBytes, signal);
-    if (!ticketValue || typeof ticketValue !== "object" || Array.isArray(ticketValue) || Object.keys(ticketValue).sort().join() !== "expiresAtMs,publicPrincipalId,token") throw new Error("Invalid link ticket.");
-    const {token, publicPrincipalId, expiresAtMs} = ticketValue as Record<string, unknown>;
-    parseLiveTicketToken(token);
-    const principal = parseLiveUpdateIdentifier(publicPrincipalId);
-    if (typeof expiresAtMs !== "number" || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= Date.now()) throw new Error("Invalid link ticket.");
+    const maxBytes = options.limits.maxHttpResponseBytes;
+    const ticket = "client" in options.live ? await personalTicket(options.live, path, maxBytes, signal) : await linkTicket(options.live, path, maxBytes, signal);
     const frames = options.limits.provider.frames;
-    const host = await options.live.open(token as string, signal, {
+    const host = await ticket.open(ticket.token, signal, {
       maxPayload: frames.receive.maxFrameBytes, maxFragments: 64, maxBufferedChunks: 64,
       closeTimeout: options.limits.sendTimeoutMs, perMessageDeflate: false, autoPong: false,
     });
     if (!host) throw new Error("The live document host is unavailable.");
-    provider = createNamedLiveProvider(options.limits.provider, {objectId}, {kind: "link", publicPrincipalId: principal});
+    provider = createNamedLiveProvider(options.limits.provider,
+      {objectId: ticket.objectId, ...(ticket.workspaceId === undefined ? {} : {workspaceId: ticket.workspaceId})}, ticket.context);
     const current = provider;
     route = provider.connect({
       send(bytes) {
@@ -91,7 +144,8 @@ export async function remoteLiveDocument(options: {
     const state = provider?.state();
     const refused = state?.status === "quarantined" && LIVE_UPDATE_REFUSAL_VALUES.some(reason => reason === state.reason);
     const unknown = changed && !refused;
-    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : error instanceof Error ? error.message : "Live document is unavailable."};
+    return {ok: false, path, outcome: unknown ? "unknown" : "not-applied", ...(error instanceof LiveDocumentRefusal ? {code: error.code} : {}),
+      error: unknown ? "The edit outcome is unknown. Read the live document before retrying." : error instanceof Error ? error.message : "Live document is unavailable."};
   } finally {
     lifetime.abort();
     provider?.close();

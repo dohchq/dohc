@@ -5,10 +5,12 @@ import { asRecord } from "@dohc/workspace-core/records";
 import {
   ANSWER_RESERVE_MS, answerMcp, boundedBytes, chatPostFields, COLLECTION_WRITE_GUIDE, COLLECTION_WRITE_TOO_LARGE,
   COLLECTION_WRITE_TOOL, collectionWriteFields, fitsCollectionWrite, MAX_WAIT_TIMEOUT_MS, POST_UNKNOWN, readRequestJson,
-  refuseBatchedWrite, ResponseTooLargeError, sentPost, toolError, toolResult,
+  refuseBatchedWrite, registerLiveDocumentTools, ResponseTooLargeError, sentPost, toolError, toolResult,
 } from "./remoteMcp";
 import { collectionWriteChanges, type CollectionWriteOutcome } from "./collectionWrites";
 import type { PersonalAgentAction, PersonalAgentClient } from "./personalAgentClient";
+import type { PersonalLiveClient } from "./personalLiveClient";
+import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 
 // The MCP server a personal agent signs in to at /mcp/agent/w/<workspace>.
 // Its token reaches the workspaces its owner chose, each at View, Comment or
@@ -25,6 +27,8 @@ export interface PersonalMcpOptions {
   signal: AbortSignal;
   /** When `signal` aborts on its own, so a wait answers before it does. */
   deadlineAtMs: number;
+  /** The agent's live documents, on a server that edits them live. */
+  live?: {client: PersonalLiveClient; limits: NamedLiveBrowserLimits};
 }
 
 export const PERSONAL_SIGN_IN_UNAVAILABLE = "dohc can't check this agent's sign-in right now. Try again shortly.";
@@ -376,6 +380,33 @@ function buildServer(options: PersonalMcpOptions, reach: Reach): McpServer {
       return toolResult(await writeOutcome(response, writeSignal));
     } catch {return toolResult({ok: false, outcome: "unknown"});}
   });
+
+  // Every level sees the live tools, as it sees the write tool: the relay refuses an open below Edit.
+  if (options.live) {
+    const {client: liveClient, limits} = options.live;
+    const liveRefusals: Readonly<Record<string, Refused>> = {...refusals, personal_agent_edit_needed: {status: 403, code: "edit_needed",
+      error: `${reach.agent.name} needs Edit to change this workspace's documents. Its owner can change that in Settings › Agents.`}};
+    // Why the relay won't host a document is written for the agent and needs
+    // its owner, so its reason and words pass. Other refusals read as this server words them.
+    const liveRefused = async (response: Response, liveSignal: AbortSignal) => {
+      const value = asRecord(await readBoundedJson(response, 4096, liveSignal).catch(() => null));
+      await response.body?.cancel().catch(() => undefined);
+      const code = value?.code, error = value?.error;
+      if (response.status === 409 && typeof code === "string" && typeof error === "string") return {code: utf8Prefix(code, 64), error: utf8Prefix(error, 1024)};
+      const known = typeof code === "string" && Object.hasOwn(liveRefusals, code) ? liveRefusals[code] : undefined;
+      if (known?.status === response.status) return known;
+      if (response.status === 404) return {code: "not_found", error: "dohc could not open this document live. Use a Markdown path from dohc_list_files."};
+      if (response.status === 400) return {code: "bad_request", error: NO_WORKSPACE};
+      return response.status === 429 ? RATE_LIMITED : UNAVAILABLE;
+    };
+    registerLiveDocumentTools(server, "Read the current live Markdown document in a workspace where you have Edit, before editing it. " +
+      "Its owner must have opened it in dohc on a desktop first.", {
+      workspace: workspaceArg(),
+      // The live call answers before this request's own deadline.
+      options: workspace => ({live: {client: liveClient, workspaceId: workspace, refused: liveRefused}, limits,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(0, options.deadlineAtMs - Date.now() - ANSWER_RESERVE_MS))])}),
+    });
+  }
 
   // Holds until a message arrives or the wait ends, and answers before this request's own deadline.
   server.registerTool("dohc_wait_for_messages", {
