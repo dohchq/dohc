@@ -22,7 +22,8 @@ const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: re
   relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
   attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace"}]});
-afterEach(() => {vi.clearAllMocks(); vi.useRealTimers(); mock.synchronized = false;});
+// Resetting drain drops answers a failed test left queued, so they do not reach the next test.
+afterEach(() => {vi.clearAllMocks(); mock.drain.mockReset(); vi.useRealTimers(); mock.synchronized = false;});
 
 it("keeps a known-document preparation overload on the work retry cadence", async () => {
   vi.useFakeTimers();
@@ -175,7 +176,7 @@ it("skips a retired generation without authority or a drain, and the next page d
   const second = {...config.documents[0]!, binding: {...binding, objectId: "second", currentPath: "b.md", selectorPaths: ["b.md"]}};
   const client = {ownerYDocPrepareEnrollment: vi.fn(async (_request: unknown, target: {binding: {objectId: string}}) =>
     target.binding.objectId === "object" ? {status: "retired"} : {status: "observed", draft: {outboxId: "outbox"}})};
-  mock.drain.mockResolvedValue("acknowledged");
+  mock.drain.mockResolvedValueOnce("acknowledged").mockResolvedValue("empty");
   const outcomes: string[] = [];
   const runPass = vi.fn(async (_workspace: string, index: number, signal: AbortSignal) => {
     const documents = [config.documents[0]!, second];
@@ -191,7 +192,62 @@ it("skips a retired generation without authority or a drain, and the next page d
     await vi.waitFor(() => expect(outcomes).toEqual(["empty", "acknowledged"]));
     expect(runPass.mock.calls.map(call => call[1])).toEqual([0, 1]);
     expect(mock.authority).not.toHaveBeenCalled();
-    expect(mock.drain).toHaveBeenCalledTimes(1);
+    expect(mock.drain).toHaveBeenCalledTimes(2);
     expect(onError).not.toHaveBeenCalled();
   } finally {await owner.stop();}
+});
+
+// #2337: one pass carries every waiting row of its note, not one row per pass.
+const deliveryPass = () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}}))};
+  const pass = runNativeOwnerDeliveryPass({client: client as unknown as EngineClient, workspaceHandle: "handle", config, refusals: new OwnerKnownRefusals(),
+    document: config.documents[0]!, signal: new AbortController().signal, bearer: "credential", accountId: "owner", assertCurrent() {}});
+  return {client, pass};
+};
+
+it("delivers every waiting row of a note in one pass, after one preparation", async () => {
+  mock.drain.mockResolvedValueOnce("acknowledged").mockResolvedValueOnce("acknowledged").mockResolvedValueOnce("acknowledged").mockResolvedValue("empty");
+  const {client, pass} = deliveryPass();
+  expect(await pass).toBe("acknowledged");
+  expect(mock.drain).toHaveBeenCalledTimes(4);
+  expect(client.ownerYDocPrepareEnrollment).toHaveBeenCalledTimes(1);
+  // Rows were delivered, so the empty queue at the end needs no separate standing check.
+  expect(mock.authority).not.toHaveBeenCalled();
+});
+
+it.each(["frozen", "not-accepted"] as const)("stops at a %s row after the rows before it were delivered", async outcome => {
+  mock.drain.mockResolvedValueOnce("acknowledged").mockResolvedValueOnce("acknowledged").mockResolvedValueOnce(outcome).mockResolvedValue("acknowledged");
+  const {pass} = deliveryPass();
+  expect(await pass).toBe(outcome);
+  expect(mock.drain).toHaveBeenCalledTimes(3);
+});
+
+it("reports progress when a later row must wait, and the next pass retries it", async () => {
+  mock.drain.mockResolvedValueOnce("acknowledged").mockResolvedValueOnce("retry").mockResolvedValue("acknowledged");
+  const {pass} = deliveryPass();
+  expect(await pass).toBe("acknowledged");
+  expect(mock.drain).toHaveBeenCalledTimes(2);
+});
+
+it("delivers at most one page of rows in one pass", async () => {
+  mock.drain.mockResolvedValue("acknowledged");
+  const {pass} = deliveryPass();
+  expect(await pass).toBe("acknowledged");
+  expect(mock.drain).toHaveBeenCalledTimes(128);
+});
+
+it("takes no new row once half the attempt time has passed", async () => {
+  vi.useFakeTimers({toFake: ["Date"]});
+  // Each row takes a second of a five-second attempt.
+  mock.drain.mockImplementation(async () => {vi.setSystemTime(Date.now() + 1000); return "acknowledged";});
+  const {pass} = deliveryPass();
+  expect(await pass).toBe("acknowledged");
+  expect(mock.drain).toHaveBeenCalledTimes(3);
+});
+
+it("keeps a move's targeted pass to one answer", async () => {
+  const client = {ownerYDocPrepareEnrollment: vi.fn(async () => ({status: "observed", draft: {outboxId: "outbox"}})), ownerYDocEnroll: vi.fn()};
+  mock.drain.mockImplementation(async () => {mock.synchronized = true; return "acknowledged";});
+  expect(await observedPass(client)).toBe("acknowledged");
+  expect(mock.drain).toHaveBeenCalledTimes(1);
 });

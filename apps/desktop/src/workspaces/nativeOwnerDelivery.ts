@@ -9,6 +9,8 @@ import {isOwnerDeliveryBackoff} from "./ownerDeliveryBackoff";
 export {OwnerKnownRefusals} from "./ownerYDocOutbox";
 
 type DrainResult = Awaited<ReturnType<OwnerYDocOutboxDrainer["drainOnce"]>>;
+/** The relay's own owner outbox drain pages the same number of rows. */
+const MAX_ROWS_PER_PASS = 128;
 
 interface NativeOwnerDeliveryPassOptions {
   client: EngineClient;
@@ -114,8 +116,21 @@ export async function runNativeOwnerDeliveryPass(options: NativeOwnerDeliveryPas
     if (preparation.status === "retired") return "empty";
     if (preparation.status !== "observed") return "retry";
     if (preparation.draft.outboxId === null) return answered("empty");
-    drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, delivery, options.refusals);
-    const result = await drainer.drainOnce();
+    drainer = new OwnerYDocOutboxDrainer(outbox, preparation.draft.outboxId, {
+      freshOwnerAuthority: binding => delivery.nextOwnerAuthority(binding),
+      deliver: (authority, envelope) => delivery.deliver(authority, envelope),
+    }, options.refusals);
+    // A pass delivers its note's waiting rows in order over one connection. It stops at the first row
+    // that is not acknowledged, and takes no new row once half the attempt's time has passed.
+    const started = Date.now();
+    let result = await drainer.drainOnce(), delivered = 0;
+    while (!options.observedOnly && result === "acknowledged" && ++delivered < MAX_ROWS_PER_PASS &&
+      Date.now() - started < config.attemptTimeoutMs / 2) {
+      check();
+      result = await drainer.drainOnce();
+    }
+    // Rows delivered before an empty queue or a row that must wait are this pass's progress.
+    if (delivered > 0 && (result === "empty" || result === "retry")) result = "acknowledged";
     if (result === "empty" && !synchronized) {
       const authority = await delivery.freshOwnerAuthority(document.binding);
       check();

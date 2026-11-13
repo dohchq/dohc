@@ -39,7 +39,10 @@ function fixture(overrides: {binding?: typeof binding; initialCursor?: number; i
     isReceiptApplied: vi.fn(async input => {receiptChecked.resolve(); return retained.get(input.receipt.journalCursor) === input.receipt.updateDigest;}),
     ...overrides.state,
   };
-  const submit = vi.fn(async input => {submitted.resolve(); return overrides.result ?? {result: "success" as const, ack: {...receipt, localYDocSequence: 4, applicationReplayed: false}};});
+  // Each accepted submission gets the next journal cursor, from 9.
+  let accepted = 0;
+  const submit = vi.fn(async input => {submitted.resolve(); return overrides.result ?? {result: "success" as const, ack: {...receipt,
+    deliveryId: input.deliveryId, updateDigest: input.updateDigest, journalCursor: receipt.journalCursor + accepted++, localYDocSequence: 4, applicationReplayed: false}};});
   let server: ReturnType<typeof createNamedLiveFrameSession> | undefined;
   const connect = vi.fn<NonNullable<OwnerYDocFrameDeliveryOptions["connect"]>>(overrides.connect ?? (async input => {
     server = createNamedLiveFrameSession({frames, host: {hostEpoch: parseHostEpoch(3), invalidated: input.signal, assertCurrent: () => input.signal.throwIfAborted(), close() {}, submit,
@@ -77,6 +80,66 @@ it("uses owner bearer route and exact stored delivery bytes; waits for durable o
   f.feed();
   expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.acceptedState.applyAcceptedFrame).toHaveBeenCalledWith({binding, previousAcceptedCursor: 0, journalCursor: 9, updateBytes: envelope.update}, expect.any(AbortSignal));
+});
+
+// #2337: a pass sends its next row over the connection that received the last one.
+const second: OwnerYDocDeliveryEnvelope = {...envelope, sequence: 5, appendKey: "append-5", deliveryId: "second-delivery",
+  update: new Uint8Array([4,5]), updateDigest: hash(new Uint8Array([4,5]))};
+
+it("delivers a later row over the same connection once the earlier one is received", async () => {
+  const f = fixture(), fresh = await f.delivery.nextOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  const first = f.delivery.deliver(fresh.authority, envelope);
+  await f.receiptChecked.promise; f.feed();
+  expect(await first).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(await f.delivery.nextOwnerAuthority(binding)).toEqual(fresh);
+  const later = f.delivery.deliver(fresh.authority, second);
+  await vi.waitFor(() => expect(f.submit).toHaveBeenCalledTimes(2));
+  f.feed({journalCursor: 10, updateBytes: second.update});
+  expect(await later).toEqual({kind: "receipt", receipt: {...f.receipt, deliveryId: second.deliveryId, updateDigest: second.updateDigest, journalCursor: 10}});
+  // Each row keeps its own delivery, digest and author.
+  expect(f.submit.mock.calls[1]![0]).toEqual({deliveryId: second.deliveryId, updateDigest: second.updateDigest, updateBytes: second.update,
+    authorContext: {kind: "account", accountId: "owner"}});
+  expect(f.acceptedState.applyAcceptedFrame).toHaveBeenLastCalledWith({binding, previousAcceptedCursor: 9, journalCursor: 10, updateBytes: second.update}, expect.any(AbortSignal));
+  expect(f.acceptedState.isReceiptApplied).toHaveBeenLastCalledWith({binding, receipt: expect.objectContaining({deliveryId: second.deliveryId, journalCursor: 10})}, expect.any(AbortSignal));
+  expect(f.connect).toHaveBeenCalledTimes(1);
+  expect(f.acceptedState.readState).toHaveBeenCalledTimes(1);
+  expect(f.acceptedState.applyInitialSync).toHaveBeenCalledTimes(1);
+});
+
+it("freezes a refused later row, keeps the earlier receipt, and connects again for the next one", async () => {
+  const options: Parameters<typeof fixture>[0] = {retained: true};
+  const f = fixture(options), fresh = await f.delivery.nextOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "receipt", receipt: f.receipt});
+  options.result = {result: "refused", reason: "invalid-update"};
+  expect(await f.delivery.nextOwnerAuthority(binding)).toEqual(fresh);
+  expect(await f.delivery.deliver(fresh.authority, second)).toEqual({kind: "quarantine", reason: "invalid-update"});
+  expect(f.submit).toHaveBeenCalledTimes(2);
+  expect(f.connect).toHaveBeenCalledTimes(1);
+  // A refusal ends the connection, so the next row starts a new one.
+  expect((await f.delivery.nextOwnerAuthority(binding)).kind).toBe("authority");
+  expect(f.connect).toHaveBeenCalledTimes(2);
+});
+
+it("connects again rather than continue a connection whose row is in flight", async () => {
+  const f = fixture(), fresh = await f.delivery.nextOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  const first = f.delivery.deliver(fresh.authority, envelope);
+  await f.receiptChecked.promise;
+  const next = await f.delivery.nextOwnerAuthority(binding);
+  expect(await first).toEqual({kind: "retry"});
+  expect(next.kind === "authority" && next.authority).not.toBe(fresh.authority);
+  expect(f.connect).toHaveBeenCalledTimes(2);
+});
+
+it("connects again for another note's binding", async () => {
+  const f = fixture({retained: true}), fresh = await f.delivery.nextOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  expect(await f.delivery.deliver(fresh.authority, envelope)).toEqual({kind: "receipt", receipt: f.receipt});
+  const other = {...binding, objectId: "other"};
+  expect(await f.delivery.nextOwnerAuthority(other)).toEqual({kind: "quarantine", reason: "binding-changed", observedBinding: binding});
+  expect(f.connect).toHaveBeenCalledTimes(2);
 });
 
 it("submits the agent a queued edit declared, owned before transport, beside its stored bytes", async () => {

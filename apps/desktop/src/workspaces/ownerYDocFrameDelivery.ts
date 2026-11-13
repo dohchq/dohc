@@ -53,6 +53,8 @@ interface Attempt {
   ready: ReturnType<typeof deferred<OwnerAuthorityResult>>;
   delivered: ReturnType<typeof deferred<OwnerYDocDeliveryResult>>;
   authority?: FreshOwnerAuthority;
+  /** The opening sync installed, so a later row may use this connection. */
+  synced: boolean;
   transport?: OwnerLiveTransport;
   controls: LiveFrame[];
   transfer?: Transfer;
@@ -122,7 +124,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     const binding = parseLiveObjectBinding(bindingValue), abort = new AbortController();
     const attempt: Attempt = {binding, abort, signal: AbortSignal.any([abort.signal, this.options.signal]),
       protocol: createLiveFrameSession("client", this.options.frames), ready: deferred(), delivered: deferred(),
-      controls: [{kind: "hello", receivePolicy: this.options.frames.receive}], vector: new Uint8Array(), vectorSent: false,
+      controls: [{kind: "hello", receivePolicy: this.options.frames.receive}], synced: false, vector: new Uint8Array(), vectorSent: false,
       submitted: false, pumping: false, receiving: Promise.resolve(), incomingBytes: 0, incomingFrames: 0,
       grantedBytes: 0, grantedFrames: 0, nextTransfer: 1, maxFrameBytes: this.options.frames.receive.maxFrameBytes, cursor: 0};
     this.active = attempt;
@@ -147,9 +149,23 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     } catch {this.stop(attempt); return {kind: "retry"};}
   }
 
+  /**
+   * The connection that received this pass's last row answers for its next one. The relay
+   * re-checks the binding, authority and host at every submission and closes the connection
+   * when they change, so standing is still checked per row.
+   */
+  async nextOwnerAuthority(binding: LiveObjectBinding): Promise<OwnerAuthorityResult> {
+    const attempt = this.active;
+    if (attempt?.authority && attempt.synced && !attempt.envelope && this.current(attempt) && isDeepStrictEqual(attempt.binding, binding)) {
+      return {kind: "authority", authority: attempt.authority};
+    }
+    return this.freshOwnerAuthority(binding);
+  }
+
   async deliver(authority: FreshOwnerAuthority, envelopeValue: OwnerYDocDeliveryEnvelope): Promise<OwnerYDocDeliveryResult> {
     const attempt = this.active;
     if (!attempt || !this.current(attempt) || attempt.authority !== authority || attempt.envelope || !isDeepStrictEqual(attempt.binding, envelopeValue.binding)) return {kind: "retry"};
+    attempt.delivered = deferred(); attempt.submitted = false; attempt.receipt = undefined;
     if (envelopeValue.update.length > this.options.frames.receive.maxUpdateBytes || digest(envelopeValue.update) !== envelopeValue.updateDigest) {this.stop(attempt); return {kind: "retry"};}
     const declared = envelopeValue.agentDeclaration;
     let agentDeclaration: AgentDeclaration | undefined;
@@ -248,7 +264,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             const applied = await abortable(this.options.acceptedState.applyInitialSync({...sync, appliedThroughJournalCursor: begin.appliedThroughJournalCursor}, attempt.signal), attempt.signal); this.check(attempt);
             if (applied !== "applied") {this.stop(attempt); return;}
             attempt.cursor = begin.appliedThroughJournalCursor;
-            this.synchronized = true;
+            this.synchronized = true; attempt.synced = true;
             attempt.controls.push({kind: "sync-applied", appliedThroughJournalCursor: attempt.cursor});
             attempt.ready.resolve({kind: "authority", authority: attempt.authority!});
           } else if (begin.purpose === "applied-update") {
@@ -265,12 +281,17 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   }
 
   private async finishReceipt(attempt: Attempt): Promise<void> {
-    if (!attempt.receipt) return;
+    const receipt = attempt.receipt;
+    if (!receipt) return;
     let backoffMs = 25;
     while (this.current(attempt)) {
       try {
-        const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt: attempt.receipt}, attempt.signal), attempt.signal); this.check(attempt);
-        if (applied) this.stop(attempt, {kind: "receipt", receipt: attempt.receipt});
+        const applied = await abortable(this.options.acceptedState.isReceiptApplied({binding: attempt.binding, receipt}, attempt.signal), attempt.signal); this.check(attempt);
+        // The row is done, and the connection stays open for the next one.
+        if (applied) {
+          attempt.envelope = undefined; attempt.receipt = undefined; attempt.submitted = false;
+          attempt.delivered.resolve({kind: "receipt", receipt});
+        }
         return;
       } catch (error) {
         if (!isOwnerDeliveryBackoff(error)) throw error;
