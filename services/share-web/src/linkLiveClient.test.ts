@@ -344,6 +344,16 @@ it("tells a viewer to try again when the relay doesn't answer in time", async ()
   );
   expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
 });
+it("refuses a malformed ticket request from a viewer with a session", async () => {
+  const f = fixture(undefined, { holdsSession: true });
+  for (const objectId of ["", "a\u0000b", 7])
+    expect(
+      await answered(
+        await f.client.handle(request({ discriminator, objectId }, "/api/live/link-ticket")),
+      ),
+    ).toEqual(opaque);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
+});
 it("gives anyone without a session and every agent the same 404 in each server state", async () => {
   for (const [, relay] of serverTrouble) {
     const stranger = fixture(vi.fn(relay), {

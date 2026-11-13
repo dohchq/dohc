@@ -31,11 +31,7 @@ import {
   type LiveBrowserContext,
   type PersonalLiveContext,
 } from "./liveBrowserContext.js";
-import {
-  isAgentRequest,
-  type LinkAuthorityResolver,
-  type PersonalAuthority,
-} from "./linkAuthority.js";
+import { type LinkAuthorityResolver, type PersonalAuthority } from "./linkAuthority.js";
 import type { PersonalAgents } from "./personalAgents.js";
 import { errorResponse, relayError, RelayError } from "./errors.js";
 import type { CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
@@ -330,7 +326,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
       request.signal.aborted
     )
       return refusal();
-    let vouched = !isAgentRequest(request);
+    let vouched = (request.headers.get("authorization") ?? "").startsWith("LinkCapability ");
     if (closed || storage.unavailable.aborted || pendingRequests >= limits.maxPendingRequests)
       return busy(vouched);
     pendingRequests++;

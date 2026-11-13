@@ -1870,6 +1870,26 @@ describe("a link ticket while the relay is busy", () => {
     expect(await ask(f)).toEqual(tryAgain);
   });
 
+  it("asks a holder to try again when the live host goes away during a ticket", async () => {
+    const f = await fixture(limits, true);
+    f.captureNative.mockImplementationOnce(async () => {
+      f.raw.exec(
+        "BEGIN IMMEDIATE; UPDATE sync_relay_session_host_control SET admission_state='closed', registered_connection_id=NULL; COMMIT",
+      );
+      return f.native;
+    });
+    expect(await ask(f)).toEqual(tryAgain);
+  });
+
+  it("tells a caller with neither a capability nor an agent token nothing", async () => {
+    const f = await fixture(limits, true);
+    f.routes.close();
+    f.useCredentials({});
+    expect(await ask(f)).toEqual(opaque);
+    f.useCredentials({ authorization: "Bearer something" });
+    expect(await ask(f)).toEqual(opaque);
+  });
+
   it("asks a holder to try again when a ticket takes too long", async () => {
     const f = await fixture(limits, true);
     vi.spyOn(f.tickets, "mint").mockImplementation(() => new Promise(() => {}));

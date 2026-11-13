@@ -143,6 +143,13 @@ export function openLiveSocket(
     }
   });
 }
+const isObjectId = (value: unknown) => {
+  try {
+    return !!parseLiveUpdateIdentifier(value);
+  } catch {
+    return false;
+  }
+};
 // Only what a live request is: its session, and a document path or an object.
 const liveInput = (document: boolean, body: unknown): body is Record<string, unknown> =>
   exact(body, document ? "discriminator,path" : "discriminator,objectId") &&
@@ -150,7 +157,7 @@ const liveInput = (document: boolean, body: unknown): body is Record<string, unk
   isSessionDiscriminator(body.discriminator) &&
   (document
     ? typeof body.path === "string" && body.path.length <= 1024 && /\.md$/i.test(body.path)
-    : !!parseLiveUpdateIdentifier(body.objectId));
+    : isObjectId(body.objectId));
 
 /** Viewer credentials stay in protected cookies and private relay requests. */
 export function createLinkLiveClient(options: {
@@ -348,7 +355,7 @@ export function createLinkLiveClient(options: {
       return refused();
     const cookie = request.headers.get("cookie");
     return admitted(request.signal, options.holdsSession?.(cookie) ?? false, async (signal) => {
-      // A body that can't be read is the browser's fault, not the servers'.
+      // A body that isn't JSON is refused. One still arriving at the timeout is answered as busy.
       const body = await readBoundedJson(request, limits.maxRequestBytes, signal).catch(() => null);
       if (!liveInput(document, body)) return refused();
       return answer(

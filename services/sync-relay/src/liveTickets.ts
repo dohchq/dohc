@@ -80,12 +80,19 @@ export function createLiveTickets(options: LiveTicketOptions) {
       }
       try {
         signal?.throwIfAborted();
+        const before = storage.resolveLiveObjectHostBinding(scope, objectId);
         const candidate = await currentBinding({ ...scope }, objectId, signal);
         signal?.throwIfAborted();
         if (candidate === null) {
-          // A binding that is still current means the live host changed while this ran, as when
-          // it reconnects. That is a failure to ask again after, not a refusal.
-          if (storage.resolveLiveObjectHostBinding(scope, objectId).kind === "current")
+          // A live host that changed or went away while this ran, as when it reconnects, is a
+          // failure to ask again after, not a refusal. The link route answers the same before minting.
+          const now = storage.resolveLiveObjectHostBinding(scope, objectId);
+          if (
+            before.kind === "current" &&
+            (now.kind === "current" ||
+              now.reason === "host-unavailable" ||
+              now.reason === "stale-document")
+          )
             throw new Error("The live host changed.");
           return null;
         }
