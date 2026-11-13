@@ -30,6 +30,10 @@ function setup(invoke:(request:TransactionalInvoke,signal:AbortSignal)=>Promise<
   admitCollectionChanges(props.workspaceId);
   return {...render(<TransactionalCollectionPage {...props}/>),props};
 }
+// A view ignores clicks while it reads, and it can show its records a render before its read ends.
+// A test waits for the view to finish reading before it clicks a control that does not show it is disabled.
+const viewIdle=(view:"board"|"calendar")=>waitFor(()=>expect(screen.getByTestId(view).closest("[aria-busy]")?.getAttribute("aria-busy")).toBe("false"));
+const enabled=(name:string)=>waitFor(()=>expect(screen.getByRole<HTMLButtonElement>("button",{name}).disabled).toBe(false));
 // The table's virtualizer reads offsetWidth and offsetHeight, which jsdom reports as 0, so every element
 // gets a nonzero box and a table view's rows render.
 const offsetDescriptors = { offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"), offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth") };
@@ -49,10 +53,12 @@ it("queries every board group beyond the first table page and pages each indepen
     return {result:{group,rows:group.value==="Todo"?[{id:input.after?51:1,version:7,values:{name:input.after?"Later task":"First task",status:"Todo"}}]:[{id:99,version:1,values:{name:"Other group",status:"Done"}}],nextCursor:group.value==="Todo"?next:null}};
   });
   const result=setup(invoke);
+  const paged=()=>invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).after!==undefined);
   await screen.findByText("Other group");
+  await enabled("Next records in Todo");
   fireEvent.click(screen.getByRole("button",{name:"Next records in Todo"}));
+  await waitFor(()=>expect(paged()).toBe(true));
   await screen.findByText("Later task");
-  expect(invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).after!==undefined)).toBe(true);
   expect(result.props.onError).not.toHaveBeenCalled();
 });
 it("names a board's fields as the Collection does, not by their ids",async()=>{
@@ -109,7 +115,8 @@ it("routes board moves through approved edits with the real version, then offers
     return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
   });
   setup(invoke);
-  fireEvent.click(await screen.findByRole("button",{name:"Move 4"}));
+  await enabled("Move 4");
+  fireEvent.click(screen.getByRole("button",{name:"Move 4"}));
   await screen.findByRole("button",{name:"Undo last edit"});
   expect(invoke.mock.calls.find(([request])=>request.operationId==="edit")?.[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,operationId:"edit",input:{id:4,expectedVersion:7,values:{status:"Done"}}});
 });
@@ -121,6 +128,7 @@ it("opens a board card's record in the panel, marks its card, and changes its fi
   });
   setup(invoke);
   expect((await screen.findByTestId("board")).getAttribute("data-open-record")).toBe("");
+  await viewIdle("board");
   fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
   const record=screen.getByRole("complementary",{name:"Task"});
   // The board stays beside the panel, with the open record's card marked.
@@ -142,7 +150,8 @@ it("moves a board's card through the approved edit with the record's version, wi
     return Promise.resolve({result:{...empty,group,rows:group.value===(moved?"Done":"Todo")?[{id:4,version:moved?8:7,values:{name:"Task",status:group.value}}]:[]}});
   });
   const result=setup(invoke);
-  fireEvent.click(await screen.findByRole("button",{name:"Move 4"}));
+  await enabled("Move 4");
+  fireEvent.click(screen.getByRole("button",{name:"Move 4"}));
   const edits=()=>invoke.mock.calls.map(([request])=>request).filter(request=>request.operationId==="edit");
   expect(edits()).toHaveLength(1);
   expect(edits()[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,input:{id:4,expectedVersion:7,values:{status:"Done"}}});
@@ -163,7 +172,8 @@ it("lists a board move dohc could not confirm with Try again, which sends the ex
     return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
   });
   const result=setup(invoke);
-  fireEvent.click(await screen.findByRole("button",{name:"Move 4"}));
+  await enabled("Move 4");
+  fireEvent.click(screen.getByRole("button",{name:"Move 4"}));
   // A board has no cell to say so, so the page lists the change.
   const list=within(await screen.findByRole("group",{name:"Changes dohc did not confirm"}));
   expect(list.getByText("dohc could not confirm a change to record 4.")).toBeTruthy();
@@ -239,6 +249,7 @@ it("opens New record beside a board in the panel with no value filled in, and of
   view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating(["name","date"])}/>);
   await screen.findByTestId("board");
   expect(screen.queryByRole("button",{name:"New in Done"})).toBeNull();
+  await waitFor(()=>expect(screen.getByTestId<HTMLButtonElement>("collection-new-record").disabled).toBe(false));
   fireEvent.click(screen.getByTestId("collection-new-record"));
   expect(within(draftPanel()).getAllByRole("group").map(row=>row.getAttribute("data-property"))).toEqual(["name","date"]);
   expect(draftValue("Name")).toBe("Empty");
@@ -271,7 +282,8 @@ it("opens a calendar day's new record in the panel with the day in the calendar'
 it("loads the visible calendar range and changes range on navigation",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,range:input.range!}};});
   setup(invoke,calendar);
-  fireEvent.click(await screen.findByRole("button",{name:"January"}));
+  await viewIdle("calendar");
+  fireEvent.click(screen.getByRole("button",{name:"January"}));
   await waitFor(()=>expect(invoke.mock.calls.some(([request])=>JSON.stringify(request.input)===JSON.stringify({limit:50,range:{fieldId:"date",start:"2026-12-27",end:"2027-02-07"}}))).toBe(true));
 });
 it("reads the nearest record on each side of an empty month for the calendar to offer",async()=>{
@@ -334,8 +346,10 @@ it("offers layout changes to readers without owner view-source controls",async()
   fireEvent.keyDown(screen.getByRole("menu"),{key:"Escape"});
   expect(screen.getByRole("button",{name:"Date Date"}).title).toBe("Calendar date");
   // A board groups by the first select field, and its field changes here only.
+  await waitFor(()=>expect(tab("Board").disabled).toBe(false));
   fireEvent.click(tab("Board"));
-  fireEvent.click(await screen.findByRole("button",{name:"Group by Status"}));
+  await enabled("Group by Status");
+  fireEvent.click(screen.getByRole("button",{name:"Group by Status"}));
   expect(within(screen.getByRole("menu",{name:"Group board by"})).getAllByRole("menuitemradio").map(row=>[row.textContent,row.getAttribute("aria-checked")])).toEqual([["Name","false"],["Status","true"],["Date","false"]]);
   fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
   expect(await screen.findByRole("button",{name:"Group by Name"})).toBeTruthy();
@@ -346,7 +360,8 @@ it("saves the field a saved board groups by, and changes nothing here until its 
   const views={list:[board],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
   const result=setup(invoke,board);
   result.rerender(<TransactionalCollectionPage {...result.props} views={views}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"Group by Status"}));
+  await enabled("Group by Status");
+  fireEvent.click(screen.getByRole("button",{name:"Group by Status"}));
   fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
   expect(views.setField).toHaveBeenCalledExactlyOnceWith("board",{groupBy:"name"});
   expect(screen.getByRole("button",{name:"Group by Status"})).toBeTruthy();
@@ -360,7 +375,8 @@ it("saves the date field of a saved calendar",async()=>{
   const views={list:[calendar],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
   const result=setup(invoke,calendar);
   result.rerender(<TransactionalCollectionPage {...result.props} dataset={dated} views={views}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"Date Date"}));
+  await enabled("Date Date");
+  fireEvent.click(screen.getByRole("button",{name:"Date Date"}));
   fireEvent.click(screen.getByRole("menuitemradio",{name:"Due"}));
   expect(views.setField).toHaveBeenCalledExactlyOnceWith("calendar",{dateField:"due"});
 });
@@ -371,6 +387,7 @@ it("paginates calendar results without implying the first 50 events cover the mo
   });
   setup(invoke,calendar);
   await screen.findByText("1 on this page · More records");
+  await enabled("Next records in this calendar");
   fireEvent.click(screen.getByRole("button",{name:"Next records in this calendar"}));
   await screen.findByText("51");
   expect(invoke.mock.calls.at(-1)?.[0].input).toMatchObject({after:{id:1,value:1}});
@@ -413,7 +430,8 @@ it("finishes a board read and a read in place asked for in one render, and shows
     return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name,status:"Todo"}}]:[]}};
   });
   const result=setup(invoke);
-  fireEvent.click(await screen.findByRole("button",{name:"Show 4"}));
+  await viewIdle("board");
+  fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
   expect(screen.getByRole("complementary").textContent).toContain("First task");
   fireEvent.click(screen.getByRole("button",{name:"Close record"}));
   const held=deferred();gate=held.promise;name="Second task";
@@ -446,7 +464,8 @@ it("reads an open Calendar record by its id once an automation moves it out of t
   });
   const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
   const {rerender}=render(<TransactionalCollectionPage {...props}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"Show 7"}));
+  await viewIdle("calendar");
+  fireEvent.click(screen.getByRole("button",{name:"Show 7"}));
   const details=()=>screen.getByRole("complementary");
   // A calendar entry opens its record in the panel, and the calendar marks the entry.
   expect(screen.getByTestId("calendar").getAttribute("data-open-record")).toBe("7");
@@ -478,7 +497,8 @@ it("drops a by-id read of an open Calendar record once a newer read finds it bac
   });
   const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
   const {rerender}=render(<TransactionalCollectionPage {...props}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"Show 7"}));
+  await viewIdle("calendar");
+  fireEvent.click(screen.getByRole("button",{name:"Show 7"}));
   const details=()=>screen.getByRole("complementary");
   // Out of the month: the page reads the record by its id, and that read waits.
   date=later;version=2;
@@ -556,6 +576,7 @@ describe("when the Collection's rules change",()=>{
     const invoke=vi.fn(async(request:TransactionalInvoke)=>answer(request,"First task"));
     const result=setup(invoke);
     await screen.findByText("First task");
+    await viewIdle("board");
     fireEvent.click(screen.getByRole("button",{name:"Show 1"}));
     const details=screen.getByRole("complementary");
     expect(within(details).getByText("Todo")).toBeTruthy();
