@@ -1841,6 +1841,19 @@ it('refuses a capture as stale when its history changes after validation',async(
     expect(f.storage.getLiveHostControl()!.registeredConnectionId).toBeNull()
   }finally{f.close()}
 })
+it('checks a validated history in the transaction from its rows\' coordinates and admissions, without reading its update bytes',async()=>{
+  const f=fixture();try{
+    const read=vi.spyOn(f.storage,'getBlob')
+    const validate:OrdinaryActivationValidator=async work=>{
+      expect(read).toHaveBeenCalled()
+      const result=await validateActivation(work)
+      read.mockClear()
+      return result
+    }
+    expect(await f.prepare(bounds,validate)).toEqual({document:f.document,replayed:false,completed:false})
+    expect(read).not.toHaveBeenCalled()
+  }finally{f.close()}
+})
 // A retained activation the read found can go before the transaction; its capture's history was never read or validated.
 it('refuses a capture as stale when the retained activation it read is gone by the transaction',async()=>{
   const f=fixture();try{

@@ -5,6 +5,9 @@
 import { afterEach, expect, it } from "vitest";
 import { createLiveValidationExecutor } from "./liveValidation.js";
 import type { StorageContext } from "./storage/context.js";
+import type { OrdinaryCheckpointScope } from "./storage/ordinaryActivationCheckpoint.js";
+import { foldOrdinaryCheckpointPages, ORDINARY_FOLD_PAGE_ROWS, type OrdinaryFoldValidator } from "./storage/ordinaryActivationFold.js";
+import { ServiceActivationStaleCut } from "./storage/ordinaryActivationSource.js";
 import { ACTIVATION, typedRelayNote as seedTypedRelayNote, type TypedRelayNote } from "./testing/typedNotes.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -113,6 +116,32 @@ it("a note typed within today's entry limit activates", async () => {
 it("a note typed past today's entry limit activates", async () => {
   const note = await typedRelayNote(ACTIVATION.maxActivationHistoryEntries + 1);
   expect((await activate(note)).outcome).toEqual({document: note.document, replayed: false, completed: false});
+});
+
+it("an activation whose lineage folds further between its read and its transaction is refused as stale, and the next one activates", {timeout: 120_000}, async () => {
+  const note = await typedRelayNote(2_400), validate = validation(), {source} = note.capture;
+  const storage = note.deployment.storage as unknown as StorageContext;
+  const scope: OrdinaryCheckpointScope = {namespace: note.deployment.history.namespace, document: note.document, replicationEpoch: source.replicationEpoch,
+    streamIdentity: source.streamIdentity, base: {relaySeq: source.baseRelaySeq, originId: source.baseOriginId, originSeq: source.baseOriginSeq},
+    policySha256: validate.policySha256!};
+  const foldPage: OrdinaryFoldValidator = async (work, signal) => {
+    const result = await validate(work, signal);
+    if (result.kind === "accepted") throw new Error("A fold page was answered as an activation.");
+    return result;
+  };
+  const foldOnce = () => foldOrdinaryCheckpointPages(storage, {scope, pages: 1, validate: foldPage, nowMs: () => 3,
+    bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: ACTIVATION.maxBytesPerDrain}});
+  // After one page, fewer rows follow the checkpoint than one read takes, so the activation reads from it without folding.
+  expect(await foldOnce()).toMatchObject({kind: "folded", reachedCursor: false});
+  let folded = false;
+  const folding: Validate = Object.assign(async (...[work, signal]: Parameters<Validate>) => {
+    const result = await validate(work, signal);
+    if ("cut" in work && !folded) {folded = true; expect(await foldOnce()).toMatchObject({kind: "folded"});}
+    return result;
+  }, validate);
+  expect((await activate(note, folding)).outcome).toBeInstanceOf(ServiceActivationStaleCut);
+  expect(folded).toBe(true);
+  expect((await activate(note, validate)).outcome).toEqual({document: note.document, replayed: false, completed: false});
 });
 
 // The plan's bars, 1 s to activate and 100 ms of held event loop, are reported here rather than asserted: a shared
