@@ -771,7 +771,7 @@ export interface SyncRelayStorage {
   chatWakeHead(accountId: string): number;
   listWaitingChatWakes(input: Parameters<typeof import("./chatWakes").listWaitingChatWakes>[1]): ReturnType<typeof import("./chatWakes").listWaitingChatWakes>;
   claimChatWake(input: Parameters<typeof import("./chatWakes").claimChatWake>[1]): ReturnType<typeof import("./chatWakes").claimChatWake>;
-  confirmChatWakeQueued(input: Parameters<typeof import("./chatWakes").confirmChatWakeQueued>[1]): import("./chatWakes").ChatWakeView | null;
+  confirmChatWakeQueued(input: Parameters<typeof import("./chatWakes").confirmChatWakeQueued>[1]): import("@dohc/workspace-contracts/chat-wakes").ChatWakeView | null;
   /** The threads of every wake a retry could answer: the wake it names, and the generation its binding answered. */
   retryWakeThreads(input: Parameters<typeof import("./chatWakes").retryWakeThreads>[1]): string[];
   retryChatWake(input: Parameters<typeof import("./chatWakes").retryChatWake>[1]): import("./chatWakes").ChatWakeRetry;

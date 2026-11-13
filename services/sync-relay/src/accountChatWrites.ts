@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { phoneMarkReadArgsSchema, phoneRetryWakeArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import type { ChatWakeView } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { asRecord } from "@dohc/workspace-core";
 import { CHATS_METHOD, ChatsLiveAdapter, DaemonRefusalError, type JsonValue } from "@dohc/workspace-engine-client";
@@ -22,7 +23,6 @@ import {
 } from "./operationPublication";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
-import type { ChatWakeView } from "./storage/chatWakes";
 import type { OperationRecord } from "./storage/operationRecords";
 
 // The phone's chat writes on this server's copy of a workspace its account

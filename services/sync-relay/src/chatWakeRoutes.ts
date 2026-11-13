@@ -1,15 +1,15 @@
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { handleForName, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
+import { CHAT_RUNNER_AGENTS, CHAT_WAKE_ID, CHAT_WAKE_WAIT_MAX_MS, isChatRunnerAgentId } from "@dohc/workspace-contracts/chat-wakes";
 import { asRecord } from "@dohc/workspace-core";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { DiscussionActivityCapacityError, type DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
-import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import { observeChatWakeChanges } from "./relayWriteChanges";
 import { parseString, parseWorkspaceId } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
-import { CHAT_RUNNER_AGENTS, type ChatRunner } from "./storage/chatWakes";
+import type { ChatRunner } from "./storage/chatWakes";
 
 // The routes an owner's computers use to wake its agents: declare the agents
 // each computer runs in a workspace, wait for wakes that list the computer,
@@ -22,8 +22,6 @@ export type ChatWakeRoute =
   | { route: "chat-wakes" }
   | { route: "chat-wake"; wakeId: string; action: "claim" | "queued" };
 
-/** The longest a wake read waits. */
-export const CHAT_WAKE_WAIT_MAX_MS = 25_000;
 /** The wake reads one account may hold waiting at once, across its computers. */
 const CHAT_WAKE_WAITS_PER_ACCOUNT = 16;
 /** The wake reads one computer may hold waiting at once. */
@@ -31,16 +29,13 @@ export const CHAT_WAKE_WAITS_PER_INSTALL = 2;
 // A runners or claim body is small.
 const BODY_MAX_BYTES = 32 * 1024;
 const BODY_RECEIPT_MS = 10_000;
-const WAKE_ID = /^wake-[0-9a-f]{32}$/u;
-// A desktop agent's settings ID. A personal agent's starts with `p-` and is never a runner.
-const AGENT_ID = /^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/u;
 const SEQUENCE = /^(?:0|[1-9]\d{0,15})$/u;
 
 /** Parses `/sync/wakes/...`, already split into segments. */
 export function parseChatWakeRoute(parts: readonly string[]): ChatWakeRoute {
   if (parts.length === 2) return { route: "chat-wakes" };
   const [, , wakeId, action] = parts;
-  if (parts.length === 4 && wakeId !== undefined && WAKE_ID.test(wakeId) && (action === "claim" || action === "queued")) {
+  if (parts.length === 4 && wakeId !== undefined && CHAT_WAKE_ID.test(wakeId) && (action === "claim" || action === "queued")) {
     return { route: "chat-wake", wakeId, action };
   }
   throw notFound();
@@ -128,7 +123,7 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
   const runners = listed.map((value) => {
     const runner = asRecord(value);
     if (runner === null || !exactly(runner, ["agentId", "displayName", "enabled"]) || typeof runner.agentId !== "string" ||
-      !AGENT_ID.test(runner.agentId) || runner.agentId.startsWith(PERSONAL_AGENT_ID_PREFIX) || typeof runner.enabled !== "boolean") {
+      !isChatRunnerAgentId(runner.agentId) || typeof runner.enabled !== "boolean") {
       throw badRequest(shape);
     }
     const displayName = parseString(runner.displayName, "displayName", 200);

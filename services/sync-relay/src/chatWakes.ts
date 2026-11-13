@@ -1,4 +1,5 @@
 import { chatMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
+import type { ChatWakeCandidate } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import { cutText } from "@dohc/workspace-contracts/names";
 import { asRecord } from "@dohc/workspace-core";
@@ -6,7 +7,7 @@ import type { JsonValue } from "@dohc/workspace-engine-client";
 import type { WriteCommand } from "./accountChatWrites";
 import type { Verdict } from "./operationPublication";
 import type { SyncRelayStorage } from "./storage";
-import type { ChatRunner, ChatWakeCandidate, ChatWakeTarget, OperationWakeChange } from "./storage/chatWakes";
+import type { ChatRunner, ChatWakeTarget, OperationWakeChange } from "./storage/chatWakes";
 
 // The wake targets of a person's phone message. They are resolved once,
 // before the write's first engine stage, from the account's declared
