@@ -217,6 +217,19 @@ async function titles(computer: Computer): Promise<string[]> {
 
 describe("Notices passes requested by a shared view", () => {
 
+
+  it("drops a late missing-route response instead of moving Notices into another account's local list", async () => {
+    const server = await relay(); server.outdated = true;
+    const recipient = await computer(account(server, "owner"));
+    const started = deferred(); const release = deferred();
+    server.onRequest = async () => { started.resolve(); await release.promise; };
+    let current = true; const syncing = recipient.store.sync(() => current);
+    await started.promise; current = false; switchTo(recipient, account(server, "ben"));
+    release.resolve(); await syncing;
+    expect(recipient.changes).toBe(0);
+    expect((await recipient.store.list()).notices).toEqual([]);
+  });
+
   it.each(["account"] as const)("drops a late pull after the %s changes without starting a pass for another account", async change => {
     const server = await relay();
     const signedIn = account(server, "owner");

@@ -351,6 +351,8 @@ describe("agent moves and deletes", () => {
 describe("a folder with a live page", () => {
   const refusal = [`dohc can't move "notes" while a page in it has live editing on`,
     "In Live documents, stop live editing for every page in this folder, then move the folder again."].join(String.fromCharCode(10));
+  const deleteRefusal = [`dohc can't delete "notes" while a page in it has live editing on`,
+    "In Live documents, stop live editing for every page in this folder, then delete the folder again."].join(String.fromCharCode(10));
   // A page this computer owns at notes/page.md. The engine refuses only a folder move or delete over it.
   async function ownedFixture() {
     const methods: string[] = [], checks: Array<{ path: string; change: string | undefined }> = [];
@@ -381,11 +383,27 @@ describe("a folder with a live page", () => {
     await f.settle();
     expect(await f.added(f.seen)).toEqual([]);
   });
+
+  it("refuses the delete from the app, the CLI and MCP, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.remove("notes")).toMatchObject({ ok: false, reason: deleteRefusal });
+    await expect(f.removeByHand("notes")).rejects.toMatchObject({ name: "LiveFolderError", message: deleteRefusal });
+    expect(f.checks.filter(check => check.path === "notes")).toEqual([{ path: "notes", change: "delete" }, { path: "notes", change: "delete" }]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
 });
 
 describe("a page this computer owns live", () => {
   const refusal = [`dohc can't move "notes/page.md" while it has live editing on`,
     "In Live documents, stop live editing for this page, then move it again."].join(String.fromCharCode(10));
+  const deleteRefusal = [`dohc can't delete "notes/page.md" while it has live editing on`,
+    "In Live documents, stop live editing for this page, then delete it again."].join(String.fromCharCode(10));
   // The engine refuses only a page move or delete of notes/page.md.
   async function ownedFixture() {
     const methods: string[] = [], changes: Array<string | undefined> = [];
@@ -416,6 +434,20 @@ describe("a page this computer owns live", () => {
     await f.settle();
     expect(await f.added(f.seen)).toEqual([]);
   });
+
+  it("refuses its delete from the app, the CLI and MCP, before anything changes", async () => {
+    const f = await ownedFixture();
+    const from = f.methods.length;
+    expect(await f.remove("notes/page.md")).toMatchObject({ ok: false, reason: deleteRefusal });
+    await expect(f.removeByHand("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError", message: deleteRefusal });
+    expect(f.changes).toEqual(["delete", "delete"]);
+    expect(f.methods.slice(from).filter(method => method !== VERSIONED_METHOD.textCheckMove && /capture|delete|rename|write/i.test(method))).toEqual([]);
+    expect(f.trashItem).not.toHaveBeenCalled();
+    expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    await f.settle();
+    expect(await f.added(f.seen)).toEqual([]);
+  });
+
 });
 
 describe("agent move and delete admission", () => {
@@ -650,4 +682,25 @@ describe("History operation admission",()=>{
       expect(await readFile(join(f.rootPath,"kept.md"),"utf8")).toBe("Before");
     } finally {await f.engine().stop();}
   });
+});
+
+describe("a restore of a page this computer owns live", () => {
+  it("refuses removing it to before its creation with the restore words, and keeps the page", async () => {
+    // The engine refuses the delete a restore to before creation runs.
+    const f = await fixture({ beforeRequest: request => {
+      if (request.method === VERSIONED_METHOD.textDelete) {
+        throw new DaemonRefusalError({ code: "INVALID_PARAMS", message: "live-page-owned", retry: "no" }, null);
+      }
+    } });
+    await write(f.rootPath, "notes/page.md", "page");
+    await f.start();
+    try {
+      const created = (await f.rows()).find(row => row.path === "notes/page.md" && row.operation === "write")!;
+      await expect(f.engine().restoreFileToBeforeMoment(created.id, person)).rejects.toMatchObject({ name: "LivePageOwnedError",
+        message: [`dohc can't restore "notes/page.md" while it has live editing on`,
+          "In Live documents, stop live editing for this page, then restore it again."].join(String.fromCharCode(10)) });
+      expect(await readFile(join(f.rootPath, "notes/page.md"), "utf8")).toBe("page");
+    } finally { await f.engine().stop(); }
+  });
+
 });

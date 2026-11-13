@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
+import { datasetColumnFields, type DatasetDefinition, type DatasetRevision } from "@dohc/security-contract/dataset";
 import type { DatasetSchemaChange } from "@dohc/cli/dataset";
 import { DatasetSchemaChangeError, generateDatasetSchemaChange } from "./datasetSchemaChanges";
 import { invalidateDatasetAddresses, resolveDatasetAddress } from "./datasetAddress";
@@ -125,6 +125,42 @@ it("refuses changed capture, stale revision and missing required defaults while 
   f.tamper(paths => { const migration = paths.find(path => path.endsWith("migration.sql"))!; f.files.set(migration, "DELETE FROM people;"); });
   await expect(f.prepare({ kind: "renameCollection", name: "Guests" })).rejects.toThrow("differs from this review");
   expect(f.host.describe(id(1)).revision).toBe(1);
+});
+
+
+it("refuses invalid numeric values with the affected record ID and leaves live data intact", async () => {
+  const f = await fixture();
+  const created = await f.host.action(call(f.revision,id(6),{values:{[id(4)]:"pay later"}},"first"));
+  await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true})).rejects.toThrow(`Fix record ${(created.result as {id:string}).id}`);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+  const result=(await f.host.query(call(f.revision,id(5)))).result as {rows:Array<{values:Record<string,unknown>}>};
+  expect(result.rows[0]!.values[id(4)]).toBe("pay later");
+});
+
+it("refuses a required field change until missing values are filled", async () => {
+  const optional=structuredClone(definition); datasetColumnFields(optional.tables[0]!)[1]!.required=false;
+  const f = await fixture(optional);
+  const created=await f.host.action(call(f.revision,id(6),{values:{}},"first"));
+  await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true})).rejects.toThrow(/Fix record/);
+  await f.host.action(call(f.revision,id(7),{id:(created.result as {id:string}).id,expectedVersion:1,values:{[id(4)]:"Ada"}},"filled"));
+  const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
+  expect(datasetColumnFields(next.revision.definition.tables[0]!)[1]!.required).toBe(true);
+});
+
+it.each(["9007199254740993","1e-999","0.10000000000000001"])("refuses a conversion that would lose numeric information: %s",async value=>{
+  const f=await fixture();
+  const created=await f.host.action(call(f.revision,id(6),{values:{[id(4)]:value}},"first"));
+  await expect(f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"number",required:true})).rejects.toThrow(`Fix record ${(created.result as {id:string}).id}`);
+  expect(f.host.describe(id(1)).revision).toBe(1);
+});
+
+it("keeps all significant numeric digits when converting a stored number to text",async()=>{
+  const initial=structuredClone(definition); initial.tables[0]!.fields[1]!.type="number";
+  const f=await fixture(initial), value=1.2345678901234567;
+  await f.host.action(call(f.revision,id(6),{values:{[id(4)]:value}},"first"));
+  const next=await approve(f,await f.prepare({kind:"changeField",tableId:id(2),fieldId:id(4),type:"text",required:true}));
+  const result=(await f.host.query(call(next.revision,id(5)))).result as {rows:Array<{values:Record<string,unknown>}>};
+  expect(result.rows[0]!.values[id(4)]).toBe("1.2345678901234567");
 });
 
 it("captures remote schema changes without opening the fenced local store and binds approval to the caller", async () => {

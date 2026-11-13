@@ -133,6 +133,15 @@ describe("owner Collection migration", () => {
     f.files.set("items/dataset.json", JSON.stringify({ ...definition, datasetId: id(99) }));
     await expect(prepare(host, f)).rejects.toThrow(/another Collection/);
   });
+
+  it("rejects mismatched target schema and never publishes partial changes", async () => {
+    const { host } = await open(), f = fixture(), first = await activate(host, f); f.next();
+    f.files.set("items/migration.sql", "SELECT 1;");
+    await expect(prepare(host, f)).rejects.toThrow(/schema/i);
+    expect(host.approvedArtifacts(id(1)).revision).toEqual(first);
+    expect((await host.query(call(first, id(5)))).result).toEqual([]);
+  });
+
 });
 
 // A daemon whose opens prepare `.dohc/local` as the engine's do.

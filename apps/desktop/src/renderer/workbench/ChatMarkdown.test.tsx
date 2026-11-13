@@ -4,7 +4,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { bridge } from "../bridge";
 import { ChatMarkdown, createDrawnCache } from "./ChatMarkdown";
-import { answerChatParse, parseChatMarkdown, type ChatParseRequest } from "./chatMarkdownParse";
+import { CHAT_MARKDOWN_MAX_LENGTH, answerChatParse, parseChatMarkdown, type ChatParseRequest } from "./chatMarkdownParse";
 import { CHAT_PARSE_DEADLINE_MS } from "./chatMarkdownWorker";
 
 vi.mock("../bridge", () => ({ bridge: vi.fn() }));
@@ -242,6 +242,19 @@ describe("ChatMarkdown", () => {
       expect(view.container.querySelectorAll("li")).toHaveLength(2);
     });
 
+
+    it("parse in the worker when a short body nests deeply or has a long table", () => {
+      for (const body of [
+        `${"> ".repeat(40)}deep`,
+        `${"[".repeat(40)}a${"]".repeat(40)}`,
+        `| a | b |\n| - | - |\n${"| x | y |\n".repeat(110)}`.slice(0, 1024),
+      ]) {
+        const view = renderBody(body);
+        expect(parseChatMarkdown).not.toHaveBeenCalled();
+        view.unmount();
+      }
+    });
+
     it("keep their words when the worker runs past its deadline, and a new worker takes the next body", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       workerMode = "hang";
@@ -267,6 +280,22 @@ describe("ChatMarkdown", () => {
       const next = renderBody(long("next **body** ", 1200));
       await waitFor(() => expect(next.container.querySelector("strong")).not.toBeNull());
       expect(workers.length).toBe(count + 1);
+    });
+
+
+    it("show a body over the length cap as text, with its chips", async () => {
+      const view = renderBody(`hi @sam ${long("**word** ", 50_001)}`);
+      await waitFor(() => expect(view.queryByTestId("body-mention")).not.toBeNull());
+      expect(view.container.querySelector("strong")).toBeNull();
+      expect(view.container.textContent).not.toContain("**");
+    });
+
+    it("show a body whose tree is too large as text", async () => {
+      const view = renderBody(`${"[a][r] ".repeat(300)}\n\n[r]: https://example.com/${"x".repeat(1000)}`);
+      await act(async () => {});
+      expect(view.queryByRole("link")).toBeNull();
+      expect(view.container.textContent).toContain("a a a");
+      expect(view.container.textContent).not.toContain("example.com");
     });
 
     it("show the current body when one is edited, deleted or remounted while its parse is pending", async () => {
@@ -316,6 +345,44 @@ describe("ChatMarkdown", () => {
       expect(queued.getByTestId("queued").querySelector("strong")?.textContent).toBe("two");
     });
 
+  });
+
+});
+
+
+describe("the parse worker's answer", () => {
+  it("gives up on a tree with too many nodes", () => {
+    const answer = answerChatParse({ id: 1, body: "- a\n".repeat(6000), candidates: CANDIDATES, attachments: [] });
+    expect(answer.parsed).toBeUndefined();
+  });
+
+  it("gives up on deep nesting instead of throwing", () => {
+    const answer = answerChatParse({ id: 2, body: `${"> ".repeat(2000)}a`, candidates: CANDIDATES, attachments: [] });
+    expect(answer.parsed).toBeUndefined();
+  });
+
+  it("keeps a reply at the length cap that links on every line", () => {
+    const line = "See [the plan](https://example.com/trips/2026/plan) at the **harbor**.\n\n";
+    const body = line.repeat(Math.floor(CHAT_MARKDOWN_MAX_LENGTH / line.length));
+    expect(answerChatParse({ id: 4, body, candidates: CANDIDATES, attachments: [] }).parsed).toBeDefined();
+  });
+
+  it("weighs a table by its nodes as well as its text", () => {
+    const row = `|${"a|".repeat(20)}\n`;
+    const body = `${row}|${"-|".repeat(20)}\n${row.repeat(250)}`;
+    const parsed = parseChatMarkdown(body, []);
+    const answer = answerChatParse({ id: 6, body, candidates: CANDIDATES, attachments: [] });
+    expect(answer.parsed?.weight).toBe(parsed.chars + parsed.nodes * 64);
+    // So the cache holds a few such tables, not a hundred.
+    expect(answer.parsed!.weight).toBeGreaterThan(500_000);
+  });
+
+  it("gives up on a short body that repeats a long target or title", () => {
+    const uses = "[a][r] ".repeat(300);
+    for (const definition of [`[r]: https://example.com/${"x".repeat(1000)}`, `[r]: https://example.com "${"t".repeat(1000)}"`]) {
+      const answer = answerChatParse({ id: 5, body: `${uses}\n\n${definition}`, candidates: CANDIDATES, attachments: [] });
+      expect(answer.parsed).toBeUndefined();
+    }
   });
 
 });

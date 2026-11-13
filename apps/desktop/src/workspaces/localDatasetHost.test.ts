@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { fakeLocalStateOpens, openedLocalState } from "../testing/preparedLocalState";
 import { DatabaseSync } from "node:sqlite";
 import { copyFile, lstat, mkdtemp, mkdir, readdir, readFile, rename, writeFile, rm, symlink } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -595,6 +595,150 @@ describe("the computer that keeps a workspace's Collections", () => {
       expect((await datasetFiles(root))!.filter(name => name.includes("moving"))).toEqual([]);
       expect(await oldFiles(root)).toEqual([]);
     });
+
+    it("throws away a copy that dohc stopped while making, and copies the store again", async () => {
+      const { root, approved } = await storeInOldPlace();
+      await writeFile(`${localStore(root)}.moving`, "SQLite format 3\0 cut short");
+      await writeFile(`${localStore(root)}.moving-journal`, "");
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: systemTrash().trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect((await datasetFiles(root))!.filter(name => name.includes("moving"))).toEqual([]);
+    });
+
+    it("opens the moved store when the old one is still there with its id, and trashes the old one, whenever dohc stopped after the rename", async () => {
+      const { root, approved } = await storeInOldPlace();
+      const saved = await mkdtemp(join(tmpdir(), "dohc-local-dataset-test-")); roots.push(saved);
+      for (const file of await oldFiles(root) ?? []) await copyFile(join(oldFolder(root), file), join(saved, file));
+      const trash = systemTrash();
+      const moved = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      await moved.host.action(call(approved, id(6), "after-move", { name: "Lens" }));
+      await moved.host.close(); hosts.splice(hosts.indexOf(moved.host), 1);
+      // The old files as they were before the trash: what a stop after the rename leaves, or iCloud Drive brings back.
+      for (const file of await readdir(saved)) await copyFile(join(saved, file), join(oldFolder(root), file));
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera", "Lens"]);
+      expect(await oldFiles(root)).toEqual([]);
+      expect(trash.items.filter(name => name === "state.sqlite")).toHaveLength(2);
+    });
+
+    it("trashes a -wal or -shm left without its store, as a stop between trashing them leaves", async () => {
+      const { root, approved } = await storeInOldPlace();
+      const trash = systemTrash();
+      const moved = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      await moved.host.close(); hosts.splice(hosts.indexOf(moved.host), 1);
+      for (const file of ["state.sqlite-wal", "state.sqlite-shm"]) await writeFile(join(oldFolder(root), file), "left behind");
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toEqual([]);
+      expect(trash.items.slice(-2).sort()).toEqual(["state.sqlite-shm", "state.sqlite-wal"]);
+    });
+
+    // Another computer keeps the Collections meanwhile, with this store's id, as an "earlier installation" Keep there does.
+    const keptElsewhere = (root: string, storeId: string | null, when: () => boolean) => {
+      let kept = false;
+      return { here: () => here, required: () => {
+        if (!kept && when()) { kept = true; writeFileSync(recordFile(root), JSON.stringify({ version: 1, workspaceId: "w", installId: laptop.installId, label: laptop.label, storeId })); }
+        return true;
+      } };
+    };
+    const oldBytes = async (root: string) => Promise.all(["state.sqlite", "state.sqlite-wal"].map(file => readFile(join(oldFolder(root), file))));
+
+    it("throws the copy away and refuses when the record changes before the copy takes the store's place", async () => {
+      const { root, storeId } = await storeInOldPlace();
+      const before = await oldBytes(root), trash = systemTrash();
+      // The record changes once the copy is made, before its rename.
+      const holder = keptElsewhere(root, storeId, () => existsSync(`${localStore(root)}.moving`));
+      expect((await refusedOpen(root, { holder, trashItem: trash.trashItem })).refusal).toMatchObject({ kind: "elsewhere", computer: laptop });
+      expect(await datasetFiles(root), "no store and no copy here").toEqual([]);
+      expect(await oldBytes(root)).toEqual(before);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+      expect(await readRecord(root)).toMatchObject({ installId: "install-laptop", storeId });
+    });
+
+    it("keeps the moved store but trashes nothing and refuses when the record changes after the rename", async () => {
+      const { root, storeId } = await storeInOldPlace();
+      const before = await oldBytes(root), trash = systemTrash();
+      const holder = keptElsewhere(root, storeId, () => existsSync(localStore(root)) && existsSync(join(oldFolder(root), "state.sqlite")));
+      expect((await refusedOpen(root, { holder, trashItem: trash.trashItem })).refusal).toMatchObject({ kind: "elsewhere", computer: laptop });
+      expect(storeIdIn(root), "the moved store stays").toBe(storeId);
+      expect(await oldBytes(root)).toEqual(before);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+    });
+
+    it("refuses, touching nothing, when the store in .dohc/local has another id", async () => {
+      const { root } = await storeInOldPlace();
+      const other = await storeWithoutRecord();
+      await copyFile(localStore(other.root), localStore(root));
+      const read = async () => Promise.all([readFile(localStore(root)), ...(await oldFiles(root))!.map(file => readFile(join(oldFolder(root), file)))]);
+      const before = await read();
+      const trash = systemTrash();
+      expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal).toEqual({ kind: "replaced", path: ".dohc/local/datasets/state.sqlite" });
+      expect(await read()).toEqual(before);
+      expect(await oldFiles(root)).toEqual(["state.sqlite", "state.sqlite-wal"]);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+    });
+
+    it("leaves the old files where they are when the trash refuses them, and trashes them at the next open", async () => {
+      const { root, approved } = await storeInOldPlace();
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const trash = systemTrash(), before = await oldBytes(root);
+      trash.refuses = true;
+      const first = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(first.host, approved)).toEqual(["Camera"]);
+      // Read only: nothing was checkpointed into the old store, and its -wal stays.
+      expect(await oldBytes(root)).toEqual(before);
+      expect(warned).toHaveBeenCalled();
+      await first.host.close(); hosts.splice(hosts.indexOf(first.host), 1);
+      trash.refuses = false;
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toEqual([]);
+      expect(trash.items[0]).toBe("state.sqlite");
+    });
+
+    it("never copies, trashes or opens an old copy on a computer that does not keep the Collections", async () => {
+      const { root, storeId } = await storeInOldPlace();
+      const trash = systemTrash();
+      const before = await Promise.all((await oldFiles(root))!.map(file => readFile(join(oldFolder(root), file))));
+      for (const [computer, named] of [[laptop, storeId], [laptop, null]] as const) {
+        await writeRecord(root, computer, named);
+        expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal.kind).toBe("elsewhere");
+        // Keep asks nothing and changes nothing while the record names no store and a copy is here.
+        if (named === null) await expect(keepCollectionsHere(root, "w", here, keepSteps(root))).rejects.toThrow("These Collections are on Laptop.");
+      }
+      await rm(recordFile(root));
+      expect((await refusedOpen(root, { trashItem: trash.trashItem })).refusal).toEqual({ kind: "unclaimed" });
+      expect(await Promise.all((await oldFiles(root))!.map(file => readFile(join(oldFolder(root), file))))).toEqual(before);
+      expect(await datasetFiles(root)).toEqual([]);
+      expect(trash.trashItem).not.toHaveBeenCalled();
+    });
+
+    it("keeps an earlier installation's store that is still there, and moves it at the next open", async () => {
+      const { root, approved, storeId } = await storeInOldPlace();
+      await writeRecord(root, { installId: "install-before", label: "Studio" }, storeId);
+      expect(await localDatasetStoreId(root)).toBe(storeId);
+      expect(await keepCollectionsHere(root, "w", here, keepSteps(root))).toBe(true);
+      expect(await readRecord(root)).toMatchObject({ installId: "install-here", storeId });
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: systemTrash().trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(await oldFiles(root)).toEqual([]);
+    });
+
+    it("moves a store from before the record once a person keeps the Collections here", async () => {
+      const { root, approved } = await storeWithoutRecord();
+      await mkdir(oldFolder(root));
+      await rename(localStore(root), join(oldFolder(root), "state.sqlite"));
+      expect((await refusedOpen(root)).refusal).toEqual({ kind: "unclaimed" });
+      expect(await oldFiles(root)).toEqual(["state.sqlite"]);
+      await keepCollectionsHere(root, "w", here, keepSteps(root));
+      const { storeId } = await readRecord(root);
+      const trash = systemTrash();
+      const { host } = await open({ workspaceRoot: root, holder: guarded, trashItem: trash.trashItem });
+      expect(await names(host, approved)).toEqual(["Camera"]);
+      expect(storeIdIn(root)).toBe(storeId);
+      expect(await oldFiles(root)).toEqual([]);
+    });
+
 
   });
 });

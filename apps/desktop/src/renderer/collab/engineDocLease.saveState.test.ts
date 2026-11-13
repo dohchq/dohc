@@ -478,6 +478,67 @@ it("does not report Saved while an earlier delivery is still unanswered", async 
   }
 });
 
+
+it("does not claim File in use for a lock refusal that predates the newest keystroke", async () => {
+  // `file-locked` is the one refusal whose copy makes a durability claim —
+  // dohc has your edits, and it is retrying. A refusal about older text would
+  // promise safety for a keystroke the settle never carried, so it is held to
+  // the same sequence guard "saved" uses.
+  //
+  await retainBound();
+
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  const firstSeq = harness.applied.at(-1)!.seq;
+  act(() => {
+    editDocument();
+  });
+
+  // The lock refusal belongs to the settle that started before the second
+  // keystroke. The second edit is staged but not sent yet. The local sequence
+  // already guards it, so the document stays saving instead of claiming the
+  // edit is safely parked under a lock.
+  harness.emit("file-locked", firstSeq);
+  expect(retained.snapshot.saveState.kind).toBe("saving");
+
+  // A refusal that does cover the newest edit names the blocker.
+  await flushLocalBatch();
+  const secondSeq = harness.applied.at(-1)!.seq;
+  expect(secondSeq).toBeGreaterThan(firstSeq);
+  harness.emit("file-locked", secondSeq);
+  expect(retained.snapshot.saveState.kind).toBe("file-locked");
+});
+
+it("does not claim Saved for a settle that predates the newest keystroke", async () => {
+  await retainBound();
+
+  act(() => {
+    editDocument();
+  });
+  await flushLocalBatch();
+  const firstSeq = harness.applied.at(-1)!.seq;
+  act(() => {
+    editDocument();
+  });
+
+  // A settle that started before the second keystroke reports success. It
+  // never carried that staged, not-yet-sent edit, so the indicator must keep
+  // saying "saving".
+  harness.emit("saved", firstSeq);
+  expect(retained.snapshot.saveState.kind).toBe("saving");
+
+  // The follow-up settle covers it.
+  await flushLocalBatch();
+  const secondSeq = harness.applied.at(-1)!.seq;
+  expect(secondSeq).toBeGreaterThan(firstSeq);
+  harness.emit("saved", secondSeq);
+  await waitFor(() =>
+    expect(retained.snapshot.saveState.kind).toBe("saved-here"),
+  );
+});
+
 it("stays Saving while a rejected transport head retries ahead of later edits", async () => {
   harness.rejectNextApplyAttempts(1);
   await retainBound();

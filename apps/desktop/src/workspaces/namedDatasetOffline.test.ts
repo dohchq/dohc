@@ -70,11 +70,19 @@ it("saves only exact authorized result pages across restart, with honest stale s
   for (const forbidden of ["private-token", "operationSource", "schemaSql", "history", "retry"]) expect(bytes).not.toContain(forbidden);
 });
 
-it.each([403])("removes saved pages after explicit %i and never later falls back", async status => {
+it.each([401, 403, 404, 409])("removes saved pages after explicit %i and never later falls back", async status => {
   const f = await fixture(); await f.data().describe(id(1)); await f.data().invoke(invocation);
   f.status(status); await expect(f.data().describe(id(1))).rejects.toThrow(/access or rules changed/);
   f.offline(); await expect(f.data().describe(id(1))).rejects.toThrow(/not saved/);
   await expect(readFile(join(f.directory, "pages.json"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+
+it("purges prior pages after a known grant fingerprint change, including on malformed responses", async () => {
+  const f = await fixture(); await f.data().describe(id(1)); await f.data().invoke(invocation);
+  f.token("d".repeat(64)); f.malformed();
+  await expect(f.data().describe(id(1))).rejects.toThrow();
+  f.offline(); await expect(f.data().describe(id(1))).rejects.toThrow(/not saved/);
 });
 
 it("isolates share/workspace scopes and removes the previous account's disk pages", async () => {

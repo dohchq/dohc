@@ -141,6 +141,25 @@ describe("About Access", () => {
     expect(notices.clear).toHaveBeenLastCalledWith("about-access:file:docs/plan.md");
   });
 
+
+  it("neither reports nor clears when workspace A's read fails after the switch to B", async () => {
+    const forA = deferred<AccessAnswer>();
+    bridgeMock.getObjectAccess.mockImplementation(({ workspaceId }) =>
+      workspaceId === "workspace-a" ? forA.promise : Promise.resolve(answer()));
+    const { rerender } = render(<Access workspaceId="workspace-a" />);
+    await waitFor(() => expect(bridgeMock.getObjectAccess).toHaveBeenCalledTimes(1));
+    rerender(<Access workspaceId="workspace-b" />);
+    await screen.findByTestId("about-access-empty");
+    const clears = notices.clear.mock.calls.length;
+    await act(async () => {
+      forA.reject(new Error("disk is busy"));
+      await forA.promise.catch(() => undefined);
+    });
+    expect(notices.report).not.toHaveBeenCalled();
+    expect(notices.clear.mock.calls.length).toBe(clears);
+    expect(screen.queryByTestId("about-access-failed")).toBeNull();
+  });
+
   it("never shows workspace A's answer after a switch to workspace B", async () => {
     const forA = deferred<AccessAnswer>();
     bridgeMock.getObjectAccess.mockImplementation(({ workspaceId }) =>

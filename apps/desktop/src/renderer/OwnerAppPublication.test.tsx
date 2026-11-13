@@ -102,6 +102,46 @@ describe("owner app publication", () => {
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
   });
 
+
+  it.each([approvedCollection, "unavailable" as const])("confirms revocation of %s, sends the displayed revision, and keeps the app published", async currentCapability => {
+    let revision = 7;
+    api.publishOwnerApp.mockImplementation(async request => {
+      if (request.action === "list") return {kind:"listed",publications:[{publicationId:published.publicationId,authorityRevision:revision,shareId:row.shareId,grantId:row.grantId,active:true,datasetCapability: null, collectionCapability: revision === 7 ? currentCapability : null, linkCurrent: true, manifestUnavailable: false,appRoot:"trip",sourceRevision:prepared.sourceRevision}],nextCursor:null};
+      if (request.action === "revokeCollection") { revision++; return {kind:"collectionRevoked",publicationId:published.publicationId,authorityRevision:revision}; }
+      return answer(request);
+    });
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />); await open();
+    if (currentCapability !== "unavailable") {
+      expect(screen.getByText("Shown in the app: destination")).toBeTruthy();
+      expect(screen.getByText("People with this share can read every response file and all its fields.")).toBeTruthy();
+    }
+    fireEvent.click(screen.getByRole("button",{name:`Revoke collection access ${published.publicationId}`}));
+    expect(api.publishOwnerApp.mock.calls.some(([input])=>input.action==="revokeCollection")).toBe(false);
+    expect(screen.getByText("Saved responses stay in your workspace. Copies already received cannot be removed.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button",{name:"Revoke access"}));
+    await screen.findByText("App collection access revoked. Prepare the app again to review and restore access.");
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({action:"revokeCollection",workspaceId:"ws-trip",publicationId:published.publicationId,expectedAuthorityRevision:7});
+    expect(screen.getByRole("button",{name:`Unpublish ${published.publicationId}`})).toBeTruthy();
+    await screen.findByText("No collection access");
+    expect(screen.queryByRole("button",{name:`Revoke collection access ${published.publicationId}`})).toBeNull();
+  });
+
+  it("does not show a late revocation result in another workspace", async () => {
+    const pending = deferred<OwnerAppPublicationResult>();
+    api.publishOwnerApp.mockImplementation(async request => {
+      if(request.action==="list") return {kind:"listed",publications:request.workspaceId==="ws-trip"?[{publicationId:published.publicationId,authorityRevision:7,shareId:row.shareId,grantId:row.grantId,active:true,datasetCapability: null, collectionCapability: approvedCollection, linkCurrent: true, manifestUnavailable: false,appRoot:"trip",sourceRevision:prepared.sourceRevision}]:[],nextCursor:null};
+      if(request.action==="revokeCollection") return pending.promise;
+      return answer(request);
+    });
+    const view=render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);await open();
+    fireEvent.click(screen.getByRole("button",{name:`Revoke collection access ${published.publicationId}`}));
+    fireEvent.click(screen.getByRole("button",{name:"Revoke access"}));
+    expect((screen.getByRole("button",{name:"Close"}) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<OwnerAppPublication workspaceId="ws-other" appRoot="other" />);await open();
+    await act(async()=>pending.resolve({kind:"collectionRevoked",publicationId:published.publicationId,authorityRevision:8}));
+    expect(screen.queryByText("App collection access revoked. Prepare the app again to review and restore access.")).toBeNull();
+  });
+
   it("never paints workspace A's pending preparation in workspace B", async () => {
     const pending = deferred<OwnerAppPublicationResult>();
     api.publishOwnerApp.mockImplementation(request => request.action === "prepare" ? pending.promise : answer(request));
@@ -153,6 +193,19 @@ describe("owner app publication", () => {
     expect(scope.textContent).toContain("cannot change or delete existing records");
     await userEvent.setup().click(screen.getByRole("button", { name: "Publish this revision" }));
     expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "approve", workspaceId: "ws-trip", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest });
+  });
+
+
+  it.each([undefined, [{ kind: "collection-create", collectionPath: "trip/responses" }]])("refuses malformed or missing capabilities: %j", async capabilities => {
+    api.publishOwnerApp.mockImplementation(request => request.action === "prepare" ? Promise.resolve({ ...prepared, capabilities } as unknown as OwnerAppPublicationResult) : answer(request));
+    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" />);
+    await open();
+    await userEvent.setup().selectOptions(screen.getByLabelText("Publication share link"), "grant-trip");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Prepare app" }));
+    await screen.findByText("dohc could not verify this app's data access. Prepare the app again.");
+    expect(screen.queryByRole("button", { name: "Publish this revision" })).toBeNull();
+    expect(api.publishOwnerApp.mock.calls.some(([input]) => input.action === "approve")).toBe(false);
+    expect(api.publishOwnerApp).toHaveBeenCalledWith({ action: "cancel", workspaceId: "ws-trip", approvalId: prepared.approvalId });
   });
 
   it("keeps concurrent removal results visible until every panel finishes", async () => {

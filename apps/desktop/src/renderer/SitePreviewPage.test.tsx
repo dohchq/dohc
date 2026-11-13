@@ -247,6 +247,18 @@ describe("SitePreviewPage", () => {
       bridgeMock.getSitePackage.mockResolvedValue(site);
     });
 
+
+    it("ignores another workspace's trust change", async () => {
+      trust.trusted = false;
+      bridgeMock.getSitePackage.mockResolvedValue(packageApp);
+      render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+      await screen.findByTestId("restricted-mode-state");
+      act(() => { for (const listener of trustListeners) listener({ workspaceId: "ws-other", trusted: true }); });
+      expect(starts()).toEqual(["static"]);
+      expect(screen.getByTestId("restricted-mode-state")).toBeTruthy();
+      bridgeMock.getSitePackage.mockResolvedValue(site);
+    });
+
     it("builds nothing for Share, and shares once the person trusts the workspace", async () => {
       trust.trusted = false;
       const needsBuild: SitePackageInfo = {
@@ -761,6 +773,41 @@ describe("SitePreviewPage", () => {
     expect((screen.getByTestId("site-preview-reload") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("site-preview-open-external") as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("site-preview-stop")).toBeTruthy();
+  });
+
+
+  it("refuses to render https loopback preview URLs", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "static",
+      url: "https://127.0.0.1:49152/",
+      logs: [],
+      exited: false,
+      generation: 1,
+    });
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
+  });
+
+  it("refuses to render authenticated loopback preview URLs", async () => {
+    bridgeMock.startSitePreview.mockResolvedValueOnce({
+      siteRoot: "report",
+      mode: "static",
+      url: "http://user:pass@127.0.0.1:49152/",
+      logs: [],
+      exited: false,
+      generation: 1,
+    });
+    render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
+
+    await screen.findByText("Report");
+
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
   it("does not let a stale stop completion clear a replacement site", async () => {

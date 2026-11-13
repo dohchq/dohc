@@ -680,6 +680,30 @@ describe("collectZipEntries", () => {
     );
   });
 
+
+  it("refuses an oversized export instead of buffering it", async () => {
+    // 3 x 100MB sparse-ish writes would be slow; instead lower the bar by
+    // exceeding the ENTRY cap with many tiny files in one directory tree.
+    await mkdir(join(root, "many"), { recursive: true });
+    await Promise.all(
+      Array.from({ length: 2001 }, (_, i) =>
+        writeFile(join(root, "many", `f-${i}.md`), "x"),
+      ),
+    );
+    await expect(collectZipEntries(root, "many")).rejects.toThrow(/Export too large/);
+    await expect(
+      collectZipEntries(root, "many", {
+        includeArchivePath: () => false,
+      }),
+      "excluded projection files are buffered before owner replacement",
+    ).resolves.toMatchObject({ entries: [] });
+    // 30s because this one writes 2001 real files — an I/O budget, not a logic
+    // budget. Scoped to this test: the other 58 in this file measured
+    // under 1s on a loaded box, and a file-wide bump would multiply how long a
+    // genuine hang takes to surface. The old 15s bound was measured from
+    // inside: 13.0s on a 24-process load, 2026-08-03.
+  }, 30_000);
+
   it("keeps secrets out of MOUNTED-share exports too (read-aware floor)", async () => {
     await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
     await writeFile(join(root, SHARED_WITH_ME_FOLDER, "alex", "brief.md"), "fine");
@@ -918,6 +942,42 @@ describe("importDroppedPaths", () => {
 
   // The validator decodes %2f and reads \ as a separator, so these names
   // would land as cfg/evil, through the link cfg, outside the workspace.
+
+  it("takes 1,000 files and folders from a drop with folders, and refuses the whole drop past that", async () => {
+    const outside = await createTestScratch("dohc-many-");
+    const fits = join(outside, "fits");
+    await mkdir(join(fits, "inner"), { recursive: true });
+    // The two folders and 998 files make 1,000.
+    await Promise.all(Array.from({ length: 998 }, (_, i) => writeFile(join(fits, "inner", `f-${i}.md`), "x")));
+    const landed = await importDroppedPaths(root, [fits], [root]);
+    expect([landed.imported.length, landed.folders]).toEqual([998, ["fits"]]);
+
+    const over = join(outside, "over");
+    await mkdir(over, { recursive: true });
+    await writeFile(join(outside, "loose.md"), "x");
+    await Promise.all(Array.from({ length: 999 }, (_, i) => writeFile(join(over, `f-${i}.md`), "x")));
+    // A file, the folder, and its 999 files make 1,001: nothing lands.
+    await expect(importDroppedPaths(root, [join(outside, "loose.md"), over], [root]))
+      .rejects.toThrow("dohc imports up to 1,000 files and folders from one drop. Drop fewer folders at a time.");
+    expect(await readdir(root)).toEqual(["fits"]);
+  }, 120_000);
+
+  it("refuses a symlink pointing at a secret outside the workspace (exfil vector)", async () => {
+    // A compromised renderer forging droppedPaths could plant a symlink to a
+    // secret and rely on realpath-then-isFile to copy the SECRET's bytes into
+    // the (possibly cloud-synced) workspace. lstat-ing the original source
+    // refuses the link before it ever resolves to the target.
+    const secrets = await createTestScratch("dohc-secrets-");
+    await writeFile(join(secrets, "id_rsa"), "PRIVATE KEY");
+    const stage = await createTestScratch("dohc-stage-");
+    await symlink(join(secrets, "id_rsa"), join(stage, "innocent.txt"), "file");
+    const outcome = await importDroppedPaths(root, [join(stage, "innocent.txt")], [root]);
+    expect(outcome).toEqual({ imported: [], skipped: 1, skippedSources: [{ path: "innocent.txt", reason: "link" }] });
+    expect(existsSync(join(root, "innocent.txt"))).toBe(false);
+    // Nothing landed in the workspace — the secret never left its directory.
+    expect(await readdir(root)).toEqual([]);
+  });
+
   it("refuses a name the destination would rewrite, which would land through a link", async () => {
     const outside = await createTestScratch("dohc-drop-");
     const elsewhere = await createTestScratch("dohc-elsewhere-");
@@ -995,6 +1055,25 @@ describe("importDroppedPaths", () => {
 
   // The forged identity stands for a screen that recorded the link target's
   // file. The folder check after the open still refuses the read.
+
+  it("refuses a drop whose folders hold more than 10,000 entries it leaves out", async () => {
+    const outside = await createTestScratch("dohc-many-");
+    const trip = join(outside, "Trip");
+    await mkdir(trip);
+    await writeFile(join(trip, "plan.md"), "plan");
+    // In batches: 10,000 files open at once run out of handles on Windows.
+    for (let start = 0; start < 10_000; start += 500) {
+      await Promise.all(Array.from({ length: 500 }, (_, i) => writeFile(join(trip, `._${start + i}`), "")));
+    }
+    expect((await importDroppedPaths(root, [trip], [root])).imported).toEqual(["Trip/plan.md"]);
+
+    await writeFile(join(trip, "._10000"), "");
+    await expect(importDroppedPaths(root, [trip], [root], "Trip")).rejects.toThrow(
+      "dohc reads up to 10,000 files it leaves out, such as .DS_Store, in one drop. Drop fewer folders at a time.",
+    );
+    expect(await readdir(join(root, "Trip"))).toEqual(["plan.md"]);
+  });
+
   it("checks the file's folder again after opening it", async () => {
     const outside = await createTestScratch("dohc-drop-");
     const secrets = await createTestScratch("dohc-secrets-");

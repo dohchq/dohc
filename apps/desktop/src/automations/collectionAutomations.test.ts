@@ -1193,7 +1193,7 @@ describe("Collection automations", () => {
       .resolves.toEqual({ status: "refused", reason: "You already undid this run." });
   });
 
-  it.each(["stop-and-restore"] as const)("keeps %s unfinished when its WAL barrier fails and preserves completed reversal keys", async (mode: "undo" | "kept" | "stop-and-restore") => {
+  it.each(["undo", "kept", "stop-and-restore"] as const)("keeps %s unfinished when its WAL barrier fails and preserves completed reversal keys", async mode => {
     const w = await world({collections: ["Tasks", "Log"], automations: {Tasks: STAMP}});
     const task = w.addRecord("Tasks", "one", {Status: "Done", Count: 2, Note: "old"});
     const claim = w.claim("collection:Tasks#stamp", task);
@@ -1229,6 +1229,53 @@ describe("Collection automations", () => {
     expect(await attempt()).toMatchObject(mode === "stop-and-restore" ? {errorMessage: null} : {status: "undone"});
     expect(log).toEqual(["barrier", "barrier", "done"]);
     expect(w.fieldsOf(task).Count).toBe(3);
+  });
+
+
+  it("makes shared reversal receipts durable before appending them and finishing Undo", async () => {
+    const w = await world({automations: {Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n"}});
+    const task = w.addRecord("Tasks", "one", {Status: "Done", Note: "old"});
+    const claim = w.claim("collection:Tasks#finish", task);
+    const log: string[] = [];
+    const draft = {outboxId: "undo", appendKey: "undo/Note", nativeHeadSequence: 2,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: task.id, lineageClaimId: "a".repeat(64),
+        currentPath: task.path, selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    const executor = w.makeExecutor({withUndoWrites: async (_signal, work) => work({
+      setFields: async () => {log.push("write"); return {replaced: {}, kept: {}, sharedFileUpdates: {Note: draft}};},
+      create: async () => {throw Error("Not used");},
+    }), store: {...w.baseStore, recordUndoWrites: async (run, writes) => {
+      log.push("receipt"); await w.baseStore.recordUndoWrites(run, writes);
+    }, updateState: async (run, state) => {
+      if (state.undo === "done") log.push("done"); await w.baseStore.updateState(run, state);
+    }}});
+    onTestFinished(() => executor.dispose()); await executor.open(); await w.settledClaim(claim);
+    let fail = true;
+    w.engine.makeAutomationWritesDurable = async () => {log.push("barrier"); if (fail) throw Error("WAL sync failed");};
+    w.engine.sharedFileUpdateStates = async writes => writes.map(() => "pending");
+    const input = {automationId: claim.automationId, claimId: claim.claimId, deletes: null};
+    await expect(executor.undo(input, async () => {})).rejects.toThrow("WAL sync failed");
+    expect(log).toEqual(["write", "barrier"]);
+    expect((await w.baseStore.runsOf(claim.automationId, claim.claimId)).runs[0]?.undoWrites ?? []).toEqual([]);
+    fail = false; log.length = 0;
+    expect(await executor.undo(input, async () => {})).toMatchObject({status: "undone"});
+    expect(log).toEqual(["write", "barrier", "receipt", "done"]);
+  });
+
+  it.each([false, true])("waits for WAL durability before a restore journal receipt (Undo: %s)", async undo => {
+    const w = await world({automations: {Tasks: BUMP}}); await w.executor.open();
+    await w.executor.savePendingRestore({id: "restore", claims: [], session: {grants: [],
+      target: {kind: "person", userId: "owner"}, label: "Owner", definitions: [], filesUndone: false,
+      receipts: [], result: {status: "waiting"}}});
+    const receipt = {path: "Tasks/one.md", restoredMomentId: "restore-1"};
+    if (undo) await w.executor.recordRestoreReceipts("restore", [receipt]);
+    let fail = true;
+    w.engine.makeAutomationWritesDurable = async () => {if (fail) throw Error("WAL sync failed");};
+    const attempt = () => undo ? w.executor.undoRestoreReceipts("restore", [receipt.restoredMomentId])
+      : w.executor.recordRestoreReceipts("restore", [receipt]);
+    await expect(attempt()).rejects.toThrow("WAL sync failed");
+    expect((await w.executor.pendingRestores())[0]?.session?.receipts).toEqual(undo ? [receipt] : []);
+    fail = false; await attempt();
+    expect((await w.executor.pendingRestores())[0]?.session?.receipts).toEqual(undo ? [] : [receipt]);
   });
 
   it.each([

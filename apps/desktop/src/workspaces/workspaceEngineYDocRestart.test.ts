@@ -256,6 +256,23 @@ it("refuses a folder delete when owner adoption finishes during teardown and rel
 const MOVE_AUTHOR = { kind: "human" as const, humanId: "local-person" };
 const MOVE_OPERATION = "dohc-operation:44444444-4444-4444-8444-444444444444";
 
+
+it("refuses deleting an owned page, or a folder that holds one, before anything closes", async () => {
+  const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-folder-delete-");
+  await mkdir(join(rootPath, "notes"));
+  await writeFile(join(rootPath, "notes/page.md"), "original");
+  state.ownedUnder = "notes/page.md";
+  state.ownedPage = "notes/page.md";
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes")).rejects.toMatchObject({ name: "LiveFolderError",
+    message: [`dohc can't delete "notes" while a page in it has live editing on`,
+      "In Live documents, stop live editing for every page in this folder, then delete the folder again."].join(String.fromCharCode(10)) });
+  await expect(capture.settleAndCloseLiveSessionsForPath("notes/page.md")).rejects.toMatchObject({ name: "LivePageOwnedError",
+    message: [`dohc can't delete "notes/page.md" while it has live editing on`,
+      "In Live documents, stop live editing for this page, then delete it again."].join(String.fromCharCode(10)) });
+  expect(await readFile(join(rootPath, "notes/page.md"), "utf8")).toBe("original");
+  await capture.stop();
+});
+
 it("refuses a move that would replace an owned page or a folder that holds one, before anything closes or moves", async () => {
   const { capture, state, rootPath } = await reconnectFailureCapture("dohc-owned-move-destination-");
   await mkdir(join(rootPath, "notes"));

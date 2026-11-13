@@ -539,3 +539,67 @@ describe("registered discussion poll lifetime", () => {
     expect(h.polls.activeCount()).toBe(0);
   });
 });
+
+const ownerInputs = {
+  ownerRestore: {workspaceId, action: "options", path: "notes.md"},
+  listOwnerLiveDocuments: {workspaceId},
+  listOwnerLiveRefusals: {workspaceId},
+  retryOwnerLiveShare: {workspaceId, shareId: "share"},
+  stopOwnerLiveDocument: {workspaceId, path: "live.md"},
+  resumeOwnerLiveDocument: {workspaceId, path: "live.md"},
+  retryOwnerLiveQuarantine: {workspaceId, objectId: "object", incident: "outbox:delivery:0"},
+  listRelayShares: undefined,
+  getRelayReceivedShare: {shareId: "share"},
+  revokeRelayShare: {shareId: "share"},
+  undoRelayShare: {workspaceId, shareId: "share", undoId: "undo-1"},
+  pollRelayShareDiscussionActivity: pollInput,
+  cancelRelayShareDiscussionActivity: {pollId: pollInput.pollId},
+  createRelayShare: {workspaceId, paths: ["docs"], recipientEmail: "friend@dohc.test", access: "edit"},
+  createRelayShareLink: linkInput,
+  addRelayShareLink: {workspaceId, shareId: "share", access: "view"},
+  listRelayShareLinks: {workspaceId},
+  retuneRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: [], access: "view"},
+  rotateRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []},
+  revokeRelayShareLink: {workspaceId, shareId: "share", grantId: "grant", expectedDependentGrantIds: []},
+  listRelayShareLinkAgents: {workspaceId, shareId: "share", grantId: "grant"},
+  disconnectRelayShareLinkAgent: {workspaceId, shareId: "share", grantId: "grant", connectionId: "connection"},
+  listRelayShareDiscussion: {workspaceId, shareId: "share", direction: "newest-first"},
+  appendRelayShareDiscussion: {workspaceId, shareId: "share", body: "Hello", idempotencyKey: "54df38bc-6863-46a7-964a-820d81e833aa"},
+  deleteRelayShareDiscussionMessage: {workspaceId, shareId: "share", messageId: "message"},
+  blockRelayShareDiscussionPrincipal: {workspaceId, shareId: "share", principalId: "principal"},
+  unblockRelayShareDiscussionPrincipal: {workspaceId, shareId: "share", principalId: "principal"},
+  pauseRelayShareDiscussion: {workspaceId, shareId: "share"},
+  resumeRelayShareDiscussion: {workspaceId, shareId: "share"},
+  promoteRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant", expectedParentGrantId: "parent", expectedParentGeneration: 2},
+  revokeRelayShareGrant: {workspaceId, shareId: "share", grantId: "grant"},
+  saveOwnerLiveRecoveryCopy: {workspaceId, path: "notes/a.md"},
+} satisfies Record<keyof typeof relayShareOperations, unknown>;
+const ownerRows = Object.entries(relayShareOperations).map(([name, row]) => ({
+  name, row, input: ownerInputs[name as keyof typeof ownerInputs],
+}));
+const workspaceRows = ownerRows.filter(
+  (entry): entry is typeof entry & {row: Extract<typeof entry.row, {guard: "active-workspace"}>} =>
+    entry.row.guard === "active-workspace",
+);
+
+describe("owner operation admission", () => {
+  it.each(workspaceRows)("binds $name to the sender's workspace before remote access", async ({row, input}) => {
+    const h = harness();
+    await expect(h.invoke(row.channel, {...input, workspaceId: "another-workspace"})).rejects.toThrow(
+      row.inactiveMessage,
+    );
+    expect(h.remote).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
+    expect(h.accountRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(workspaceRows)("refuses $name in a shared view before remote access", async ({row, input}) => {
+    const h = harness();
+    h.workspace.shareView = {};
+    h.remote.mockRejectedValue(new Error("remote reached"));
+    await expect(h.invoke(row.channel, input)).rejects.toThrow("original workspace");
+    expect(h.remote).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
+  });
+
+});

@@ -144,6 +144,18 @@ describe("ChatLane", () => {
     expect((screen.getByTestId("chats-lane-composer") as HTMLTextAreaElement).value).toBe("Reply");
   });
 
+
+  it("does not report an old read after switching workspaces", async () => {
+    const read = deferred<void>();
+    bridgeMock.markChatThreadRead.mockReturnValueOnce(read.promise);
+    const view = render(lane());
+    await screen.findByText("Old message");
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [] });
+    view.rerender(lane("channel-2", "workspace-b"));
+    await act(async () => read.resolve());
+    expect(onThreadRead).not.toHaveBeenCalled();
+  });
+
   it("marks the first unread message with a New divider when the lane opens", async () => {
     bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ messageCount: 3, lastReadSequence: 1, unreadCount: 2 })] });
     bridgeMock.listChatMessages.mockResolvedValue({ messages: [

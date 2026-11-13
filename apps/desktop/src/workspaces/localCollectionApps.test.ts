@@ -15,7 +15,7 @@ import { compileClosedApp } from "./closedAppCompiler";
 import { generateDatasetFormSources } from "./datasetFormGenerator";
 import { generateDatasetSources } from "./datasetGenerator";
 import { createLocalAppLaunchHost, LocalAppUnavailableError } from "./localAppLaunch";
-import { LocalCollectionRefusal, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
+import { MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION, LocalCollectionRefusal, type Envelope, type LocalCollectionEngine } from "./localCollectionApps";
 import { createLocalDatasetHost, type LocalDatasetHost } from "./localDatasetHost";
 import { prepareLocalAppPublication } from "./ownerAppPublication";
 import { unguardedCollections } from "../testing/collectionsHolder";
@@ -198,6 +198,23 @@ describe("local document Collection apps", () => {
     const receipt = await f.create({ destination: "Tokyo" }, "response-1", restarted);
     expect(receipt).toMatchObject({ acceptedAtMs: createdAt, objectId: "object-0" });
     expect([...f.engine.files().keys()].filter(path => path.endsWith(".md"))).toEqual([receipt.path]);
+  });
+
+
+  it("keeps the lifetime response limit across withdrawal and reapproval", async () => {
+    const f = await fixture();
+    f.inspect(db => {
+      const insert = db.prepare("INSERT INTO local_collection_creates VALUES(?,?,?,?,NULL,?,?,1)");
+      db.exec("BEGIN");
+      for (let n = 0; n < MAX_LOCAL_COLLECTION_CREATES_PER_PUBLICATION - 1; n++) insert.run(f.published.publicationId, `seed-${n}`, "0".repeat(64), 1, JSON.stringify({ kind: "notWritten", reason: "seed" }), 0);
+      db.exec("COMMIT");
+    });
+    await f.create({ destination: "Tokyo" }, "last");
+    await expect(f.create({ destination: "Tokyo" }, "over")).rejects.toThrow(/response limit/);
+    expect(await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision)).toMatchObject({ kind: "withdrawn" });
+    const again = await f.host.apps.activate(f.prepared, signal());
+    expect(again.publicationId).toBe(f.published.publicationId);
+    await expect(f.create({ destination: "Tokyo" }, "over", f.host, again.authorityRevision)).rejects.toThrow(/response limit/);
   });
 
   it("reports an unconfirmed withdrawal while the engine is down and confirms it at the same revision later", async () => {

@@ -612,6 +612,26 @@ describe("RelayShareDialog", () => {
     expect(screen.queryByTestId("share-link-row-damaged-ended")).toBeNull();
   });
 
+
+  it("creates a paths link with the physical workspace and explicit View access", async () => {
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="physical-ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md", "assets/map.png"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await user.click(screen.getByTestId("share-link-create"));
+
+    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
+      workspaceId: "physical-ws-1",
+      paths: ["docs/plan.md", "assets/map.png"],
+      access: "view",
+    });
+  });
+
   it("warns before an Edit link that would stop automations, naming anyone who opens it, and makes it on the second Create", async () => {
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [], supportedLinkAccess: ["view", "comment", "edit"] });
     bridgeMock.automationShareImpact.mockResolvedValue({
@@ -636,6 +656,26 @@ describe("RelayShareDialog", () => {
     await user.click(create);
     expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({ workspaceId: "physical-ws-1", paths: ["Trip"], access: "edit" });
     expect(bridgeMock.automationShareImpact).toHaveBeenCalledTimes(1);
+  });
+
+
+  it("creates a version link with the physical workspace and explicit View access", async () => {
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="physical-ws-1"
+        target={{ kind: "version", versionId: "version-7", versionName: "review" }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await user.click(screen.getByTestId("share-link-create"));
+
+    expect(bridgeMock.createRelayShareLink).toHaveBeenCalledWith({
+      workspaceId: "physical-ws-1",
+      versionId: "version-7",
+      access: "view",
+    });
   });
 
   it("keeps the complete URL volatile and copies it only after an explicit click", async () => {
@@ -979,6 +1019,68 @@ codex mcp login dohc-share`);
       grantId: "grant-link-1",
       expectedDependentGrantIds: ["dependent-new-a", "dependent-new-z"],
     });
+  });
+
+
+  it("keeps B busy when a lifecycle success from A arrives late", async () => {
+    const resetA = controllable<{ outcome: "rotated"; url: string }>();
+    const endB = controllable<{ outcome: "ended"; undo: typeof UNDO }>();
+    bridgeMock.rotateRelayShareLink.mockReturnValueOnce(resetA.promise);
+    bridgeMock.revokeRelayShareLink.mockReturnValueOnce(endB.promise);
+    bridgeMock.listRelayShareLinks.mockImplementation(
+      async ({ workspaceId }: { workspaceId: string }) => ({
+        links:
+          workspaceId === "ws-a"
+            ? [readableLink("grant-a", { shareId: "share-a" })]
+            : [readableLink("grant-b", { shareId: "share-b" })],
+      }),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-a"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    let row = await screen.findByTestId("share-link-row-grant-a");
+    await chooseLinkOption(user, row, "Reset link");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "Reset link",
+      }),
+    );
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-b"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    row = await screen.findByTestId("share-link-row-grant-b");
+    await chooseLinkOption(user, row, "End link");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "End link",
+      }),
+    );
+
+    await act(async () => {
+      resetA.resolve({ outcome: "rotated", url: LINK_URL_A });
+    });
+
+    expect(screen.queryByText(LINK_URL_A)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Ending…" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    await act(async () => {
+      endB.resolve({ outcome: "ended", undo: UNDO });
+    });
+    expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
   });
 
   it("ignores a stale success after the workspace changes without clearing B busy", async () => {
@@ -1328,6 +1430,73 @@ codex mcp login dohc-share`);
     row = screen.getByTestId("share-link-row-stale-retune");
     await expectActiveLinkControls(user, row, "Can comment");
     expect(bridgeMock.retuneRelayShareLink).toHaveBeenCalledTimes(1);
+  });
+
+
+  it("keeps a newer retune busy when a stale widening arrives", async () => {
+    const widenA = controllable<{ outcome: "widened"; url: string }>();
+    const narrowB = controllable<{ outcome: "narrowed" }>();
+    bridgeMock.retuneRelayShareLink
+      .mockReturnValueOnce(widenA.promise)
+      .mockReturnValueOnce(narrowB.promise);
+    bridgeMock.listRelayShareLinks.mockImplementation(
+      async ({ workspaceId }: { workspaceId: string }) => ({
+        links: [
+          readableLink(`grant-${workspaceId}`, {
+            shareId: `share-${workspaceId}`,
+            access: workspaceId === "ws-a" ? "view" : "comment",
+          }),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <RelayShareDialog
+        workspaceId="ws-a"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    let row = await screen.findByTestId("share-link-row-grant-ws-a");
+    await chooseLinkAccess(user, row, "Can comment");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "Turn on comments",
+      }),
+    );
+
+    view.rerender(
+      <RelayShareDialog
+        workspaceId="ws-b"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    row = await screen.findByTestId("share-link-row-grant-ws-b");
+    await chooseLinkAccess(user, row, "Can view");
+    await user.click(
+      within(screen.getByTestId("share-link-confirmation")).getByRole("button", {
+        name: "Turn off comments",
+      }),
+    );
+
+    await act(async () => {
+      widenA.resolve({ outcome: "widened", url: LINK_URL_A });
+    });
+    expect(screen.queryByText(LINK_URL_A)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Turning off comments…" }).hasAttribute(
+        "disabled",
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      narrowB.resolve({ outcome: "narrowed" });
+    });
+    expect(screen.queryByText(LINK_URL_A)).toBeNull();
+    expect(screen.queryByTestId("share-link-confirmation")).toBeNull();
   });
 
   it("appends ordered pages without duplicates and renders owner tombstones", async () => {

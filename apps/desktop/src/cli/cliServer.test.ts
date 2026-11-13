@@ -1142,6 +1142,16 @@ describe("CLI socket server", () => {
     });
   });
 
+
+  it("refuses a fileWrite envelope larger than 14 MiB before opening the workspace", async () => {
+    if (!server) throw new Error("This test requires the CLI socket.");
+    const opened = calls.openWorkspace;
+    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
+      args: { cwd: workspaceRoot, actor: "agent", requestId: "oversized", files: [{ path: "large.txt", contentBase64: "A".repeat(14 * 1024 * 1024) }] } });
+    expect(response).toMatchObject({ ok: false, error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches." });
+    expect(calls.openWorkspace).toBe(opened);
+  });
+
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
