@@ -27,8 +27,9 @@ CREATE TABLE chat_account_read_seeds (
 
 -- The Groups this workspace joined from another person's share, by wire id.
 -- Their threads keep local counts and never take an account mark. A shared
--- lane records each one as it applies the Group's ops; this backfill finds
--- the ones an earlier build already applied.
+-- lane records each one as it applies the Group's ops, and the owner's other
+-- computers learn it from the `channelJoined` flag on the owner's thread
+-- export. These backfills find the ones an earlier build already held.
 CREATE TABLE chat_joined_channels (
     workspace_id TEXT NOT NULL,
     wire_id      TEXT NOT NULL CHECK (length(CAST(wire_id AS BLOB)) > 0),
@@ -49,6 +50,19 @@ SELECT workspace_id, wire_id FROM (
     WHERE op_kind = 'chat.thread.create' AND origin_id GLOB 'shared:*'
 )
 WHERE typeof(wire_id) = 'text' AND length(CAST(wire_id AS BLOB)) > 0;
+-- A copy that met a joined Group only through the owner's own sync holds it
+-- as a placeholder: the Group's create travels only on the share lane, and
+-- ordinary sync carries only a copy's own records. An owned Group whose
+-- create has not arrived yet looks the same; it keeps local counts.
+INSERT OR IGNORE INTO chat_joined_channels (workspace_id, wire_id)
+SELECT p.workspace_id, p.wire_id FROM chat_channel_placeholders p
+WHERE length(CAST(p.wire_id AS BLOB)) > 0
+  AND NOT EXISTS (
+    SELECT 1 FROM replication_log l
+    WHERE l.workspace_id = p.workspace_id AND l.op_kind = 'chat.channel.create'
+      AND (CASE WHEN json_valid(l.payload_json)
+                THEN json_extract(l.payload_json, '$.wireId') END) = p.wire_id
+  );
 
 -- Finds an account's journaled read mark for one thread, so an authorized
 -- mark publishes a coordinate that was stored without a record.

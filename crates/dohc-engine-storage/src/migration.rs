@@ -5767,7 +5767,7 @@ mod tests {
             ),
             (
                 "v2-chat-account-thread-reads",
-                "cf3a4f56e015fff278768012d4312f181fffc2c56d54c2f5152a75438d13cc73",
+                "70a3f6bf42961a6c1be343690179dca7395d926d923859677869173bbed73777",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -7933,7 +7933,10 @@ mod tests {
                (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES \
                ('ws','shared:share-1:bob',0,'chat.channel.create','{\"wireId\":\"wire-bob\"}',1,1), \
                ('ws','shared:share-2:cy',0,'chat.thread.create','{\"threadId\":\"t-9\",\"channelWireId\":\"wire-cy\"}',1,1), \
-               ('ws','own-origin',0,'chat.channel.create','{\"wireId\":\"wire-own\"}',1,0);",
+               ('ws','own-origin',0,'chat.channel.create','{\"wireId\":\"wire-own\"}',1,0); \
+             INSERT INTO chat_channel_placeholders (workspace_id,channel_id,wire_id) VALUES \
+               ('ws','c-dana','wire-dana'), \
+               ('ws','c-own','wire-own');",
         )
         .unwrap();
         assert!(
@@ -7966,8 +7969,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            joined, "wire-bob,wire-cy",
-            "only Groups a shared lane applied are joined"
+            joined, "wire-bob,wire-cy,wire-dana",
+            "Groups a shared lane applied, and placeholders no create named, are joined"
         );
         let read_index: i64 = conn
             .query_row(

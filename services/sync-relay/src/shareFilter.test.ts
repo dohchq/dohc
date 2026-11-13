@@ -781,6 +781,21 @@ describe("chat share op filter", () => {
     return filterOpForShare(channelShare, opKind, JSON.stringify(payload), resolver);
   }
 
+  it("serves and stores no joined flag from an owner's thread export", () => {
+    const record = {
+      threadId: "thread-in", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared", lane: "chat",
+      channelJoined: true,
+    };
+    for (const decision of [
+      decide("chat.thread.create", record),
+      filterOpForShareAppend(channelShare, "chat.thread.create", JSON.stringify(record), resolver),
+    ]) {
+      expect(decision.allowed).toBe(true);
+      if (!decision.allowed) continue;
+      expect(decision.payload).not.toHaveProperty("channelJoined");
+    }
+  });
+
   it("never serves or takes an account's thread read mark through a Group or channel share", () => {
     const mark = JSON.stringify({
       accountUserId: "user-a", threadId: "thread-in", lastReadCreatedAtMs: 1, lastReadMessageId: "m-1", atMs: 1,

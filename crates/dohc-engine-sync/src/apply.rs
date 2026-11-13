@@ -786,6 +786,11 @@ struct ThreadCreate {
     /// Absent from ops written before the groups migration: a post.
     #[serde(default)]
     lane: Option<String>,
+    /// Set by an owner's computer when the thread's Group was joined from
+    /// another person's share. Absent on older records and on any record a
+    /// share serves.
+    #[serde(default)]
+    channel_joined: bool,
 }
 
 #[derive(Deserialize)]
@@ -1413,6 +1418,20 @@ fn apply_thread(
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked path is invalid",
         });
+    }
+    // A joined Group keeps local read counts on every copy of the owner's
+    // workspace, so the flag is kept even for a thread this copy already has.
+    if payload.channel_joined {
+        let Some(wire_id) = payload.channel_wire_id.as_deref() else {
+            return Err(SyncError::InvalidInput {
+                reason: "chat thread joined flag needs a channel",
+            });
+        };
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_joined_channels (workspace_id, wire_id) VALUES (?1, ?2)",
+            params![op.workspace_id, wire_id],
+        )
+        .map_err(SyncError::persist)?;
     }
     let exists: bool = tx
         .query_row(

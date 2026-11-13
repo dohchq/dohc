@@ -8688,6 +8688,12 @@ fn ensure_thread_structure_exported(
                 "channelWireId".to_owned(),
                 serde_json::json!(channel_wire_id),
             );
+            // The owner's other computers learn that this Group was joined
+            // from someone else's share only from this record, so they keep
+            // local counts there too. A share's filter drops the field.
+            if channel_is_joined(tx, workspace_id, &channel_id)? {
+                payload_object.insert("channelJoined".to_owned(), serde_json::json!(true));
+            }
         }
     } else {
         let linked_object_id = linked_object_id.ok_or(DomainError::StateCorrupt {

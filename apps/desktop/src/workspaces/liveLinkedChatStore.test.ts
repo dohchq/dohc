@@ -34,10 +34,14 @@ describe("live linked chat store", () => {
   });
   it("asks the engine to record the owner's account once, even when the seed fails", async () => {
     const requests: Request[] = [];
+    let seedFails = true;
     const client = { close() {}, async sendRequest(request: Request): Promise<Response> {
       requests.push(request);
       if (request.method === "workspace.open") return { id: request.id, result: { workspace: "chat-handle" } };
-      if (request.method === "chats.readState.seedAccount") throw new Error("the engine is busy");
+      if (request.method === "chats.readState.seedAccount") {
+        if (seedFails) throw new Error("the engine is busy");
+        return { id: request.id, result: { recorded: true } };
+      }
       if (request.method === "chats.channels.list") return { id: request.id, result: { channels: [], nextCursor: null } };
       throw Error(`Unexpected request: ${request.method}`);
     } };
@@ -56,6 +60,16 @@ describe("live linked chat store", () => {
       await store.listChannelsPage({ workspaceId: "w", limit: 10 });
       await store.listChannelsPage({ workspaceId: "w", limit: 10 });
       expect(seeds().map(request => request.params)).toEqual([{ accountUserId: "owner", seedLocal: true }]);
+      expect(logged).toHaveBeenCalledOnce();
+
+      // Opening the workspace again makes a new store, which tries again.
+      seedFails = false;
+      const reopened = createLiveLinkedChatStore({ workspaceId: "w", rootPath: chatReadyRoot }, sessions, {
+        accountReadOwner: () => owner,
+      });
+      await reopened.listChannelsPage({ workspaceId: "w", limit: 10 });
+      await reopened.listChannelsPage({ workspaceId: "w", limit: 10 });
+      expect(seeds()).toHaveLength(2);
       expect(logged).toHaveBeenCalledOnce();
     } finally {
       logged.mockRestore();
