@@ -5448,19 +5448,19 @@ async function reclaimedBlocked(block: "refused" | "history-over-budget",
     }};
 }
 
-// Proves: a document reclaimed while idle with a block reports none while it
-// is not hosted, and the host applies the block it kept as an open adds the
-// document again, before any pass, so nothing captures in between. A refused
-// one is not captured again. One whose history was past the read budget keeps
-// the wait it had, so it is captured again only once that wait ends, as it
-// would have been had it never left.
+// Proves: a document reclaimed while idle with a block keeps reporting it
+// while it is not hosted, and the host applies the block it kept as an open
+// adds the document again, before any pass, so nothing captures in between. A
+// refused one is not captured again. One whose history was past the read
+// budget keeps the wait it had, so it is captured again only once that wait
+// ends, as it would have been had it never left.
 it.each(["refused", "history-over-budget"] as const)("keeps a %s block for a document reclaimed while idle, through the next open", async block => {
   const o = await reclaimedBlocked(block);
-  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.host.blocked(o.sibling)).toBe(block);
   expect(o.kept()).toBe(block);
   const captured = o.captures();
   o.enrol();
-  expect(o.host.blocked(o.sibling)).toBeUndefined();
+  expect(o.host.blocked(o.sibling)).toBe(block);
   await o.host.update({workspaces: o.workspaces, documents: [o.sibling], ...stay});
   expect(o.host.blocked(o.sibling)).toBe(block);
   await o.passes();

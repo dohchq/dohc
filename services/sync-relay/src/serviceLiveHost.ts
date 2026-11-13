@@ -1886,10 +1886,13 @@ export async function startServiceLiveHost(options: {
       diverged(): readonly {readonly workspaceId: string; readonly root: string}[] {
         return [...diverged].map(([root, workspaceId]) => ({workspaceId, root}));
       },
-      /** Why the hosted document failed the one capture it gets while it cannot progress and waits for its owner, if it did. */
+      /**
+       * Why the hosted document failed the one capture it gets while it cannot progress and waits for its owner, if it did.
+       * A document that is not hosted answers from the block and wait it keeps for when it is added again.
+       */
       blocked(document: {workspaceId: string; objectId: string}): ServiceActivationBlock | undefined {
         const key = hostedKey(document);
-        return key === undefined ? undefined : activation!.blocked(hosted.get(key)!.target);
+        return key === undefined ? activation?.keptBlock(document) : activation!.blocked(hosted.get(key)!.target);
       },
       /** Why the hosted pass left this document held, until a capture succeeds. */
       holdReason(document: {workspaceId: string; objectId: string}) {
