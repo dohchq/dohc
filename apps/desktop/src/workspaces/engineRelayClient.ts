@@ -29,6 +29,7 @@ import {
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
   type DirectWriteReport,
+  type DirectWritesWaiting,
   type PushDirectWritesResult,
   type SubmitShareProposalResult,
   type SyncRelayConnection,
@@ -618,6 +619,9 @@ export interface EngineRelayWorkspaceClient {
     shareId: string;
     grantedSelector: GrantedSelector;
   }): Promise<PushDirectWritesResult>;
+
+  // What a push that stopped in transit left unsent. A local read.
+  directWritesWaiting(input: { shareId: string }): Promise<DirectWritesWaiting>;
 }
 
 export interface EngineRelayClientOptions {
@@ -1075,6 +1079,18 @@ export class EngineRelayClient {
         }
         return {
           writes: result.writes.map((write) => directWriteReport(write, method)),
+          morePending: booleanField(result, "morePending", method),
+        };
+      },
+      directWritesWaiting: async ({ shareId }) => {
+        const method = "share.direct.waiting";
+        const result = resultRecord(
+          await request(method, { workspaceId: workspace.workspaceId, shareId }),
+          method,
+        );
+        return {
+          pages: numberField(result, "pages", method),
+          collectionWrites: numberField(result, "collectionWrites", method),
           morePending: booleanField(result, "morePending", method),
         };
       },

@@ -5597,6 +5597,8 @@ const DirectWriteRows = z.array(DirectWriteRow).max(MAX_DIRECT_WRITE_ROWS);
 // `unavailable`: the relay knows no Edit grant of this person's on the share,
 // because the owner ended the share or stopped them. `failed` keeps the writes answered before it;
 // `lasting` says trying again will not help, as when the grant is not Edit.
+// `pagesWaiting` counts the unsent writes when every one is a new page, so the
+// Notice can say pages; otherwise null.
 export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
   z.object({ status: z.literal("pushed"), writes: DirectWriteRows }),
   z.object({ status: z.literal("unavailable") }),
@@ -5605,6 +5607,7 @@ export const PushShareDirectWritesResult = z.discriminatedUnion("status", [
     writes: DirectWriteRows,
     errorMessage: z.string(),
     lasting: z.boolean(),
+    pagesWaiting: z.number().int().positive().nullable(),
   }),
 ]);
 export type PushShareDirectWritesResult = z.infer<typeof PushShareDirectWritesResult>;

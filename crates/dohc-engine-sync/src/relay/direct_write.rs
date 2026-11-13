@@ -119,6 +119,42 @@ pub enum DirectWriteState {
     Refused,
 }
 
+/// What a push that stopped in transit left unsent: the recorded plan's
+/// writes the relay has not answered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectWritesWaiting {
+    pub pages: usize,
+    pub collection_writes: usize,
+    /// The journal holds more than the plan read.
+    pub more_pending: bool,
+}
+
+pub fn read_direct_writes_waiting(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+) -> Result<DirectWritesWaiting, RelayError> {
+    let Some(plan) = read_direct_write_plan(store, workspace_id, share_id)? else {
+        return Ok(DirectWritesWaiting::default());
+    };
+    let mut waiting = DirectWritesWaiting {
+        more_pending: plan.more_pending,
+        ..DirectWritesWaiting::default()
+    };
+    for write in plan.writes.iter().filter(|write| write.result.is_none()) {
+        if store
+            .read_with(|conn| is_page_write(conn, workspace_id, write))
+            .map_err(local)?
+        {
+            waiting.pages += 1;
+        } else {
+            waiting.collection_writes += 1;
+        }
+    }
+    Ok(waiting)
+}
+
 /// Delivery facts for this replica's record creations, including after restart.
 pub fn read_record_creation_statuses(
     store: &EngineStore,
@@ -1333,7 +1369,7 @@ fn record_direct_write_result(
 /// A new page rather than a Collection record: one Markdown create at the top
 /// level or in a folder this replica holds no Collection schema for.
 fn is_page_write(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     workspace_id: &str,
     write: &PlannedWrite,
 ) -> Result<bool, SyncError> {

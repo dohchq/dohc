@@ -33,8 +33,9 @@ use crate::{
 };
 pub use direct_write::{
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
-    DirectWriteStatus, ShareCollectionWriteRequest, ShareCollectionWriteResponse, collision_key,
-    read_direct_write_status, read_record_creation_statuses,
+    DirectWriteStatus, DirectWritesWaiting, ShareCollectionWriteRequest,
+    ShareCollectionWriteResponse, collision_key, read_direct_write_status,
+    read_direct_writes_waiting, read_record_creation_statuses,
 };
 use direct_write::{read_direct_write_marks, read_direct_write_open_objects};
 

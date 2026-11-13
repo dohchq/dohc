@@ -72,6 +72,7 @@ export function useShareDirectWrites(input: {
           writes: [],
           errorMessage: error instanceof Error ? error.message : String(error),
           lasting: false,
+          pagesWaiting: null,
         });
       }
     };
@@ -183,7 +184,7 @@ export function useShareDirectWrites(input: {
               }
             : {
                 kind: "direct-write-failed",
-                message: `dohc could not send your Collection changes to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
+                message: `dohc could not send ${waitingLabel(result.pagesWaiting)} to ${ownerName}.${result.errorMessage ? ` ${result.errorMessage}` : ""}`,
                 retry: () => void push(),
                 send: null,
               },
@@ -248,6 +249,11 @@ function refusalSentence(
   return reason
     ? `The sync relay did not accept ${changes}: ${reason}.`
     : `The sync relay did not accept your change to ${writesLabel(refused)}.`;
+}
+
+function waitingLabel(pages: number | null): string {
+  if (pages === null) return "your Collection changes";
+  return pages === 1 ? "your page" : `your ${pages} pages`;
 }
 
 // The name a person knows a write by: its Collection's folder for a new

@@ -586,11 +586,16 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
           if (error instanceof ShareUnavailableError && writes.length === 0) {
             return PushShareDirectWritesResult.parse({ status: "unavailable" });
           }
+          // A push that stops keeps its plan, so the Notice can say what waits.
+          const waiting = await relay.directWritesWaiting({ shareId: scope.shareId }).catch(() => null);
           return PushShareDirectWritesResult.parse({
             status: "failed",
             writes,
             errorMessage: error instanceof Error ? error.message : String(error),
             lasting: error instanceof ShareUnavailableError || lastingDirectPushError(error),
+            pagesWaiting: waiting && waiting.pages > 0 && waiting.collectionWrites === 0 && !waiting.morePending
+              ? waiting.pages
+              : null,
           });
         }
         return PushShareDirectWritesResult.parse({ status: "pushed", writes });

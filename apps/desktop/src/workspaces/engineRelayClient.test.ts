@@ -580,25 +580,27 @@ describe("EngineRelayClient", () => {
       };
     });
     const { sessions, client } = await harness(daemon);
-  it("sends a joined workspace's Group posts with its pinned selector", async () => {
-    const { daemon, sessions, client } = await harness();
-    await expect(
-      client.pushShareViewChat({
-        shareId: "share-membership",
-        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
-      }),
-    ).resolves.toEqual({ pushed: 3 });
-    expect(
-      daemon.requests
-        .filter((request) => request.method === "share.view.pushChat")
-        .map((request) => request.params),
-    ).toEqual([{
-      workspaceId: "workspace-a",
-      shareId: "share-membership",
-      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
-    }]);
-    await sessions.closeAll();
-  });
+    it("sends a joined workspace's Group posts with its pinned selector", async () => {
+      const { daemon, sessions, client } = await harness();
+      await expect(
+        client.pushShareViewChat({
+          shareId: "share-membership",
+          grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+        }),
+      ).resolves.toEqual({ pushed: 3 });
+      expect(
+        daemon.requests
+          .filter((request) => request.method === "share.view.pushChat")
+          .map((request) => request.params),
+      ).toEqual([
+        {
+          workspaceId: "workspace-a",
+          shareId: "share-membership",
+          grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+        },
+      ]);
+      await sessions.closeAll();
+    });
 
     const recorded: string[] = [];
 
@@ -1078,3 +1080,23 @@ describe("allowInsecureLoopbackRelayForTests", () => {
     expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
   });
 });
+
+  it("reads what a stopped direct push left waiting, and refuses an answer it cannot read", async () => {
+    const answers: JsonValue[] = [
+      { pages: 2, collectionWrites: 1, morePending: false },
+      { pages: -1, collectionWrites: 0, morePending: false },
+      { pages: 1 },
+    ];
+    const daemon = new MockDaemon((request) =>
+      request.method === "share.direct.waiting" ? answers.shift() : undefined,
+    );
+    const { client, sessions } = await harness(daemon);
+    await expect(client.directWritesWaiting({ shareId: "share-file" }))
+      .resolves.toEqual({ pages: 2, collectionWrites: 1, morePending: false });
+    await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow("share.direct.waiting");
+    await expect(client.directWritesWaiting({ shareId: "share-file" })).rejects.toThrow("share.direct.waiting");
+    expect(daemon.requests.filter((request) => request.method === "share.direct.waiting").map((request) => request.params))
+      .toEqual(Array.from({ length: 3 }, () => ({ workspaceId: "workspace-a", shareId: "share-file" })));
+    expectStatefulRequestsScoped(daemon.requests);
+    await sessions.closeAll();
+  });

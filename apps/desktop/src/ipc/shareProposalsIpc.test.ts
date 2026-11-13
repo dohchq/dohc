@@ -145,11 +145,17 @@ async function harness() {
     writes: [],
     morePending: false,
   }));
+  const waiting = vi.fn<EngineRelayWorkspaceClient["directWritesWaiting"]>(async () => ({
+    pages: 0,
+    collectionWrites: 0,
+    morePending: false,
+  }));
   const relayFor = vi.fn<Dependencies["receivedShareEngine"]["relayFor"]>(
     () =>
       ({
         submitShareProposal: submit,
         pushDirectWrites: pushDirect,
+        directWritesWaiting: waiting,
       }) as unknown as EngineRelayWorkspaceClient,
   );
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
@@ -229,6 +235,7 @@ async function harness() {
     reconcile,
     submit,
     pushDirect,
+    waiting,
     relayFor,
     handlers,
     invoke,
@@ -671,6 +678,7 @@ describe("registered share proposal handlers", () => {
       ],
       errorMessage: "offline",
       lasting: false,
+      pagesWaiting: null,
     });
     h.pushDirect.mockRejectedValueOnce(new SharedFileReadOnlyError());
     await expect(
@@ -696,6 +704,41 @@ describe("registered share proposal handlers", () => {
       h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
     ).resolves.toBeUndefined();
     expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", lasting: false });
+  });
+
+  it.each([
+    [{ pages: 2, collectionWrites: 0, morePending: false }, 2],
+    [{ pages: 1, collectionWrites: 1, morePending: false }, null],
+    [{ pages: 1, collectionWrites: 0, morePending: true }, null],
+    [{ pages: 0, collectionWrites: 0, morePending: false }, null],
+  ])(
+    "counts the pages a failed push left waiting when nothing else waits: %j",
+    async (left, pagesWaiting) => {
+      const h = await harness();
+      h.recipient();
+      h.pushDirect.mockRejectedValueOnce(new Error("offline"));
+      h.waiting.mockResolvedValueOnce(left);
+      await expect(
+        h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+      ).resolves.toBeUndefined();
+      expect(h.waiting).toHaveBeenCalledWith({ shareId: "pinned-share" });
+      expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({ status: "failed", pagesWaiting });
+    },
+  );
+
+  it("reports a failed push without a page count when it cannot read what waits", async () => {
+    const h = await harness();
+    h.recipient();
+    h.pushDirect.mockRejectedValueOnce(new Error("offline"));
+    h.waiting.mockRejectedValueOnce(new Error("engine closed"));
+    await expect(
+      h.invoke(shareProposalOperations.pushShareDirectWrites.channel),
+    ).resolves.toBeUndefined();
+    expect(h.reported.mock.calls.at(-1)?.[1]).toMatchObject({
+      status: "failed",
+      errorMessage: "offline",
+      pagesWaiting: null,
+    });
   });
 
   it("says when the share is unavailable, and asks the relay again on the next push", async () => {

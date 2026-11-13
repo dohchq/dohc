@@ -2119,6 +2119,18 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn share_direct_waiting(
+        &self,
+        workspace_id: String,
+        share_id: String,
+    ) -> Result<dohc_engine_sync::DirectWritesWaiting, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::read_direct_writes_waiting(store, &workspace_id, &share_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn sync_refusal_notices(
         &self,
         workspace_id: String,

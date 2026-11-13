@@ -157,6 +157,7 @@ it("asks again after an ended share's answer, and turns a thrown push into a fai
     writes: [],
     errorMessage: "offline",
     lasting: false,
+    pagesWaiting: null,
   });
   f.push.mockResolvedValueOnce({ status: "unavailable" });
   await expect(f.queue.pushNow("a")).resolves.toBeUndefined();

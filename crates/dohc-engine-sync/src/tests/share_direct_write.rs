@@ -1291,6 +1291,75 @@ fn a_workspace_grant_writes_new_pages_and_leaves_other_changes_on_proposals() {
 }
 
 #[test]
+fn a_push_that_fails_in_transit_counts_the_pages_and_collection_writes_still_waiting() {
+    let (_scratch, _path, mut engine) = proposal_fixture(&["page", "top", "record"]);
+    assert_eq!(
+        crate::read_direct_writes_waiting(&engine, "ws", SHARE).expect("nothing planned"),
+        crate::DirectWritesWaiting::default(),
+    );
+    hold_schema(&mut engine, "trip/packing");
+    for (index, moment) in [
+        create_moment("m-1", "object-page", "docs/idea.md", "page"),
+        create_moment("m-2", "object-top", "top.md", "top"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        journal_local_moment(&mut engine, moment, 1_001 + index as i64);
+    }
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Err(RelayError::Partitioned));
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0),
+        Err(RelayError::Partitioned),
+    );
+    assert_eq!(
+        crate::read_direct_writes_waiting(&engine, "ws", SHARE).expect("waiting pages"),
+        crate::DirectWritesWaiting {
+            pages: 2,
+            collection_writes: 0,
+            more_pending: false
+        },
+    );
+
+    push_as_member(&client, &mut engine);
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-3", "object-record", "trip/packing/a.md", "record"),
+        1_003,
+    );
+    journal_local_moment(
+        &mut engine,
+        &create_moment("m-4", "object-later", "docs/later.md", "page"),
+        1_004,
+    );
+    client
+        .transport()
+        .collection_write_answers
+        .lock()
+        .expect("answers")
+        .push_back(Err(RelayError::ServerInternal));
+    assert!(
+        client
+            .push_direct_writes(&mut engine, "ws", SHARE, &workspace_grant(), &NoFaults, 0)
+            .is_err()
+    );
+    assert_eq!(
+        crate::read_direct_writes_waiting(&engine, "ws", SHARE).expect("a page and a record"),
+        crate::DirectWritesWaiting {
+            pages: 1,
+            collection_writes: 1,
+            more_pending: false
+        },
+    );
+}
+
+#[test]
 fn a_path_grant_keeps_a_new_page_on_proposals() {
     let (_scratch, _path, mut engine) = proposal_fixture(&["page"]);
     journal_local_moment(

@@ -439,6 +439,7 @@ it("offers Try again for a failure that may pass, and keeps the writes answered 
     writes: [{ result: "refused", paths: ["trip/packing/automations.yaml"], reason: "" }],
     errorMessage: "The relay did not answer.",
     lasting: false,
+    pagesWaiting: null,
   });
   expect(notices.map(({ kind, send }) => ({ kind, label: send?.label }))).toEqual([
     { kind: "direct-write-refused", label: "Send as proposal" },
@@ -454,9 +455,39 @@ it("offers Try again for a failure that may pass, and keeps the writes answered 
   expect(pushShareDirectWrites).toHaveBeenCalledTimes(2);
 });
 
+it.each([
+  [1, "dohc could not send your page to ana@example.com. The relay did not answer."],
+  [2, "dohc could not send your 2 pages to ana@example.com. The relay did not answer."],
+])(
+  "names the pages a failed send left waiting when nothing else waits: %i",
+  async (pagesWaiting, message) => {
+    const { notices } = await setup({ membership: true });
+    await answer({
+      status: "failed",
+      writes: [],
+      errorMessage: "The relay did not answer.",
+      lasting: false,
+      pagesWaiting,
+    });
+    expect(notices).toEqual([
+      expect.objectContaining({
+        kind: "direct-write-failed",
+        message,
+        retry: expect.any(Function),
+      }),
+    ]);
+  },
+);
+
 it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's reason in the same row", async () => {
   const { notices } = await setup();
-  await answer({ status: "failed", writes: [], errorMessage: "read only", lasting: true });
+  await answer({
+    status: "failed",
+    writes: [],
+    errorMessage: "read only",
+    lasting: true,
+    pagesWaiting: null,
+  });
   await answer({
     status: "failed",
     writes: [
@@ -468,6 +499,7 @@ it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's 
     ],
     errorMessage: "read only",
     lasting: true,
+    pagesWaiting: null,
   });
   expect(notices).toEqual([
     expect.objectContaining({
@@ -533,7 +565,13 @@ it("ignores an answer that arrives after the view closed", async () => {
   const { notices, hook } = await setup();
   hook.unmount();
   await act(async () => {
-    finish({ status: "failed", writes: [], errorMessage: "late", lasting: false });
+    finish({
+      status: "failed",
+      writes: [],
+      errorMessage: "late",
+      lasting: false,
+      pagesWaiting: null,
+    });
   });
   expect(notices).toEqual([]);
 });
@@ -599,7 +637,13 @@ it("discards an unavailable push's pending refresh after A to B to A", async () 
 
 it("does not retry a failure after the view closes", async () => {
   const { notices, hook } = await setup({
-    opened: { status: "failed", writes: [], errorMessage: "offline", lasting: false },
+    opened: {
+      status: "failed",
+      writes: [],
+      errorMessage: "offline",
+      lasting: false,
+      pagesWaiting: null,
+    },
   });
   expect(notices).toHaveLength(1);
   hook.unmount();
@@ -636,6 +680,7 @@ it.each(["ended", "changed"] as const)(
             status: "failed",
             writes: [],
             lasting: false,
+            pagesWaiting: null,
             errorMessage: "access refused locally",
           },
         },
@@ -660,6 +705,7 @@ it.each(["ended", "changed"] as const)(
       status: "failed",
       writes: [{ result: "refused", paths: ["tasks/new.md"], reason: "forbidden" }],
       lasting: true,
+      pagesWaiting: null,
       errorMessage: "forbidden",
     });
     expect(checkShareAccess).toHaveBeenCalledOnce();

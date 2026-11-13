@@ -122,8 +122,8 @@ pub use relay::{
     BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse, BlobDownloadSpec,
     BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
     DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
-    DirectWriteStatus, EpochRequest, EpochResponse, HostedPassOutcome, HostedPullRequest,
-    HostedPullResponse, HostedPushRefusal, HostedScope, HostedScopeDocument,
+    DirectWriteStatus, DirectWritesWaiting, EpochRequest, EpochResponse, HostedPassOutcome,
+    HostedPullRequest, HostedPullResponse, HostedPushRefusal, HostedScope, HostedScopeDocument,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse, MAX_BASE_REPAIR_LOOKUPS,
     MAX_BLOB_DOWNLOAD_BATCH, MAX_BLOB_UPLOAD_BATCH, PreparedOrdinaryPull, ProbeRequest,
@@ -137,7 +137,7 @@ pub use relay::{
     SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, WorkReferenceMapping,
     collision_key, hosted_feed_only, no_hosted_feed, read_direct_write_status,
-    read_record_creation_statuses,
+    read_direct_writes_waiting, read_record_creation_statuses,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

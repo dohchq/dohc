@@ -296,6 +296,13 @@ struct ShareDirectStatusParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareDirectWaitingParams {
+    workspace_id: String,
+    share_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShareFileStatusesParams {
     workspace_id: String,
     share_id: String,
@@ -2527,6 +2534,33 @@ impl EngineService {
         })
     }
 
+    /// What a push that stopped in transit left unsent, so its Notice can
+    /// name what waits.
+    pub(super) async fn share_direct_waiting(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareDirectWaitingParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let waiting = Self::read_under_ctx(
+            &cancellation,
+            "share.direct.waiting",
+            open.actor
+                .share_direct_waiting(open.workspace_id.clone(), params.share_id),
+        )
+        .await?;
+        serde_json::to_value(waiting).map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "direct-write-waiting-serialization-failed",
+            )
+        })
+    }
+
     pub(super) async fn share_direct_statuses(
         &self,
         ctx: &RequestContext,
@@ -2849,6 +2883,33 @@ mod tests {
                 .await
                 .is_err()
         );
+        let waiting = json!({"workspaceId": "offline-share", "shareId": "share"});
+        assert_eq!(
+            service
+                .share_direct_waiting(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    waiting.clone()
+                )
+                .await
+                .expect("nothing waiting offline"),
+            json!({"pages": 0, "collectionWrites": 0, "morePending": false})
+        );
+        let mut other_waiting = waiting;
+        other_waiting["workspaceId"] = json!("other");
+        assert!(matches!(
+            service
+                .share_direct_waiting(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    other_waiting
+                )
+                .await,
+            Err(WireError {
+                code: ErrorCode::InvalidParams,
+                ..
+            })
+        ));
         let mut wrong_workspace = params.clone();
         wrong_workspace["workspaceId"] = json!("other");
         assert!(matches!(
