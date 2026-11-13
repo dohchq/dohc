@@ -642,8 +642,10 @@ A line names the route's pattern, never the address that was requested, so link 
 It also omits the caller's IP address and every header.
 A path that matches no route logs as `unmatched`, a request to a published app as `app`, and the relay's service-to-service traffic as `replication`.
 
-Docker keeps the newest 50 MB of each service's lines (`logging` in `docker-compose.self-host.yml`).
-That limit is by size, not age: on a quiet server it can hold months of lines.
+Docker keeps each service's newest lines up to a size (`logging` in `docker-compose.self-host.yml`): 50 MB for `sync-relay`, 20 MB for `share-web` and 10 MB for `workspace-api`.
+The sizes are chosen so a lightly used server keeps about a week of lines.
+Retention is by size, not age: a quieter server keeps lines for longer, and a busier one for less.
+The gateway writes no request lines; Docker keeps its newest 50 MB of other messages.
 Recreating a container deletes its lines.
 To keep more or less, change `max-size` and `max-file` there.
 The lines still show when each route was used, such as when a share link was opened, so keep them only as long as you need them.

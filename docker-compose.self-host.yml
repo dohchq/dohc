@@ -9,8 +9,9 @@ x-service: &service
   read_only: true
   tmpfs: [/tmp]
   networks: [dohc]
-  # The services write a line for each request. Docker keeps the newest 50 MB per container.
-  logging:
+  # The services write a line for each request. Docker keeps each container's newest lines by size, not age:
+  # 50 MB here, less for the quieter services below, so a lightly used server keeps about a week.
+  logging: &logging
     driver: json-file
     options: {max-size: 10m, max-file: "5"}
 
@@ -56,6 +57,7 @@ services:
   workspace-api:
     <<: *service
     command: [workspace-api]
+    logging: {driver: json-file, options: {max-size: 2m, max-file: "5"}}
     environment:
       <<: *auth
       WORKSPACE_API_PORT: '1786'
@@ -155,6 +157,7 @@ services:
   share-web:
     <<: *service
     command: [share-web]
+    logging: {driver: json-file, options: {max-size: 4m, max-file: "5"}}
     networks:
       dohc:
         ipv4_address: ${DOHC_SHARE_WEB_ADDRESS:-10.233.42.3}
@@ -184,6 +187,7 @@ services:
   gateway:
     image: caddy:2.11.2-alpine
     restart: unless-stopped
+    logging: *logging
     environment:
       DOHC_PUBLIC_HOST: ${DOHC_PUBLIC_HOST:?Set DOHC_PUBLIC_HOST}
     # The relay reaches itself through this gateway before it reports ready, so the gateway never waits for a healthy relay.

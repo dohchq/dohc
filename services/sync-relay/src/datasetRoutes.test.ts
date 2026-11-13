@@ -15,7 +15,7 @@ import { encodeRecoveryManifest } from "@dohc/app-backend-runtime/recovery";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
 import { DatasetHostError } from "@dohc/app-backend-runtime/dataset-error";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
-import { serveFetchHandler } from "@dohc/service-http";
+import { ClientClosedRequest, serveFetchHandler } from "@dohc/service-http";
 import { guardRelayResponses } from "./relayResponseStanding";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -123,6 +123,28 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?beforeRevision=0`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?limit=101`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
+});
+
+it("answers a dataset read its client closed as closed, without an error line, and still logs any other failure", async () => {
+  const f = await httpFixture();
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const read = (handler: typeof f.handler, reason?: unknown) => {
+      const closed = new AbortController(); closed.abort(reason);
+      return handler(new Request(`https://relay/sync/${f.path}`, {headers: {authorization: "Bearer owner"}, signal: closed.signal}));
+    };
+    expect((await read(f.handler, new ClientClosedRequest())).status).toBe(499);
+    expect(errors).not.toHaveBeenCalled();
+    // A connection the server closed itself, as at shutdown, is not a client leaving: it logs and answers 500.
+    expect((await read(f.handler)).status).toBe(500);
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", expect.objectContaining({name: "AbortError"}));
+    errors.mockClear();
+    // Only the close itself is quiet: another failure after the client left still logs and answers 500.
+    const failing = createSyncRelayHandler({storage: f.storage, datasetHost: f.host, appPublicationLimits: limits, linkKey: "dataset-http-test-key", nowMs: () => 10,
+      resolveActor() {throw new Error("actor lookup failed");}});
+    expect((await read(failing, new ClientClosedRequest())).status).toBe(500);
+    expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", expect.objectContaining({message: "actor lookup failed"}));
+  } finally {errors.mockRestore();}
 });
 
 it("returns the pending-response sentence when another app cannot bind", async () => {
