@@ -93,7 +93,11 @@ export function createAccessIndex(input: readonly AccessShareRow[], members: rea
       matched.set(cacheKey, result);
       return result;
     },
-    forChat(channelWireId: string): AccessShareRow[] { return chats.get(channelWireId) ?? []; },
+    /** `members` when the chat is an ordinary Group of this workspace, which every member reaches. */
+    forChat(channelWireId: string, members = false): AccessShareRow[] {
+      const shared = chats.get(channelWireId) ?? [];
+      return members && memberRows.length ? [...shared, ...memberRows].sort(byKey) : shared;
+    },
   };
 }
 
@@ -154,7 +158,7 @@ export function createAccessQuery() {
   }
   return {
     answer(input: { observation: AccessRosterObservation | ReceivedObservation; recipientUserId: string; cursorScope: string;
-      ref: AccessObjectRef | null; coverage: "granted" | "received-own-grant" | "received-account"; shareId?: string; shareRoot?: boolean; cursor?: string }): AccessAnswer {
+      ref: AccessObjectRef | null; coverage: "granted" | "received-own-grant" | "received-account"; shareId?: string; shareRoot?: boolean; members?: boolean; cursor?: string }): AccessAnswer {
       if ("listing" in input.observation && input.observation.visibility === "hidden") return unknownAccess(input.ref, null, "hidden");
       const index = indexFor(input.observation, input.recipientUserId);
       if (!index) {
@@ -164,12 +168,12 @@ export function createAccessQuery() {
         return unknownAccess(input.ref, reason, input.ref === null ? "unknown" : "visible");
       }
       let rows = input.shareRoot ? index.rows : input.ref?.kind === "path" ? index.forPath(input.ref)
-        : input.ref?.kind === "chat" ? index.forChat(input.ref.channelWireId) : index.rows;
+        : input.ref?.kind === "chat" ? index.forChat(input.ref.channelWireId, input.members) : index.rows;
       if (input.shareId) {
         const matching = new Set(rows.map(key));
         rows = index.rows.filter(row => row.shareId === input.shareId && (matching.has(key(row)) || row.status === "removed" || row.status === "damaged"));
       }
-      const query = digest(JSON.stringify([index.fingerprint, input.cursorScope, input.ref, input.coverage, input.shareId, input.shareRoot]));
+      const query = digest(JSON.stringify([index.fingerprint, input.cursorScope, input.ref, input.coverage, input.shareId, input.shareRoot, input.members]));
       const page = accessPage(rows, key, query, input.cursor);
       if (!page) return unknownAccess(input.ref, "changed");
       return { ref: input.ref, ...page, visibility: "visible", unknownReason: null,

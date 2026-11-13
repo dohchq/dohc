@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster, type ResolvedAccessObject } from "./accessOwner";
 import { unknownAccess } from "./accessQuery";
-import { hasAccessChat, resolveAccessObject } from "./accessObjectResolution";
+import { accessChatKind, resolveAccessObject } from "./accessObjectResolution";
 import { deferred } from "../testing/deferred";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { AccessObjectRef } from "@dohc/workspace-contracts/access";
@@ -62,7 +62,7 @@ it("passes concurrent surface requests to the existing coalescing owners", async
 it("resolves current aliases after rename and reports missing objects", async () => {
   const workspace = { workspaceId: "w", rootPath: "/w" } as RegistryEntry;
   const file = vi.fn(async () => ({ path: "Notes/renamed.md", versionId: "main" }));
-  const ports = { filePathForObjectId: file, locatePath: async (path: string) => ({ path, exists: true }), hasChat: async () => false };
+  const ports = { filePathForObjectId: file, locatePath: async (path: string) => ({ path, exists: true }), chatKind: async () => null };
   expect(await resolveAccessObject(workspace, { kind: "file", objectId: "stable" }, ports)).toMatchObject({ ref: { path: "Notes/renamed.md" }, visibility: "visible" });
   file.mockResolvedValue(null as never);
   expect(await resolveAccessObject(workspace, { kind: "file", objectId: "stable" }, ports)).toMatchObject({ visibility: "missing" });
@@ -71,7 +71,7 @@ it("resolves mount coordinates to the source share and version, never the host's
   const workspace = { workspaceId: "w", rootPath: "/w", shareMounts: [{ shareId: "received", label: "friend", relayUrl: "https://relay.test",
     granterEmail: null, recipientEmail: "recipient@test.dev", grantedSelector: { paths: ["Notes"], versionId: "snapshot", access: "view" } }] } as RegistryEntry;
   const ref = { ...path, path: "shared-with-me/friend/Notes/a.md" };
-  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), hasChat: async () => false };
+  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), chatKind: async () => null };
   expect(await resolveAccessObject(workspace, ref, ports)).toMatchObject({ ref: { path: "Notes/a.md", versionId: "snapshot" }, shareId: "received", relayUrl: "https://relay.test", recipientEmail: "recipient@test.dev" });
   expect(await resolveAccessObject(workspace, { ...path, path: "shared-with-me/friend" }, ports)).toMatchObject({ shareRoot: true, shareId: "received", visibility: "visible" });
   expect(await resolveAccessObject(workspace, { ...path, path: "Notes/.env" }, ports)).toMatchObject({ visibility: "hidden" });
@@ -91,21 +91,21 @@ it("labels unavailable file aliases unknown rather than missing", async () => {
 it("withholds received projection paths outside the pinned selector", async () => {
   const workspace = { workspaceId: "w", rootPath: "/w", shareView: { shareId: "received", relayUrl: "https://relay.test", recipientUserId: "recipient",
     grantedSelector: { paths: ["Notes"], versionId: null, access: "view" } } } as RegistryEntry;
-  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), hasChat: async () => false };
+  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), chatKind: async () => null };
   expect(await resolveAccessObject(workspace, { ...path, path: "Private/a.md" }, ports)).toMatchObject({ visibility: "hidden" });
 });
 it("resolves channel wire identities independently of the store's local ids", async () => {
-  const store = { listChannelsPage: vi.fn(async () => ({ channels: [{ id: "local-uuid" }], nextCursor: null }) as never),
+  const store = { listChannelsPage: vi.fn(async () => ({ channels: [{ id: "local-uuid", kind: "channel" }], nextCursor: null }) as never),
     getChannelWireId: vi.fn(async () => "origin-wire-id") };
-  expect(await hasAccessChat("w", "origin-wire-id", store)).toBe(true);
+  expect(await accessChatKind("w", "origin-wire-id", store)).toBe("channel");
   expect(store.getChannelWireId).toHaveBeenCalledWith({ workspaceId: "w", channelId: "local-uuid" });
-  expect(await hasAccessChat("w", "local-uuid", store)).toBe(false);
+  expect(await accessChatKind("w", "local-uuid", store)).toBeNull();
 });
 it.each([undefined, null, "other@test.dev"])("returns unknown for a mount account pin %s", async recipientEmail => {
   const h = harness();
   const workspace = { workspaceId: "w", rootPath: "/w", shareMounts: [{ shareId: "received", label: "friend", relayUrl: "https://relay.test",
     granterEmail: null, recipientEmail, grantedSelector: { paths: ["Notes"], versionId: null, access: "view" } }] } as RegistryEntry;
-  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), hasChat: async () => false };
+  const ports = { filePathForObjectId: async () => null, locatePath: async (path: string) => ({ path, exists: true }), chatKind: async () => null };
   h.resolve.mockImplementation((_w, ref) => resolveAccessObject(workspace, ref, ports));
   for (const path of ["shared-with-me/friend", "shared-with-me/friend/Notes/a.md"]) {
     expect(await h.owner.object("w", { ref: { kind: "path", path, versionId: null } })).toMatchObject({ freshness: "unknown", unknownReason: recipientEmail ? "other-account" : "unreadable", coverage: { complete: false }, rows: [] });

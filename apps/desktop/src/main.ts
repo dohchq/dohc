@@ -143,7 +143,7 @@ import { folderIdentitySync, folderNamesSync } from "./workspaces/workspaceRootI
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { randomUUID } from "node:crypto";
 import { accessCliQueries, createAccessAcquisition, createAccessOwner, ownerAccessRoster, refreshAccessObservations } from "./access/accessOwner";
-import { hasAccessChat, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
+import { accessChatKind, locateAccessVersionPath, resolveAccessFileObject, resolveAccessObject } from "./access/accessObjectResolution";
 import { createShareCopyHandler, createShareCopyReader } from "./ipc/shareCopyHandler";
 import { shareCopyOperations } from "./ipc/shareCopyOperations";
 import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
@@ -1830,8 +1830,7 @@ const accessOwner = createAccessOwner<AccessWorkspaceOperation>({
           return { path: located.relative.replaceAll("\\", "/"), exists: stat !== null };
         } catch { return null; }
       },
-      hasChat: async channelWireId => workspace.sharedChannels?.some(channel => channel.channelWireId === channelWireId) === true ||
-        await hasAccessChat(workspace.workspaceId, channelWireId, linkedChatStoreFor(workspace)),
+      chatKind: channelWireId => accessChatKind(workspace.workspaceId, channelWireId, linkedChatStoreFor(workspace)),
     });
   },
   permissions: async (operation, datasetId, after) => {

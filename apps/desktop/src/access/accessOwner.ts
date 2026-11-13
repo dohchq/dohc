@@ -28,7 +28,7 @@ export function ownerAccessRoster(
 }
 
 export type ResolvedAccessObject = { ref: AccessObjectRef; visibility: "visible" | "hidden" | "missing" | "unknown";
-  shareId?: string; shareRoot?: boolean; ended?: boolean; relayUrl?: string; recipientUserId?: string; recipientEmail?: string | null };
+  shareId?: string; shareRoot?: boolean; ended?: boolean; members?: true; relayUrl?: string; recipientUserId?: string; recipientEmail?: string | null };
 
 /** Main supplies physical resolution and authority routing. These observations never admit a write. */
 export function createAccessOwner<Workspace>(dependencies: {
@@ -92,7 +92,7 @@ export function createAccessOwner<Workspace>(dependencies: {
           : recipient !== account.userId) return unknownAccess(resolved.ref, "other-account");
         if (!resolved.relayUrl || !account.relayUrl) return unknownAccess(resolved.ref, "unreadable");
       }
-      const answer = query.answer({ ref: resolved.ref, shareRoot: resolved.shareRoot, observation: resolved.shareId ? dependencies.received() : dependencies.roster(workspace),
+      const answer = query.answer({ ref: resolved.ref, shareRoot: resolved.shareRoot, members: resolved.members, observation: resolved.shareId ? dependencies.received() : dependencies.roster(workspace),
         recipientUserId: account?.userId ?? "", cursorScope: capturedScope,
         coverage: resolved.shareId ? "received-own-grant" : "granted", shareId: resolved.shareId, cursor: input.cursor });
       if (resolved.ended && answer.freshness === "fresh") answer.freshness = "stale";

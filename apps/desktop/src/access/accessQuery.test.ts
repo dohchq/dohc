@@ -150,3 +150,15 @@ it("reports no received listing yet without claiming absence", () => {
   expect(createAccessQuery().answer({ ...input(), coverage: "received-account", observation: { inventory: null, checkedAtMs: null, freshness: "unknown" } }))
     .toMatchObject({ unknownReason: "not-listed-yet", rows: [] });
 });
+
+it("answers an ordinary Group with each workspace member only when the caller says members reach it", () => {
+  const ana = grant("member", { grantId: "ana", access: "comment", selector: { kind: "workspace" } });
+  const gone = grant("member", { grantId: "gone", access: "edit", status: "revoked", selector: { kind: "workspace" } });
+  const source = readStoredRoster({ grants: [grant("group", { selector: { kind: "chat", channelWireId: "group-wire" }, access: "read-only" }), ana, gone],
+    formerGrants: [], endedGrants: [], links: [] })!;
+  const query = createAccessQuery();
+  const chat = { ...input(source), ref: { kind: "chat" as const, channelWireId: "group-wire" } };
+  expect(query.answer({ ...chat, members: true }).rows.map(row => row.kind === "share" ? row.grantId : null)).toEqual(["group", "ana"]);
+  expect(query.answer(chat).rows.map(row => row.kind === "share" ? row.grantId : null)).toEqual(["group"]);
+  expect(query.answer({ ...chat, ref: { kind: "chat" as const, channelWireId: "dm-wire" } }).rows).toEqual([]);
+});
