@@ -137,8 +137,6 @@ export function createNamedLiveBrowserTransport<
       timer?: ReturnType<typeof setTimeout>;
       removeListeners?: () => void;
       writes: Set<Promise<void>>;
-      // The server answered with a ticket, so the rest of the wait is the server opening the file.
-      ticketed?: boolean;
     };
     let attempt: Attempt | undefined;
     let automatic = false,
@@ -398,8 +396,13 @@ export function createNamedLiveBrowserTransport<
       notify();
       held.timer = setTimeout(
         // A busy live host holds the socket's upgrade until it has woken the file, so an attempt
-        // that has its ticket and still runs out of time reads as the server's, not the connection's.
-        () => fail(held, "disconnected", held.ticketed ? "host-unavailable" : "connect-timeout"),
+        // whose ticketed socket never opened reads as the server's, not the connection's.
+        () =>
+          fail(
+            held,
+            "disconnected",
+            held.socket && !held.route ? "host-unavailable" : "connect-timeout",
+          ),
         limits.connectTimeoutMs,
       );
       try {
@@ -463,7 +466,6 @@ export function createNamedLiveBrowserTransport<
           url.searchParams.get("session") !== admitted.discriminator
         )
           throw new Error("Invalid live route.");
-        held.ticketed = true;
         await attach(held, openSocket(url.href, ["dohc-live-v1", `dohc-live-ticket.${token}`]));
       } catch (error) {
         fail(

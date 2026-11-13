@@ -778,7 +778,7 @@ it("brings a live editor back by itself after the server could not open the file
   expect(edit(f.value, " more")).toBe(true);
 });
 // A busy live host answers the ticket, then holds the socket until it has woken the file.
-it("reads an open that has its ticket and still runs out of time as the server's, and tries again", async () => {
+it("reads a ticketed socket that never opens as the server's, and one that opened as the connection's", async () => {
   vi.useFakeTimers();
   const f = fixture(),
     connecting = f.value.reconnect(),
@@ -794,6 +794,14 @@ it("reads an open that has its ticket and still runs out of time as the server's
   await peer.greet();
   await peer.initial(document("base"));
   expect(f.value.state().status).toBe("live");
+  // Once the socket opens, a welcome that never comes can be the reader's connection again.
+  const g = fixture(),
+    opening = g.value.reconnect(),
+    opened = await g.socketAt(0);
+  opened.open();
+  await opening;
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(g.value.state()).toMatchObject({ status: "disconnected", reason: "connect-timeout" });
 });
 it("backs off repeated connection failures and cancels recovery when paused or replaced", async () => {
   const f = await live();
