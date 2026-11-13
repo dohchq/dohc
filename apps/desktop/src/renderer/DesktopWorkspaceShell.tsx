@@ -4,13 +4,14 @@ import { useProtectedCopyNotices } from "./shell/useProtectedCopyNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
-import { CreationPartialError } from "@dohc/cli/creation";
+import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import {shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { AgentSettingsProvider } from "./workbench/AgentBadge";
 import { AgentColorContext, saveAgentColor } from "./workbench/AgentColorPicker";
 import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
+import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 import { matchShellShortcut, matchShellShortcutChord } from "../shortcuts/shortcutRegistry";
 import { hasBlockingModal } from "./modalFocus";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
@@ -23,11 +24,13 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import type {
   CaptureFileHold,
@@ -60,7 +63,7 @@ import {
   saveOnlyLiveDocuments,
 } from "../ipc/bridgeContract";
 import { DROP_IMPORT_LIMITS, DROP_IMPORT_REFUSALS, isEditorMenuCommand } from "../ipc/channels";
-import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess } from "../ipc/errorWords";
+import { isHistoryCatchingUp, isLiveEditingRefusal, isLiveFolderRefusal, isPathTaken, isPrivacyDenied, isRestorePolicyRefusal, isLivePageOwnedRefusal, isSharedLiveFileRefusal, isStoppedWorkspaceRead, liveEditingStoppedPaths, livePageBody, livePagesBody, livePagesTitle, livePageTitle, readError, SHARED_LIVE_RESTORE_BODY, sharedLiveRestoreTitle, shouldRecheckShareAccess, withErrorWords } from "../ipc/errorWords";
 import { SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
 import {
   hasUnacknowledgedShareSkips,
@@ -180,6 +183,7 @@ import { NewPage, type NewPageFile } from "./NewPage";
 import { displayFrontmatterValue, parseFrontmatter } from "./markdown/frontmatter";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { nextPagePath, pageFileStem } from "./workbench/new-file-name";
+import type { NewRecordOptions } from "./CollectionPage";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
 import { useSharedViewAccess } from "./shell/useSharedViewAccess";
@@ -221,7 +225,7 @@ import {
 } from "./ui/controls";
 import { ActivityBar } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
-import { EditorGroupFrame } from "./workbench/tabRowActions";
+import { EditorGroupFrame, OwnActionsRow } from "./workbench/tabRowActions";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
 import { EmptyEditorGroup } from "./workbench/EmptyEditorGroup";
 import { Explorer, type LivePageRefused } from "./workbench/Explorer";
@@ -324,6 +328,8 @@ import {
   serializeUiState,
   siteTabPath,
   setCollectionActiveView,
+  setCollectionOpenRecord,
+  setRecordPanelWidth,
   setFolderExpanded,
   setExplorerMode,
   setOpenEditorsHeight,
@@ -596,6 +602,28 @@ function InvalidSitePathFallback({
   return null;
 }
 
+/**
+ * A record's body in a Collection tab's record panel. While it is on the page, the shell knows which record's
+ * file that tab's group edits. The body keeps its actions in a row of its own.
+ */
+function RecordBody(props: {
+  bodies: { current: Map<string, { tab: WorkbenchTab; path: string }> };
+  groupId: string;
+  tab: WorkbenchTab;
+  path: string;
+  children: ReactNode;
+}) {
+  const { bodies, groupId, tab, path } = props;
+  useEffect(() => {
+    const body = { tab, path };
+    bodies.current.set(groupId, body);
+    return () => {
+      if (bodies.current.get(groupId) === body) bodies.current.delete(groupId);
+    };
+  }, [bodies, groupId, tab, path]);
+  return <OwnActionsRow>{props.children}</OwnActionsRow>;
+}
+
 // Lists the drafts main keeps for the workspace again. A failed read files a
 // notice whose Try again reads again.
 function recoverLiveDrafts(
@@ -776,6 +804,10 @@ export function DesktopWorkspaceShell(props: {
     beginDraftOperation,
   } = useEditorRegistry(workspaceId, openTabs);
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
+  // The record whose body each group's Collection tab draws in its record panel. That body's
+  // editor is registered under the Collection's tab, so an open of the record's own file in
+  // another group finds it here, and saves its text first as it does a file tab's.
+  const recordBodies = useRef(new Map<string, { tab: WorkbenchTab; path: string }>());
   const collectionLineage = useCollectionWriteLineage(workspaceId);
 
   // `openWorkspace` installs main's exact renderer session before it waits
@@ -3009,18 +3041,18 @@ export function DesktopWorkspaceShell(props: {
       const targetAlreadyOwnsPath = targetGroup?.tabs.some(
         (tab) => tab.path === path,
       );
-      const needsFlush =
-        !targetAlreadyOwnsPath &&
-        hasDrafts(
-          (groupId, tab) => groupId !== targetGroupId && tab.path === path,
-        );
+      // Another group's editor of this file: the file's tab there, or a record's body.
+      const editsElsewhere = (groupId: string, tab: WorkbenchTab) => {
+        if (groupId === targetGroupId) return false;
+        const body = recordBodies.current.get(groupId);
+        return tab.path === path || (body?.tab === tab && body.path === path);
+      };
+      const needsFlush = !targetAlreadyOwnsPath && hasDrafts(editsElsewhere);
       if (!needsFlush) {
         commitOpen();
         return;
       }
-      void flushStableDrafts(
-        (groupId, tab) => groupId !== targetGroupId && tab.path === path,
-      )
+      void flushStableDrafts(editsElsewhere)
         .then(commitOpen)
         .catch((error) => {
           if (!isCurrentRequest()) return;
@@ -3449,8 +3481,8 @@ export function DesktopWorkspaceShell(props: {
   const collectionReports = useMemo(() => {
     const owner = workspaceId;
     return {
-      onError: (fallback: string, error: unknown, retry?: (() => void) | null, identity?: string) => {
-        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null, undefined, identity);
+      onError: (fallback: string, error: unknown, retry?: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void) => {
+        if (workspaceIdRef.current === owner) reportShellError(fallback, error, retry ?? null, undefined, identity, quiet, onDismiss);
       },
       onSettled: (identity: string) => {
         if (workspaceIdRef.current === owner) clearIdentity(identity);
@@ -3460,6 +3492,21 @@ export function DesktopWorkspaceShell(props: {
       },
     };
   }, [workspaceId, reportShellError, clearIdentity, showSuccessNotice]);
+  // A Collection's changes report here once their page has closed. A layout
+  // effect, so that on a switch the shell closes before its pages do, and
+  // nothing is sent as they close.
+  const collectionReportsRef = useRef(collectionReports);
+  collectionReportsRef.current = collectionReports;
+  useLayoutEffect(() => openCollectionChangeShell(workspaceId, {
+    onError: (...report) => collectionReportsRef.current.onError(...report),
+    onSettled: identity => collectionReportsRef.current.onSettled(identity),
+    onNotice: message => collectionReportsRef.current.onNotice(message),
+  }), [workspaceId]);
+  // The changes send only once main has admitted this workspace's session.
+  // Until then main holds the session of the workspace the window showed
+  // before, and refuses them. Each table whose changes need the person files
+  // its row then, and the admission ends as the shell does.
+  useLayoutEffect(() => workspaceIsReady ? admitCollectionChanges(workspaceId) : undefined, [workspaceId, workspaceIsReady]);
   const documentReports = useMemo(() => {
     const owner = workspaceId;
     const current = () => workspaceIdRef.current === owner;
@@ -4487,57 +4534,106 @@ export function DesktopWorkspaceShell(props: {
   }, [mutateWb]);
 
   // Human and agent creation share the same record identity and recovery path.
+  // The names new records hold that the listing does not show yet: one being made, and one whose file exists
+  // (made, or made in part) until a listing has it. A later record named alike then takes the next free name.
   const pendingRecordPaths = useRef(new Set<string>());
+  useEffect(() => {
+    const listed = new Set(files.map((file) => file.path.toLowerCase()));
+    for (const path of pendingRecordPaths.current) if (listed.has(path.toLowerCase())) pendingRecordPaths.current.delete(path);
+  }, [files]);
+  // Whether this shell is still the window's. A creation that answers after it closed paints nothing here.
+  const shellOpen = useRef(true);
+  useLayoutEffect(() => {
+    shellOpen.current = true;
+    return () => { shellOpen.current = false; };
+  }, []);
   const createCollectionRecord = useCallback(
-    async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void) => {
-      const prefix = `${collectionPath}/`;
-      const scopedFiles = files
-        .filter((file) => file.path.startsWith(prefix))
-        .map((file) => ({ ...file, path: file.path.slice(prefix.length) }));
-      const scopedFolders = folders
-        .filter((folder) => folder.startsWith(prefix))
-        .map((folder) => folder.slice(prefix.length));
-      scopedFolders.push(...[...pendingRecordPaths.current].filter(path => path.startsWith(prefix)).map(path => path.slice(prefix.length)));
+    async (collectionPath: string, created?: (record: { path: string; recordId: string }) => void, options: NewRecordOptions = {}) => {
       const selection = workspaceSelection.current;
-      const name = uniqueUntitledPath(scopedFiles, scopedFolders, "md").slice(0, -3);
-      const reservedPath = `${collectionPath}/${name}.md`;
+      // The file takes its name from the record's name, as a new page's does from its title. A record with none is Untitled.
+      const occupied = new Set([...files.map((file) => file.path), ...folders, ...pendingRecordPaths.current].map((path) => path.toLowerCase()));
+      const stem = options.title === undefined ? "Untitled" : pageFileStem(options.title, bridge().platform);
+      const reservedPath = nextPagePath(collectionPath, stem, occupied, bridge().platform);
+      const name = reservedPath.slice(collectionPath.length + 1, -3);
       pendingRecordPaths.current.add(reservedPath);
+      // A name no file took is free again once the creation ends. One a file took stays held until a listing shows the file.
+      let made = false;
+      // The window shows another workspace by now: this shell closed, or took another workspace. It paints nothing more.
+      const moved = () => workspaceSelection.current !== selection || !shellOpen.current;
+      /**
+       * One attempt on one record. With `recordId` it finishes a record that exists in part, and every way it
+       * can end without finishing is still that record's: reported as part way, with this same resume as its one
+       * retry. A record that exists in part is never the start of another creation.
+       */
       const execute = async (recordId?: string): Promise<void> => {
-        if (workspaceSelection.current !== selection) return;
+        const resume = recordId === undefined ? null : () => void execute(recordId);
+        // The page that asked reports a failure with what was typed for the record. Otherwise the shell reports it. A
+        // shell the window no longer shows can run no retry.
+        const shownInPage = (reason: string, retry: (() => void) | null = resume, partial = recordId !== undefined) =>
+          options.onFailure?.({ reason, retry: moved() ? null : retry, partial, ...(recordId === undefined ? {} : { recordId }) }) ?? false;
+        // A record that exists in part is said to exist in every failure of its resume, so nobody takes it for one
+        // that was never made and makes it again beside its file.
+        const could = recordId === undefined ? "dohc could not create this record." : "dohc created the record file but could not finish the record.";
+        // Main takes no creation for a workspace the window no longer shows. The page keeps what was typed.
+        if (moved()) { shownInPage(recordId === undefined ? "This window changed workspaces before dohc created the record." : `${could} This window changed workspaces first.`); return; }
         if (shareView && !shareViewWritableRef.current) {
           const message = shareWriteRefusalRef.current;
-          reportShellError(message, new Error(message));
+          if (!shownInPage(message)) reportShellError(message, new Error(message), resume);
           return;
         }
+        let result: Awaited<ReturnType<ReturnType<typeof bridge>["createCollectionRecord"]>>;
         try {
-          const result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
-          if (workspaceSelection.current !== selection) return;
-          if ("kind" in result) {
-            reportShellError("dohc could not finish this record.", new CreationPartialError(result),
-              result.retry.mode === "resume" ? () => void execute(result.retry.recordId) : null);
-            return;
-          }
-          await refreshFiles();
-          if (workspaceSelection.current !== selection) return;
-          if (result.delivery === "refused") {
-            if (shareView) await checkShareAccess();
-            if (workspaceSelection.current !== selection) return;
-            const restricted = shareView && !shareViewWritableRef.current;
-            const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
-            reportShellError(reason, new Error(reason), restricted ? null : () => void createCollectionRecord(collectionPath, created));
-          } else created?.(result);
-          openFile(result.path);
+          result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
         } catch (error) {
-          if (shareView && shouldRecheckShareAccess(error)) await checkShareAccess();
-          if (workspaceSelection.current !== selection) return;
+          // Only an error from the creation itself is a creation that failed.
+          const words = withErrorWords(could, error);
+          // A check of the share's access that fails leaves the creation's own error to say why.
+          try { if (!moved() && shareView && shouldRecheckShareAccess(error)) await checkShareAccess(); } catch { /* Reported below. */ }
+          if (moved()) { shownInPage(words); return; }
           if (shareView && !shareViewWritableRef.current) {
             const message = shareWriteRefusalRef.current;
-            reportShellError(message, new Error(message));
-          } else reportShellError("Could not create a record.", error);
+            if (!shownInPage(message)) reportShellError(message, new Error(message), resume);
+          } else if (!shownInPage(words)) reportShellError("Could not create a record.", error, resume);
+          return;
         }
+        if ("kind" in result) {
+          const partial = result;
+          for (const path of partial.created) pendingRecordPaths.current.add(path);
+          made ||= partial.created.length > 0;
+          const next = partial.retry.mode === "resume" ? () => void execute(partial.retry.recordId) : null;
+          // The file exists and the record is not finished. Files with no way to finish them stay in the notice too, whose details name them.
+          const shown = shownInPage(creationPartialNotice(partial), next, true);
+          if (!moved() && (!shown || next === null)) reportShellError("dohc could not finish this record.", new CreationPartialError(partial), next);
+          return;
+        }
+        // The record's file exists from here, whatever the relay says of it.
+        pendingRecordPaths.current.add(result.path);
+        made = true;
+        if (result.delivery === "refused") {
+          // The relay refused the record. The listing and the share's access are read for what the refusal says,
+          // and whatever they answer, and whichever workspace the window shows by then, the refusal reaches the
+          // page that asked: it holds what was typed.
+          if (!moved()) try { await refreshFiles(); } catch (error) { if (!moved()) reportShellError("Could not refresh workspace files.", error); }
+          if (!moved() && shareView) try { await checkShareAccess(); } catch { /* The refusal says why. */ }
+          const restricted = !moved() && shareView && !shareViewWritableRef.current;
+          const reason = restricted ? shareWriteRefusalRef.current : result.reason ?? "The sync relay did not accept this record.";
+          const shown = shownInPage(reason);
+          if (moved()) return;
+          if (!shown) reportShellError(reason, new Error(reason), restricted ? null : resume ?? (() => void createCollectionRecord(collectionPath, created, options)));
+          if (options.open !== false) openFile(result.path);
+          return;
+        }
+        // The record exists. What was typed for it is written whatever happens next, as an edit made just before a
+        // switch is: the field writes are kept by workspace above the shell.
+        created?.(result);
+        if (moved()) return;
+        // A listing that does not refresh is its own failure, and does not undo the creation.
+        try { await refreshFiles(); } catch (error) { if (!moved()) reportShellError("Could not refresh workspace files.", error); }
+        if (moved()) return;
+        if (options.open !== false) openFile(result.path);
       };
       try { await execute(); }
-      finally { pendingRecordPaths.current.delete(reservedPath); }
+      finally { if (!made) pendingRecordPaths.current.delete(reservedPath); }
     },
     [files, folders, openFile, refreshFiles, reportShellError, workspaceId, !!shareView],
   );
@@ -6965,6 +7061,77 @@ export function DesktopWorkspaceShell(props: {
                 searchScrollTarget.path === tabPath
                   ? searchScrollTarget
                   : undefined;
+              // One file's view with the shell's wiring: in the group's file tab, or, for
+              // `recordBody`, as the page body of the record a Collection tab shows in its
+              // panel. The body registers its save state and draft flush under the Collection
+              // tab, which mounts no editor of its own, so closing that tab, an Explorer
+              // operation and a version switch wait for its text as they do for a file tab's.
+              const fileInspector = (
+                path: string,
+                callbacks: NonNullable<typeof editorCallbacks>,
+                onEditorReady?: Parameters<NewPageFile>[0],
+                recordBody = false,
+              ) => (
+              <FileInspector
+                key={path}
+                onEditorReady={onEditorReady}
+                workspaceId={workspaceId}
+                path={path}
+                fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
+                // History growth, version switches, and share-mount pulls all
+                // re-read the open file (every counter only ever increases).
+                refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
+                // G2-C-3: the engine editor re-binds to the new version's Y.Doc
+                // lineage only on an active-version change — versionEpoch alone,
+                // not history growth (which must not churn the live session).
+                engineVersionKey={versionEpoch}
+                onOpenPath={openPathWithHeading}
+                drawingCollaboration={chatCollaboration}
+                // A search or heading jump opens the file's tab, never a record's body.
+                scrollTarget={recordBody ? undefined : groupScrollTarget}
+                headingTarget={
+                  !recordBody &&
+                  headingTarget?.groupId === editorGroup.id &&
+                  headingTarget.path === path
+                    ? headingTarget.target
+                    : undefined
+                }
+                onScrollConsumed={consumeSearchScrollTarget}
+                onSaveStateChange={callbacks.onSaveStateChange}
+                // A document in an Edit share view that turns read-only may
+                // mean the owner ended access. The refresh asks the relay, and
+                // only the relay says so.
+                onLiveReadOnly={shareViewWritable ? refreshAfterLiveReadOnly : undefined}
+                surfaceKey={recordBody ? undefined : editorGroup.id}
+                onSurfaceReady={recordBody ? undefined : onRestoredFileSurfaceReady}
+                registerDraftFlush={callbacks.registerDraftFlush}
+                registerSourceToggle={callbacks.registerSourceToggle}
+                // A record's body takes focus only when a person puts it there.
+                autoFocus={!recordBody && wb.activeEditorGroup === editorGroup.id}
+                knownMarkdownFiles={markdownWikilinkFiles}
+                appFolder={appEntries.get(path) ?? null}
+                onRunApp={openAppTab}
+                onButtonError={documentReports.onError}
+                onButtonNotice={documentReports.onNotice}
+                onClosePath={closePathTabs}
+                onOpenRecordHistory={recordHistory.open}
+                accessEnded={shareViewEnded}
+                captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === path) ?? false}
+                onRetryHeldCapture={retryHeldCapture}
+                readOnly={
+                  (!!shareView && !shareViewWritable) ||
+                  isMountedSharePath(path)
+                }
+                // The lists name this workspace's own notes, never a received share's.
+                liveEditingPaused={shareView || isMountedSharePath(path) ? undefined : liveEditingPaused.get(path)}
+                onOpenLiveDocuments={openLiveDocumentsAt}
+                receivedShare={!!shareView || isMountedSharePath(path)}
+                {...(shareView || isMountedSharePath(path)
+                  ? {}
+                  : { onSharePath })}
+                recordBody={recordBody}
+              />
+              );
               return {
                 id: editorGroup.id,
                 size: editorGroup.size,
@@ -7253,6 +7420,12 @@ export function DesktopWorkspaceShell(props: {
                   onNotice={collectionReports.onNotice}
                   historyRequested={collectionHistoryTab !== null && tab === collectionHistoryTab}
                   onHistoryShown={clearCollectionHistory}
+                  initialOpenRecord={tabPath === null ? null : wb.openRecords[tabPath] ?? null}
+                  onOpenRecordChange={(record) => {
+                    if (tabPath !== null) mutateWb((state) => setCollectionOpenRecord(state, tabPath, record));
+                  }}
+                  initialRecordPanelWidth={wb.recordPanelWidth}
+                  onRecordPanelWidthChange={(width) => mutateWb((state) => setRecordPanelWidth(state, width))}
                   onFormCreated={appRoot => {
                     void refreshFiles().catch(error => reportShellError("Could not refresh workspace files.", error));
                     openVirtualTab(siteTabPath(appRoot));
@@ -7279,6 +7452,27 @@ export function DesktopWorkspaceShell(props: {
                     }
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
+                    // The record a tab shows open stays with the tab, by the record's id.
+                    initialOpenRecord={tabPath === null ? null : wb.openRecords[tabPath] ?? null}
+                    onOpenRecordChange={(record) => {
+                      if (tabPath !== null) mutateWb((state) => setCollectionOpenRecord(state, tabPath, record));
+                    }}
+                    initialRecordPanelWidth={wb.recordPanelWidth}
+                    onRecordPanelWidthChange={(width) => mutateWb((state) => setRecordPanelWidth(state, width))}
+                    renderRecordBody={tab && editorCallbacks ? (path) => (
+                      <RecordBody bodies={recordBodies} groupId={editorGroup.id} tab={tab} path={path}>
+                        {fileInspector(path, editorCallbacks, undefined, true)}
+                      </RecordBody>
+                    ) : undefined}
+                    // What a record's body holds unsaved is saved before the record leaves the panel, as before a file tab closes.
+                    settleRecordBody={tab ? (then) => commitAfterTabFlush(
+                      editorGroup.id,
+                      tab,
+                      "dohc could not save this record's page. The record stays open.",
+                      then,
+                    ) : undefined}
+                    // A file under shared-with-me is no record of this workspace's Collections, so it has no History.
+                    onOpenRecordHistory={isMountedSharePath(groupCollectionPath) ? undefined : recordHistory.open}
                     onOpenFile={(path) => openFile(path)}
                     onOpenScheduleSettings={() => openSettings("advanced")}
                     onError={collectionReports.onError}
@@ -7332,61 +7526,7 @@ export function DesktopWorkspaceShell(props: {
                   // tab closes, so the switch from page to file keeps it.
                   const born = tabPath ? bornPages.get(tabPath) : undefined;
                   const fileView: NewPageFile = (onEditorReady) => tabPath && tab && editorCallbacks ? (
-              <FileInspector
-                key={tabPath}
-                onEditorReady={onEditorReady}
-                workspaceId={workspaceId}
-                path={tabPath}
-                fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
-                // History growth, version switches, and share-mount pulls all
-                // re-read the open file (every counter only ever increases).
-                refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
-                // G2-C-3: the engine editor re-binds to the new version's Y.Doc
-                // lineage only on an active-version change — versionEpoch alone,
-                // not history growth (which must not churn the live session).
-                engineVersionKey={versionEpoch}
-                onOpenPath={openPathWithHeading}
-                drawingCollaboration={chatCollaboration}
-                scrollTarget={groupScrollTarget}
-                headingTarget={
-                  headingTarget?.groupId === editorGroup.id &&
-                  headingTarget.path === tabPath
-                    ? headingTarget.target
-                    : undefined
-                }
-                onScrollConsumed={consumeSearchScrollTarget}
-                onSaveStateChange={editorCallbacks.onSaveStateChange}
-                // A document in an Edit share view that turns read-only may
-                // mean the owner ended access. The refresh asks the relay, and
-                // only the relay says so.
-                onLiveReadOnly={shareViewWritable ? refreshAfterLiveReadOnly : undefined}
-                surfaceKey={editorGroup.id}
-                onSurfaceReady={onRestoredFileSurfaceReady}
-                registerDraftFlush={editorCallbacks.registerDraftFlush}
-                registerSourceToggle={editorCallbacks.registerSourceToggle}
-                autoFocus={wb.activeEditorGroup === editorGroup.id}
-                knownMarkdownFiles={markdownWikilinkFiles}
-                appFolder={appEntries.get(tabPath) ?? null}
-                onRunApp={openAppTab}
-                onButtonError={documentReports.onError}
-                onButtonNotice={documentReports.onNotice}
-                onClosePath={closePathTabs}
-                onOpenRecordHistory={recordHistory.open}
-                accessEnded={shareViewEnded}
-                captureHeld={heldFiles?.some(file => file.workspaceId === workspaceId && file.path === tabPath) ?? false}
-                onRetryHeldCapture={retryHeldCapture}
-                readOnly={
-                  (!!shareView && !shareViewWritable) ||
-                  isMountedSharePath(tabPath)
-                }
-                // The lists name this workspace's own notes, never a received share's.
-                liveEditingPaused={shareView || isMountedSharePath(tabPath) ? undefined : liveEditingPaused.get(tabPath)}
-                onOpenLiveDocuments={openLiveDocumentsAt}
-                receivedShare={!!shareView || isMountedSharePath(tabPath)}
-                {...(shareView || isMountedSharePath(tabPath)
-                  ? {}
-                  : { onSharePath })}
-              />
+              fileInspector(tabPath, editorCallbacks, onEditorReady)
             ) : (
               <EmptyEditorGroup
                 platform={bridge().platform}

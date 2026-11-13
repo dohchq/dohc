@@ -51,3 +51,33 @@ export function visualRecord(row: TransactionalRow, fields: TransactionalField[]
   return { id: JSON.stringify(row.id), path: String(row.id), conflicted: false, values: fields.map(field => ({ field: field.fieldId,
     value: row.values[field.fieldId] ?? null, validation: { status: "valid" }, resolvedRelations: [] })) };
 }
+
+/** The key of a Button field's column. A field's key is its id, a UUID, so no field has this one. */
+export const buttonColumn = (name: string) => `button:${name}`;
+/** The Button field a column's key names. */
+export const buttonField = (column: string) => column.slice("button:".length);
+
+/** The table's columns: the fields by id, then the Button fields. The page draws files and relations itself. */
+export function tableSchema(fields: TransactionalField[], buttons: readonly string[]): CollectionSchema {
+  const schema = visualSchema(fields);
+  return { ...schema, fields: [...schema.fields, ...buttons.map((name): FieldDefinition => ({ name: buttonColumn(name), type: "button" }))] };
+}
+
+/**
+ * The table's records, and each one's row by the record's id. The table gets
+ * values only. A row's version and its values as read stay with the page,
+ * which sends them with a change.
+ */
+export function tableRecords(rows: readonly TransactionalRow[], fields: TransactionalField[]): { records: CollectionRecord[]; rows: ReadonlyMap<string, TransactionalRow> } {
+  const records = rows.map(row => visualRecord(row, fields));
+  return { records, rows: new Map(rows.map((row, index) => [records[index]!.id, row])) };
+}
+
+/** What people call a record: its first text field with a value, or its id. */
+export function recordName(row: TransactionalRow, fields: readonly TransactionalField[]): string {
+  for (const field of fields) {
+    const value = row.values[field.fieldId];
+    if (field.type === "text" && typeof value === "string" && value.trim() !== "") return value;
+  }
+  return `record ${String(row.id)}`;
+}

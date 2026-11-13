@@ -1,5 +1,5 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Save, Server, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Save, Server, X } from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
@@ -14,7 +14,7 @@ import { relativeTime } from "../relativeTime";
 import { computerInSentence, shownScheduleHost } from "../scheduleHost";
 import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { EmptyState, GhostButton, IconButton, SecondaryButton } from "../ui/controls";
+import { EmptyState, IconButton, SecondaryButton } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { useRequestSequence } from "../useRequestSequence";
 import { AutomationBuilder } from "./AutomationBuilder";
@@ -107,40 +107,6 @@ export function automationCount(file: ListCollectionAutomationsResult | null, ta
 /** False once dohc knows a Collection's automations.yaml does not exist yet. */
 export function automationsFileMade(file: ListCollectionAutomationsResult | null): boolean {
   return (file?.status === "shared" ? file.definitions.file.status : file?.status) !== "missing";
-}
-
-/** The ⚡ Automations button at the top of a Collection, with how many it has. */
-export function AutomationsButton(props: { open: boolean; count: number; onClick: () => void; toolbar?: boolean }) {
-  if (props.toolbar) {
-    return (
-      <GhostButton
-        size="toolbar"
-        data-testid="collection-automations-button"
-        aria-pressed={props.open}
-        onClick={props.onClick}
-      >
-        <Zap size={14} strokeWidth={1.9} aria-hidden />
-        Automations
-        {props.count > 0 ? <span className="text-[12px] tabular-nums text-subtle">{props.count}</span> : null}
-      </GhostButton>
-    );
-  }
-  return (
-    <SecondaryButton
-      data-testid="collection-automations-button"
-      aria-pressed={props.open}
-      onClick={props.onClick}
-      className={`flex items-center gap-1.5${props.open ? " bg-panel-2 text-ink" : ""}`}
-    >
-      <Zap size={12} aria-hidden />
-      Automations
-      {props.count > 0 ? (
-        <span className="rounded-full border border-line bg-panel-2 px-1.5 text-[11px] leading-4 text-muted">
-          {props.count}
-        </span>
-      ) : null}
-    </SecondaryButton>
-  );
 }
 
 /**
@@ -543,6 +509,8 @@ function OwnerAutomationsPanel(props: {
   /** The panel took the start request; the page forgets it, so a new panel does not take it again. */
   onStarted?: () => void;
   onClose: () => void;
+  /** The builder kept its draft, so the panel did not leave it as asked, as when the page asked it to close. */
+  onStayed?: () => void;
   onOpenFile: (path: string) => void;
   /** Opens the setting where the owner chooses which computer runs schedules. */
   onOpenScheduleSettings: () => void;
@@ -602,6 +570,11 @@ function OwnerAutomationsPanel(props: {
   const leave = (then: () => void) => {
     if (editingRef.current) setLeaving(() => then);
     else then();
+  };
+  // The builder keeps its draft, so a leave it was asked for does not happen, and what asked hears that.
+  const stay = () => {
+    if (leavingRef.current) props.onStayed?.();
+    setLeaving(null);
   };
   // A switched-off automation's notice, and Try again on its run, go to its
   // switch in the list, which takes focus once its row shows.
@@ -874,7 +847,7 @@ function OwnerAutomationsPanel(props: {
     const { original } = open;
     const now = original === null ? undefined : listed.find((entry) => entry.id === original.id);
     const stopLeaving = () => {
-      if (editingRef.current?.session === open.session) setLeaving(null);
+      if (editingRef.current?.session === open.session) stay();
     };
     if (original !== null && now === undefined) {
       stopLeaving();
@@ -1014,7 +987,7 @@ function OwnerAutomationsPanel(props: {
               setLeaving(null);
               then?.();
             }}
-            onStay={() => setLeaving(null)}
+            onStay={stay}
             onDraftChange={(draft) => {
               latestDraft.current = draft;
             }}

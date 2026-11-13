@@ -59,7 +59,7 @@ export async function writeTableViews(workspaceId:string,previous:TableViewsSnap
   if(previous.contentHash===null)await bridge().createWorkspaceFile({workspaceId,relativePath,initialText:text});
   else {
     const result=await bridge().writeWorkspaceText({workspaceId,relativePath,text,expectedContentHash:previous.contentHash});
-    if(result.status!=="written")throw Error("The saved views changed elsewhere. Refresh before editing them again.");
+    if(result.status!=="written")throw Error("The saved views changed elsewhere. Try again.");
   }
   signal.throwIfAborted();return readTableViews(workspaceId,document.datasetId,document.tableId,signal);
 }

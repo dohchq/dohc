@@ -38,3 +38,24 @@
   background-color: var(--color-accent);
   color: var(--color-bg);
 }
+
+/*
+ * A day's New record shows while the pointer is on the day, and while it
+ * has keyboard focus. The day's number is in one layer and its background
+ * in another, so the control follows a hover of either.
+ */
+.dohc-collection-calendar .dohc-calendar-new {
+  opacity: 0;
+}
+
+.dohc-collection-calendar .dohc-calendar-new:focus-visible,
+.dohc-collection-calendar .rbc-date-cell:hover .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(1):hover) .rbc-date-cell:nth-child(1) .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(2):hover) .rbc-date-cell:nth-child(2) .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(3):hover) .rbc-date-cell:nth-child(3) .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(4):hover) .rbc-date-cell:nth-child(4) .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(5):hover) .rbc-date-cell:nth-child(5) .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(6):hover) .rbc-date-cell:nth-child(6) .dohc-calendar-new,
+.dohc-collection-calendar .rbc-month-row:has(.rbc-day-bg:nth-child(7):hover) .rbc-date-cell:nth-child(7) .dohc-calendar-new {
+  opacity: 1;
+}

@@ -40,6 +40,8 @@ export interface BoardViewProps {
   onCellChange?: (change: CollectionCellChange) => void;
   /** Receives the card's record when the card is clicked, not dragged. */
   onOpenRecord?: (record: CollectionRecord) => void;
+  /** The record the host shows open, as in a panel beside the board. Its card is marked. */
+  openRecordId?: string | null;
   /** Adds a record whose grouped field holds this column's value. */
   onNewRecord?: (value: CollectionValue) => void;
   /** Saves a color for one of the grouped select field's options. */
@@ -48,6 +50,8 @@ export interface BoardViewProps {
   personLabel?: (userId: string) => string | null;
   /** The name people read for a field. A host that keys fields by id provides it; absent, the key is the name. */
   fieldLabel?: (field: string) => string;
+  /** The name people read for a record. Absent, its title, name, or filename. */
+  recordName?: (record: CollectionRecord) => string;
   /**
    * Hosts with paged queries provide controls and a truthful page count.
    * Both receive the query's group and its index in `groups`. A paged board
@@ -59,6 +63,7 @@ export interface BoardViewProps {
 
 type PersonLabel = (userId: string) => string | null;
 type FieldLabel = (field: string) => string;
+type RecordName = (record: CollectionRecord) => string;
 
 /** One board column: a query group, or an option no record uses yet. */
 interface BoardColumnModel {
@@ -156,10 +161,13 @@ interface BoardCardProps {
   onOpen?: (record: CollectionRecord) => void;
   personLabel?: PersonLabel;
   fieldLabel?: FieldLabel;
+  recordName?: RecordName;
   canDrag: boolean;
+  /** The host shows this record open. */
+  open: boolean;
 }
 
-function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, canDrag }: BoardCardProps) {
+function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, recordName, canDrag, open }: BoardCardProps) {
   const { ref, isDragging } = useDraggable({ id: record.id, disabled: !canDrag });
   // Click opens the record. Enter belongs to the keyboard drag sensor (it
   // lifts the card), so it must not also open; keyboard users open through
@@ -181,15 +189,17 @@ function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, canDrag }:
   });
   const lines = shown.filter(({ field }) => field.type === "text");
   const chips = shown.filter(({ field }) => field.type !== "text");
-  const name = title || recordLabel(record);
+  const label = recordName?.(record) ?? recordLabel(record);
+  const name = title || label;
   return (
     <div
       ref={ref}
       role="listitem"
       tabIndex={0}
       aria-label={name}
+      aria-current={open ? "true" : undefined}
       data-dragging={isDragging ? "" : undefined}
-      className={`group/card relative flex cursor-pointer flex-col gap-2 rounded-lg border border-line bg-bg p-3 transition-colors duration-75 hover:bg-panel dark:bg-panel dark:hover:bg-panel-2 ${
+      className={`group/card relative flex cursor-pointer flex-col gap-2 rounded-lg border border-line bg-bg p-3 transition-colors duration-75 hover:bg-panel aria-[current=true]:border-ink dark:bg-panel dark:hover:bg-panel-2 ${
         isDragging ? "opacity-50" : ""
       }`}
       onPointerDown={
@@ -225,7 +235,7 @@ function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, canDrag }:
       {onOpen ? (
         <button
           type="button"
-          aria-label={`Open ${recordLabel(record)}`}
+          aria-label={`Open ${label}`}
           title="Open"
           className="absolute right-2 top-2 grid size-6 place-items-center rounded-md text-subtle opacity-0 transition-opacity duration-75 hover:bg-hover hover:text-ink focus-visible:opacity-100 group-hover/card:opacity-100"
           onClick={(event) => {
@@ -328,10 +338,12 @@ interface BoardColumnProps {
   /** The record being dragged, so its source column keeps it mounted. */
   draggingId: string | null;
   onOpen?: (record: CollectionRecord) => void;
+  openRecordId: string | null | undefined;
   onNew?: () => void;
   onColor?: (color: OptionColor) => void;
   personLabel?: PersonLabel;
   fieldLabel?: FieldLabel;
+  recordName?: RecordName;
 }
 
 /**
@@ -349,10 +361,12 @@ function BoardColumn({
   fields,
   draggingId,
   onOpen,
+  openRecordId,
   onNew,
   onColor,
   personLabel,
   fieldLabel,
+  recordName,
   footer,
   count,
   canDrag,
@@ -445,7 +459,9 @@ function BoardColumn({
                   onOpen={onOpen}
                   personLabel={personLabel}
                   fieldLabel={fieldLabel}
+                  recordName={recordName}
                   canDrag={canDrag}
+                  open={record.id === openRecordId}
                 />
               </div>
             );
@@ -475,10 +491,12 @@ export function BoardView({
   visibleFields,
   onCellChange,
   onOpenRecord,
+  openRecordId,
   onNewRecord,
   onOptionColorChange,
   personLabel,
   fieldLabel,
+  recordName,
   groupFooter,
   groupCount,
 }: BoardViewProps) {
@@ -545,10 +563,12 @@ export function BoardView({
               fields={fields}
               draggingId={draggingId}
               onOpen={onOpenRecord}
+              openRecordId={openRecordId}
               onNew={onNewRecord && (option !== null || column.value === null) ? () => onNewRecord(column.value) : undefined}
               onColor={option !== null && onOptionColorChange ? (color) => onOptionColorChange(option, color) : undefined}
               personLabel={personLabel}
               fieldLabel={fieldLabel}
+              recordName={recordName}
               footer={group && column.groupIndex !== null ? groupFooter?.(group, column.groupIndex) : undefined}
               count={group && column.groupIndex !== null ? groupCount?.(group, column.groupIndex) : undefined}
               canDrag={!!onCellChange}

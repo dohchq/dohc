@@ -12,7 +12,7 @@ import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
-import { NARROW_GROUP_HIDDEN, useTabRowActionsSlot } from "./workbench/tabRowActions";
+import { NARROW_GROUP_HIDDEN, usePlainActionsRow, useTabRowActionsSlot } from "./workbench/tabRowActions";
 import { useShownAfter } from "./ui/useShownAfter";
 import { PROPERTIES_READ_ONLY_REASON } from "./markdown/frontmatter";
 import { SAVE_STATE } from "./ui/StateMark";
@@ -44,6 +44,7 @@ export function ViewActions(props: {
   actions?: ReactNode;
 }) {
   const slot = useTabRowActionsSlot();
+  const plain = usePlainActionsRow();
   const content = (
     <>
       {/* 28px: the widest mark (12px), its gap and an ellipsis. A grid of
@@ -85,7 +86,7 @@ export function ViewActions(props: {
     </>
   );
   if (slot === undefined) {
-    return <div data-testid="view-actions" className="flex h-9 items-center justify-end gap-1 border-b border-line bg-panel pl-2 pr-1">{content}</div>;
+    return <div data-testid="view-actions" className={`flex items-center justify-end gap-1 pl-2 pr-1 ${plain ? "h-8 border-t border-line" : "h-9 border-b border-line bg-panel"}`}>{content}</div>;
   }
   return slot ? createPortal(content, slot) : null;
 }

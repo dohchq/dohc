@@ -6,20 +6,26 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
-import { CalendarDays, Database, Plus, SquareKanban, Table2 } from "lucide-react";
+import { History, LayoutList, PanelsTopLeft, SlidersHorizontal, Zap } from "lucide-react";
 import {
   BoardView,
   CalendarView,
   createCollectionStore,
   recordLabel,
+  RecordProperties,
   TableView,
   useCollectionStore,
   type CollectionCellChange,
   type CollectionOptionCreate,
+  type TableAbandonedDraft,
+  type TableNewRecord,
 } from "@dohc/collection-views";
 import type {
+  CollectionQueryCursor,
   CollectionQueryParams,
+  CollectionQueryResult,
   CollectionRecord,
   CollectionSchema,
   CollectionValue,
@@ -30,27 +36,33 @@ import type {
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { GhostButton, PrimaryButton, SecondaryButton } from "./ui/controls";
-import { MoreMenu } from "./ui/MoreMenu";
+import { SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
+import { TextNotSavedError } from "./shell/copyDetails";
 import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
+import { CollectionFrame, type CollectionFrameViews, type NewCollectionView } from "./collections/CollectionFrame";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
+import { collectionChangeShell } from "./collectionChangeShells";
 import {
+  collectionWritesPaused,
+  currentCollectionWriteLineage,
   enqueueCollectionFieldWrite,
+  retainUnsavedCollectionRecord,
+  retainUnsavedFieldText,
   useCollectionWriteLineage,
   useCollectionWritesPaused,
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
-import { setOptionColor } from "./collections/schemaAuthoring";
+import { addView, deleteView, renameView, setOptionColor } from "./collections/schemaAuthoring";
 import { withErrorWords } from "../ipc/errorWords";
+import { openLink } from "./linkActivation";
 import { useCollectionFieldMarks, useTableFieldMarks } from "./collections/collectionFieldMarks";
 import {
   AUTOMATIONS_FILE,
   automationCount,
   automationsFileMade,
-  AutomationsButton,
   AutomationsPanel,
   useCollectionAutomations,
   type AutomationFocus,
@@ -60,6 +72,9 @@ import type { Automation } from "./collections/automationSentence";
 import { RecordButton } from "./collections/RecordButton";
 import { CalendarNeedsDateField } from "./collections/CalendarNeedsDateField";
 import { useAutomationButtons, useButtonStates } from "./collections/useAutomationButtons";
+import { RecordPanel, type RecordPanelCommand } from "./collections/RecordPanel";
+import { useRecordPanel, type RecordPanelHost } from "./collections/useRecordPanel";
+import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 
 // The collection surface behind a tab://collection/<path> tab uses the shared
 // @dohc/collection-views components bound to the desktop's collections.*
@@ -73,7 +88,100 @@ import { useAutomationButtons, useButtonStates } from "./collections/useAutomati
 // queries and mount them all. Exported for CollectionPage.test.tsx.
 export const DRAIN_RECORD_LIMIT = 1000;
 
-export interface CollectionPageProps {
+// A record open in the panel that is not among the records the page holds is
+// looked for by its id, a query at a time, in the Collection's own order: the
+// engine reads no record by its id. The search stops at the record, at the
+// last record, or once it has read this many. Exported for CollectionPage.recordPanel.test.tsx.
+export const FIND_RECORD_PAGE = 500;
+export const FIND_RECORD_LIMIT = 5000;
+const RECORD_GONE = "This record is no longer in this Collection.";
+const RECORD_NOT_FOUND = "dohc could not find this record in the first 5,000 records. Close it, then open it from its view.";
+const RECORD_NOT_READ = "dohc could not read this record. Close it, then open it again.";
+
+/** Where a record is in the Collection's own order: the cursor that reads from it on. Undefined for the first record. */
+type RecordPlace = CollectionQueryCursor | undefined;
+/** What a search for the open record found: the record and its place, or why there is none. */
+type FoundRecord = { record: CollectionRecord; place: RecordPlace } | { record: null; problem: string };
+
+/** Answers null once `superseded`, having read no further page. */
+async function findRecord(
+  read: (params: CollectionQueryParams) => Promise<CollectionQueryResult>,
+  collectionPath: string,
+  recordId: string,
+  // The record's place when it was last found, which one read of one record checks first.
+  known: { place: RecordPlace } | null,
+  superseded: () => boolean,
+): Promise<FoundRecord | null> {
+  const page = (cursor: RecordPlace, limit: number) =>
+    read({ collectionPath, resolveRelations: true, limit, ...(cursor ? { cursor } : {}) });
+  if (known) {
+    const record = (await page(known.place, 1)).records[0];
+    if (record?.id === recordId) return { record, place: known.place };
+  }
+  let cursor: RecordPlace;
+  for (let seen = 0; seen < FIND_RECORD_LIMIT; seen += FIND_RECORD_PAGE) {
+    if (superseded()) return null;
+    const result = await page(cursor, FIND_RECORD_PAGE);
+    const at = result.records.findIndex((entry) => entry.id === recordId);
+    // The cursor a page ending at the record before it would give: the Collection's own order sorts by no field.
+    const before = result.records[at - 1];
+    if (at >= 0) return { record: result.records[at]!, place: before ? { sortValues: [], recordPath: before.path, recordId: before.id } : cursor };
+    if (result.nextCursor === null) return { record: null, problem: RECORD_GONE };
+    cursor = result.nextCursor;
+  }
+  return { record: null, problem: RECORD_NOT_FOUND };
+}
+
+/**
+ * The field a record's name is a value of, as `recordLabel` reads it: its
+ * `title`, then its `name`, where that holds text. Null for a record named
+ * by its file.
+ */
+function labelField(values: ReadonlyArray<{ field: string; value: CollectionValue }>): string | null {
+  for (const preferred of ["title", "name"]) {
+    const matches = values.filter((entry) => entry.field.toLowerCase() === preferred);
+    const entry = matches.find((candidate) => candidate.field === preferred) ?? matches.sort((a, b) => (a.field < b.field ? -1 : 1))[0];
+    if (entry && typeof entry.value === "string" && entry.value.trim().length > 0) return entry.field;
+  }
+  return null;
+}
+
+/** How the shell makes a record the page asks for. */
+export interface NewRecordOptions {
+  /** The record's name, which names its file as a new page's title does. Absent, the file is Untitled. */
+  title?: string;
+  /** False keeps the record's file out of a tab. */
+  open?: boolean;
+  /**
+   * Receives why the record was not made, and what finishes a creation that
+   * stopped part way. True when the page reports it with what was typed, so
+   * the shell reports nothing more.
+   */
+  onFailure?(failure: {
+    reason: string;
+    retry: (() => void) | null;
+    /** The record's file exists and the record is not finished. `retry` finishes that same creation. */
+    partial?: boolean;
+    /** The record a failed resume belongs to. Its only retry is that resume. */
+    recordId?: string;
+  }): boolean;
+}
+
+/**
+ * The text field a Collection's records are named in: `title`, then `name`,
+ * by `recordLabel`'s rule for a record's values. Undefined where the
+ * Collection has neither.
+ */
+function nameFieldOf(schema: CollectionSchema): FieldDefinition | undefined {
+  for (const preferred of ["title", "name"]) {
+    const matches = schema.fields.filter((field) => field.type === "text" && field.name.toLowerCase() === preferred);
+    const field = matches.find((candidate) => candidate.name === preferred) ?? matches.sort((a, b) => (a.name < b.name ? -1 : 1))[0];
+    if (field) return field;
+  }
+  return undefined;
+}
+
+export interface CollectionPageProps extends RecordPanelHost {
   readOnly?: boolean;
   accessEnded?: boolean;
   writeRefusal?: string;
@@ -85,16 +193,27 @@ export interface CollectionPageProps {
   // the page falls back to the schema's first view.
   activeViewName: string | null;
   onActiveViewChange: (viewName: string | null) => void;
-  // The shell creates the record file (untitled naming needs the file
-  // listing, which the shell owns) and opens it; adoption mints the id.
-  // `created` runs once the record exists, before it opens.
+  // The shell creates the record file (naming it needs the file listing,
+  // which the shell owns) and opens it in a tab unless asked not to;
+  // adoption mints the id. `created` runs once the record exists, before it opens.
   onNewRecord: (
     collectionPath: string,
     created?: (record: { path: string; recordId: string }) => void,
+    options?: NewRecordOptions,
   ) => void;
-  // The md file IS the record: opening one goes through the shell's normal
-  // file tab machinery, which composes PropertiesPanel and the live editor.
+  // The md file IS the record. A record opens in the panel beside its view;
+  // this opens its file in a tab, as the panel's Open as page does.
   onOpenRecord: (recordPath: string) => void;
+  // Draws a record's page body under its fields in the panel, by the
+  // record's file. The shell owns the file's editor, so the body is the
+  // document a file tab shows. Absent, the panel shows the fields alone.
+  renderRecordBody?: (recordPath: string) => ReactNode;
+  // Runs `then` once the body's unsaved text is saved, as closing a file
+  // tab does: before the record leaves the panel, and before its file opens
+  // in a tab. A save that fails keeps the record open, and `then` never runs.
+  settleRecordBody?: (then: () => void) => void;
+  // Opens a record's History. Absent where a record has none.
+  onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
   // Opens any workspace file in a tab, such as automations.yaml.
   onOpenFile: (path: string) => void;
   // Opens the setting where the owner chooses which computer runs schedules.
@@ -109,21 +228,8 @@ export interface CollectionPageProps {
   onAutomationFocused: () => void;
 }
 
-function NewRecordButton({ onClick }: { onClick: () => void }) {
-  return (
-    <PrimaryButton
-      type="button"
-      data-testid="collection-new-record"
-      onClick={onClick}
-      className="inline-flex items-center gap-2 pl-2"
-    >
-      <Plus size={14} strokeWidth={1.9} aria-hidden />
-      New record
-    </PrimaryButton>
-  );
-}
-
-const VIEW_KIND_ICONS = { table: Table2, board: SquareKanban, calendar: CalendarDays } as const;
+// A url cell's link opens the way a link in a chat or a document does.
+const openCellLink = (url: string) => void openLink(url);
 
 export function CollectionPage({
   readOnly = false,
@@ -135,12 +241,19 @@ export function CollectionPage({
   onActiveViewChange,
   onNewRecord,
   onOpenRecord,
+  renderRecordBody,
+  settleRecordBody,
+  onOpenRecordHistory,
   onOpenFile,
   onOpenScheduleSettings,
   onError,
   onNotice,
   automationFocus,
   onAutomationFocused,
+  initialOpenRecord,
+  onOpenRecordChange,
+  initialRecordPanelWidth,
+  onRecordPanelWidthChange,
 }: CollectionPageProps) {
   const [details, setDetails] = useState<{ schema: CollectionSchema } | null>(
     null,
@@ -221,6 +334,31 @@ export function CollectionPage({
   // only when main's automations change.
   const tableFieldMarks = useTableFieldMarks(useCollectionFieldMarks(collectionPath));
 
+  // The people a person field can name: the ones main lists for this
+  // Collection. A person cell then opens a picker and shows names. Without
+  // the list, as on a received share, the cell keeps the typed id.
+  const [people, setPeople] = useState<ReadonlyArray<{ id: string; name: string }> | undefined>(undefined);
+  const peopleRequests = useRequestSequence([workspaceId, collectionPath]);
+  const hasPersonField = details?.schema.fields.some((field) => field.type === "person") ?? false;
+  useEffect(() => {
+    setPeople(undefined);
+    if (!hasPersonField) return;
+    const request = peopleRequests.next();
+    void bridge()
+      .listAutomationPeople({ workspaceId, collectionPath })
+      .then((result) => {
+        if (!peopleRequests.isCurrent(request) || result.status !== "listed" || result.people.length === 0) return;
+        setPeople(result.people.map((person) => ({ id: person.userId, name: person.name })));
+      })
+      // A failed read leaves the typed id, which still works.
+      .catch(() => undefined);
+  }, [workspaceId, collectionPath, hasPersonField]);
+  const personLabel = useMemo(() => {
+    if (!people) return undefined;
+    const names = new Map(people.map((person) => [person.id, person.name]));
+    return (userId: string) => names.get(userId) ?? null;
+  }, [people]);
+
   const views = details?.schema.views ?? [];
   const activeView: ViewDefinition | null =
     views.find((view) => view.name === activeViewName) ?? views[0] ?? null;
@@ -259,10 +397,32 @@ export function CollectionPage({
   // A button nothing uses opens the builder with its trigger filled in.
   const [panelStart, setPanelStart] = useState<{ automation: Automation; seq: number } | null>(null);
   const panelStarts = useRef(0);
+  // Rises each time the ⚡ panel is asked to close, so a draft with changes asks first.
+  const [closeAsk, setCloseAsk] = useState(0);
+  // What runs once the ⚡ panel has closed at the record panel's asking.
+  const afterAutomationsClose = useRef<(() => void) | null>(null);
+  // The open record's panel: which record it shows, by its id, where focus goes, and what the shell keeps with the tab.
+  const recordPanel = useRecordPanel({
+    initialOpenRecord, onOpenRecordChange, initialRecordPanelWidth, onRecordPanelWidthChange,
+    settle: settleRecordBody,
+    automations: {
+      open: automationsOpen,
+      // The ⚡ panel may hold a draft, so it is asked to close, and the record opens once it has.
+      close: (then) => {
+        afterAutomationsClose.current = then;
+        setCloseAsk((ask) => ask + 1);
+      },
+    },
+  });
+  const openRecordId = recordPanel.openKey;
+  // What takes the open record's body off the page waits until what the body holds is saved.
+  const afterBodySaved = recordPanel.afterSettled;
+  // The ⚡ panel takes the record panel's place.
+  const showAutomations = () => afterBodySaved(() => setAutomationsOpen(true));
   useEffect(() => {
     if (!automationFocus) return;
     setPanelFocus(automationFocus);
-    setAutomationsOpen(true);
+    showAutomations();
     onAutomationFocused();
   }, [automationFocus?.seq]);
   // With the panel closed, only a change to automations.yaml re-reads them;
@@ -278,13 +438,13 @@ export function CollectionPage({
     if (automationsOpen) void reloadAutomations();
   }, [automationsOpen]);
   // Closing forgets a notice's ask, so the next open shows the list.
-  // The header's button asks the panel to close, so a draft with changes
-  // asks first; `seq` rises with each ask.
-  const [closeAsk, setCloseAsk] = useState(0);
   const closeAutomations = useCallback(() => {
     setAutomationsOpen(false);
     setPanelFocus(null);
     setPanelStart(null);
+    const then = afterAutomationsClose.current;
+    afterAutomationsClose.current = null;
+    then?.();
   }, []);
 
   // Invalidation: refresh when a settled batch touches this collection's
@@ -378,14 +538,16 @@ export function CollectionPage({
   // The global host finishes accepted edits after this page unmounts.
   const lineage = useCollectionWriteLineage(workspaceId);
   const enqueueCellChange = useCallback(
-    (change: CollectionCellChange, createOption?: string) => {
+    // `settled`: the write landed, or is kept in the list of unsaved changes with its value. It runs once.
+    (change: CollectionCellChange, createOption?: string, settled?: () => void) => {
       const editId = ++nextEditId.current;
       const key = JSON.stringify([change.recordId, change.recordPath, change.field]);
       enqueueCollectionFieldWrite(workspaceId, collectionPath, change, createOption, lineage, () => {
         completedEdits.current.set(key, Math.max(completedEdits.current.get(key) ?? 0, editId));
+        settled?.();
       }, () => {
         for (const listener of discardListeners.current) listener(editId);
-      });
+      }, settled);
       return editId;
     },
     [workspaceId, collectionPath, lineage],
@@ -404,35 +566,282 @@ export function CollectionPage({
     refreshCoalescer.schedule();
   }, [settledWrites, refreshCoalescer]);
 
-  const newRecord = useCallback(
-    () => onNewRecord(collectionPath),
-    [onNewRecord, collectionPath],
+  // The page is open. A creation that answers after it closed changes nothing on screen.
+  const pageOpen = useRef(true);
+  useEffect(() => {
+    pageOpen.current = true;
+    return () => {
+      pageOpen.current = false;
+    };
+  }, []);
+  // The table's side of its new row, while a table shows.
+  const tableSide = useRef<Parameters<NonNullable<TableNewRecord["bind"]>>[0] | null>(null);
+  // The creations the table's new rows handed over that have not ended, and the records they made that no notice
+  // has counted. Once the last creation ends the view reads its records, and `rowsDue` waits for that read.
+  const rowsOut = useRef(0);
+  const rowsMade = useRef<string[]>([]);
+  const rowsDue = useRef(false);
+  const [rowsRead, setRowsRead] = useState(0);
+  // The records new rows made that no row on screen shows get one notice, so a burst of rows gets one. It waits
+  // for the read that started after the last of them was written, which `rowsRead` counts.
+  useEffect(() => {
+    if (!rowsDue.current || state.status !== "ready" || rowsOut.current > 0) return;
+    rowsDue.current = false;
+    const side = tableSide.current;
+    const unseen = rowsMade.current.splice(0).filter((recordId) => side !== null && !side.shows(recordId)).length;
+    if (unseen > 0) onNotice(unseen === 1 ? "Created a record. It is not among the records on screen." : `Created ${unseen} records. They are not among the records on screen.`);
+  }, [rowsRead, state.status]);
+  // The record made a moment ago from a board, a calendar, or New record beside one, which opens in the panel with its name ready to type.
+  const [justMade, setJustMade] = useState<string | null>(null);
+  const openMade = useRef<(recordId: string) => void>(() => undefined);
+  const panelShows = recordPanel.openKeyRef;
+  /**
+   * Makes a record from a board or a calendar, with a value in one field
+   * where the column or the day gives one. The record then opens in the
+   * panel, in no file tab. A creation that answers after the page closed
+   * still writes its value, and opens nothing.
+   */
+  const makeRecord = useCallback(
+    (field?: string, value?: CollectionValue) => {
+      // The record the panel shows as the person asks. One they open meanwhile keeps the panel, and its focus.
+      const asked = panelShows.current;
+      onNewRecord(collectionPath, (record) => {
+        if (field !== undefined && value !== undefined && value !== null) enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value });
+        const show = () => {
+          if (pageOpen.current && panelShows.current === asked) openMade.current(record.recordId);
+        };
+        // The view reads its records first, so the panel finds the new one among them.
+        if (pageOpen.current) void store.refresh().then(show, show);
+      }, { open: false });
+    },
+    [onNewRecord, collectionPath, enqueueCellChange, store],
   );
+  // In a table the button starts the new row. Beside a board or a calendar it makes a record with no value filled in.
+  const newRecord = useCallback(
+    () => (tableSide.current ? tableSide.current.start() : makeRecord()),
+    [makeRecord],
+  );
+  // The lineage this page opened under. The shell opens a new page when the workspace changes versions or restores
+  // earlier work, so a row typed here belongs to this one, whatever the workspace's lineage is by the time it is saved.
+  const pageLineage = useState(() => currentCollectionWriteLineage(workspaceId))[0];
+  const rowHost = useRef({ onNewRecord, enqueueCellChange, onError, collectionName: collectionPath });
+  rowHost.current = { onNewRecord, enqueueCellChange, onError, collectionName: details?.schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath };
+  /**
+   * The table's new row. Saving it creates the record's file, named from
+   * the row's title or name, then writes each typed value as an edit of a
+   * cell does. The row is gone as soon as it is saved, so what becomes of
+   * the creation shows elsewhere: a notice keeps what was typed for a record
+   * that was not made, and the list of unsaved changes keeps a value whose
+   * write failed. One object for the page's life, so the table builds
+   * nothing again.
+   */
+  const tableNewRecord = useMemo((): TableNewRecord => {
+    const text = (value: CollectionValue) => (Array.isArray(value) ? value.join(", ") : String(value));
+    /**
+     * Keeps what a row held and did not save where the person can copy it:
+     * a notice of this workspace's shell while the window shows the
+     * workspace, and once it shows another, the list of unsaved Collection
+     * changes, which outlives the shell and keeps entries by workspace.
+     */
+    // `made`: the record's file exists and the record is not finished, which `reason` says. Nothing then says it was not created.
+    const keep = (values: Readonly<Record<string, CollectionValue>>, typed: string, reason: string, retry: (() => void) | null, left?: { field: string; text: string }, made = false) => {
+      if (collectionChangeShell(workspaceId)) {
+        const message = made ? `${reason} You typed: ${typed}` : `dohc did not create a record in ${rowHost.current.collectionName}. ${reason} You typed: ${typed}`;
+        rowHost.current.onError(message, new TextNotSavedError(message, typed), retry);
+        // The kept row holds everything typed: its values, and text an editor held that its field cannot take, under that field.
+      } else retainUnsavedCollectionRecord(workspaceId, collectionPath, left ? { ...values, [left.field]: left.text } : values, made ? reason : `dohc did not create this record. ${reason}`);
+    };
+    const save: TableNewRecord["save"] = (values) => {
+      const now = rowHost.current;
+      const entries = Object.entries(values).map(([field, value]) => ({ field, value }));
+      const named = labelField(entries);
+      const typed = entries.map((entry) => `${entry.field}: ${text(entry.value)}`).join(", ");
+      // What a field write checks, checked before the file is made: a file made where its values would be refused
+      // is a named record with empty fields. Nothing is made, and all the row held is kept once.
+      const refusal = mayNotWrite.current()
+        ?? (collectionWritesPaused(workspaceId) ? "Editing was paused while dohc changed files in this workspace." : null)
+        ?? (pageLineage !== currentCollectionWriteLineage(workspaceId) ? "This workspace changed versions or restored earlier work." : null);
+      if (refusal !== null) {
+        if (typed !== "") keep(values, typed, refusal, null);
+        return;
+      }
+      // The creation is out until the file is made or the creation fails. A resume that ends later is the same one.
+      let out = true;
+      rowsOut.current++;
+      const ended = (recordId?: string) => {
+        if (recordId !== undefined) rowsMade.current.push(recordId);
+        if (out) rowsOut.current--;
+        out = false;
+        if (rowsOut.current > 0 || !pageOpen.current) return;
+        // The view reads its records, and the table then says which of the records the rows made no row on screen shows.
+        const read = () => {
+          if (!pageOpen.current) return;
+          rowsDue.current = true;
+          setRowsRead((count) => count + 1);
+        };
+        void store.refresh().then(read, read);
+      };
+      now.onNewRecord(collectionPath, (record) => {
+        // The file is made. Each typed value is written as an edit of a cell is, whether or not the page is still
+        // open. A write that fails is in the list of unsaved changes, with its value and its Try again.
+        // The creation ends once its values are written, or kept in that list: a read before then finds the record
+        // without them, where its own name would not put it.
+        let writes = entries.length;
+        if (writes === 0) ended(record.recordId);
+        for (const { field, value } of entries) {
+          now.enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field, value }, undefined, () => {
+            writes -= 1;
+            if (writes === 0) ended(record.recordId);
+          });
+        }
+      }, {
+        ...(named === null ? {} : { title: text(values[named] ?? null) }),
+        open: false,
+        onFailure: (failure) => {
+          ended();
+          // A record with nothing typed in it has nothing to keep, so the shell reports it as it does any creation.
+          if (typed === "") return false;
+          // No row is left to say why, so what it held is kept with the failure. A file that exists and is not
+          // finished keeps the shell's own resume, which writes these values when it finishes. Where nothing
+          // was made, Try again makes the record again.
+          keep(values, typed, failure.reason, failure.retry ?? (failure.partial ? null : () => void save(values)), undefined, failure.partial);
+          return true;
+        },
+      });
+    };
+    return {
+      bind: (side) => {
+        tableSide.current = side;
+        return () => {
+          if (tableSide.current === side) tableSide.current = null;
+        };
+      },
+      save,
+      // What the row held and did not save goes to a notice, whose details hold all of it. Nothing is created.
+      onUnsaved: (row) => {
+        const typed = [...Object.entries(row.values).map(([field, value]) => `${field}: ${text(value)}`), ...(row.text ? [`${row.text.field}: ${row.text.text}`] : [])].join(", ");
+        const field = Object.keys(row.values)[0] ?? "";
+        if (row.why === "closed") return keep(row.values, typed, `Enter a value ${row.text?.field ?? "the field"} can take.`, null, row.text);
+        const why = mayNotWrite.current() ?? "The field changed, or this view no longer shows it.";
+        const message = `dohc did not save what you typed in the ${field} field of the new record. ${why} You typed: ${typed}`;
+        rowHost.current.onError(message, new TextNotSavedError(message, typed));
+        return `The ${field} field changed, so its value left this row. A notice has what you typed.`;
+      },
+    };
+  }, [collectionPath, store, workspaceId, pageLineage]);
+  // Why the page may not write now, read when the new row is saved or gives a value back.
+  const mayNotWrite = useRef<() => string | null>(() => null);
   // A board column's New: the record starts with the column's value, written
   // through the same queue as any edit once the record exists.
   const groupBy = activeView?.kind === "board" ? activeView.groupBy : undefined;
   const newRecordInGroup = useCallback(
-    (value: CollectionValue) => {
-      if (!groupBy || value === null) return onNewRecord(collectionPath);
-      onNewRecord(collectionPath, (record) => {
-        enqueueCellChange({ recordId: record.recordId, recordPath: record.path, field: groupBy, value });
-      });
-    },
-    [onNewRecord, collectionPath, groupBy, enqueueCellChange],
+    (value: CollectionValue) => makeRecord(groupBy ?? undefined, value),
+    [makeRecord, groupBy],
   );
-  const openRecord = useCallback(
-    (record: CollectionRecord) => onOpenRecord(record.path),
-    [onOpenRecord],
-  );
+  // Stable, so opening or closing a record builds no column of the table again.
+  const openInPanel = useRef(recordPanel.open);
+  openInPanel.current = recordPanel.open;
+  const openRecord = useCallback((record: CollectionRecord) => openInPanel.current(record.id), []);
+  openMade.current = (recordId) => {
+    setJustMade(recordId);
+    openInPanel.current(recordId);
+  };
+
+  // The open record, as the page holds it: among the view's records, or as a search by its id found it.
+  const [sought, setSought] = useState<({ id: string } & FoundRecord) | null>(null);
+  const heldRecord = openRecordId === null ? undefined
+    : state.records.find((record) => record.id === openRecordId)
+      ?? state.groups?.flatMap((group) => group.records).find((record) => record.id === openRecordId);
+  const found = sought !== null && sought.id === openRecordId ? sought : null;
+  // The record as last seen, which the panel shows while a refresh that left it out looks for it again.
+  const lastRecord = useRef<CollectionRecord | null>(null);
+  if (heldRecord ?? found?.record) lastRecord.current = heldRecord ?? found?.record ?? null;
+  else if (lastRecord.current?.id !== openRecordId || found !== null) lastRecord.current = null;
+  const shownRecord = lastRecord.current;
+  useEffect(() => {
+    if (justMade !== null && justMade === openRecordId && shownRecord !== null) setJustMade(null);
+  }, [justMade, openRecordId, shownRecord]);
+  const recordProblem = heldRecord === undefined && found !== null && found.record === null ? found.problem : undefined;
+  const held = heldRecord !== undefined;
+  // Where the open record was last found. It outlives the rows that hold the record, which a refresh drops.
+  const foundAt = useRef<{ id: string; place: RecordPlace } | null>(null);
+  useEffect(() => {
+    // A closed record is looked for again when a person opens it again.
+    if (openRecordId === null) return setSought(null);
+    if (state.status !== "ready") return;
+    // A record the view holds needs no search, and what an earlier search found is older than the view's.
+    if (held) return setSought(null);
+    // A search that ended without the record is not run again for it.
+    if (sought !== null && sought.id === openRecordId && sought.record === null && sought.problem !== RECORD_NOT_READ) return;
+    let stale = false;
+    findRecord(executor, collectionPath, openRecordId, foundAt.current?.id === openRecordId ? foundAt.current : null, () => stale).then(
+      (result) => {
+        if (stale || result === null) return;
+        foundAt.current = result.record === null ? null : { id: openRecordId, place: result.place };
+        setSought({ id: openRecordId, ...result });
+      },
+      () => {
+        // A record the panel already shows keeps its last values: the next refresh looks again.
+        if (!stale && lastRecord.current === null) setSought({ id: openRecordId, record: null, problem: RECORD_NOT_READ });
+      },
+    );
+    return () => {
+      stale = true;
+    };
+    // Each refresh of the view's records reads the record again, so a record outside them shows its changes.
+  }, [openRecordId, held, state.status, state.records, state.groups, executor, collectionPath]);
+  /** Reads the Collection's records again because a person asked, which looks again for a record an earlier search did not find. */
+  const readAgain = () => {
+    setSought(null);
+    void store.refresh();
+  };
   const recordDrafts = [...new Map([...state.records, ...(state.groups?.flatMap(group => group.records) ?? [])]
     .filter(record => record.creationDelivery === "pending" || record.creationDelivery === "offline" || record.creationDelivery === "refused").map(record => [record.path, record])).values()];
   const draftActions = useRequestSequence([workspaceId, collectionPath, readOnly]);
   const draftAccess = useRef({ readOnly, accessEnded, writeRefusal });
   draftAccess.current = { readOnly, accessEnded, writeRefusal };
+  /** Why this page may not write now, or null where it may. */
+  const accessRefusal = () => !draftAccess.current.readOnly && !draftAccess.current.accessEnded ? null
+    : draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
+      : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+  mayNotWrite.current = accessRefusal;
+  // Each record as the page last had it, so text left in a cell whose record a refresh took still has its record's name and file.
+  const knownRecords = useRef(new Map<string, CollectionRecord>());
+  useEffect(() => {
+    for (const record of [...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])]) knownRecords.current.set(record.id, record);
+  }, [state.records, state.groups]);
+  const leftWith = useRef({ enqueueCellChange, onError });
+  leftWith.current = { enqueueCellChange, onError };
+  /**
+   * Text still in an editor that went away with no press, as with its tab or its record. It is saved as a press
+   * away saves it. What its field cannot take, or this page may not write, is reported with the text and never sent.
+   */
+  const saveLeftText = useCallback((record: CollectionRecord, field: string, text: string, value: CollectionValue | undefined) => {
+    const refusal = accessRefusal()
+      ?? (collectionWritesPaused(workspaceId) ? "Editing was paused while dohc changed files in this workspace. Type it again." : null)
+      ?? (value === undefined ? `Enter a value ${field} can take.` : null);
+    if (refusal === null && value !== undefined) {
+      leftWith.current.enqueueCellChange({ recordId: record.id, recordPath: record.path, field, value });
+      return;
+    }
+    const said = `dohc did not save what you typed in the ${field} field of ${recordLabel(record)}. ${refusal}`;
+    // The window shows another workspace by now, so this workspace's shell takes no notice. The list of unsaved
+    // changes outlives it, and keeps the text for its own workspace.
+    if (!collectionChangeShell(workspaceId)) {
+      retainUnsavedFieldText(workspaceId, collectionPath, { recordId: record.id, recordPath: record.path, field }, text, said);
+      return;
+    }
+    // The text comes last, so a long one is all a cut takes from the message. Copy details has all of it.
+    const message = `${said} You typed: ${text}`;
+    leftWith.current.onError(message, new TextNotSavedError(message, text));
+  }, [workspaceId, collectionPath]);
+  const saveLeftCell = useCallback((draft: TableAbandonedDraft) => {
+    const record = knownRecords.current.get(draft.recordId);
+    if (record) saveLeftText(record, draft.field, draft.text, draft.value);
+  }, [saveLeftText]);
   const retryDrafts = async () => {
-    if (draftAccess.current.readOnly) {
-      const message = draftAccess.current.writeRefusal ?? (draftAccess.current.accessEnded ? "Your access to this share ended."
-        : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+    const message = accessRefusal();
+    if (draftAccess.current.readOnly && message !== null) {
       onError(message, new Error(message));
       return;
     }
@@ -521,17 +930,75 @@ export function CollectionPage({
   );
 
   const changeOptionColor = useCallback(
-    function change(option: string, color: OptionColor) {
-      if (!groupBy) return;
+    function change(field: string, option: string, color: OptionColor) {
       const dialog = currentSchemaDialog.current;
-      void applySchemaChange((current) => setOptionColor(current, groupBy, option, color)).then((failure) => {
+      void applySchemaChange((current) => setOptionColor(current, field, option, color)).then((failure) => {
         // applySchemaChange reports a failure itself only when a dialog changed.
         if (failure !== null && currentSchemaDialog.current === dialog) {
-          onError(failure, new Error(failure), () => change(option, color));
+          onError(failure, new Error(failure), () => change(field, option, color));
         }
       });
     },
-    [applySchemaChange, groupBy, onError],
+    [applySchemaChange, onError],
+  );
+  // A board colors the options of the field it groups by.
+  const changeGroupColor = useCallback(
+    (option: string, color: OptionColor) => {
+      if (groupBy) changeOptionColor(groupBy, option, color);
+    },
+    [changeOptionColor, groupBy],
+  );
+
+  // The tab strip's view changes: each is one schema rewrite, as the Views
+  // dialog's are. Which view is open stays the shell's state, so the page
+  // follows a new, renamed or deleted view there. A write that ends after
+  // the page closed changes nothing: applySchemaChange answers null for it too.
+  const openViewName = useRef(activeViewName);
+  openViewName.current = activeViewName;
+  // Current while the page is open: schemaWrites moves on only as the page closes.
+  const pageWrites = schemaWrites.current();
+  const createView = useCallback(
+    async (view: NewCollectionView): Promise<string | null> => {
+      const request = schemaWrites.current();
+      const failure = await applySchemaChange((current) =>
+        addView(current, {
+          name: view.name,
+          kind: view.kind,
+          groupBy: view.kind === "board" ? view.groupBy ?? null : null,
+          sort: [],
+          visibleFields: null,
+          dateField: view.kind === "calendar" ? view.dateField ?? null : null,
+        }),
+      );
+      if (failure === null && schemaWrites.isCurrent(request)) onActiveViewChange(view.name);
+      return failure;
+    },
+    [applySchemaChange, onActiveViewChange, schemaWrites],
+  );
+  const renameOpenView = useCallback(
+    async (from: string, to: string): Promise<string | null> => {
+      const request = schemaWrites.current();
+      const failure = await applySchemaChange((current) => renameView(current, from, to));
+      if (failure === null && schemaWrites.isCurrent(request) && openViewName.current === from) onActiveViewChange(to);
+      return failure;
+    },
+    [applySchemaChange, onActiveViewChange, schemaWrites],
+  );
+  const removeView = useCallback(
+    function remove(name: string) {
+      const dialog = currentSchemaDialog.current;
+      const request = schemaWrites.current();
+      void applySchemaChange((current) => deleteView(current, name)).then((failure) => {
+        if (!schemaWrites.isCurrent(request)) return;
+        if (failure === null) {
+          if (openViewName.current === name) onActiveViewChange(null);
+          // applySchemaChange reports a failure itself only when a dialog changed.
+        } else if (currentSchemaDialog.current === dialog) {
+          onError(failure, new Error(failure), () => remove(name));
+        }
+      });
+    },
+    [applySchemaChange, onActiveViewChange, onError, schemaWrites],
   );
 
   // A typed select value not in the options yet: the whole edit enters the
@@ -585,7 +1052,7 @@ export function CollectionPage({
           type="button"
           onClick={() => {
             void refreshDetails();
-            void store.refresh();
+            readAgain();
           }}
 
         >
@@ -606,6 +1073,7 @@ export function CollectionPage({
   }
 
   const schema = details.schema;
+  const name = schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath;
 
   // The ⚡ panel docks at the right of whatever the page shows.
   const automationsPanel = automationsOpen ? (
@@ -620,6 +1088,9 @@ export function CollectionPage({
       onStarted={() => setPanelStart(null)}
       closeAsk={closeAsk}
       onClose={closeAutomations}
+      onStayed={() => {
+        afterAutomationsClose.current = null;
+      }}
       onOpenFile={onOpenFile}
       onOpenScheduleSettings={onOpenScheduleSettings}
       onOpenFields={() => setFieldsOpen(true)}
@@ -628,40 +1099,9 @@ export function CollectionPage({
     />
   ) : null;
 
-  // Automations and Fields set up a Collection, so they stay in the header
-  // even before it has records.
-  const collectionName = (
-    <h1 className="m-0 flex min-w-0 items-center gap-2 text-base font-semibold text-ink">
-      <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-md bg-panel-2 text-muted">
-        <Database size={14} strokeWidth={1.9} />
-      </span>
-      <span className="truncate">{schema.name ?? collectionPath.split("/").at(-1)}</span>
-    </h1>
-  );
-  const setupButtons = (
-    <>
-      <AutomationsButton
-        toolbar
-        open={automationsOpen}
-        count={automationCount(automations.file)}
-        onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
-      />
-      {!readOnly ? <GhostButton
-        size="toolbar"
-        data-testid="collection-fields-button"
-        onClick={() => setFieldsOpen(true)}
-      >
-        Fields
-      </GhostButton> : null}
-      <MoreMenu
-        label="Collection actions"
-        items={[{ label: "Customize…", onSelect: () => setCustomizing(true) }]}
-      />
-    </>
-  );
   const customizeDialog = customizing ? (
     <CollectionCustomizeDialog
-      name={schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath}
+      name={name}
       files={documentCollectionFiles(collectionPath, automationsFileMade(automations.file))}
       onOpenFile={onOpenFile}
       onClose={() => setCustomizing(false)}
@@ -678,7 +1118,7 @@ export function CollectionPage({
         setFieldsOpen(false);
         panelStarts.current += 1;
         setPanelStart({ automation: buttonAutomation(field, null, []), seq: panelStarts.current });
-        setAutomationsOpen(true);
+        showAutomations();
       }}
       onClose={() => setFieldsOpen(false)}
     />
@@ -691,75 +1131,146 @@ export function CollectionPage({
   const dateFields = schema.fields.filter((field) => field.type === "date");
   const calendarReady = kind === "calendar" && (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
+  // A calendar day's New record: the record starts with the day in the calendar's date field.
+  const newRecordOnDay = (day: string) => makeRecord(calendarReady || undefined, day);
+  const toggleAutomations = () => (automationsOpen ? setCloseAsk((ask) => ask + 1) : showAutomations());
+  // Every record the page holds, in rows or in a board's columns. More can load while a cursor remains.
+  const loaded = new Set([...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])].map((record) => record.path)).size;
+  const more = state.nextCursor !== null;
+  // Someone who cannot change the Collection switches views and saves none.
+  const frameViews: CollectionFrameViews | undefined = readOnly ? undefined : {
+    // A board groups by stored values, and a button stores none.
+    groupFields: schema.fields.filter((field) => field.type !== "button").map((field) => ({ id: field.name, name: field.name })),
+    dateFields: dateFields.map((field) => ({ id: field.name, name: field.name })),
+    onAddDateField: () => setFieldsOpen("date"),
+    create: createView,
+    rename: renameOpenView,
+    remove: removeView,
+    // Deleting a view drops its configuration with no reverse path, so the menu asks twice.
+    confirmDelete: true,
+  };
+
+  // The open record, in the panel: its name as the table calls it, a row for each field of the Collection with
+  // the table's own editors, and its page body. The ⚡ panel has the place while it is open.
+  const recordPanelNode = (() => {
+    if (openRecordId === null || automationsOpen) return null;
+    const record = shownRecord;
+    // The name opens for typing where it is a text field's value, which the page writes as the table's cell does:
+    // the field that names the record, or with no name yet, the Collection's title or name field, so a new
+    // record can be named. A record of a Collection with neither is named by its file, which no cell writes.
+    const labelled = record === null ? null : labelField(record.values);
+    const candidate = record === null ? undefined
+      : labelled !== null ? schema.fields.find((field) => field.name === labelled && field.type === "text") : nameFieldOf(schema);
+    const stored = candidate && record?.values.find((entry) => entry.field === candidate.name)?.value;
+    // A value that is not text stays in its row, where its flag shows.
+    const nameField = candidate && (typeof stored === "string" || stored === null || stored === undefined) ? candidate : undefined;
+    const storedText = typeof stored === "string" ? stored : "";
+    const commands: RecordPanelCommand[] = record !== null && onOpenRecordHistory
+      ? [{
+          id: "history",
+          label: "History",
+          icon: <History size={14} strokeWidth={1.9} aria-hidden />,
+          onSelect: () => onOpenRecordHistory({ collectionPath, recordId: record.id, recordName: recordLabel(record) }),
+        }]
+      : [];
+    return (
+      <RecordPanel
+        key={openRecordId}
+        panelRef={recordPanel.element}
+        collectionName={name}
+        name={record === null ? "" : recordLabel(record)}
+        nameText={nameField ? storedText : undefined}
+        nameField={nameField?.name}
+        nameLabel={nameField?.name}
+        canRename={nameField !== undefined && onCellChange !== undefined && !readOnly}
+        startRenaming={justMade === openRecordId}
+        onNameChange={nameField && record ? (value) => {
+          enqueueCellChange({ recordId: record.id, recordPath: record.path, field: nameField.name, value: value || null });
+        } : undefined}
+        // A name the input still shows as it was is no change, as for a press away.
+        onNameAbandoned={nameField && record ? (text) => {
+          if (text !== storedText) saveLeftText(record, nameField.name, text, text || null);
+        } : undefined}
+        onOpenAsPage={record === null ? undefined : () => afterBodySaved(() => onOpenRecord(record.path))}
+        commands={commands}
+        loading={record === null && recordProblem === undefined}
+        unavailable={recordProblem}
+        width={recordPanel.width}
+        onWidthChange={recordPanel.setWidth}
+        onClose={() => recordPanel.close("opener")}
+        properties={record === null ? undefined : (
+          <RecordProperties
+            schema={schema}
+            record={record}
+            visibleFields={null}
+            omitFields={nameField ? [nameField.name] : undefined}
+            onCellChange={readOnly ? undefined : enqueueCellChange}
+            onDraftAbandoned={(draft) => saveLeftText(record, draft.field, draft.text, draft.value)}
+            editingDisabled={readOnly || writesPaused}
+            acknowledgedWriteId={acknowledgedWriteId}
+            subscribeToDiscardedWrites={subscribeToDiscardedWrites}
+            onCreateOption={readOnly ? undefined : createOption}
+            onOptionColorChange={readOnly ? undefined : changeOptionColor}
+            people={people}
+            personLabel={personLabel}
+            onOpenLink={openCellLink}
+            relationExecutor={executor}
+            fieldMarks={tableFieldMarks}
+            renderButton={readOnly ? undefined : renderButton}
+          />
+        )}
+        body={record === null ? undefined : renderRecordBody?.(record.path)}
+      />
+    );
+  })();
+
   return (
-    <div
-      data-testid="collection-page"
-      className="flex min-h-0 flex-1 flex-col bg-bg"
+    <CollectionFrame
+      name={name}
+      // An editor, a picker and a menu each take their own Escape. The next one closes the open record.
+      onKeyDown={recordPanel.onPageKeyDown}
+      count={`${loaded}${more ? "+" : ""} ${loaded === 1 && !more ? "record" : "records"}`}
+      status={state.status === "error" ? (
+        <>
+          <span className="truncate text-[12px] text-danger">
+            dohc could not read this collection's records. {state.error}
+          </span>
+          <SecondaryButton size="compact" onClick={readAgain}>
+            Retry
+          </SecondaryButton>
+        </>
+      ) : writesPaused ? (
+        <span
+          data-testid="collection-writes-paused"
+          className="truncate text-[12px] text-muted"
+        >
+          Editing is paused while dohc changes files in this workspace.
+        </span>
+      ) : writeError ? (
+        <span data-testid="collection-write-error" className="truncate text-[12px] text-danger">
+          {writeError}
+        </span>
+      ) : null}
+      // A Collection with no saved view shows its default table as the one tab.
+      tabs={views.length > 0 ? views.map((view) => ({ id: view.name, name: view.name, kind: view.kind, saved: true })) : [{ id: "", name: "Table", kind: "table" }]}
+      activeTabId={activeView?.name ?? ""}
+      onSelectTab={(id) => { if (id !== "") onActiveViewChange(id); }}
+      views={frameViews}
+      automations={{ open: automationsOpen, count: automationCount(automations.file), onToggle: toggleAutomations }}
+      newRecord={readOnly ? undefined : { onClick: newRecord, disabled: writesPaused }}
+      menuLabel="Collection actions"
+      menu={[
+        { label: "View", commands: [
+          !readOnly && { id: "fields", label: "Fields", icon: <LayoutList size={14} strokeWidth={1.9} aria-hidden />, testId: "collection-fields-button", onSelect: () => setFieldsOpen(true) },
+          !readOnly && { id: "views", label: "Views", icon: <PanelsTopLeft size={14} strokeWidth={1.9} aria-hidden />, testId: "collection-views-button", onSelect: () => setViewsOpen(true) },
+        ] },
+        { label: "Collection", commands: [
+          { id: "automations", label: "Automations", icon: <Zap size={14} strokeWidth={1.9} aria-hidden />, count: automationCount(automations.file), onSelect: toggleAutomations },
+          { id: "customize", label: "Customize…", icon: <SlidersHorizontal size={14} strokeWidth={1.9} aria-hidden />, onSelect: () => setCustomizing(true) },
+        ] },
+      ]}
+      panel={recordPanelNode ?? automationsPanel}
     >
-      <div className="flex shrink-0 items-center gap-2 px-5 pt-4">
-        {collectionName}
-        <span className="flex-1" />
-        {state.status === "error" ? (
-          <>
-            <span className="truncate text-[12px] text-danger">
-              dohc could not read this collection's records. {state.error}
-            </span>
-            <SecondaryButton size="compact" onClick={() => void store.refresh()}>
-              Retry
-            </SecondaryButton>
-          </>
-        ) : writesPaused ? (
-          <span
-            data-testid="collection-writes-paused"
-            className="truncate text-[12px] text-muted"
-          >
-            Editing is paused while dohc changes files in this workspace.
-          </span>
-        ) : writeError ? (
-          <span data-testid="collection-write-error" className="truncate text-[12px] text-danger">
-            {writeError}
-          </span>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-1 border-b border-line px-3 pt-2">
-        {views.length > 1 ? (
-          <div
-            data-testid="collection-view-switcher"
-            className="dohc-tab-strip flex min-w-0 items-center self-stretch overflow-x-auto overflow-y-hidden"
-          >
-            {views.map((view) => {
-              const Icon = VIEW_KIND_ICONS[view.kind];
-              const active = view.name === (activeView?.name ?? "");
-              return (
-                <button
-                  key={view.name}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => onActiveViewChange(view.name)}
-                  className={`flex h-10 shrink-0 items-center gap-2 border-b-2 px-2 text-[13px] font-medium transition-colors duration-75 ${
-                    active ? "border-ink text-ink" : "border-transparent text-muted hover:text-ink"
-                  }`}
-                >
-                  <Icon size={14} strokeWidth={1.9} aria-hidden />
-                  {view.name}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-        <span className="flex-1" />
-        <div className="flex shrink-0 items-center gap-1 pb-1">
-          {setupButtons}
-          {!readOnly ? <GhostButton
-            size="toolbar"
-            data-testid="collection-views-button"
-            onClick={() => setViewsOpen(true)}
-          >
-            Views
-          </GhostButton> : null}
-          {!readOnly ? <span className="ml-1"><NewRecordButton onClick={newRecord} /></span> : null}
-        </div>
-      </div>
       {drainCapped ? (
         <div
           data-testid="collection-drain-cap"
@@ -776,7 +1287,6 @@ export function CollectionPage({
           {record.creationCanDiscard === true && !readOnly ? <SecondaryButton onClick={() => void discardDraft(record)}>Discard draft</SecondaryButton> : null}
         </div>)}
       </div> : null}
-      <div className="flex min-h-0 flex-1">
       <div className="min-h-0 min-w-0 flex-1 overflow-auto">
         {boardReady ? (
           <BoardView
@@ -786,8 +1296,10 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
+            openRecordId={openRecordId}
             onNewRecord={readOnly || writesPaused ? undefined : newRecordInGroup}
-            onOptionColorChange={readOnly ? undefined : changeOptionColor}
+            onOptionColorChange={readOnly ? undefined : changeGroupColor}
+            personLabel={personLabel}
           />
         ) : calendarReady ? (
           <CalendarView
@@ -797,6 +1309,8 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
+            openRecordId={openRecordId}
+            onNewRecord={readOnly || writesPaused ? undefined : newRecordOnDay}
           />
         ) : kind === "calendar" ? (
           <CalendarNeedsDateField onAddDateField={readOnly ? undefined : () => setFieldsOpen("date")} />
@@ -808,20 +1322,24 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={readOnly ? undefined : enqueueCellChange}
+            onDraftAbandoned={saveLeftCell}
             editingDisabled={readOnly || writesPaused}
             acknowledgedWriteId={acknowledgedWriteId}
             subscribeToDiscardedWrites={subscribeToDiscardedWrites}
             onCreateOption={readOnly ? undefined : createOption}
+            onOptionColorChange={readOnly ? undefined : changeOptionColor}
+            people={people}
+            personLabel={personLabel}
+            onOpenLink={openCellLink}
             onOpenRecord={openRecord}
+            openRecordId={openRecordId}
             relationExecutor={executor}
             fieldMarks={tableFieldMarks}
             renderButton={readOnly ? undefined : renderButton}
             onNearEnd={loadNextPage}
-            onNewRecord={readOnly ? undefined : newRecord}
+            newRecord={readOnly ? undefined : tableNewRecord}
           />
         )}
-      </div>
-      {automationsPanel}
       </div>
       {fieldsDialog}
       {customizeDialog}
@@ -830,14 +1348,15 @@ export function CollectionPage({
           schema={schema}
           apply={applySchemaChange}
           onClose={() => setViewsOpen(false)}
+          // A write that ends after the page closed answers as a success, and changes nothing in the shell.
           onRenamed={(from, to) => {
-            if (activeViewName === from) onActiveViewChange(to);
+            if (schemaWrites.isCurrent(pageWrites) && openViewName.current === from) onActiveViewChange(to);
           }}
           onDeleted={(name) => {
-            if (activeViewName === name) onActiveViewChange(null);
+            if (schemaWrites.isCurrent(pageWrites) && openViewName.current === name) onActiveViewChange(null);
           }}
         />
       ) : null}
-    </div>
+    </CollectionFrame>
   );
 }

@@ -12,6 +12,15 @@ export type ErrorDetailField = readonly [
   maxChars?: number,
 ];
 
+/**
+ * What a person typed that dohc did not save. Its notice says why in its
+ * message, and carries all of the text in Copy details, where no cut takes
+ * the end of a long one.
+ */
+export class TextNotSavedError extends Error {
+  constructor(message: string, readonly typed: string) { super(message); }
+}
+
 export function errorDetails(fields: ReadonlyArray<ErrorDetailField>): string {
   return fields
     .filter((field): field is readonly [string, string, number?] => Boolean(field[1]))

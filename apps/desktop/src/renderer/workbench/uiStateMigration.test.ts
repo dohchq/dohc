@@ -4,7 +4,7 @@ import { GetWorkspaceUiStateResult, WorkspaceUiState } from "../../ipc/bridgeCon
 import { readUiStateFile, writeUiStateFile } from "../../workspaces/workspaceUiState";
 import { createTestScratch } from "../../workspaces/testTemp";
 import { fakeLocalStateOpens } from "../../testing/preparedLocalState";
-import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, parseTab, parseUiState, serializeUiState } from "./workbenchState";
+import { ABOUT_DEFAULT_WIDTH, allTabs, defaultWorkbenchState, parseTab, parseUiState, RECORD_PANEL_DEFAULT_WIDTH, serializeUiState } from "./workbenchState";
 
 const engine = fakeLocalStateOpens();
 // A workspace whose engine open prepared .dohc/local.
@@ -20,10 +20,11 @@ async function fixture(version: 2 | 3) {
 
 // A version-2 file predates the About rail: its right-panel fields were
 // chatsVisible and chatsWidth, which nothing reads, so the rail opens closed.
+// It predates the record panel too, and its Data Collection tab does not restore.
 async function migratedFixture() {
   const current = await fixture(3);
   current.editorGroups[0].tabs = current.editorGroups[0].tabs.filter((path: string) => !path.startsWith("tab://data-collection/"));
-  return { ...current, aboutVisible: false, aboutWidth: ABOUT_DEFAULT_WIDTH };
+  return { ...current, aboutVisible: false, aboutWidth: ABOUT_DEFAULT_WIDTH, openRecords: {}, recordPanelWidth: RECORD_PANEL_DEFAULT_WIDTH };
 }
 
 describe("a layout saved before the About rail", () => {

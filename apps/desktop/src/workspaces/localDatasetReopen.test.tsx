@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { performance as nodePerformance } from "node:perf_hooks";
 import { join } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AppRuntimeLauncher } from "@dohc/app-backend-runtime";
 import { DEFAULT_LIMITS } from "../../../../packages/app-backend-runtime/src/protocol";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
@@ -36,11 +36,19 @@ const definition: DatasetDefinition = {
     { operationId: id(6), name: "add", label: "Add item", tableId: id(2), kind: "create", access: "owner", readOnly: false, fieldIds: [id(4)] },
   ],
 };
+// The table's virtualizer reads offsetWidth and offsetHeight, which jsdom reports as 0, so every element
+// gets a nonzero box and the page's rows render.
+const offsetDescriptors = { offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"), offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth") };
+beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, value: 600 });
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, value: 900 });
+});
 afterEach(async () => {
   cleanup();
   for (const close of cleanups.splice(0).reverse()) await close();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  for (const [key, descriptor] of Object.entries(offsetDescriptors)) if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
 });
 async function fixture() {
   // SQLite and child IPC return Node typed arrays in this renderer integration test.

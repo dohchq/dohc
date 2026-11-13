@@ -246,4 +246,27 @@ describe("FileInspector renders markdown through the shared component map", () =
     );
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { surface: "the editor", text: "---\ntitle: Plan\nstatus: draft\n---\n\nBase paragraph.\n" },
+    { surface: "the read preview", text: `---\ntitle: Plan\nstatus: draft\n---\n\n${TABLE_DOCUMENT}` },
+  ])("draws a record's body without the title and the properties in $surface, and a file tab with both", async ({ text }) => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({ text, truncated: false }));
+    try {
+      const view = render(<FileInspector workspaceId="ws-1" path="a.md" recordBody />);
+      const document = await screen.findByTestId("view-markdown");
+      await waitFor(() => expect(document.textContent).toContain(text.includes("Base paragraph.") ? "Base paragraph." : "Limits"));
+      expect(screen.queryByTestId("page-identity")).toBeNull();
+      expect(screen.queryByTestId("properties-panel")).toBeNull();
+      // The document keeps its own controls.
+      expect(screen.getByTestId("markdown-edit-toggle")).toBeTruthy();
+
+      view.rerender(<FileInspector workspaceId="ws-1" path="a.md" />);
+      expect((await screen.findByTestId("page-title") as HTMLTextAreaElement).value).toBe("Plan");
+      expect(await screen.findByTestId("properties-panel")).toBeTruthy();
+    } finally {
+      bridgeMock.readWorkspaceText.mockImplementation(read!);
+    }
+  });
 });

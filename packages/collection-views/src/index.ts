@@ -23,7 +23,9 @@ export {
   TableView,
   type CollectionCellChange,
   type CollectionOptionCreate,
+  type TableAbandonedDraft,
   type TableFieldMark,
+  type TableNewRecord,
   type TableViewProps,
 } from "./table/TableView";
 export { BoardView, type BoardViewProps } from "./board/BoardView";
@@ -32,3 +34,6 @@ export {
   type CalendarRecordEvent,
   type CalendarViewProps,
 } from "./calendar/CalendarView";
+export {
+  RecordProperties,
+} from "./record/RecordProperties";

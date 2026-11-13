@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
 import * as Y from "yjs";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
-import { editorTabTestId } from "../src/testPins";
 import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { probeRelayWorkspace } from "../src/workspaces/relayWorkspaceProbe";
@@ -444,14 +443,14 @@ test("an agent's file save on one device opens a conflict against a record the o
         },
         { id: workspaceId, recordPath: path },
       );
-    // B claims its copy: the card opens the record's live document, and
-    // closing it originates the lineage's base. With `typed`, B edits the
-    // record before closing it.
+    // B claims its copy: the card opens the record in the panel, whose body
+    // is the record's live document, and closing the record originates the
+    // lineage's base. With `typed`, B edits the record before closing it.
     const claimOnB = async (card: Locator, path: string, typed?: string) => {
       await card.click();
-      const tab = page.getByTestId(editorTabTestId(path));
-      await expect(tab).toBeVisible({ timeout: 15_000 });
-      const editor = page.getByTestId("markdown-editor");
+      const record = page.getByTestId("collection-record-panel");
+      await expect(record).toBeVisible({ timeout: 15_000 });
+      const editor = record.getByTestId("markdown-editor");
       await expect(editor).toHaveAttribute("contenteditable", "true");
       if (typed !== undefined) {
         await editor.click();
@@ -461,13 +460,11 @@ test("an agent's file save on one device opens a conflict against a record the o
           .poll(() => readFile(join(temp.rootPath, path), "utf8"), { timeout: 30_000 })
           .toContain(typed);
       }
-      await tab.hover();
-      await tab.getByRole("button", { name: /^Close / }).click();
-      await expect(tab).toHaveCount(0);
+      await record.getByRole("button", { name: "Close record" }).click();
+      await expect(record).toHaveCount(0);
       await expect
         .poll(() => ydocLineageClaimStatus(temp.rootPath, path), { timeout: 30_000 })
         .toBe("exact");
-      await page.getByTestId(editorTabTestId("tab://collection/tasks")).click();
       await expect(card).toBeVisible();
       expect(ydocLineageClaimStatus(sourceRoot, path)).toBeNull();
     };

@@ -258,6 +258,16 @@ export function explorerRow(page: Page, path: string) {
   );
 }
 
+/**
+ * Opens a document Collection's record from its row, then its file in a tab.
+ * Open shows the record in the panel beside its view, and the panel's Open
+ * as page opens the file.
+ */
+export async function openRecordAsPage(page: Page, name: string): Promise<void> {
+  await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
+  await page.getByTestId("collection-record-panel").getByRole("button", { name: "Open as page", exact: true }).click();
+}
+
 export async function waitForWorkspaceReady(page: Page): Promise<void> {
   await expect(page.getByTestId("workspace-shell")).toHaveAttribute(
     "data-ready",

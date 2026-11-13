@@ -1,3 +1,4 @@
+import { collectionCommand, createRecord, fieldCells } from "./helpers/dataCollection";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
 import { editorTabTestId } from "../src/testPins";
 import { test, expect } from "@playwright/test";
@@ -41,12 +42,9 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await create.getByTestId("new-collection-create").click();
     await expect(create).toBeHidden();
     const collection = page.getByRole("region", { name: "Registrations", exact: true });
-    await collection.getByRole("button", { name: "New record", exact: true }).first().click();
-    await collection.getByRole("row", { name: "New record" }).getByLabel("Name", { exact: true }).fill("Before sharing");
-    await collection.getByRole("button", { name: "Create record", exact: true }).click();
-    await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Before sharing");
-    await collection.getByLabel("Manage Collection", { exact: true }).click();
-    await collection.getByRole("button", { name: "Create form", exact: true }).click();
+    await createRecord(collection, "Before sharing");
+    await expect(await fieldCells(collection, "Name")).toHaveText("Before sharing");
+    await (await collectionCommand(collection, "Create form")).click();
     const formDialog = page.getByTestId("create-dataset-form-dialog");
     await formDialog.getByRole("button", { name: "Create form", exact: true }).click();
     await expect(formDialog).toBeHidden();
@@ -136,8 +134,8 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
     const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
     await page.getByTestId(editorTabTestId(path)).click();
-    await collection.getByRole("button", { name: "Refresh", exact: true }).click();
-    const names = collection.getByRole("button", { name: /^Edit Name for record / });
+    await (await collectionCommand(collection, "Refresh")).click();
+    const names = await fieldCells(collection, "Name");
     await expect(names).toHaveCount(2);
     expect(await names.allTextContents()).toEqual(expect.arrayContaining(["Before sharing", "Shared browser participant"]));
     const request = { action: "invoke" as const, workspaceId, datasetPath: dataset.datasetPath!, revision: dataset.revision,

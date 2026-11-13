@@ -780,4 +780,27 @@ describe("revealMenuRow", () => {
     revealMenuRow(element, rows[4], rows[2]);
     expect(element.scrollTop).toBe(56);
   });
+
+  it("groups the rows under a section label, and the keys move through every row", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        items={[
+          { section: "View" },
+          { id: "fields", label: "Fields", onSelect: vi.fn() },
+          { section: "Collection" },
+          { id: "archive", label: "Archive", onSelect: remove },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    const groups = screen.getAllByRole("group");
+    expect(groups.map((group) => document.getElementById(group.getAttribute("aria-labelledby")!)!.textContent)).toEqual(["View", "Collection"]);
+    expect(groups.map((group) => group.querySelector('[role="menuitem"]')!.textContent)).toEqual(["Fields", "Archive"]);
+    // A label is not a row: the arrows skip it.
+    await user.keyboard("{ArrowDown}{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Archive" }));
+    await user.keyboard("{Enter}");
+    expect(remove).toHaveBeenCalledOnce();
+  });
 });

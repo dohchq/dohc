@@ -11,7 +11,7 @@ import { readHistoryMoments } from "./helpers/history";
 import { relayJson } from "./helpers/relayPeer";
 import { startServerProxy, type ProxiedCollectionWriteResponse } from "./helpers/selfHostOnboarding";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
-import { createTempWorkspace, openWorkspaceFromFirstRun, seedCloudCredentials,
+import { createTempWorkspace, openRecordAsPage, openWorkspaceFromFirstRun, seedCloudCredentials,
   seedWorkspaceManifest, seedWorkspaceRegistry, showExplorerFiles, writeWorkspaceFiles } from "./helpers/workspace";
 
 type Api = DohcDesktopBridge;
@@ -19,7 +19,10 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
 const COLLECTION = "trip/Tasks", OWNER_ID = "record-create-owner";
 const OWNER_TOKEN = "test:e2e-granter", RECIPIENT_TOKEN = "test:e2e-recipient";
 const OWNER_EMAIL = "e2e-granter@dohc.test", RECIPIENT_EMAIL = "e2e-recipient@dohc.test";
-const SCHEMA = "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\n";
+// The Collection opens on a board. These specs follow a record with nothing typed in it through the relay, and in a
+// table New record starts a row that makes no record until it holds a value. Beside a board it makes the record at once.
+// Its second view is a table, where one step types a record in the new row.
+const SCHEMA = "name: Tasks\nfields:\n  Task:\n    type: text\n  Status:\n    type: text\nviews:\n  - name: Board\n    kind: board\n    groupBy: Status\n  - name: Table\n    kind: table\n";
 type Op = { originId: string; opKind: string; payload: Record<string, unknown> };
 async function log(relay: SyncRelayHandle): Promise<Op[]> {
   const query = new URLSearchParams({ since: "0", limit: "1000", ...(relayAdoptedIdentity(relay.dbPath, OWNER_ID) ?? {}) });
@@ -36,6 +39,35 @@ async function openCollection(page: Page) {
     if (path === COLLECTION || await row.getAttribute("aria-expanded") !== "true") await row.click({ timeout: 120_000 });
   }
   await expect(page.getByTestId("collection-new-record")).toBeVisible({ timeout: 120_000 });
+}
+/**
+ * Makes a record with New record, and opens its page. The record opens in the panel beside the board, in no file tab,
+ * so the specs that follow its page through the relay open the page from the panel.
+ *
+ * The panel may still show the record made before: it takes the new record only once that record exists. The panel
+ * is named for its record, which this Collection names by its file, so the helper waits for the new record's panel
+ * before it presses Open as page. Pressed sooner, it opens the page of the record before.
+ *
+ * It ends with the record's page showing in its tab, which is where New record used to leave these specs. The panel
+ * is not on screen then: it belongs to the Collection's tab, and shows again when a spec goes back to the Collection.
+ */
+async function newRecordPage(page: Page, file = "Untitled") {
+  await page.getByTestId("collection-new-record").click();
+  const panel = page.getByRole("complementary", { name: file, exact: true });
+  await panel.getByRole("button", { name: "Open as page", exact: true }).click({ timeout: 30_000 });
+  await expect(page.getByTestId(`tab-${COLLECTION}/${file}.md`)).toBeVisible({ timeout: 30_000 });
+}
+/**
+ * Closes the record panel where the Collection shows one. A spec that goes back to the Collection after
+ * `newRecordPage` finds the panel on the record it made. Closing it leaves the Collection as it was when New record
+ * opened a record's page in a tab, with no record open beside the board. The panel is part of the Collection's page,
+ * so once `openCollection` has seen the page's New record button, the panel is on the page or it is not open.
+ */
+async function closeRecordPanel(page: Page) {
+  const panel = page.getByTestId("collection-record-panel");
+  if (await panel.count() === 0) return;
+  await panel.getByRole("button", { name: "Close record", exact: true }).click();
+  await expect(panel).toHaveCount(0);
 }
 async function records(page: Page) {
   return page.evaluate(async collectionPath => {
@@ -241,9 +273,8 @@ test("@two-client an Edit recipient's new record opens immediately, becomes edit
       if (result.status === 200) await acknowledged;
     }, async fixture => {
       const page = fixture.recipient().page;
-      await page.getByTestId("collection-new-record").click();
-      // The tab must open while the relay answer is still withheld.
-      await expect(page.getByTestId(`tab-${COLLECTION}/Untitled.md`)).toBeVisible({ timeout: 30_000 });
+      // The record must open in the panel, and its page from there, while the relay answer is still withheld.
+      await newRecordPage(page);
       await expect(page.getByTestId("view-markdown")).toBeVisible({ timeout: 30_000 });
       await expect.poll(async () => (await records(page)).length, { timeout: 30_000 }).toBe(1);
       const [created] = await records(page);
@@ -315,9 +346,9 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
   await withSharedCollection(() => undefined, async fixture => {
     const recipient = fixture.recipient().page;
     const created: { id: string; path: string }[] = [];
-    for (const label of ["Owner review", "Recipient only"]) {
+    for (const [label, file] of [["Owner review", "Untitled"], ["Recipient only", "Untitled 2"]]) {
       await openCollection(recipient);
-      await recipient.getByTestId("collection-new-record").click();
+      await newRecordPage(recipient, file);
       await expect(recipient.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
       for (const [field, value] of [["Task", label], ["Status", "Ready"]]) {
         await recipient.getByTestId("property-add").click();
@@ -332,7 +363,7 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     await openCollection(fixture.owner.page);
     await expect.poll(async () => (await records(fixture.owner.page)).length, { timeout: 120_000 }).toBe(2);
     for (const record of created) await expectOnlyRecipientChanged(fixture.owner.page, record.path);
-    await fixture.owner.page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await openRecordAsPage(fixture.owner.page, "Untitled");
     const status = fixture.owner.page.getByLabel("Property Status value", { exact: true });
     await expect(status).toBeEnabled({ timeout: 120_000 });
     // The Source button shows only on the engine's live document or an ended share's read-only copy. File editing shows Edit.
@@ -381,7 +412,7 @@ test(`@two-client Stop and restore keeps the owner's text ${restartBeforeRestore
     await fixture.restartOwner();
     await openCollection(fixture.owner.page);
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created[0]!.id]);
-    await fixture.owner.page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await openRecordAsPage(fixture.owner.page, "Untitled");
     await expect(fixture.owner.page.getByLabel("Property Status value", { exact: true })).toHaveValue("Owner text KEEP", { timeout: 120_000 });
     const undo = await fixture.owner.page.evaluate(async ({ workspaceId, ids }) =>
       (window as unknown as { dohcDesktop: Api }).dohcDesktop.undoStopAndRestore({ workspaceId, restoredMomentIds: ids }),
@@ -403,8 +434,7 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     return drop ? "drop" : undefined;
   }, async fixture => {
     let page = fixture.recipient().page;
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(`tab-${COLLECTION}/Untitled.md`)).toBeVisible({ timeout: 30_000 });
+    await newRecordPage(page);
     await expect.poll(() => responses.some(response => response.dropped && response.receipt.created === true),
       { timeout: 120_000 }).toBe(true);
     const original = responses.find(response => response.receipt.created === true)!;
@@ -413,6 +443,7 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     expect(original.request.submitId).toEqual(expect.any(String));
     await expect.poll(async () => creationOps(await log(fixture.relay)).length, { timeout: 120_000 }).toBe(1);
     await openCollection(page);
+    await closeRecordPanel(page);
     await expect(page.getByTestId("collection-record-drafts")).toContainText("Saved on this computer. Waiting to send");
     await expect(page.getByTestId("collection-record-drafts").getByRole("button", { name: "Discard draft", exact: true })).toHaveCount(0);
     let beforeRelaunch = 0;
@@ -433,7 +464,7 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(creationOps(await log(fixture.relay))).toHaveLength(1);
     expect(responses.filter(response => response.receipt.created === true)).toHaveLength(1);
-    await page.getByRole("button", { name: "Open Untitled", exact: true }).click();
+    await openRecordAsPage(page, "Untitled");
     await expect(page.getByTestId("property-add")).toBeEnabled({ timeout: 120_000 });
     await page.getByTestId("property-add").click();
     await page.getByTestId("property-key").last().fill("Task");
@@ -443,6 +474,22 @@ test("@two-client a recipient restarts after a lost creation acknowledgement and
     await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id), { timeout: 120_000 }).toEqual([created!.id]);
     expect(creationOps(await log(fixture.relay))).toHaveLength(1);
     await test.info().attach("lost acknowledgement and relay replay", { contentType: "application/json", body: JSON.stringify(responses, null, 2) });
+
+    // A recipient's new row, through the relay: the task typed in the table's row makes a record on Enter, and both
+    // the creation and the field write of what was typed reach the owner.
+    await openCollection(page);
+    await page.getByTestId("collection-view-switcher").getByRole("button", { name: "Table", exact: true }).click();
+    await page.getByTestId("collection-new-record").click();
+    const rowEditor = page.locator("[data-cell-editor] input");
+    await rowEditor.fill("Typed in the new row");
+    await rowEditor.press("Enter");
+    await expect.poll(async () => (await records(page)).length, { timeout: 120_000 }).toBe(2);
+    const typed = (await records(page)).find(record => record.id !== created!.id)!;
+    await expect.poll(() => fixture.ownerText(typed.path), { timeout: 120_000, intervals: [1000] }).toContain("Task: Typed in the new row");
+    await expect.poll(async () => (await records(fixture.owner.page)).map(record => record.id).sort(), { timeout: 120_000 }).toEqual([created!.id, typed.id].sort());
+    // The row saved, so its record has a row in the table, and no file tab opened for it.
+    await expect(page.getByRole("grid").getByRole("button", { name: "Open Untitled 2", exact: true })).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByTestId(`tab-${typed.path}`)).toHaveCount(0);
   });
 });
 
@@ -455,12 +502,12 @@ test("@two-client a recipient's record survives a restart while the relay is unr
     if (result.status === 200) receipts.push(JSON.parse(result.body) as Record<string, unknown>);
   }, async fixture => {
     let page = fixture.recipient().page;
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(`tab-${COLLECTION}/Untitled.md`)).toBeVisible({ timeout: 30_000 });
+    await newRecordPage(page);
     await expect.poll(() => refusedWrites, { timeout: 120_000 }).toBeGreaterThan(0);
     const [created] = await records(page);
     expect(created).toMatchObject({ creationDelivery: "pending" });
     await openCollection(page);
+    await closeRecordPanel(page);
     await expectWaitingDraft(page);
     let refusedBeforeRelaunch = 0;
     page = (await fixture.restartRecipient(() => { refusedBeforeRelaunch = refusedWrites; })).page;
@@ -503,7 +550,8 @@ test("@two-client a waiting editor becomes editable when the owner's computer re
       if (result.status === 200) { creationWritten(); await acknowledgement; }
     }, async fixture => {
       const page = fixture.recipient().page;
-      await page.getByTestId("collection-new-record").click();
+      // The record's page is the editor that waits, so it is open before the owner's computer stops.
+      await newRecordPage(page);
       await written;
       await fixture.stopOwner();
       release();

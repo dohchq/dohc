@@ -297,6 +297,21 @@ describe("BoardView", () => {
     expect(within(card).queryByText("done")).toBeNull();
   });
 
+  it("names a record through recordName on its Open control, and on a card with no title", () => {
+    const groups = [makeGroup(null, [makeRecord("rec-1")])];
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={groups}
+        groupBy="status"
+        onOpenRecord={vi.fn()}
+        recordName={(record) => `Invoice ${record.id}`}
+      />,
+    );
+    expect(screen.getByRole("listitem", { name: "Invoice rec-1" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Open Invoice rec-1" })).toBeDefined();
+  });
+
   it("labels the null group after the field and marks a flagged card with a warning dot", () => {
     const groups = [
       makeGroup(null, [makeRecord("rec-none", [indexedValue("title", "No status yet")])]),
@@ -512,6 +527,15 @@ describe("BoardView", () => {
       expect(within(column).queryByRole("listitem", { name: "Task 0" })).toBeNull();
     });
     expect(onCellChange).not.toHaveBeenCalled();
+  });
+
+  it("marks the card of the record the host shows open, and no other", () => {
+    const groups = makeGroups();
+    const open = groups.flatMap((group) => group.records)[0]!;
+    render(<BoardView schema={makeSchema()} groups={groups} groupBy="status" openRecordId={open.id} />);
+    const current = screen.getAllByRole("listitem").filter((card) => card.getAttribute("aria-current") === "true");
+    expect(current).toHaveLength(1);
+    expect(current[0]!.getAttribute("aria-label")).toBe("Write the spec");
   });
 
   it("opens the record from the card's focusable Open button", () => {

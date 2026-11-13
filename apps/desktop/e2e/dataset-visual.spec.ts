@@ -53,9 +53,14 @@ for (const theme of ["light", "dark"] as const) {
       await expect(create).toBeHidden();
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1280, 900));
       const collection = page.getByRole("region", { name: "Tournament", exact: true });
-      await expect(collection.getByRole("button", { name: "Create form", exact: true })).toBeEnabled();
-      await collection.getByRole("button", { name: "Create form", exact: true }).focus();
-      await expect(collection.getByRole("button", { name: "Create form", exact: true })).toBeFocused();
+      // Create form is a command in the actions menu. Enter on the menu's button opens it from the keyboard, so Enter then runs the command that has focus.
+      const manage = collection.getByRole("button", { name: "Manage Collection", exact: true });
+      const createForm = collection.getByRole("menuitem", { name: "Create form", exact: true });
+      await manage.focus();
+      await page.keyboard.press("Enter");
+      await expect(createForm).not.toHaveAttribute("aria-disabled", "true");
+      await createForm.focus();
+      await expect(createForm).toBeFocused();
       const start = performance.now();
       await page.keyboard.press("Enter");
       const form = page.getByTestId("create-dataset-form-dialog");
@@ -72,9 +77,10 @@ for (const theme of ["light", "dark"] as const) {
       await page.screenshot({ path: test.info().outputPath(`create-form-narrow-${theme}.png`) });
       await form.getByRole("button", { name: "Cancel", exact: true }).click();
       await expect(form).toBeHidden();
-      await expect(collection.getByRole("button", { name: "Create form", exact: true })).toBeFocused();
-      await collection.getByLabel("Manage Collection", { exact: true }).click();
-      await expectInsideViewport(collection.getByLabel("Manage Collection", { exact: true }).locator("..").locator(":scope > div"));
+      // Focus returns to the menu's button, which opened the command's dialog.
+      await expect(manage).toBeFocused();
+      await manage.click();
+      await expectInsideViewport(collection.getByRole("menu", { name: "Manage Collection", exact: true }));
       await page.screenshot({ path: test.info().outputPath(`collection-toolbar-narrow-${theme}.png`) });
       await page.keyboard.press("Escape");
       assertDesktopEngineHealthy(desktop.logs);

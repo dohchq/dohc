@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler, useMemo, useRef, useState } from "react";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
+import { editorTabTestId } from "../testPins";
 import { sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import { createAutomationButtons } from "./collections/useAutomationButtons";
 import { collectionTabPath } from "./workbench/workbenchState";
@@ -100,14 +101,51 @@ function focusAfterMinimum() {
   fireEvent.focus(window);
 }
 
+/** Opens the Collection's actions menu, which holds Fields and Views, when it is closed. */
+function openCollectionActions() {
+  if (!screen.queryByRole("menu", { name: "Collection actions" })) fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+}
+/** Whether the actions menu offers a command. The menu is opened to look, then closed. */
+function offersCollectionAction(testId: string): boolean {
+  openCollectionActions();
+  const offered = screen.queryByTestId(testId) !== null;
+  fireEvent.click(screen.getByRole("button", { name: "Collection actions" }));
+  return offered;
+}
+/** Runs a command of the actions menu, once the page shows the Collection can be changed. */
+async function runCollectionAction(testId: string) {
+  await screen.findByTestId("collection-new-record");
+  openCollectionActions();
+  fireEvent.click(screen.getByTestId(testId));
+}
+
+/** Types a name in the table's new row, and saves the row with Enter. */
+async function saveNewRow(name: string) {
+  fireEvent.click(await screen.findByTestId("collection-new-record"));
+  const input = document.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+  fireEvent.change(input, { target: { value: name } });
+  fireEvent.keyDown(input, { key: "Enter" });
+}
+/** Waits for a notice to say why the new row's record was not made, with what was typed. No row says it. */
+async function noticeSays(text: string) {
+  await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(text));
+  expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk");
+  expect(document.querySelector("[data-new-record-status]")).toBeNull();
+}
+const PART_WAY = "dohc created the record file but could not finish the record.";
+
 async function assertReadableAndReadOnly(bridge: ReturnType<typeof collectionBridge>) {
   await waitFor(() => expect(screen.getByTestId("shared-view-banner").textContent).toContain(ENDED_SENTENCE));
   expect(await screen.findByText("Retained task")).toBeTruthy();
   await waitFor(() => expect(screen.getAllByTestId("tree-row").find(row => row.dataset.path === "tasks")?.dataset.collection).toBe("true"));
   expect(screen.queryByTestId("share-changes-send")).toBeNull();
   expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
-  expect(screen.queryByTestId("collection-fields-button")).toBeNull();
+  expect(offersCollectionAction("collection-fields-button")).toBe(false);
   expect(screen.queryByTestId("collection-new-record")).toBeNull();
+  // The view still shows as a tab, with nothing that saves a view.
+  expect(within(screen.getByTestId("collection-view-switcher")).getByRole("button", { name: "Table" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.queryByRole("button", { name: "Add a view" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Retained task" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Finish for Retained task" })).toBeNull();
   expect(screen.queryByRole("textbox")).toBeNull();
@@ -149,16 +187,22 @@ describe("ended Edit Collection shares", () => {
     await screen.findByTestId("collection-new-record");
     const send = directWriteInput.current!.sendShareChanges;
     if (action === "record creation") {
-      fireEvent.click(screen.getByTestId("collection-new-record"));
-      await screen.findByTestId("workspace-shell-error");
+      await saveNewRow("Milk");
+      // A notice says the creation stopped part way, and keeps what was typed.
+      await noticeSays(PART_WAY);
     }
     view.rerender(shell(bridge, { ...ENDED_SHARE, shareView: { ...ENDED_SHARE.shareView!, damaged: true } }));
+    // The right to add records goes, and nothing starts a request as it goes. The notice's Try again, which
+    // finishes the same creation, meets the shell's refusal.
     if (action === "record creation") {
+      await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(PART_WAY));
+      expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
       fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     } else await act(async () => send());
     const message = "Your access to this share ended.";
-    expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message);
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(message));
+    if (action === "record creation") expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk");
     expect(shellRefusal).toHaveBeenLastCalledWith(EDIT_SHARE.workspaceId, message);
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(action === "record creation" ? 1 : 0);
     expect(bridge.submitShareChanges).not.toHaveBeenCalled();
@@ -409,8 +453,8 @@ describe("ended Edit Collection shares", () => {
       await act(async () => focusAfterMinimum());
       expect(bridge.getWorkspaceRegistry.mock.calls.length).toBe(registryReads + 1);
       expect(screen.queryByTestId("collection-new-record")).toBeNull();
-      expect(screen.queryByTestId("collection-fields-button")).toBeNull();
-      expect(screen.queryByTestId("collection-views-button")).toBeNull();
+      expect(offersCollectionAction("collection-fields-button")).toBe(false);
+      expect(offersCollectionAction("collection-views-button")).toBe(false);
       expect(screen.queryByTestId("share-changes-send")).toBeNull();
       expect(screen.getByText("Retained task")).toBeTruthy();
       await act(() => vi.advanceTimersByTimeAsync(10_000));
@@ -464,7 +508,7 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-fields-button"));
+    await runCollectionAction("collection-fields-button");
     const dialog = await screen.findByTestId("collection-fields-dialog");
     fireEvent.change(within(dialog).getByRole("textbox", { name: "Field name" }), { target: { value: "Extra" } });
     const write = deferred<Awaited<ReturnType<typeof bridge.writeWorkspaceText>>>();
@@ -485,7 +529,7 @@ describe("ended Edit Collection shares", () => {
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    await screen.findByTestId("collection-fields-button");
+    await screen.findByTestId("collection-new-record");
     await act(async () => {});
     const before = bridge.checkSharedViewAccess.mock.calls.length;
     await act(async () => bridge.emitShareDirectWritesPushed({ workspaceId: EDIT_SHARE.workspaceId, result: {
@@ -502,7 +546,7 @@ describe("ended Edit Collection shares", () => {
       const view = render(shell(bridge, EDIT_SHARE));
       await screen.findByRole("button", { name: "Retained task" });
       expect(screen.getByTestId("share-changes-send")).toBeTruthy();
-      expect(screen.getByTestId("collection-fields-button")).toBeTruthy();
+      expect(offersCollectionAction("collection-fields-button")).toBe(true);
       expect(screen.getByTestId("collection-new-record")).toBeTruthy();
       expect(await screen.findByRole("button", { name: "Finish for Retained task" })).toBeTruthy();
       fireEvent.click(screen.getByTestId("collection-automations-button"));
@@ -530,8 +574,11 @@ describe("ended Edit Collection shares", () => {
       act(() => bridge.emitWorkspaceActivity({ paths: ["tasks/retained.md"] }));
       await waitFor(() => expect(bridge.queryCollectionRecords.mock.calls.length).toBeGreaterThan(reads));
       expect(screen.getByText("Retained task")).toBeTruthy();
+      // The record opens in the panel, with no edit there: its name is text, and its body is the file's own read-only view.
       fireEvent.click(screen.getByRole("button", { name: "Open Retained task" }));
-      const edit = await screen.findByTestId("markdown-edit-toggle");
+      const record = await screen.findByRole("complementary", { name: "Retained task" });
+      expect(within(within(record).getByRole("heading", { name: "Retained task" })).queryByRole("button")).toBeNull();
+      const edit = await within(record).findByTestId("markdown-edit-toggle");
       await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
       expect(edit.hasAttribute("disabled") || edit.getAttribute("aria-disabled") === "true").toBe(true);
       act(() => bridge.emitMenuCommand("command-palette"));
@@ -543,13 +590,14 @@ describe("ended Edit Collection shares", () => {
     const bridge = collectionBridge();
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId(`collection-${kind}-button`));
+    await runCollectionAction(`collection-${kind}-button`);
     await screen.findByTestId(`collection-${kind}-dialog`);
     view.rerender(shell(bridge, ENDED_SHARE));
     await waitFor(() => expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull());
     expect(screen.getByText("Retained task")).toBeTruthy();
     view.rerender(shell(bridge, { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView! } }));
-    await screen.findByTestId(`collection-${kind}-button`);
+    await screen.findByTestId("collection-new-record");
+    expect(offersCollectionAction(`collection-${kind}-button`)).toBe(true);
     expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull();
   });
 
@@ -572,7 +620,7 @@ describe("ended Edit Collection shares", () => {
     view.rerender(shell(bridge, restored));
     await screen.findByRole("button", { name: "Retained task" });
     expect(screen.getByTestId("collection-new-record")).toBeTruthy();
-    expect(screen.getByTestId("collection-fields-button")).toBeTruthy();
+    expect(offersCollectionAction("collection-fields-button")).toBe(true);
     expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
     expect(screen.getByTestId("share-changes-send")).toBeTruthy();
     expect(screen.getByTestId("shared-view-banner").textContent).not.toContain(ENDED_SENTENCE);
@@ -619,12 +667,13 @@ describe("ended Edit Collection shares", () => {
     bridge.createCollectionRecord.mockRejectedValueOnce(new Error("tasks/Untitled.md already exists. Choose another record name."));
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    const create = await screen.findByTestId("collection-new-record");
+    await screen.findByTestId("collection-new-record");
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce());
     const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
     bridge.checkSharedViewAccess.mockReturnValue(pending.promise);
-    fireEvent.click(create);
-    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("already exists"));
+    await saveNewRow("Milk");
+    // A notice keeps what was typed and says why.
+    await noticeSays("already exists");
     expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce();
   });
 
@@ -639,15 +688,39 @@ describe("ended Edit Collection shares", () => {
     bridge.createCollectionRecord.mockRejectedValueOnce(new Error(error));
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    const create = await screen.findByTestId("collection-new-record");
+    await screen.findByTestId("collection-new-record");
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledOnce());
     const pending = deferred<Awaited<ReturnType<typeof bridge.checkSharedViewAccess>>>();
     bridge.checkSharedViewAccess.mockReturnValueOnce(pending.promise);
-    fireEvent.click(create);
+    await saveNewRow("Milk");
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     await act(async () => pending.resolve(access === "ended" ? { status: "ended" } : { status: "current", access: "view" }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain(`Your access to this share ${access}.`));
+  });
+
+  it("keeps what a recipient typed in a new row, with why, when the relay refuses the record, and opens no file tab", async () => {
+    const bridge = collectionBridge();
+    bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access: "edit" });
+    // The record's file is kept on this computer as a draft the relay refused.
+    const refused = { path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz", delivery: "refused" as const, reason: "The owner's server did not accept this record." };
+    bridge.createCollectionRecord.mockResolvedValueOnce(refused);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, EDIT_SHARE));
+    await saveNewRow("Milk");
+    await noticeSays("The owner's server did not accept this record.");
+
+    // The file takes the record's name. One notice keeps what was typed, and no row holds it.
+    expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({ collectionPath: "tasks", name: "Milk" });
+    expect(document.querySelector("[data-new-record]")?.textContent).toBe("");
+    expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
+
+    // The notice's Try again makes the record once more, and still opens no tab.
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
+    expect(bridge.createCollectionRecord.mock.calls[1]![0]).toMatchObject({ collectionPath: "tasks" });
+    expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
   });
 
   it("reports a record creation retry after the share ends", async () => {
@@ -658,9 +731,13 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-new-record"));
-    await screen.findByTestId("workspace-shell-error");
+    await saveNewRow("Milk");
+    await noticeSays(PART_WAY);
+    // The share ends, and nothing starts a request as it does. The notice keeps what was typed.
     view.rerender(shell(bridge, ENDED_SHARE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("You typed: Name: Milk"));
+    expect(bridge.createCollectionRecord).toHaveBeenCalledOnce();
+    // Its Try again finishes the same creation, which the ended share refuses.
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     fireEvent.click(within(screen.getByTestId("notice-center")).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Your access to this share ended."));
@@ -681,8 +758,8 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-new-record"));
-    await screen.findByTestId("workspace-shell-error");
+    await saveNewRow("Milk");
+    await noticeSays(PART_WAY);
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "current", access });
     focusAfterMinimum();
     await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
@@ -704,8 +781,8 @@ describe("ended Edit Collection shares", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId("collection-new-record"));
-    await screen.findByTestId("workspace-shell-error");
+    await saveNewRow("Milk");
+    await noticeSays(PART_WAY);
     bridge.checkSharedViewAccess.mockResolvedValue({ status: "needs-reopen" });
     focusAfterMinimum();
     await waitFor(() => expect(screen.queryByTestId("collection-new-record")).toBeNull());
@@ -726,7 +803,7 @@ describe("ended Edit Collection shares", () => {
     bridge.writeWorkspaceText.mockImplementationOnce(() => write.promise);
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(bridge, EDIT_SHARE));
-    fireEvent.click(await screen.findByTestId(`collection-${kind}-button`));
+    await runCollectionAction(`collection-${kind}-button`);
     const dialog = await screen.findByTestId(`collection-${kind}-dialog`);
     fireEvent.change(within(dialog).getByRole("textbox", { name: kind === "fields" ? "Field name" : "View name" }), { target: { value: "Extra" } });
     fireEvent.click(screen.getByTestId(kind === "fields" ? "collection-add-field" : "collection-add-view"));
@@ -734,8 +811,10 @@ describe("ended Edit Collection shares", () => {
     view.rerender(shell(bridge, ENDED_SHARE));
     await waitFor(() => expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull());
     view.rerender(shell(bridge, { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView! } }));
-    await screen.findByTestId(`collection-${kind}-button`);
+    await screen.findByTestId("collection-new-record");
+    expect(offersCollectionAction(`collection-${kind}-button`)).toBe(true);
     expect(screen.queryByTestId(`collection-${kind}-dialog`)).toBeNull();
+    openCollectionActions();
     fireEvent.click(screen.getByTestId(`collection-${kind}-button`));
     await screen.findByTestId(`collection-${kind}-dialog`);
     await act(async () => { write.reject(new Error("Your access to this share ended.")); });

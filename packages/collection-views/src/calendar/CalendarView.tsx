@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
+import { Plus } from "lucide-react";
 import { Calendar, dateFnsLocalizer } from "react-big-calendar";
-import type { CalendarProps } from "react-big-calendar";
+import type { CalendarProps, DateHeaderProps } from "react-big-calendar";
 import withDragAndDrop from "react-big-calendar/lib/addons/dragAndDrop";
 import type { EventInteractionArgs } from "react-big-calendar/lib/addons/dragAndDrop";
 import { addMonths } from "date-fns/addMonths";
@@ -44,6 +45,14 @@ export interface CalendarViewProps {
   onCellChange?: (change: CollectionCellChange) => void;
   /** Receives the event's record when the event is clicked, not dragged. */
   onOpenRecord?: (record: CollectionRecord) => void;
+  /** The record the host shows open, as in a panel beside the calendar. Its entry is marked. */
+  openRecordId?: string | null;
+  /**
+   * Adds a record on a day: its date field holds the day, in the engine's
+   * date format. Each day then offers New record, on hover and on keyboard
+   * focus. Absent, where no record can be created, no day offers it.
+   */
+  onNewRecord?: (date: string) => void;
   /** Maps a person field's user id to a display name. Falls back to the id. */
   personLabel?: (userId: string) => string | null;
   /** The date whose month opens first. Defaults to today. */
@@ -115,12 +124,43 @@ export function CalendarView({
   visibleFields,
   onCellChange,
   onOpenRecord,
+  openRecordId,
+  onNewRecord,
   personLabel,
   defaultDate,
   date,
   onNavigate,
   nearbyDates,
 }: CalendarViewProps) {
+  // The day's number, and before it the control that adds a record on that day. One component for the
+  // calendar's life, so a host that builds its handler again draws no day again.
+  const addRecord = useRef(onNewRecord);
+  addRecord.current = onNewRecord;
+  const offersNew = onNewRecord !== undefined;
+  const components = useMemo(
+    () =>
+      offersNew
+        ? {
+            month: {
+              dateHeader: ({ date: day, label }: DateHeaderProps) => (
+                <span className="flex items-center justify-between gap-1">
+                  <button
+                    type="button"
+                    aria-label={`New record on ${format(day, "MMMM d, yyyy")}`}
+                    title="New record"
+                    className="dohc-calendar-new grid size-5 shrink-0 place-items-center rounded text-subtle transition-opacity duration-75 hover:bg-hover hover:text-ink"
+                    onClick={() => addRecord.current?.(format(day, DATE_VALUE_FORMAT))}
+                  >
+                    <Plus size={12} strokeWidth={1.9} aria-hidden />
+                  </button>
+                  <span>{label}</span>
+                </span>
+              ),
+            },
+          }
+        : undefined,
+    [offersNew],
+  );
   const [ownDate, setOwnDate] = useState(() => defaultDate ?? new Date());
   const shown = date ?? ownDate;
   const navigate = useCallback(
@@ -205,11 +245,14 @@ export function CalendarView({
           defaultView="month"
           views={["month"]}
           resizable={false}
+          components={components}
           draggableAccessor={() => !!onCellChange}
           onEventDrop={handleEventDrop}
           onSelectEvent={
             onOpenRecord ? (event) => onOpenRecord(event.record) : undefined
           }
+          // The open record's entry wears a line around it, clear of the entry's own fill.
+          eventPropGetter={(event) => (event.record.id === openRecordId ? { className: "ring-2 ring-ink ring-offset-1 ring-offset-bg" } : {})}
         />
       </div>
     </div>

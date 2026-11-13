@@ -185,6 +185,38 @@ describe("CalendarView", () => {
     expect(onNavigate.mock.calls[0]?.[0].toDateString()).toBe(new Date(2026, 10, 3).toDateString());
   });
 
+  it("marks the entry of the record the host shows open, and no other", () => {
+    const records = makeRecords();
+    const { container } = render(
+      <CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} openRecordId={records[0]!.id} />,
+    );
+    const marked = [...container.querySelectorAll(".rbc-event")].filter((entry) => entry.classList.contains("ring-ink"));
+    expect(marked).toHaveLength(1);
+    expect(marked[0]!.textContent).toBe("Book flights");
+  });
+
+  it("offers New record on each day where a record can be created, by the day's date, and on no day otherwise", () => {
+    const onNewRecord = vi.fn();
+    const view = render(
+      <CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} onNewRecord={onNewRecord} />,
+    );
+    // Every day of the month's grid has one, off-range days too. The keyboard reaches each.
+    const days = screen.getAllByRole("button", { name: /^New record on / });
+    expect(days.length).toBe(42);
+    expect(days.every((day) => day.tabIndex === 0)).toBe(true);
+    const day = screen.getByRole("button", { name: "New record on August 20, 2026" });
+    day.focus();
+    expect(document.activeElement).toBe(day);
+    fireEvent.click(day);
+    // The day goes to the host as the engine's date value.
+    expect(onNewRecord).toHaveBeenCalledExactlyOnceWith("2026-08-20");
+    // The day still shows its number.
+    expect(day.parentElement?.textContent).toBe("20");
+
+    view.rerender(<CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} />);
+    expect(screen.queryAllByRole("button", { name: /^New record on / })).toEqual([]);
+  });
+
   it("emits the event's record when the event is selected", () => {
     const onOpenRecord = vi.fn();
     render(

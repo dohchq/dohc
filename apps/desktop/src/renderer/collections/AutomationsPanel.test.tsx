@@ -203,6 +203,7 @@ function Panel(props: {
   onOpenFields?: () => void;
   closeAsk?: number;
   onClose?: () => void;
+  onStayed?: () => void;
   start?: { automation: Automation; seq: number } | null;
   onStarted?: () => void;
 }) {
@@ -223,6 +224,7 @@ function Panel(props: {
       onStarted={props.onStarted}
       closeAsk={props.closeAsk ?? 0}
       onClose={props.onClose ?? (() => undefined)}
+      onStayed={props.onStayed}
       onOpenFile={props.onOpenFile ?? (() => undefined)}
       onOpenScheduleSettings={props.onOpenScheduleSettings ?? (() => undefined)}
       onOpenFields={props.onOpenFields}
@@ -3800,6 +3802,25 @@ describe("the builder", () => {
     render(<Panel />);
     expect(await screen.findByTestId("automation-stamp")).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+  });
+
+  it("tells the page it stayed when the person keeps a draft the page asked it to close over, and not when it closes", async () => {
+    makeBridge(read([summary(stamp)]));
+    const onClose = vi.fn(), onStayed = vi.fn();
+    const user = userEvent.setup();
+    const { rerender } = render(<Panel onClose={onClose} onStayed={onStayed} />);
+    await openBuilder(user);
+    await user.type(screen.getByRole("textbox", { name: "Name" }), "!");
+    rerender(<Panel onClose={onClose} onStayed={onStayed} closeAsk={1} />);
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Keep editing" }));
+    expect(onStayed).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox", { name: "Name" }) as HTMLInputElement).value).toBe("Stamp the finish date!");
+    // Asked again, the person discards the draft: the panel closes, and has not stayed a second time.
+    rerender(<Panel onClose={onClose} onStayed={onStayed} closeAsk={2} />);
+    await user.click(within(await screen.findByTestId("automation-unsaved")).getByRole("button", { name: "Discard" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onStayed).toHaveBeenCalledTimes(1);
   });
 
   it("checks the file again when the person agrees to the new layout, and writes nothing over a change since", async () => {

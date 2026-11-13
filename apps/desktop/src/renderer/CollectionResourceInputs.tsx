@@ -35,7 +35,7 @@ export function CollectionAttachmentInput(props: InputProps & { upload: NonNulla
       setFile(uploaded); props.onChange(uploaded.fileId);
     } catch (cause) {
       if (alive.current && !abort.signal.aborted) props.onError(`dohc could not upload ${request.file.name}.`, cause, () => { if (alive.current) void upload(request); });
-    // An upload ends its busy state even when its input closed first, as when record details closes, so the page unlocks.
+    // An upload ends its busy state even when its input closed first, as when a record's panel closes, so the page unlocks.
     } finally { if (alive.current) { locked.current = false; setPending(false); } props.onBusy(false); }
   }
   return <div className="flex flex-col gap-2">
@@ -49,7 +49,8 @@ export function CollectionAttachmentInput(props: InputProps & { upload: NonNulla
   </div>;
 }
 
-export function CollectionAttachmentCell(props: { scope: CollectionResourceScope; fieldName: string; fileId: string; disabled: boolean; read: NonNullable<CollectionResources["readFile"]>; onError: CollectionResourceError }) {
+/** `compact` fits the button in a table row. */
+export function CollectionAttachmentCell(props: { scope: CollectionResourceScope; fieldName: string; fileId: string; disabled: boolean; compact?: boolean; read: NonNullable<CollectionResources["readFile"]>; onError: CollectionResourceError }) {
   const [pending, setPending] = useState(false);
   const alive = useRef(true), active = useRef<AbortController | null>(null), locked = useRef(false);
   useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; active.current?.abort(); }; }, []);
@@ -60,7 +61,7 @@ export function CollectionAttachmentCell(props: { scope: CollectionResourceScope
     catch (cause) { if (alive.current && !abort.signal.aborted) props.onError(`dohc could not download ${props.fieldName}.`, cause, () => { if (alive.current) void download(); }); }
     finally { if (alive.current) { locked.current = false; setPending(false); } }
   }
-  return <SecondaryButton className="max-w-full truncate" title={`Download ${props.fieldName}`} disabled={props.disabled || pending} onClick={() => void download()}>{pending ? "Downloading…" : `Download ${props.fieldName}`}</SecondaryButton>;
+  return <SecondaryButton size={props.compact ? "row" : undefined} className="max-w-full truncate" title={`Download ${props.fieldName}`} disabled={props.disabled || pending} onClick={() => void download()}>{pending ? "Downloading…" : `Download ${props.fieldName}`}</SecondaryButton>;
 }
 
 export function CollectionRelationInput(props: InputProps & { resolve: NonNullable<CollectionResources["resolveRelation"]> }) {

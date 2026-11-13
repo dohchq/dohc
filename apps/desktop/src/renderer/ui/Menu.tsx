@@ -37,7 +37,10 @@ export type MenuItem = {
 
 /** A line between two groups of rows. */
 export const MENU_SEPARATOR = "separator";
-export type MenuEntry = MenuItem | typeof MENU_SEPARATOR;
+/** A label over the rows that follow it, up to the next label. The rows are its group. */
+export type MenuSectionLabel = { section: string };
+export type MenuEntry = MenuItem | typeof MENU_SEPARATOR | MenuSectionLabel;
+const isSectionLabel = (entry: MenuEntry): entry is MenuSectionLabel => entry !== MENU_SEPARATOR && "section" in entry;
 
 /** What the menu needs on its trigger. Spread it onto the owner's button. */
 export type MenuTriggerProps = {
@@ -252,7 +255,7 @@ export function Menu(props: {
   const [marked, setMarked] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
 
-  const rows = props.items.filter((entry): entry is MenuItem => entry !== MENU_SEPARATOR);
+  const rows = props.items.filter((entry): entry is MenuItem => entry !== MENU_SEPARATOR && !isSectionLabel(entry));
   const count = rows.length;
   // The row focus starts on: the checked one, where Enter keeps things as they are.
   const checkedRow = rows.findIndex((row) => row.checked === true);
@@ -368,6 +371,15 @@ export function Menu(props: {
     },
   };
 
+  // Rows under a label are its group; rows before the first label stand alone.
+  const sections: Array<{ label: string | null; entries: Array<{ entry: MenuItem | typeof MENU_SEPARATOR; entryIndex: number }> }> = [];
+  props.items.forEach((entry, entryIndex) => {
+    if (isSectionLabel(entry)) sections.push({ label: entry.section, entries: [] });
+    else {
+      if (sections.length === 0) sections.push({ label: null, entries: [] });
+      sections.at(-1)!.entries.push({ entry, entryIndex });
+    }
+  });
   let rowIndex = 0;
   return (
     // No box of its own: the trigger lays out where the owner puts it.
@@ -412,7 +424,8 @@ export function Menu(props: {
           } as CSSProperties}
           className={`${MENU_FRAME} fixed z-40 ${place ? MENU_ENTER : ""}`}
         >
-          {props.items.map((entry, entryIndex) => {
+          {sections.map((section, sectionIndex) => {
+            const sectionRows = section.entries.map(({ entry, entryIndex }) => {
             if (entry === MENU_SEPARATOR) {
               return <div key={`separator-${entryIndex}`} role="separator" className={MENU_SEPARATOR_LINE} />;
             }
@@ -467,6 +480,15 @@ export function Menu(props: {
                 )}
                 {entry.shortcut ? <kbd aria-hidden className={`${MENU_SHORTCUT} ${dim}`}>{entry.shortcut.label}</kbd> : null}
               </button>
+            );
+            });
+            if (section.label === null) return sectionRows;
+            const labelId = `${descriptionId}-section-${sectionIndex}`;
+            return (
+              <div key={labelId} role="group" aria-labelledby={labelId} className={sectionIndex > 0 ? "mt-1" : undefined}>
+                <div id={labelId} className={MENU_SECTION}>{section.label}</div>
+                {sectionRows}
+              </div>
             );
           })}
           {props.children}

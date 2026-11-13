@@ -29,11 +29,6 @@ const CLIENTS_TAB = editorTabTestId("tab://collection/clients");
 // reads could straddle a month boundary at midnight.
 const NOW = new Date();
 
-function currentMonthDay(day: number): string {
-  const month = String(NOW.getMonth() + 1).padStart(2, "0");
-  return `${NOW.getFullYear()}-${month}-${String(day).padStart(2, "0")}`;
-}
-
 // The application menu's New Collection… item sends this exact command over
 // the menu channel; driving the channel is driving the File menu without a
 // native-menu robot.
@@ -45,11 +40,14 @@ async function newCollectionFromFileMenu(desktop: Desktop): Promise<void> {
   });
 }
 
-async function closeTab(page: Page, path: string): Promise<void> {
-  const tab = page.getByTestId(editorTabTestId(path));
-  await tab.hover();
-  await tab.getByRole("button", { name: /^Close / }).click();
-  await expect(tab).toHaveCount(0);
+// New record starts a row in place, with the editor of its first field,
+// Name, open. Enter saves the record, whose file takes that name, and no
+// file tab opens.
+async function newRecordNamed(page: Page, name: string): Promise<void> {
+  await page.getByTestId("collection-new-record").click();
+  const input = page.locator("[data-cell-editor] input");
+  await input.fill(name);
+  await input.press("Enter");
 }
 
 // A data row in the table view (the header row carries no data-index).
@@ -63,7 +61,7 @@ function fieldCell(row: Locator, fieldIndex: number): Locator {
   return row.locator('[role="gridcell"]').nth(fieldIndex + 1);
 }
 
-// Inline edit of a plain-input cell (text, number, date, person, url):
+// Inline edit of a plain-input cell (text, number, url, a typed person id):
 // click the cell's display button, type into the editor, commit with Enter,
 // then wait for the settled value to come back from the index.
 async function editInputCell(
@@ -87,8 +85,34 @@ async function editSelectCell(
 ): Promise<void> {
   const cell = fieldCell(row, fieldIndex);
   await cell.getByRole("button").click();
-  await row.page().locator("[data-cell-editor] select").selectOption(option);
+  // The option picker opens in the table-owned overlay. A pick saves and closes it.
+  await row.page().locator("[data-cell-editor]").getByRole("option", { name: option, exact: true }).click();
   await expect(cell).toContainText(option, { timeout: 30_000 });
+}
+
+// Picks a day of the current month in a date cell's picker, which opens on
+// today's month for an empty cell. The cell then shows the date as people
+// read it ("Nov 10").
+async function editDateCell(
+  row: Locator,
+  fieldIndex: number,
+  day: number,
+): Promise<void> {
+  const cell = fieldCell(row, fieldIndex);
+  await cell.getByRole("button").click();
+  const date = new Date(NOW.getFullYear(), NOW.getMonth(), day);
+  await row
+    .page()
+    .locator("[data-cell-editor]")
+    .getByRole("gridcell", {
+      name: date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
+      exact: true,
+    })
+    .click();
+  await expect(cell).toContainText(
+    date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+    { timeout: 30_000 },
+  );
 }
 
 interface FieldSpec {
@@ -193,8 +217,6 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   let desktop: Desktop | null = null;
-  const dueDate = currentMonthDay(10);
-  const startedDate = currentMonthDay(20);
 
   try {
     await seedWorkspaceManifest(temp, "collections-walkthrough-e2e");
@@ -202,7 +224,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // --- The relation target: a small "clients" collection with one record.
+    // --- The relation target: a small "clients" collection.
     await newCollectionFromFileMenu(desktop);
     const newCollection = page.getByTestId("new-collection-dialog");
     await expect(newCollection).toBeVisible();
@@ -217,16 +239,24 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // New record creates and opens the record's file tab; the walkthrough
-    // returns to the collection to edit it inline.
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(editorTabTestId("clients/Untitled.md"))).toBeVisible({
-      timeout: 15_000,
-    });
-    await closeTab(page, "clients/Untitled.md");
-    await page.getByTestId(CLIENTS_TAB).click();
+    // New record adds the record in the table, named as it is typed.
+    await newRecordNamed(page, "Acme");
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
-    await editInputCell(recordRows(page).first(), 0, "Acme");
+    await expect(fieldCell(recordRows(page).first(), 0)).toContainText("Acme", { timeout: 30_000 });
+    await expect(page.getByTestId(editorTabTestId("clients/Acme.md"))).toHaveCount(0);
+
+    // Three more records typed with no pause: each Enter saves its row, and
+    // the first key after it is typed in the next row. Every one is made.
+    await page.getByTestId("collection-new-record").click();
+    await expect(page.locator("[data-cell-editor] input")).toBeFocused();
+    for (const name of ["Birch", "Cedar", "Dune"]) {
+      await page.keyboard.type(name);
+      await page.keyboard.press("Enter");
+    }
+    await expect(recordRows(page)).toHaveCount(4, { timeout: 30_000 });
+    for (const name of ["Acme", "Birch", "Cedar", "Dune"]) {
+      await expect(page.getByRole("grid").getByRole("button", { name: `Open ${name}`, exact: true })).toBeVisible({ timeout: 30_000 });
+    }
 
     // --- The main "projects" collection.
     await newCollectionFromFileMenu(desktop);
@@ -239,17 +269,17 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       timeout: 30_000,
     });
 
-    // The first record comes before the schema takes shape.
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toBeVisible({
-      timeout: 15_000,
-    });
-    await closeTab(page, "projects/Untitled.md");
-    await page.getByTestId(PROJECTS_TAB).click();
+    // The first record comes before the schema takes shape. Its file is
+    // named Web.md for the name it starts with, and keeps that name when
+    // the walkthrough renames the record in its cell below.
+    await newRecordNamed(page, "Web");
     await expect(recordRows(page)).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);
 
     // --- Every v1 field type, added through the Fields dialog (Name/text
     // came from the New collection dialog).
+    // Fields and Views are commands in the Collection's actions menu.
+    await page.getByRole("button", { name: "Collection actions", exact: true }).click();
     await page.getByTestId("collection-fields-button").click();
     await expect(page.getByTestId("collection-fields-dialog")).toBeVisible();
     await addField(page, { name: "Effort", type: "number" });
@@ -279,22 +309,34 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     const doneBox = fieldCell(websiteRow, 2).locator('input[type="checkbox"]');
     await doneBox.click();
     await expect(doneBox).toBeChecked({ timeout: 30_000 });
-    await editInputCell(websiteRow, 3, dueDate);
+    await editDateCell(websiteRow, 3, 10);
     await editSelectCell(websiteRow, 5, "Todo");
-    // Multi-select: toggle an option inside the editor, then close it.
+    // Multi-select: pick an option in the tags picker, then close it with
+    // Tab. The picker saves once, when it closes; Escape would drop the pick.
     const overlay = page.locator("[data-cell-editor]");
     const tagsCell = fieldCell(websiteRow, 6);
     await tagsCell.getByRole("button").click();
     const designOption = overlay
       .getByRole("listbox")
-      .locator("label")
-      .filter({ hasText: "Design" })
-      .locator("input");
+      .getByRole("option", { name: "Design", exact: true });
     await designOption.click();
-    await expect(designOption).toBeChecked({ timeout: 30_000 });
-    await page.keyboard.press("Escape");
+    await expect(designOption).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Tab");
     await expect(tagsCell).toContainText("Design", { timeout: 30_000 });
-    await editInputCell(websiteRow, 7, "ice");
+    // Person: where dohc lists this Collection's people, the cell opens a
+    // people picker. Where it cannot, the cell takes a typed id.
+    const ownerCell = fieldCell(websiteRow, 7);
+    await ownerCell.getByRole("button").click();
+    await expect(overlay).toBeVisible();
+    if (await overlay.getByRole("combobox", { name: "Search people" }).isVisible()) {
+      await overlay.getByRole("option").first().click();
+      await expect(ownerCell).toContainText(/\S/, { timeout: 30_000 });
+    } else {
+      const ownerInput = overlay.locator("input");
+      await ownerInput.fill("ice");
+      await ownerInput.press("Enter");
+      await expect(ownerCell).toContainText("ice", { timeout: 30_000 });
+    }
     // Relation: the picker lists the clients records by label in the overlay.
     const clientCell = fieldCell(websiteRow, 8);
     await clientCell.getByRole("button").click();
@@ -304,22 +346,16 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
 
     // --- A second record: the board's target column and the calendar's
     // second-date-field proof.
-    await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId(editorTabTestId("projects/Untitled 2.md"))).toBeVisible({
-      timeout: 15_000,
-    });
-    await closeTab(page, "projects/Untitled 2.md");
-    await page.getByTestId(PROJECTS_TAB).click();
+    await newRecordNamed(page, "Launch");
     await expect(recordRows(page)).toHaveCount(2, { timeout: 30_000 });
-    const row2 = recordRows(page).filter({ hasNotText: "Website" });
-    await editInputCell(row2, 0, "Launch");
     const launchRow = recordRows(page).filter({ hasText: "Launch" });
     await editSelectCell(launchRow, 5, "Doing");
-    await editInputCell(launchRow, 4, startedDate);
+    await editDateCell(launchRow, 4, 20);
 
     // --- Views: table, board grouped by Status, and two calendars — the
     // second keyed to the other date field IS the rekey (a view's key is
     // set at creation; switching views switches the key).
+    await page.getByRole("button", { name: "Collection actions", exact: true }).click();
     await page.getByTestId("collection-views-button").click();
     await expect(page.getByTestId("collection-views-dialog")).toBeVisible();
     await addView(page, { name: "All", kind: "table" });
@@ -362,7 +398,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
         async () => {
           try {
             const text = await readFile(
-              join(temp.rootPath, "projects", "Untitled.md"),
+              join(temp.rootPath, "projects", "Web.md"),
               "utf8",
             );
             return /Status:\s*Doing/.test(text);
@@ -374,7 +410,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       )
       .toBe(true);
     // A completed drag is not a click: the record tab must not have opened.
-    await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toHaveCount(0);
+    await expect(page.getByTestId(editorTabTestId("projects/Web.md"))).toHaveCount(0);
 
     // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed
     // to Started only Launch renders (day 20). The events moved with the key.

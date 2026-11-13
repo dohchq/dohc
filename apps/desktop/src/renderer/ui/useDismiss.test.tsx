@@ -181,6 +181,17 @@ describe("listenForDismiss", () => {
     stop();
   });
 
+  // The Escape that closes an IME's candidate list is the IME's own.
+  it.each([{ isComposing: true }, { keyCode: 229 }])("leaves an Escape that belongs to a composition ($isComposing, $keyCode)", (composing) => {
+    const { row, onClose, stop } = mount();
+    const escape = fireEvent.keyDown(row, { key: "Escape", ...composing });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(escape).toBe(true);
+    fireEvent.keyDown(row, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledExactlyOnceWith("escape");
+    stop();
+  });
+
   it("holds the open-menu flag until it stops, and listens no more after", () => {
     const { elsewhere, onClose, stop } = mount();
     expect(document.documentElement.dataset.menuOpen).toBe("");
