@@ -17,7 +17,8 @@
 // offers the recipient nothing to accept.
 //
 // A workspace membership belongs to the Members page, which ends it, and
-// leaves both lanes too.
+// leaves both lanes too. A received one whose role the relay could not read
+// arrives damaged, with only its kind.
 
 type ShareRow = Record<string, unknown>;
 
@@ -45,7 +46,8 @@ export function pathShareLanes(listing: { granted?: ShareRow[]; received?: Share
         !isReadableChatChannelRow(row) &&
         !isMembershipRow(row) &&
         row.selectorKind !== "chat" &&
-        row.selectorKind !== "group",
+        row.selectorKind !== "group" &&
+        row.selectorKind !== "workspace",
     ),
   };
 }
