@@ -95,7 +95,11 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   let checking = false;
 
   const keyOf = (entry: ChatRunnerLedgerEntry) => JSON.stringify([entry.account, entry.installId, entry.workspaceId]);
-  const fresh = (confirmed: { atMs: number }) => deps.nowMs() - confirmed.atMs < CHAT_RUNNER_REFRESH_MS;
+  // A confirmation from a clock that has since moved back is due, so a corrected clock can't outlast the relay's lease.
+  const fresh = (confirmed: { atMs: number }) => {
+    const ageMs = deps.nowMs() - confirmed.atMs;
+    return ageMs >= 0 && ageMs < CHAT_RUNNER_REFRESH_MS;
+  };
   const withdrawal = (session: ChatWakeSession, computerLabel: string): ChatRunnerDeclaration =>
     ({ installId: session.account.installId, computerLabel, runners: [] });
 

@@ -623,6 +623,28 @@ describe("keeping the relay's lease", () => {
     await r.roster.stop();
   });
 
+  it("renews at once when the clock moves back past a confirmation, then waits a day again", async () => {
+    vi.useFakeTimers();
+    const r = setup();
+    r.owned.A = ["ws1"];
+    const a = session("A");
+    // Confirmed while the computer's clock ran four days ahead.
+    vi.setSystemTime(Date.now() + 4 * 24 * HOUR);
+    await r.roster.reconcile(a);
+    expect(r.server.puts).toHaveLength(1);
+    // The clock is corrected; no timer has moved.
+    vi.setSystemTime(Date.now() - 4 * 24 * HOUR);
+    await r.roster.check();
+    expect(r.server.puts).toHaveLength(2);
+    expect(r.server.putSessions[1]).toBe(a);
+    await r.roster.check();
+    expect(r.server.puts).toHaveLength(2);
+    vi.setSystemTime(Date.now() + CHAT_RUNNER_REFRESH_MS);
+    await r.roster.check();
+    expect(r.server.puts).toHaveLength(3);
+    await r.roster.stop();
+  });
+
   it("retries a renewal the server was too busy for, with the same backoff", async () => {
     vi.useFakeTimers();
     const checks = countedSleep();
