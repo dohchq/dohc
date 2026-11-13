@@ -324,6 +324,8 @@ export function MarkdownView(props: {
   // Read-only shared views: editing is disabled regardless of size,
   // and live collab never activates.
   forceReadOnly?: boolean;
+  // The level allows no editing here, so the page has no Edit toggle.
+  levelReadOnly?: boolean;
   // Main takes no live edits to this note from this computer until Try again
   // sends its queue or a Stop releases the note. The session stays bound, so
   // remote edits still show.
@@ -2498,21 +2500,29 @@ export function MarkdownView(props: {
         }
         actions={
           <DocumentControls
-            toggle={{
-              label:
-                surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
-              testId: "markdown-edit-toggle",
-              disabled: readOnly || opening,
-              title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
-              onClick: () => {
-                if (readOnly || opening) return;
-                if (mode === "source" && saveTimer.current) {
-                  clearTimeout(saveTimer.current);
-                  void saveNow();
-                }
-                toggleEditorMode();
-              },
-            }}
+            toggle={
+              props.levelReadOnly
+                ? null
+                : {
+                    label:
+                      surfaceMode === "read"
+                        ? "Edit"
+                        : surfaceMode === "wysiwyg"
+                          ? "Source"
+                          : "WYSIWYG",
+                    testId: "markdown-edit-toggle",
+                    disabled: readOnly || opening,
+                    title: opening ? OPENING_TITLE : readOnly ? editReason : undefined,
+                    onClick: () => {
+                      if (readOnly || opening) return;
+                      if (mode === "source" && saveTimer.current) {
+                        clearTimeout(saveTimer.current);
+                        void saveNow();
+                      }
+                      toggleEditorMode();
+                    },
+                  }
+            }
             // A truncated doc only loaded a bounded prefix into
             // serializeDraftRef — copying/exporting it would silently emit a
             // partial document. No menu until the full file is loaded (same

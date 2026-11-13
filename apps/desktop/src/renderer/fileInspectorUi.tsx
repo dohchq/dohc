@@ -129,7 +129,8 @@ export function OpeningState() {
 // "Editor", so the words it says on its own never move the menu or Share;
 // only a person's own click to "WYSIWYG" widens it. A truncated read never
 // has the whole document to copy, so it has no menu, and the menu's place
-// stays empty instead of closing up.
+// stays empty instead of closing up. A level that allows no editing has no
+// toggle at all.
 export function DocumentControls(props: {
   toggle: {
     label: string;
@@ -138,27 +139,29 @@ export function DocumentControls(props: {
     disabled?: boolean;
     title?: string;
     onClick?: () => void;
-  };
+  } | null;
   menu: ComponentProps<typeof DocumentMenu> | null;
 }) {
   const { toggle } = props;
   return (
     <>
-      <button
-        type="button"
-        data-testid={toggle.testId}
-        aria-pressed={toggle.pressed}
-        disabled={toggle.disabled && !toggle.title}
-        aria-disabled={(toggle.disabled && !!toggle.title) || undefined}
-        title={toggle.title}
-        onClick={() => {
-          if (toggle.disabled) return;
-          toggle.onClick?.();
-        }}
-        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
-      >
-        {toggle.label}
-      </button>
+      {toggle && (
+        <button
+          type="button"
+          data-testid={toggle.testId}
+          aria-pressed={toggle.pressed}
+          disabled={toggle.disabled && !toggle.title}
+          aria-disabled={(toggle.disabled && !!toggle.title) || undefined}
+          title={toggle.title}
+          onClick={() => {
+            if (toggle.disabled) return;
+            toggle.onClick?.();
+          }}
+          className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-50 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted"
+        >
+          {toggle.label}
+        </button>
+      )}
       {props.menu ? (
         <DocumentMenu {...props.menu} />
       ) : (

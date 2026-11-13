@@ -307,6 +307,10 @@ type FileInspectorProps = {
   onPendingUndoConsumed?: (token: number) => void;
   // Read-only shared views: every editable view refuses edits.
   readOnly?: boolean;
+  // A joined workspace at View or Comment, whose level allows no editing:
+  // a page shows no Edit toggle, since controls the level does not allow are
+  // absent, not disabled.
+  levelReadOnly?: boolean;
   // Live editing is paused for this note: the server refused its edits, or too many wait.
   liveEditingPaused?: "refused" | "full";
   // A share shows this new note, and the server has no file for it yet.
@@ -791,11 +795,15 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
   const closedDocumentControls = (opening: boolean) =>
     kind === "markdown" ? (
       <DocumentControls
-        toggle={{
-          label: "Edit",
-          disabled: true,
-          title: opening ? OPENING_TITLE : "dohc could not open this file.",
-        }}
+        toggle={
+          props.levelReadOnly
+            ? null
+            : {
+                label: "Edit",
+                disabled: true,
+                title: opening ? OPENING_TITLE : "dohc could not open this file.",
+              }
+        }
         menu={{
           workspaceId: props.workspaceId,
           path: props.path,
@@ -939,6 +947,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             pendingUndo={pendingTextUndo}
             onPendingUndoConsumed={props.onPendingUndoConsumed}
             forceReadOnly={props.readOnly}
+            levelReadOnly={props.levelReadOnly}
             liveEditingPaused={props.liveEditingPaused}
             pendingShare={props.pendingShare}
             onOpenLiveDocuments={props.onOpenLiveDocuments}

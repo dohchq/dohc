@@ -8561,6 +8561,7 @@ export function DesktopWorkspaceShell(props: {
                                         isMountedSharePath(path)
                                       }
                                       // The lists name this workspace's own notes, never a received share's.
+                                      levelReadOnly={membershipView && (shareAccess === "view" || shareAccess === "comment")}
                                       liveEditingPaused={
                                         shareView || isMountedSharePath(path)
                                           ? undefined

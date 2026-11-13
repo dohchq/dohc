@@ -3,7 +3,7 @@ import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 
 const JOINED: Workspace = {
   ...SHARE_VIEW,
@@ -37,6 +37,26 @@ describe("a joined workspace", () => {
     fireEvent.click(screen.getByTestId("workspace-switcher"));
     expect(screen.getByTestId("workspace-switcher-level").textContent).toBe("You can comment");
     expect(screen.getAllByText("You can comment")).toHaveLength(1);
+  });
+
+  // Controls the level does not allow are absent, not disabled.
+  it.each(["view", "comment"] as const)("shows a page at %s with no Edit toggle, opening or open", async (access) => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access } }));
+    expect(await screen.findByTestId("document-menu-trigger")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
+    expect(screen.queryByTestId("markdown-edit-toggle")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+  });
+
+  it("keeps the Edit toggle for a member at Edit", async () => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access: "edit" } }));
+    const toggle = await screen.findByTestId("markdown-edit-toggle");
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
+    expect(toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true").toBe(false);
   });
 
   function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>) {
