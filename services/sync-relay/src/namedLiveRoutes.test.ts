@@ -3,9 +3,10 @@ import { LIVE_CONNECTION_LIMIT_CLOSE_CODE } from "@dohc/live-session-contract/li
 import { LIVE_TICKET_LIFETIME_MS } from "@dohc/live-session-contract/live-ticket";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { createNamedDesktopLive } from "./namedDesktopLive";
+import { notifyRelayWrite } from "./relayWriteChanges";
+import { notifyDesktopReadiness } from "./desktopReadinessChanges";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
-import { request as httpRequest } from "node:http";
 import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +23,6 @@ import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import {
   LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   createLiveFrameSession,
-  decodeLiveFrame,
   encodeLiveFrame,
   type LiveFrame,
 } from "@dohc/live-session-contract/live-frame";
@@ -37,11 +37,8 @@ import {
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth.js";
 import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity.js";
 import { createNamedLiveProvider } from "@dohc/ydoc-projection/named-live-provider";
-import { createLiveMembershipRegistry, type LiveMembershipPolicy } from "./liveMembership.js";
 import { liveBrowserActor } from "./liveBrowserContext.js";
 import { captureNamedLiveFrameHost } from "./namedLiveFrameHost.js";
-import { createLiveTickets } from "./liveTickets.js";
-import { createLiveHostReports } from "./namedLiveHostReports.js";
 import { createNamedFrameChanges, type NamedFrameNativeHost } from "./namedLiveFrameHost.js";
 import {
   fixture as ticketFixture,
@@ -1857,47 +1854,6 @@ type ProductionPeer = {
   f: Awaited<ReturnType<typeof fixture>>;
   socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>;
 };
-
-async function openProductionSync(
-  f: Awaited<ReturnType<typeof fixture>>,
-  socket: ReturnType<Awaited<ReturnType<typeof fixture>>["connect"]>,
-  credit = true,
-) {
-  await vi.waitFor(
-    () => {
-      expect(socket.ws.readyState).toBe(WebSocket.OPEN);
-      expect(socket.received.map((frame) => frame.kind)).toContain("credit");
-    },
-    { timeout: 5000 },
-  );
-  const send = (frame: LiveFrame) =>
-    socket.ws.send(encodeLiveFrame(frame, f.frames.receive.maxFrameBytes));
-  send({ kind: "hello", receivePolicy: f.frames.receive });
-  if (credit)
-    send({
-      kind: "credit",
-      grantedBytes: f.frames.maxQueuedBytes,
-      grantedFrames: f.frames.maxQueuedFrames,
-    });
-  const vector = Uint8Array.of(0);
-  send({
-    kind: "begin",
-    purpose: "client-vector",
-    transferId: 1,
-    totalBytes: vector.length,
-    digest: createHash("sha256").update(vector).digest("hex"),
-  });
-  send({ kind: "chunk", transferId: 1, offset: 0, bytes: vector });
-  if (credit)
-    await vi.waitFor(
-      () => {
-        expect(socket.ws.readyState).toBe(WebSocket.OPEN);
-        expect(socket.received.map((frame) => frame.kind)).toContain("chunk");
-      },
-      { timeout: 5000 },
-    );
-  if (credit) send({ kind: "sync-applied", appliedThroughJournalCursor: 0 });
-}
 
 it.each([false, true])(
   "delivers one production-size 2 MiB edit to 22 readers of one document; link=%s",
