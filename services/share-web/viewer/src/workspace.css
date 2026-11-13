@@ -1,5 +1,5 @@
 /* A member's workspace: its files, the open page, and its Groups side by side; three tabs on a phone. */
-.workspace-page .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 .workspace-page > nav { display: flex; flex-direction: column; padding: 0 4px; }
 .workspace-title { display: flex; height: 48px; flex: none; align-items: center; gap: 4px; padding: 0 8px 0 0; }
@@ -50,6 +50,8 @@
   .workspace-page > [data-shown="false"] { visibility: hidden; }
   .link-page.workspace-page > nav { position: static; z-index: auto; width: auto; overflow-y: auto; border: 0; box-shadow: none; }
   .workspace-page > .side-panel, .workspace-page > .side-panel[data-open] { position: static; inset: auto; width: auto; border: 0; border-radius: 0; box-shadow: none; }
+  /* A tab fills the screen, so its rows take a finger. */
+  .link-page.workspace-page > nav :is(.folder, .file), .group-row { height: 40px; }
   .narrow-mark { display: grid; }
   .toast-slot { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
   .link-page .toast-slot .edit-notice { border-radius: 12px; }
