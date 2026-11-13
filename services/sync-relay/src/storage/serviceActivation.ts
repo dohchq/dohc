@@ -94,6 +94,7 @@ export interface ServiceActivationReadiness {
   readonly binding: LiveObjectBinding;
 }
 import { assertWorkspaceQuota } from "./workspaces";
+import { ServerLogError } from "../serverLogWords";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import {
   readServiceActivation,
@@ -1007,8 +1008,17 @@ export class ServiceActivationStore {
         ordinaryCut,
       );
       // A successor replays the baseline its verified predecessor registered; a first activation registers it.
+      // The reason is a fixed code word, so the server log shows it whole.
       if (registration.kind !== "registered" || registration.replayed !== (predecessor !== null))
-        throw new Error("Service activation requires a new live baseline.");
+        throw new ServerLogError(
+          `Service activation requires a new live baseline: ${
+            registration.kind !== "registered"
+              ? registration.reason
+              : registration.replayed
+                ? "already-registered"
+                : "not-registered"
+          }.`,
+        );
       const actor = { kind: "owner" as const, userId: ownerUserId };
       // A first activation records the baseline's binding. A successor keeps its predecessor's at the document's current
       // restore generation. The retired predecessor admits nothing, so that binding is authorized below, through its own pending access.
