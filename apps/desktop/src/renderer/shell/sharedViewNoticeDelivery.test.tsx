@@ -2,6 +2,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
+import { NOTICE_UNREAD_RETENTION_MS, type RelayNotice } from "@dohc/workspace-contracts/relay";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
 import { sharedViewAccessOperations } from "../../ipc/bridgeContract";
 import { createNoticeStore } from "../../notices/noticeStore";
@@ -66,6 +67,7 @@ async function delivery(rootPath?: string) {
   } as unknown as DohcDesktopBridge);
   const hook = renderHook(() => useSentNotices(true));
   await waitFor(() => expect(hook.result.current.settled).toBe(true));
+  // Typed as the relay serves it, so a new contract field fails here, not in the store.
   const failed = {
     noticeId: "automation-press:failed",
     changeSeq: 1,
@@ -82,8 +84,9 @@ async function delivery(rootPath?: string) {
     createdAtMs: Date.now(),
     readAtMs: null,
     dismissedAtMs: null,
+    expiresAtMs: Date.now() + NOTICE_UNREAD_RETENTION_MS,
     removed: false,
-  };
+  } satisfies RelayNotice;
   return {
     h,
     hook,

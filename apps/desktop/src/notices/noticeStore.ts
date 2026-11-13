@@ -24,7 +24,7 @@ import {
   NOTICE_TITLE_MAX_CHARS,
   NOTICE_UNREAD_RETENTION_MS,
   type NoticeKind,
-  type NoticeMark,
+  type ComputerNoticeMark,
   type NoticeReach,
   type NoticeRecipient,
   type NoticeTarget,
@@ -103,7 +103,7 @@ export interface NoticeStore {
   list(): Promise<{ account: string | null; notices: NoticeRow[] }>;
   // `account` is the key the caller's list showed. Account rows are marked
   // only while that account is signed in; local rows always are.
-  mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void>;
+  mark(refs: readonly NoticeRef[], mark: ComputerNoticeMark, account: string | null): Promise<void>;
   // Dismisses one notice now and says whether this was its first dismissal,
   // as Run now needs: "unanswered" when the relay could not say.
   dismissFirst(
@@ -271,6 +271,8 @@ const RelayRow = z.object({
   createdAtMs: NoticeRow.shape.createdAtMs,
   readAtMs: NoticeRow.shape.readAtMs,
   dismissedAtMs: z.number().int().nonnegative().nullable(),
+  // The relay's own retention for the row, which each mark starts again.
+  expiresAtMs: z.number().int().positive(),
   removed: z.boolean(),
 });
 type RelayRow = z.infer<typeof RelayRow>;
@@ -289,8 +291,11 @@ const OutboxMark = z.object({
 });
 type OutboxMark = z.infer<typeof OutboxMark>;
 
+// Version 2 keeps each row's expiry from the relay. A version 1 file is read
+// once for its waiting marks; its rows, cursor, and unsent posts go, and the
+// list refills from the relay.
 const AccountFile = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   cursor: z.string().max(64).nullable(),
   // The server answered that it has no notice list. Notices for this account
   // stay on this computer until a pull succeeds.
@@ -316,6 +321,10 @@ const AccountFile = z.object({
   marks: z.array(OutboxMark),
 });
 type AccountFile = z.infer<typeof AccountFile>;
+
+// What a version 1 account file still gives: the marks this computer had not sent, withdrawals
+// included. Other fields are left unread.
+const AccountFileVersion1 = z.object({ version: z.literal(1), marks: z.array(OutboxMark) });
 
 const RelayPage = z.object({
   ok: z.literal(true),
@@ -390,7 +399,13 @@ export function createNoticeStore(deps: {
   const accountFileName = (account: NoticeAccount) =>
     `account-${createHash("sha256").update(account.key).digest("hex").slice(0, 32)}.json`;
 
-  async function load<T>(name: string, schema: z.ZodType<T>, empty: T): Promise<T> {
+  // `upgrade` reads a file in an older shape, or answers null to treat it as damaged.
+  async function load<T>(
+    name: string,
+    schema: z.ZodType<T>,
+    empty: T,
+    upgrade?: (json: unknown) => T | null,
+  ): Promise<T> {
     const path = join(deps.directory, name);
     let raw: string;
     try {
@@ -407,6 +422,8 @@ export function createNoticeStore(deps: {
     }
     const parsed = schema.safeParse(json);
     if (parsed.success) return parsed.data;
+    const upgraded = upgrade?.(json) ?? null;
+    if (upgraded !== null) return upgraded;
     // Keep a damaged file for inspection and start again. An account list
     // refills from the relay because its cursor starts over.
     console.error(`[notices] ${name} is damaged; it was moved aside`, parsed.error);
@@ -444,7 +461,7 @@ export function createNoticeStore(deps: {
     // Dismissed refusal rows also wait for the engine to acknowledge them on next open.
     const pending = file.rows.filter((row) => isRefusalNoticeKind(row.kind));
     const rest = file.rows.filter((row) => !isRefusalNoticeKind(row.kind));
-    const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, nowMs())];
+    const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, localRowLive(nowMs()))];
     if (kept.length === file.rows.length) return false;
     file.rows = kept;
     return true;
@@ -454,16 +471,23 @@ export function createNoticeStore(deps: {
     const name = accountFileName(account);
     let file = accountFiles.get(name);
     if (!file) {
-      file = await load(name, AccountFile, {
-        version: 1,
+      const empty = (marks: OutboxMark[]): AccountFile => ({
+        version: 2,
         cursor: null,
         routesMissing: false,
         rows: [],
         posts: [],
-        marks: [],
+        marks,
+      });
+      const read = { upgraded: false };
+      file = await load(name, AccountFile, empty([]), (json) => {
+        const old = AccountFileVersion1.safeParse(json);
+        if (!old.success) return null;
+        read.upgraded = true;
+        return empty(old.data.marks);
       });
       accountFiles.set(name, file);
-      if (pruneAccount(file)) await saveAccount(account, file);
+      if (pruneAccount(file) || read.upgraded) await saveAccount(account, file);
     }
     return file;
   }
@@ -473,9 +497,10 @@ export function createNoticeStore(deps: {
     accountFiles.set(accountFileName(account), file);
   }
 
-  // Only cached relay rows age out; the outbox has its own limit.
+  // Only cached relay rows age out, when the relay lets them go; the outbox has its own limit.
   function pruneAccount(file: AccountFile): boolean {
-    const kept = retained(file.rows, NOTICE_LIST_ROW_LIMIT, nowMs());
+    const now = nowMs();
+    const kept = retained(file.rows, NOTICE_LIST_ROW_LIMIT, (row) => row.expiresAtMs > now);
     if (kept === file.rows) return false;
     file.rows = kept;
     return true;
@@ -496,7 +521,7 @@ export function createNoticeStore(deps: {
   function queueMark(
     file: AccountFile,
     noticeId: string,
-    mark: NoticeMark,
+    mark: ComputerNoticeMark,
     withdraw = false,
   ): boolean {
     const index = file.marks.findIndex((waiting) => waiting.noticeId === noticeId);
@@ -718,12 +743,16 @@ export function createNoticeStore(deps: {
         const file = await loadAccount(account);
         // A mark replaced while the batch was on its way stays for the next one.
         file.marks = file.marks.filter((waiting) => !batch.includes(waiting));
-        // Keep the marks on the rows until the next pull brings them back.
+        // Keep the marks on the rows until the next pull brings them back. The relay kept each
+        // marked row for the mark's retention, so a pull that fails can't let this copy go first.
         for (const { noticeId, mark, atMs } of batch) {
           const row = file.rows.find((candidate) => candidate.noticeId === noticeId);
           if (!row) continue;
           if (mark === "read") row.readAtMs ??= atMs;
           else row.dismissedAtMs ??= atMs;
+          const retentionMs =
+            mark === "read" ? NOTICE_READ_RETENTION_MS : NOTICE_DISMISSED_RETENTION_MS;
+          row.expiresAtMs = Math.max(row.expiresAtMs, atMs + retentionMs);
         }
         await saveAccount(account, file);
       });
@@ -1196,7 +1225,7 @@ export function createNoticeStore(deps: {
   // read costs one save and one pass.
   async function mark(
     refs: readonly NoticeRef[],
-    mark: NoticeMark,
+    mark: ComputerNoticeMark,
     account: string | null,
   ): Promise<void> {
     const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
@@ -1306,6 +1335,14 @@ export function createNoticeStore(deps: {
     if (!session?.isCurrent() || session.account.key !== account) return "unanswered";
     // The notice's own post goes first, or the relay would not hold it yet.
     await sync();
+    // The row as it was when the dismissal left. A pull while the answer is on its way may bring a
+    // newer row, such as one the phone restored, which the answer must not dismiss again.
+    const sentAtSeq = await locked(
+      async () =>
+        (await loadAccount(session.account)).rows.find(
+          (candidate) => candidate.noticeId === ref.noticeId,
+        )?.changeSeq ?? null,
+    );
     let dismissed: unknown;
     try {
       const response = await relay(session, "/sync/notices/marks", {
@@ -1333,7 +1370,7 @@ export function createNoticeStore(deps: {
     await locked(async () => {
       const file = await loadAccount(session.account);
       const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
-      if (row) row.dismissedAtMs ??= nowMs();
+      if (row && row.changeSeq === sentAtSeq) row.dismissedAtMs ??= nowMs();
       file.marks = file.marks.filter((waiting) => waiting.noticeId !== ref.noticeId);
       await saveAccount(session.account, file);
     });
@@ -1470,10 +1507,12 @@ export function createNoticeStore(deps: {
 }
 
 // Folds one page into the stored rows. A page that starts the list over
-// replaces every cached row first; the outbox stays. Read and dismissed only
-// move forward, so a row marked here stays marked whatever order changes
-// arrive in. A row the relay removed to make room is dropped. A pulled row
-// settles the sent post with its id.
+// replaces every cached row first; the outbox stays. The relay's row is the
+// row, its cleared marks included, as when a phone marks it unread or
+// restores it; only a row older than the one held, by its change sequence,
+// changes nothing. Marks still waiting here show over the row in the list
+// until they send. A row the relay removed to make room is dropped. A pulled
+// row settles the sent post with its id.
 function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
   let changed = false;
   if (page.replace && file.rows.length > 0) {
@@ -1497,25 +1536,29 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
       changed = true;
       continue;
     }
-    const next = existing
-      ? {
-          ...row,
-          readAtMs: row.readAtMs ?? existing.readAtMs,
-          dismissedAtMs: row.dismissedAtMs ?? existing.dismissedAtMs,
-        }
-      : row;
-    if (existing) file.rows[index] = next;
-    else file.rows.push(next);
+    if (existing && row.changeSeq < existing.changeSeq) continue;
+    if (existing) file.rows[index] = row;
+    else file.rows.push(row);
     changed = true;
   }
   return changed;
 }
 
-// The relay's retention and row limit, applied to this computer's copy:
-// dismissed rows go 30 days after dismissal, read rows 90 days after
-// reading, unread rows 180 days after arriving. Past the limit, read and
-// dismissed rows go first, oldest first, then the oldest unread. Returns
-// `rows` itself when nothing goes.
+// This computer's own rows keep the relay's retention: dismissed rows go 30
+// days after dismissal, read rows 90 days after reading, unread rows 180 days
+// after arriving.
+function localRowLive(nowMs: number) {
+  return (row: LocalRow) =>
+    row.dismissedAtMs !== null
+      ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
+      : row.readAtMs !== null
+        ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
+        : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs;
+}
+
+// The rows `live` keeps, within the row limit. Past the limit, read and
+// dismissed rows go first, oldest first, then the oldest unread; a waiting
+// automation wake stays. Returns `rows` itself when nothing goes.
 function retained<
   Row extends {
     kind?: string;
@@ -1523,17 +1566,9 @@ function retained<
     readAtMs: number | null;
     dismissedAtMs: number | null;
   },
->(rows: Row[], limit: number, nowMs: number): Row[] {
+>(rows: Row[], limit: number, isLive: (row: Row) => boolean): Row[] {
   const parked = (row: Row) => row.kind === "automation-wake" && row.dismissedAtMs === null;
-  const live = rows.filter(
-    (row) =>
-      parked(row) ||
-      (row.dismissedAtMs !== null
-        ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
-        : row.readAtMs !== null
-          ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
-          : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs),
-  );
+  const live = rows.filter(isLive);
   if (live.length === rows.length && rows.length <= limit) return rows;
   if (live.length <= limit) return live;
   const removed = new Set(

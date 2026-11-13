@@ -1,4 +1,4 @@
-import { open, readdir, readFile } from "node:fs/promises";
+import { open, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -153,6 +153,8 @@ interface Relay {
   failPulls: boolean;
   // Runs, and is awaited, as each request leaves.
   onRequest?: (request: Request) => void | Promise<void>;
+  // Runs, and is awaited, after the relay answers and before the answer reaches the store.
+  onAnswer?: (request: Request) => void | Promise<void>;
 }
 
 async function relay(overrides: HandlerOverrides = {}): Promise<Relay> {
@@ -196,6 +198,7 @@ function account(server: Relay, userId: string): NoticeAccount {
           );
         }
         const answer = await server.handler(request);
+        await server.onAnswer?.(request);
         if (server.losePostReplies && request.method === "POST" && path === "/sync/notices")
           throw new TypeError("fetch failed");
         return answer;
@@ -484,6 +487,196 @@ describe("notices on one person's computers", () => {
     const other = await computer(account(server, "ana"));
     await other.store.sync();
     expect((await other.store.list()).notices).toEqual([]);
+  });
+
+  it("takes a phone's unread and restore from the relay, and keeps a copy newer than a change it pulls", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    const desktop = await computer(account(server, "ana"));
+    const key = desktop.signedIn?.key ?? null;
+    const ref = { store: "account" as const, noticeId: "agent-run:1" };
+    // The phone marks through the relay; nothing on this computer asks for it.
+    const phone = (mark: "unread" | "restore" | "read") =>
+      server.storage.markNotices({
+        recipientUserId: "ana",
+        marks: [{ noticeId: "agent-run:1", mark }],
+        nowMs: clock,
+      });
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    await desktop.store.sync();
+    clock = 11_000;
+    await desktop.store.mark([ref], "read", key);
+    await desktop.store.sync();
+    expect(await titles(desktop)).toEqual(["account:Your agent finished (read)"]);
+
+    clock = 12_000;
+    phone("unread");
+    await desktop.store.sync();
+    expect(await titles(desktop)).toEqual(["account:Your agent finished"]);
+
+    await desktop.store.mark([ref], "dismissed", key);
+    await desktop.store.sync();
+    expect(await titles(desktop)).toEqual([]);
+    clock = 13_000;
+    phone("restore");
+    await desktop.store.sync();
+    expect(await titles(desktop)).toEqual(["account:Your agent finished"]);
+
+    // A copy whose change is newer than the one the relay serves keeps what it holds.
+    const name = (await readdir(desktop.directory)).find(
+      (entry) => entry.startsWith("account-") && entry.endsWith(".json"),
+    )!;
+    const saved = JSON.parse(await readFile(join(desktop.directory, name), "utf8")) as {
+      rows: Array<{ changeSeq: number; readAtMs: number | null }>;
+    };
+    saved.rows[0]!.changeSeq = 1_000_000;
+    saved.rows[0]!.readAtMs = 13_500;
+    await writeFile(join(desktop.directory, name), JSON.stringify(saved));
+    const restarted = await computer(desktop.signedIn, { directory: desktop.directory });
+    clock = 14_000;
+    phone("read");
+    await restarted.store.sync();
+    expect((await restarted.store.list()).notices.map((row) => row.readAtMs)).toEqual([13_500]);
+  });
+
+  it("keeps a row it marked read past its old expiry when the pull after the mark fails", async () => {
+    const DAY = 24 * 60 * 60_000;
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    // Read a day before its unread expiry; the mark reaches the relay half a day later.
+    clock = 10_000 + 179 * DAY;
+    await laptop.store.mark(
+      [{ store: "account", noticeId: "agent-run:1" }],
+      "read",
+      laptop.signedIn?.key ?? null,
+    );
+    clock = 10_000 + 179.5 * DAY;
+    server.failPulls = true;
+    await laptop.store.sync();
+    const expiry = async (on: Computer) =>
+      ((await file(on, "account")).rows as Array<{ expiresAtMs: number }>)[0]?.expiresAtMs;
+    expect(await expiry(laptop)).toBe(10_000 + (179 + 90) * DAY);
+
+    clock = 10_000 + 185 * DAY;
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual(["account:Your agent finished (read)"]);
+    server.failPulls = false;
+    await restarted.store.sync();
+    expect(await expiry(restarted)).toBe(10_000 + (179.5 + 90) * DAY);
+    expect(await titles(restarted)).toEqual(["account:Your agent finished (read)"]);
+  });
+
+  it("keeps a row as long as the relay does after a phone's unread, past the expiry its arrival gave it", async () => {
+    const DAY = 24 * 60 * 60_000;
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    clock = 10_000 + 100 * DAY;
+    await laptop.store.mark(
+      [{ store: "account", noticeId: "agent-run:1" }],
+      "read",
+      laptop.signedIn?.key ?? null,
+    );
+    await laptop.store.sync();
+    // Unread at day 170 keeps the row on the relay until day 350.
+    clock = 10_000 + 170 * DAY;
+    server.storage.markNotices({
+      recipientUserId: "ana",
+      marks: [{ noticeId: "agent-run:1", mark: "unread" }],
+      nowMs: clock,
+    });
+    await laptop.store.sync();
+    clock = 10_000 + 185 * DAY;
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual(["account:Your agent finished"]);
+    clock = 10_000 + 351 * DAY;
+    expect(await titles(restarted)).toEqual([]);
+  });
+
+  it("keeps a row the phone restored while a Run now dismissal's answer was on its way", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    let reached!: () => void;
+    let release!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The relay takes the dismissal, and its answer waits.
+    server.onAnswer = async (request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices/marks")
+        return;
+      server.onAnswer = undefined;
+      reached();
+      await held;
+    };
+    const dismissing = laptop.store.dismissFirst(
+      { store: "account", noticeId: "agent-run:1" },
+      laptop.signedIn?.key ?? null,
+    );
+    await applied;
+    clock = 11_000;
+    server.storage.markNotices({
+      recipientUserId: "ana",
+      marks: [{ noticeId: "agent-run:1", mark: "restore" }],
+      nowMs: clock,
+    });
+    await laptop.store.sync();
+    expect(await titles(laptop)).toEqual(["account:Your agent finished"]);
+    release();
+    expect(await dismissing).toBe("first");
+    await laptop.store.sync();
+    expect(await titles(laptop)).toEqual(["account:Your agent finished"]);
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual(["account:Your agent finished"]);
+  });
+
+  it("carries a version-1 file's waiting marks, withdrawals included, and refills the rest", async () => {
+    const server = await relay();
+    server.online = false;
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    const name = (await readdir(laptop.directory)).find(
+      (entry) => entry.startsWith("account-") && entry.endsWith(".json"),
+    )!;
+    const marks = [
+      { noticeId: "schedule-skipped:x", mark: "dismissed", withdraw: true, atMs: 9_000 },
+      { noticeId: "agent-run:1", mark: "read", atMs: 9_500 },
+    ];
+    // A version 1 file: its rows carry no relay expiry, and its unsent post goes.
+    await writeFile(
+      join(laptop.directory, name),
+      JSON.stringify({
+        version: 1,
+        cursor: "7",
+        routesMissing: false,
+        rows: [{ noticeId: "old", changeSeq: 3 }],
+        posts: [{ request: { noticeId: "unsent" }, sent: false }],
+        marks,
+      }),
+    );
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual([]);
+    expect(await file(restarted, "account")).toEqual({
+      version: 2,
+      cursor: null,
+      routesMissing: false,
+      rows: [],
+      posts: [],
+      marks,
+    });
+    expect((await readdir(laptop.directory)).some((entry) => entry.endsWith(".damaged"))).toBe(
+      false,
+    );
   });
 
   it("marks nothing in the account signed in now for a list shown for another", async () => {

@@ -112,7 +112,7 @@ type Placement =
 
 const NOTICE_COLUMNS = `notice_id, change_seq, workspace_id, recipient_share_id, kind,
   sender_kind, sender_user_id, sender_label, title, body, target_json,
-  origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, removed_at_ms`;
+  origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms`;
 const MARKED = "(read_at_ms IS NOT NULL OR dismissed_at_ms IS NOT NULL)";
 const UNREAD = "read_at_ms IS NULL AND dismissed_at_ms IS NULL";
 
@@ -710,12 +710,19 @@ function withWakes(
  *   recipient doesn't own, or through a share that doesn't admit the path.
  *   This depends only on the recipient's own access, never on what another
  *   account's workspace holds;
- * - a path that doesn't normalize, is secret or ignored, or whose file the
- *   main version last placed at such a path;
+ * - a path that doesn't normalize or is secret or ignored. In a workspace the
+ *   recipient owns, also a path whose file the relay last placed at such a
+ *   path in any version. Through a share, a path whose file the main version
+ *   no longer has at a path the share admits, which reads the same whether
+ *   it moved out, moved to a secret path, or was deleted;
  * - a thread whose create the log doesn't hold, names a hidden path or hint,
  *   or links a file the relay can't place or last placed at a hidden path;
  * - a message target without its thread: the relay finds a message's thread
- *   only by scanning its log.
+ *   only by scanning its log;
+ * - an automation's own rows whose Collection it can't place: every
+ *   automation wake, which names its automation by a Collection ID the
+ *   relay can't map to a path, and a skipped schedule without the path of
+ *   its automations.yaml. A skipped schedule with that path is judged by it.
  * A removed row stays, so a phone drops what it holds, without its title.
  */
 function phoneNotices(
@@ -812,6 +819,11 @@ function phoneNotices(
       !storage.showsOnPhone(recipientUserId, notice.workspaceId)
     )
       return [];
+    if (
+      notice.kind === "automation-wake" ||
+      (notice.kind === "schedule-skipped" && notice.target?.path === undefined)
+    )
+      return [];
     return safeTarget(notice) ? [notice] : [];
   });
 }
@@ -836,10 +848,17 @@ export function advanceNoticeHead(storage: StorageContext, recipientUserId: stri
 }
 
 /**
- * Sets read or dismissed once. A row already marked, removed, expired, or
- * gone is left as it is. Returns the notices this call dismissed for the
- * first time ever: a receipt outlives the row, so a notice posted again
- * after its retention is not dismissed first twice.
+ * Sets read or dismissed once, or clears one with unread or restore. A mark
+ * that would change nothing, or a row removed, expired, or gone, is left as
+ * it is. Each change starts the row's retention again, by the state it leaves:
+ * dismissed, else read, else unread. Returns the notices this call dismissed
+ * for the first time ever: a receipt outlives the row, and a restore keeps
+ * it, so a notice is never dismissed first twice.
+ *
+ * An automation wake's row stands for its waiting payload. Only a computer
+ * consuming the wake dismisses it, and no unread or restore brings back a
+ * payload a dismissal consumed, so such a mark skips the row and the rest of
+ * the batch goes on.
  */
 export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
   for (const mark of input.marks) {
@@ -896,16 +915,44 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
       );
     const markRead = markRow("read_at_ms");
     const markDismissed = markRow("dismissed_at_ms");
+    const clearRow = (column: string) =>
+      storage.db.prepare(
+        `UPDATE sync_relay_notices SET expires_at_ms = ?, change_seq = ?, ${column} = NULL
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+      );
+    const clearRead = clearRow("read_at_ms");
+    const clearDismissed = clearRow("dismissed_at_ms");
     const removeWake = storage.db.prepare(
       "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
     );
     for (const { noticeId, mark } of input.marks) {
       const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
-      if (wake && mark === "dismissed" && input.installId === undefined) {
-        throw relayError(
-          "notice_refused",
-          "Only a computer consuming this agent wake can dismiss it.",
+      if (
+        wake &&
+        (mark === "unread" ||
+          mark === "restore" ||
+          (mark === "dismissed" && input.installId === undefined))
+      )
+        continue;
+      if (mark === "unread" || mark === "restore") {
+        const row = read.get(input.recipientUserId, noticeId, input.nowMs);
+        if (!row || row.kind === "automation-wake") continue;
+        const readAt = mark === "unread" ? null : row.read_at_ms;
+        const dismissedAt = mark === "restore" ? null : row.dismissed_at_ms;
+        if (readAt === row.read_at_ms && dismissedAt === row.dismissed_at_ms) continue;
+        const retentionMs =
+          dismissedAt !== null
+            ? NOTICE_DISMISSED_RETENTION_MS
+            : readAt !== null
+              ? NOTICE_READ_RETENTION_MS
+              : NOTICE_UNREAD_RETENTION_MS;
+        (mark === "unread" ? clearRead : clearDismissed).run(
+          input.nowMs + retentionMs,
+          nextSeq(),
+          input.recipientUserId,
+          noticeId,
         );
+        continue;
       }
       if (wake && input.installId === "server") continue;
       if (mark === "dismissed" && input.installId !== undefined && !dismissed.includes(noticeId)) {
@@ -1492,6 +1539,7 @@ function rowToNotice(row: Record<string, unknown>): RelayNotice {
     createdAtMs: Number(row.created_at_ms),
     readAtMs: row.read_at_ms === null ? null : Number(row.read_at_ms),
     dismissedAtMs: row.dismissed_at_ms === null ? null : Number(row.dismissed_at_ms),
+    expiresAtMs: Number(row.expires_at_ms),
     removed: row.removed_at_ms !== null,
   };
 }

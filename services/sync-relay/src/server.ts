@@ -1674,7 +1674,7 @@ export function createSyncRelayHandler({
 /**
  * The routes whose handlers authenticate before they read the body, and bound
  * its size and receipt time: recovery imports, direct writes, a personal
- * agent's included, and an account's reads through this server's copies. Classified by
+ * agent's included, an account's reads through this server's copies, and Notice marks. Classified by
  * the same parse as dispatch, so every spelling of the path streams.
  */
 export function streamsRequestBody(url: URL, method: string): boolean {
@@ -1685,6 +1685,7 @@ export function streamsRequestBody(url: URL, method: string): boolean {
       route.route === "share-collection-writes" ||
       route.route === "link-collection-writes" ||
       route.route === "account-operation" ||
+      (route.route === "notice-marks" && method === "POST") ||
       (route.route === "personal-agent-tools" && route.action === "collection-writes")
     );
   } catch {
