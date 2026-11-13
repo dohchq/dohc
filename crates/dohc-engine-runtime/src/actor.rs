@@ -1184,6 +1184,17 @@ fn close_stranded_owner_bindings(store: &mut EngineStore, now_ms: i64) {
     }
 }
 
+/// Apply the owner-private records an earlier build kept without knowing their
+/// kind, now that this build may know it. A failure keeps them for the next
+/// open, and the workspace still opens.
+fn replay_retained_owner_private(store: &mut EngineStore) {
+    if let Err(error) =
+        dohc_engine_sync::replay_retained_owner_private(store, &dohc_engine_storage::NoFaults)
+    {
+        eprintln!("engine: retained owner-private records kept: {error}");
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "worker startup owns store configuration, channels, lifecycle, and the writer lock"
@@ -1252,6 +1263,9 @@ fn worker_main(
     }
     if matches!(mode, ActorOpenMode::ReadWrite) {
         close_stranded_owner_bindings(&mut store, now_ms);
+    }
+    if matches!(mode, ActorOpenMode::ReadWrite | ActorOpenMode::Passive) {
+        replay_retained_owner_private(&mut store);
     }
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready. The same handshake carries the

@@ -225,11 +225,18 @@ enum Admission<T> {
     Applied(T),
     Refused(ReplicationRefusal),
     Skipped,
+    RetainedQuietly,
 }
 
 pub(crate) enum MutationOutcome<T> {
     Applied(T),
-    RefusedRetainingMutation { reason: String },
+    RefusedRetainingMutation {
+        reason: String,
+    },
+    /// An owner-private record this build can't read yet. It is journaled as
+    /// refused and acknowledged, with no Notice, for a later build to apply
+    /// (`owner_private`).
+    RetainedQuietly,
 }
 
 /// Return whether the imported coordinate is already acknowledged with the
@@ -364,6 +371,12 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     },
                 })
             }
+            Ok(MutationOutcome::RetainedQuietly) => {
+                mutation_committed = false;
+                tx.execute_batch("RELEASE dohc_replication_mutation")
+                    .map_err(SyncError::persist)?;
+                Admission::RetainedQuietly
+            }
             Err(error) => {
                 mutation_committed = false;
                 tx.execute_batch(
@@ -408,7 +421,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
             if !exists { persist_refusal(tx, refusal)?; }
         }
-        let apply_disposition = if matches!(&admission, Admission::Refused(_)) {
+        // A quietly retained record is not applied either.
+        let apply_disposition = if matches!(&admission, Admission::Refused(_) | Admission::RetainedQuietly) {
             "refused"
         } else {
             "applied"
@@ -472,7 +486,11 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         Ok(TxnOutcome::Committed(Admission::Refused(refusal))) => {
             ApplyDisposition::Refused(refusal)
         }
-        Ok(TxnOutcome::Committed(Admission::Skipped)) => ApplyDisposition::Skipped,
+        // A retained record took its coordinate and changed nothing, as a
+        // skipped one does, so a pull neither counts it applied nor reports it.
+        Ok(TxnOutcome::Committed(Admission::Skipped | Admission::RetainedQuietly)) => {
+            ApplyDisposition::Skipped
+        }
         Ok(TxnOutcome::Crashed { committed }) => ApplyDisposition::Crashed { committed },
         Err(SyncError::FaultCrash) => ApplyDisposition::Crashed { committed: false },
         Err(err) => return Err(err),
@@ -883,6 +901,9 @@ struct FeedReadSet {
     last_seen_created_at_ms: i64,
     last_seen_message_id: String,
     at_ms: i64,
+    // Missing is fine; a present null is malformed.
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    owner_private_account_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -893,6 +914,14 @@ struct ThreadReadSet {
     last_read_created_at_ms: i64,
     last_read_message_id: String,
     at_ms: i64,
+    #[serde(default, deserialize_with = "deserialize_present_string")]
+    owner_private_account_id: Option<String>,
+}
+
+/// A known owner-private kind may carry the owner-private marker, and when it
+/// does the marker must name the same account as the record.
+fn marker_names(marker: Option<&str>, account_user_id: &str) -> bool {
+    marker.is_none_or(|marked| marked == account_user_id)
 }
 
 #[derive(Deserialize)]
@@ -2122,7 +2151,9 @@ fn apply_feed_read(
     }
     let owner_user_id = normalize_feed_identity(&p.owner_user_id, "Feed owner")
         .map_err(|error| map_chat_rule(error, "chat feed read owner is invalid"))?;
-    if owner_user_id != p.owner_user_id {
+    if owner_user_id != p.owner_user_id
+        || !marker_names(p.owner_private_account_id.as_deref(), &owner_user_id)
+    {
         return Err(SyncError::InvalidInput {
             reason: "chat feed read owner is invalid",
         });
@@ -2182,7 +2213,9 @@ fn apply_thread_read(
     }
     let account_user_id = normalize_feed_identity(&p.account_user_id, "Read account")
         .map_err(|error| map_chat_rule(error, "chat thread read account is invalid"))?;
-    if account_user_id != p.account_user_id {
+    if account_user_id != p.account_user_id
+        || !marker_names(p.owner_private_account_id.as_deref(), &account_user_id)
+    {
         return Err(SyncError::InvalidInput {
             reason: "chat thread read account is invalid",
         });

@@ -278,11 +278,19 @@ export async function parseAuthenticatedLogOps(
 //
 // A future authored chat op is verified by adding it to CHAT_OP_POLICY; a
 // future no-author chat op by enumerating it as "structural".
+//
+// OWNER-PRIVATE MARKER. `ownerPrivateAccountId` in a payload declares that the
+// record changes only that account's own state, so a reader that doesn't know
+// its kind keeps it quietly and applies it after an upgrade. It is admitted
+// only on an authored kind registered here with `ownerPrivate: true`, and only
+// naming the authenticated pusher. Any other op carrying it, chat or not, is
+// refused, so no record can opt itself into quiet handling.
 type ChatOpPolicy =
   | { kind: "structural" }
   | {
       kind: "authored";
       field: string;
+      ownerPrivate?: true;
     };
 const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   // No-author structural/derived ops: nothing to verify, pass through.
@@ -300,9 +308,22 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   // It never appears in a channel share, and the authenticated pusher must be
   // the receiver named by the durable record.
   "chat.follow.set": { kind: "authored", field: "ownerUserId" },
-  "chat.feed.read.set": { kind: "authored", field: "ownerUserId" },
-  "chat.thread.read.set": { kind: "authored", field: "accountUserId" },
+  "chat.feed.read.set": { kind: "authored", field: "ownerUserId", ownerPrivate: true },
+  "chat.thread.read.set": { kind: "authored", field: "accountUserId", ownerPrivate: true },
 };
+
+const OWNER_PRIVATE_MARKER = "ownerPrivateAccountId";
+
+function assertOwnerPrivateMarker(opKind: string, payload: unknown, actorUserId: string): void {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+  const fields = payload as Record<string, unknown>;
+  if (!Object.hasOwn(fields, OWNER_PRIVATE_MARKER)) return;
+  const policy = Object.hasOwn(CHAT_OP_POLICY, opKind) ? CHAT_OP_POLICY[opKind] : undefined;
+  if (policy === undefined || policy.kind !== "authored" || policy.ownerPrivate !== true) {
+    throw badRequest(`${OWNER_PRIVATE_MARKER} is reserved for owner-private kinds`);
+  }
+  if (fields[OWNER_PRIVATE_MARKER] !== actorUserId) throw relayError("authorship_mismatch");
+}
 
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.
 // The ordinary workspace route preserves payload bytes for replica comparison.
@@ -316,6 +337,8 @@ export function assertChatAuthorship(
     const op = rawOp as Record<string, unknown>;
     const opKind = op.opKind;
     if (typeof opKind !== "string") continue;
+    // The one field every op is checked for: the owner-private marker.
+    assertOwnerPrivateMarker(opKind, op.payload, actorUserId);
     // Only chat.* ops are subject to the authorship gate; everything else is an
     // opaque payload and passes through even if it carries an author-shaped field.
     if (!opKind.startsWith("chat.")) continue;

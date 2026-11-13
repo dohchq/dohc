@@ -108,6 +108,19 @@ pub(crate) fn is_owned_op_kind(kind: &str) -> bool {
     OWNED_OP_ROUTES.iter().any(|(owned, _)| *owned == kind)
 }
 
+/// The kinds this build knows to be owner-private: each changes only the named
+/// account's own state, and each routes to the chat applier. Only these replay
+/// from the log after an earlier build kept them quietly, so a content kind
+/// never does. The relay registers the same kinds with `ownerPrivate: true`.
+pub(crate) const OWNER_PRIVATE_KINDS: &[&str] = &["chat.feed.read.set", "chat.thread.read.set"];
+
+#[cfg(test)]
+pub(crate) fn routes_to_chat(kind: &str) -> bool {
+    OWNED_OP_ROUTES
+        .iter()
+        .any(|(owned, route)| *owned == kind && matches!(route, OwnedRoute::Chat))
+}
+
 pub fn apply_replication_envelope(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -203,12 +216,20 @@ pub(crate) fn apply_replication_envelope_in_batch(
     else {
         // Forward compatibility: an older client cannot interpret a newer
         // peer's operation, but permanently wedging that origin prevents it
-        // from receiving every later operation it *does* understand.
-        return plain(crate::apply_envelope_with(
+        // from receiving every later operation it *does* understand. The
+        // owner's own private state is kept without a Notice and applies once
+        // this build knows its kind; anything else is refused visibly.
+        return plain(crate::apply::apply_envelope_with_mutation_outcome(
             store,
             envelope,
             faults,
-            |_tx, _op| Err(SyncError::UnsupportedOperation),
+            |tx, op| {
+                if crate::owner_private::admit_quietly(tx, op)? {
+                    Ok(crate::apply::MutationOutcome::<()>::RetainedQuietly)
+                } else {
+                    Err(SyncError::UnsupportedOperation)
+                }
+            },
         ));
     };
     if !matches!(
