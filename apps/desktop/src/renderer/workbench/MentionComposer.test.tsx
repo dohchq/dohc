@@ -22,7 +22,7 @@ const candidates: MentionCandidate[] = [
 // A tiny controlled harness so the composer behaves like it does in ChatsView
 // (parent owns the value).
 function Harness(props: {
-  fileCandidates?: { path: string; label: string }[];
+  fileCandidates?: { path: string; label: string; readPath?: string }[];
   onSend?: () => void;
   onRosterPick?: (pick: import("../offers/agentAddressed").AgentRosterPick | null) => void;
   onEscape?: () => void;
@@ -357,6 +357,27 @@ describe("MentionComposer autocomplete", () => {
     await userEvent.click(screen.getByTestId("chats-file-mention-option"));
     await userEvent.click(await screen.findByTestId("chats-file-mention-whole"));
     expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
+  });
+
+  it("links a joined Group's file by the Group's path and reads headings from this workspace's copy", async () => {
+    const load = vi.fn(() =>
+      Promise.resolve([{ text: "Scope", anchor: "scope", line: 3, level: 2, occurrence: 0 }]),
+    );
+    render(
+      <Harness
+        fileCandidates={[
+          { path: "team/plan.md", label: "Plan", readPath: "shared-with-me/ana/team/plan.md" },
+        ]}
+        loadFileHeadings={load}
+      />,
+    );
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await userEvent.type(composer, "@plan");
+    await userEvent.click(await screen.findByTestId("chats-file-mention-option"));
+    await userEvent.click(await screen.findByTestId("chats-file-mention-heading"));
+    expect(load.mock.calls).toEqual([["shared-with-me/ana/team/plan.md"]]);
+    expect(composer.value).toContain("@[team/plan.md#scope]");
+    expect(composer.value).not.toContain("shared-with-me");
   });
 
   it("offers the file choices from the chat's +", async () => {

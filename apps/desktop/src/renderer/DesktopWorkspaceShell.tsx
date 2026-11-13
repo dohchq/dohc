@@ -7205,6 +7205,7 @@ export function DesktopWorkspaceShell(props: {
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
+    shareMounts: workspaceShareMounts,
     collaboration: chatCollaboration,
     agentSetup,
     onSetupAgent: openAgentSettings,
@@ -7246,6 +7247,7 @@ export function DesktopWorkspaceShell(props: {
     shareRemovals,
     mentionCandidates,
     workspaceFiles: files,
+    shareMounts: workspaceShareMounts,
     collaboration: null,
     suspendPolling: chatsTabIsLive,
     ...(revealedInvitation === null

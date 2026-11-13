@@ -119,7 +119,11 @@ import {
 } from "./chatMessages";
 import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
-import { channelFileCandidates, DM_FILE_CANDIDATES } from "./chatFileMentionScope";
+import {
+  channelFileCandidates,
+  type ChannelFileSharing,
+  DM_FILE_CANDIDATES,
+} from "./chatFileMentionScope";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
@@ -311,6 +315,7 @@ interface ChannelSnapshot {
 }
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
+const EMPTY_SHARE_MOUNTS: readonly { shareId: string; label: string }[] = [];
 
 // How long a failed DM sync holds the DM syncs nobody asked for. The relay is
 // down or slow, and a sync that queued behind a slow failure would otherwise
@@ -590,6 +595,9 @@ export function ChatsView(props: {
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
   workspaceFiles?: readonly WorkspaceFileEntry[];
+  // The received shares mounted in this workspace. A joined Group's files are
+  // its share's mount.
+  shareMounts?: readonly { shareId: string; label: string }[];
   // Main-derived settings/status summary. The Agents section reads it to
   // say whether the configured agent is set up.
   agentSetup?: AgentSetupSummary | null;
@@ -3423,14 +3431,26 @@ export function ChatsView(props: {
   const scopeResolved = sharesWorkspaceId === workspaceId;
   // The files the open Group's composers offer. Its sharing counts only once
   // this workspace's share listing has answered.
+  const shareMounts = props.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const channelFiles = useMemo(() => {
     const wireId = activeChannel?.wireId ?? null;
-    const shared =
-      scopeResolved &&
-      wireId !== null &&
-      (Boolean(joinedByWire.get(wireId)) || (grantedByWire.get(wireId)?.length ?? 0) > 0);
-    return channelFileCandidates(fileMentionCandidates, activeChannel, shared);
-  }, [activeChannel, fileMentionCandidates, grantedByWire, joinedByWire, scopeResolved]);
+    const joined = wireId === null ? null : (joinedByWire.get(wireId) ?? null);
+    let sharing: ChannelFileSharing = { kind: "unshared" };
+    if (scopeResolved && joined) {
+      const mounts = shareMounts.filter((mount) => mount.shareId === joined.shareId);
+      sharing = { kind: "joined", mountLabel: mounts.length === 1 ? mounts[0]!.label : null };
+    } else if (scopeResolved && wireId !== null && (grantedByWire.get(wireId)?.length ?? 0) > 0) {
+      sharing = { kind: "owned" };
+    }
+    return channelFileCandidates(fileMentionCandidates, activeChannel, sharing);
+  }, [
+    activeChannel,
+    fileMentionCandidates,
+    grantedByWire,
+    joinedByWire,
+    scopeResolved,
+    shareMounts,
+  ]);
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
     transport: presenceTransport,
