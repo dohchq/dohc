@@ -37,6 +37,15 @@ const SHAPES = {
   ),
   "chevron-right": <path d="m9 18 6-6-6-6" />,
   "chevron-down": <path d="m6 9 6 6 6-6" />,
+  "chevron-left": <path d="m15 18-6-6 6-6" />,
+  hash: (
+    <>
+      <path d="M4 9h16" />
+      <path d="M4 15h16" />
+      <path d="M10 3 8 21" />
+      <path d="m16 3-2 18" />
+    </>
+  ),
   message: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
   pencil: (
     <>

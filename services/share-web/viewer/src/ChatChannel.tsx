@@ -26,6 +26,8 @@ const POST_UNKNOWN =
 const POST_BUSY = "The server is busy. Try again in a moment.";
 const POST_REFUSED = "The server did not accept this message. Try again.";
 const PINNED_PX = 48;
+const READ_ONLY = "You can read this channel but not post. The owner gave you read-only access.";
+const EMPTY = "No messages in this channel yet.";
 
 /** A 401 or 404 ends the channel for this account; other failures leave it open. */
 export function ended(error: unknown): Ended | null {
@@ -140,19 +142,26 @@ export interface ChatChannelClient {
   tooLong(text: string): boolean;
 }
 
-/** `composerField` sits above the message box; while `holdSend` is set, the message waits for that field. */
+/**
+ * `composerField` sits above the message box; while `holdSend` is set, the message waits for that field.
+ * `readOnlyNote` and `empty` replace the channel's own sentences, where the page names its conversations differently.
+ */
 export function ChannelView({
   client,
   name,
   onEnded,
   composerField,
   holdSend = false,
+  readOnlyNote = READ_ONLY,
+  empty = EMPTY,
 }: {
   client: ChatChannelClient;
   name: string | null;
   onEnded(reason: Ended): void;
   composerField?: ReactNode;
   holdSend?: boolean;
+  readOnlyNote?: string;
+  empty?: string;
 }) {
   const [messages, setMessages] = useState<NamedChatMessage[] | null>(null),
     [loadFailed, setLoadFailed] = useState(false);
@@ -461,7 +470,7 @@ export function ChannelView({
             ) : !messages ? (
               <p className="chat-state">Loading messages…</p>
             ) : !messages.length && olderCursor === null ? (
-              <p className="chat-state">No messages in this channel yet.</p>
+              <p className="chat-state">{empty}</p>
             ) : (
               <ol className="chat-list">
                 {messages.map((message) => (
@@ -492,7 +501,7 @@ export function ChannelView({
       </div>
       {access === "read-only" ? (
         <div className="chat-read-only">
-          <p>You can read this channel but not post. The owner gave you read-only access.</p>
+          <p>{readOnlyNote}</p>
           {draft && <textarea readOnly value={draft} aria-label="Your unsent message" />}
         </div>
       ) : (

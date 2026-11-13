@@ -285,7 +285,7 @@ describe("share-web sessions", () => {
   it("serves each viewer route its own page", async () => {
     const viewerAssetsDir = await mkdtemp(join(tmpdir(), "dohc-share-web-pages-"));
     try {
-      for (const page of ["index", "edit", "chat", "apps"])
+      for (const page of ["index", "edit", "chat", "apps", "workspace"])
         await writeFile(join(viewerAssetsDir, `${page}.html`), page);
       const handler = createShareWebHandler({
         relayUrl: "http://relay.test",
@@ -301,9 +301,10 @@ describe("share-web sessions", () => {
           "/s/edit/grant",
           "/s/chat/grant",
           `/s/apps/workspace/${"a".repeat(64)}`,
+          "/s/workspace/grant",
         ].map(async (path) => (await handler(request(path))).text()),
       );
-      expect(pages).toEqual(["index", "index", "index", "edit", "chat", "apps"]);
+      expect(pages).toEqual(["index", "index", "index", "edit", "chat", "apps", "workspace"]);
     } finally {
       await rm(viewerAssetsDir, { recursive: true, force: true });
     }

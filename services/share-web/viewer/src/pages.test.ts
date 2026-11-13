@@ -9,6 +9,7 @@ const ROUTES = [
   "NamedChatApp.tsx",
   "NamedApp.tsx",
   "JoinApp.tsx",
+  "WorkspaceApp.tsx",
 ];
 const EDITOR = ["NamedDocumentEditor.tsx", "DiscardDraft.tsx"];
 
@@ -54,10 +55,18 @@ it("loads only each route's own code before it renders", async () => {
     "chat.html": ["NamedChatApp.tsx"],
     "apps.html": ["NamedApp.tsx"],
     "join.html": ["JoinApp.tsx"],
+    "workspace.html": ["WorkspaceApp.tsx"],
   });
+  // A member's page loads the live editor only once a page opens for editing.
+  expect(loads(pages["workspace.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["chat.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["apps.html"]!, EDITOR)).toEqual([]);
   expect(loads(pages["join.html"]!, EDITOR)).toEqual([]);
+});
+
+it("serves a member's workspace page at /s/workspace/<grant>", () => {
+  expect(viewerPage("/s/workspace/grant-1")).toBe("workspace.html");
+  expect(viewerPage("/s/workspace")).toBe("index.html");
 });
 
 it("serves the invite link page only at /join", () => {

@@ -1,0 +1,60 @@
+/* A member's workspace: its files, the open page, and its Groups side by side; three tabs on a phone. */
+.workspace-page .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+.workspace-page > nav { display: flex; flex-direction: column; padding: 0 4px; }
+.workspace-title { display: flex; height: 48px; flex: none; align-items: center; gap: 4px; padding: 0 8px 0 0; }
+.workspace-title .bar-mark { width: 32px; }
+.workspace-name { min-width: 0; margin: 0; overflow: hidden; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-page > nav .tree { flex: 1 0 auto; padding-bottom: 8px; }
+.workspace-empty { margin: 0; padding: 4px 8px; color: var(--viewer-muted); }
+.workspace-account { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 -4px; border-top: 1px solid var(--viewer-line); padding: 8px 12px; background: var(--viewer-panel); }
+.workspace-account > span { min-width: 0; flex: 1; overflow: hidden; color: var(--viewer-muted); text-overflow: ellipsis; white-space: nowrap; }
+.link-page .workspace-account .handoff-button { height: 28px; padding: 0 8px; font-size: 12px; }
+.workspace-account p { width: 100%; margin: 0; color: var(--viewer-danger); font-size: 12px; }
+
+.narrow-mark { display: none; }
+.workspace-status { display: flex; min-width: 0; align-items: center; }
+.workspace-status .named-document-status { display: flex; align-items: center; gap: 6px; }
+/* The ring says the page is waiting for its owner's dohc. */
+.live-ring { width: 10px; height: 10px; flex: none; border: 1.5px solid var(--viewer-line-strong); border-top-color: var(--viewer-muted); border-radius: 50%; animation: workspace-ring 900ms linear infinite; }
+@keyframes workspace-ring { to { transform: rotate(360deg); } }
+
+/* Errors land at the bottom right of the page, over its text. */
+.toast-slot { position: absolute; right: 16px; bottom: 16px; z-index: 25; width: 360px; max-width: calc(100% - 32px); pointer-events: none; }
+.link-page .toast-slot .edit-notice { position: static; width: auto; max-width: none; pointer-events: auto; animation: workspace-toast 160ms ease-out both; }
+.toast-slot .edit-notice > div { min-width: 0; flex: 1; }
+.toast-close { flex: none; min-width: 28px; height: 28px; margin: -4px -4px 0 0; padding: 0; }
+@keyframes workspace-toast { from { opacity: 0; transform: translateY(8px); } }
+
+.workspace-chats { min-width: 0; }
+.chats-head { display: flex; min-height: 48px; flex: none; align-items: center; gap: 4px; padding: 0 12px 0 16px; }
+.chats-head:has(> .icon-button) { padding-left: 8px; }
+.link-page .chats-head h2 { min-width: 0; margin: 0; overflow: hidden; font-family: inherit; font-size: 14px; font-weight: 600; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.chats-hash { display: grid; flex: none; place-items: center; color: var(--viewer-subtle); }
+.group-list { margin: 0; padding: 0 8px 8px; list-style: none; }
+.group-row { display: flex; width: 100%; height: 32px; align-items: center; gap: 8px; border: 0; border-radius: 6px; padding: 0 8px; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; text-align: left; transition: background-color 80ms; }
+.group-row:hover { background: var(--viewer-hover); color: var(--viewer-ink); }
+.group-row .icon { color: var(--viewer-subtle); }
+.group-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-row.unread { color: var(--viewer-ink); font-weight: 600; }
+.unread-count { display: inline-grid; min-width: 18px; height: 18px; place-items: center; border-radius: 999px; padding: 0 5px; background: var(--viewer-accent); color: var(--viewer-on-accent); font-size: 11px; font-weight: 600; line-height: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-ring, .link-page .toast-slot .edit-notice { animation: none; }
+}
+
+@media (max-width: 720px) {
+  .workspace-page { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .workspace-page > nav, .workspace-page > .page, .workspace-page > .side-panel { grid-area: 1 / 1; min-height: 0; }
+  /* A tab out of view keeps its size, so a Group that loads meanwhile still scrolls to its newest message. */
+  .workspace-page > [data-shown="false"] { visibility: hidden; }
+  .link-page.workspace-page > nav { position: static; z-index: auto; width: auto; overflow-y: auto; border: 0; box-shadow: none; }
+  .workspace-page > .side-panel, .workspace-page > .side-panel[data-open] { position: static; inset: auto; width: auto; border: 0; border-radius: 0; box-shadow: none; }
+  .narrow-mark { display: grid; }
+  .toast-slot { right: 8px; bottom: 8px; left: 8px; width: auto; max-width: none; }
+  .link-page .toast-slot .edit-notice { border-radius: 12px; }
+  .workspace-tabs { display: flex; grid-area: 2 / 1; border-top: 1px solid var(--viewer-line); padding-bottom: env(safe-area-inset-bottom); background: var(--viewer-panel); }
+  .workspace-tabs [role="tab"] { display: inline-flex; height: 48px; flex: 1; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: var(--viewer-muted); cursor: pointer; font-size: 13px; font-weight: 500; }
+  .workspace-tabs [role="tab"][aria-selected="true"] { box-shadow: inset 0 2px 0 var(--viewer-accent); color: var(--viewer-ink); }
+  .workspace-tabs [role="tab"]:focus-visible { outline-offset: -2px; }
+}

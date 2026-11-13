@@ -145,6 +145,17 @@ it("lists every Group and follows them all in one request, each message naming i
   expect(posted.status, await posted.clone().text()).toBe(200);
 });
 
+it("reads one Group's history for a member, newest first, with the cursor that follows every Group", async () => {
+  const f = await fixture();
+  const history = await f.chat(`messages?shareId=${f.shareId}&channelWireId=wire-food&limit=50`);
+  expect(history.status, await history.clone().text()).toBe(200);
+  const page = await history.json() as { channelWireId: string; messages: Array<{ body: string }>; nextCursor: number; olderCursor: number | null };
+  expect(page.channelWireId).toBe("wire-food");
+  expect(page.messages.map(message => message.body)).toEqual(["Bring snacks"]);
+  const follow = await (await f.chat(`messages?shareId=${f.shareId}&since=${page.nextCursor}`)).json() as { messages: unknown[] };
+  expect(follow.messages).toEqual([]);
+});
+
 it("shows a View member every Group read-only and refuses a post", async () => {
   const f = await fixture("view");
   const channels = await (await f.chat(`channels?grantId=${f.grantId}`)).json() as { channels: Array<{ access: string }> };

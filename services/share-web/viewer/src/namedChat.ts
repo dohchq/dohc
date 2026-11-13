@@ -48,7 +48,7 @@ const record = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const invalid = () => new NamedChatError(0);
 
-async function chatRequest(
+export async function chatRequest(
   path: string,
   signal: AbortSignal,
   body?: unknown,
