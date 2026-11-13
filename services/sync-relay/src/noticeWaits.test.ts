@@ -271,6 +271,25 @@ it("never looks up a thread named through a share, even beside a path the share 
   expect(ids(await full())).toContain("share-path-thread");
 });
 
+it("shows a shared file's Notice only while the file stays in the share, whatever it became outside", async () => {
+  const { storage, read, post } = await relay();
+  shareNotesWithAna(storage);
+  const write = logWriter(storage, "bens");
+  write("moment.append", { objectId: "object-list", path: "notes/list.md" });
+  post("share-file", { reach: { shareId: "share-ben" }, target: { path: "notes/list.md" } });
+  write("moment.append", { objectId: "object-list", path: "notes/renamed.md" });
+  expect(ids(await page(await read("scope=phone")))).toEqual(["share-file"]);
+  write("moment.append", { objectId: "object-list", path: ".env" });
+  const secret = await (await read("scope=phone")).text();
+  write("moment.append", { objectId: "object-list", path: "private/list.md" });
+  const elsewhere = await (await read("scope=phone")).text();
+  write("moment.append", { objectId: "object-list", path: null });
+  const deleted = await read("scope=phone");
+  expect(await deleted.clone().text()).toBe(secret);
+  expect(elsewhere).toBe(secret);
+  expect(ids(await page(deleted))).toEqual([]);
+});
+
 it("leaves out a share-placed row whose target reach settlement removed, even after the whole list was read", async () => {
   const { storage, read, full, post } = await relay();
   shareNotesWithAna(storage);

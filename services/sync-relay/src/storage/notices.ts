@@ -598,11 +598,16 @@ function phoneNotices(storage: StorageContext, recipientUserId: string, notices:
     `SELECT object_id FROM sync_relay_object_moments
      WHERE workspace_id = ? AND version_id = 'main' AND path = ? ORDER BY relay_seq DESC LIMIT 1`,
   );
-  const safePath = (workspaceId: string, path: string) => {
+  // Through a share, `admitted` keeps a file's later place private: one that has left the share reads the
+  // same whether it moved to a secret path, moved elsewhere, or was deleted.
+  const safePath = (workspaceId: string, path: string, admitted?: (path: string) => boolean) => {
     const validated = validateUserWritePath(path);
     if (!validated.ok || hiddenFile(path) || hiddenFile(validated.normalized)) return false;
     const objectId = lastAtPath.get(workspaceId, validated.normalized)?.object_id;
-    return typeof objectId !== "string" || !hiddenFile(storage.objectLastKnownPath(workspaceId, objectId));
+    if (typeof objectId !== "string") return true;
+    const now = storage.objectLastKnownPath(workspaceId, objectId);
+    if (admitted !== undefined) return now !== undefined && admitted(now) && !hiddenFile(now);
+    return !hiddenFile(now);
   };
   const safeTarget = (notice: RelayNotice) => {
     const target = notice.target;
@@ -610,6 +615,7 @@ function phoneNotices(storage: StorageContext, recipientUserId: string, notices:
     if (target.path === undefined && target.thread === undefined && target.message === undefined) return true;
     if (target.thread === undefined && target.message !== undefined) return false;
     let workspaceId: string;
+    let admitted: ((path: string) => boolean) | undefined;
     if (notice.workspaceId !== null) {
       if (!owned(notice.workspaceId)) return false;
       workspaceId = notice.workspaceId;
@@ -620,8 +626,10 @@ function phoneNotices(storage: StorageContext, recipientUserId: string, notices:
       if (share === null || target.path === undefined || target.thread !== undefined ||
         !admits(reach.sidesOn(share.shareId), target.path)) return false;
       workspaceId = share.workspaceId;
+      const sides = reach.sidesOn(share.shareId);
+      admitted = (path) => admits(sides, path);
     }
-    return (target.path === undefined || safePath(workspaceId, target.path)) &&
+    return (target.path === undefined || safePath(workspaceId, target.path, admitted)) &&
       (target.thread === undefined || safeThread(workspaceId, target.thread));
   };
   return notices.flatMap((notice) => {
