@@ -577,6 +577,76 @@ describe("marks on the account's Notices", () => {
     },
   );
 
+  it.each(["read", "dismissed"] as const)(
+    "keeps a taken %s sent against a row newer than the list file, across a relaunch before the list lands",
+    async (mark) => {
+      const files = memoryFiles();
+      const first = setup({ files });
+      first.store.resume();
+      const held = await reply(first.server, first.server.read(), [relayRow("a")], {
+        replace: true,
+      });
+      // The feed brings sequence 2; its list save still waits when the mark goes.
+      files.deferList = true;
+      await reply(first.server, held, [relayRow("a", { changeSeq: 2 })], { nextCursor: "2" });
+      first.store.mark("a", mark);
+      const stop = gate();
+      files.hold.beforeList = stop;
+      (await first.server.marks()).answer(200, OK);
+      await stop.reached;
+      first.store.stop();
+      files.hold = {};
+      files.deferList = false;
+      expect(files.lists.get(scope)).toMatchObject([{ changeSeq: 1 }]);
+      expect(files.marks.get(scope)).toMatchObject([{ noticeId: "a", taken: 2 }]);
+
+      const second = setup({ files });
+      second.store.resume();
+      await second.server.read();
+      expect(second.ids()).toEqual(mark === "read" ? ["a"] : []);
+      expect(files.lists.get(scope)).toMatchObject([
+        mark === "read" ? { readAtMs: NOW } : { dismissedAtMs: NOW },
+      ]);
+      second.store.mark("b", "read");
+      expect((await second.server.marks()).body).toEqual({
+        marks: [{ noticeId: "b", mark: "read" }],
+      });
+      expect(files.marks.get(scope)).toEqual([{ noticeId: "b", mark: "read", atMs: NOW }]);
+    },
+  );
+
+  it("keeps a taken mark whose row the list file lacks until a whole list is saved", async () => {
+    const files = memoryFiles();
+    const first = setup({ files });
+    first.store.resume();
+    const held = await reply(first.server, first.server.read(), [], { replace: true });
+    files.deferList = true;
+    await reply(first.server, held, [relayRow("a", { changeSeq: 2 })], { nextCursor: "2" });
+    first.store.mark("a", "dismissed");
+    const stop = gate();
+    files.hold.beforeList = stop;
+    (await first.server.marks()).answer(200, OK);
+    await stop.reached;
+    first.store.stop();
+    files.hold = {};
+    files.deferList = false;
+
+    const second = setup({ files });
+    second.store.resume();
+    const call = await second.server.read();
+    expect(files.marks.get(scope)).toMatchObject([{ noticeId: "a", taken: 2 }]);
+    second.store.mark("b", "read");
+    expect((await second.server.marks()).body).toEqual({
+      marks: [{ noticeId: "b", mark: "read" }],
+    });
+    await reply(second.server, call, [relayRow("a", { changeSeq: 3, dismissedAtMs: NOW })], {
+      replace: true,
+    });
+    expect(second.ids()).toEqual([]);
+    expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a", changeSeq: 3 }]);
+    expect(files.marks.get(scope)).toEqual([{ noticeId: "b", mark: "read", atMs: NOW }]);
+  });
+
   const replays = (["read", "dismissed"] as const).flatMap((mark) =>
     (["beforeList", "beforeMarks"] as const).flatMap((point) =>
       (["before", "after"] as const).map((when) => [mark, point, when] as const),

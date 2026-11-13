@@ -45,8 +45,8 @@ import type { WorkspaceList, WorkspaceListStore } from "./workspaceList";
 // the earlier one's answer was lost and both go again. The list shows each row with its waiting marks applied. A mark
 // the server took is applied to the row held then, unless a newer change to the row arrived meanwhile. Either way it
 // stays on disk, marked taken with what it left the row as sent (expiry included), until a list saved after it has
-// landed. A relaunch in between gives the list file's row that recorded result, if the row is still the one sent, and
-// never sends the mark again.
+// landed. A relaunch in between gives the list file's row that recorded result, if the row is the one sent or older,
+// and never sends the mark again. One whose row the list file lacks stays on disk until the next whole list is saved.
 
 export const NOTICE_RETRY_MS = 1000;
 export const NOTICE_RETRY_MAX_MS = 30_000;
@@ -242,6 +242,8 @@ export function createNoticeStore(options: {
   let marks: PendingMark[] = [];
   /** Marks the server took whose effect the list file may not hold yet. */
   let settling: TakenMark[] = [];
+  /** Taken marks a relaunch found whose row the list file lacks: they settle with the next whole list. */
+  let unplaced: TakenMark[] = [];
   let known = false;
   let reads = NONE;
   let markFailure = NONE;
@@ -317,7 +319,7 @@ export function createNoticeStore(options: {
 
   /** The marks file: taken marks still settling, then the waiting ones, in order. */
   function saveMarks() {
-    if (live()) void files?.writeMarks(scope, [...settling, ...marks]);
+    if (live()) void files?.writeMarks(scope, [...unplaced, ...settling, ...marks]);
   }
 
   /** Saves the list now, and only once it has landed drops the taken marks it holds from the marks file. */
@@ -330,7 +332,7 @@ export function createNoticeStore(options: {
     const done = new Set(settling);
     void files.writeListThenMarks(scope, [...rows.values()], () => {
       settling = settling.filter((entry) => !done.has(entry));
-      return [...settling, ...marks];
+      return [...unplaced, ...settling, ...marks];
     });
   }
 
@@ -417,6 +419,12 @@ export function createNoticeStore(options: {
         building = null;
         known = true;
         saveList();
+        // A whole list read since the relaunch holds what the server took.
+        if (unplaced.length > 0) {
+          settling.push(...unplaced);
+          unplaced = [];
+          settle();
+        }
       } else if (!building && page.changes.length > 0) saveList();
       cursor = page.nextCursor;
       caughtUp = !page.hasMore;
@@ -470,20 +478,25 @@ export function createNoticeStore(options: {
   }
 
   /**
-   * After a relaunch, applies a taken mark's recorded result to the list file's row, if that row is still the one it
-   * applied to and doesn't already show it. Its expiry is the one the server's answer set, never one from now.
+   * After a relaunch, applies a taken mark's recorded result to the list file's row, if that row is the one it applied
+   * to or older, as when the list's save was still waiting when the mark went. A newer row is another device's change
+   * and keeps its own. The expiry is the one the server's answer set, never one from now. Resolves whether the list now
+   * holds the mark's effect; false only when the list file lacks the row.
    */
-  function replay(mark: TakenMark) {
-    const row = rows.get(mark.noticeId);
+  function replay(mark: TakenMark): boolean {
     const result = mark.result;
-    if (!result || !row || row.changeSeq !== mark.taken) return;
+    if (!result || mark.taken === null) return true;
+    const row = rows.get(mark.noticeId);
+    if (!row) return false;
     if (
-      row.readAtMs === result.readAtMs &&
-      row.dismissedAtMs === result.dismissedAtMs &&
-      row.expiresAtMs === result.expiresAtMs
+      row.changeSeq > mark.taken ||
+      (row.readAtMs === result.readAtMs &&
+        row.dismissedAtMs === result.dismissedAtMs &&
+        row.expiresAtMs === result.expiresAtMs)
     )
-      return;
+      return true;
     rows.set(mark.noticeId, { ...row, ...result });
+    return true;
   }
 
   async function send() {
@@ -592,17 +605,15 @@ export function createNoticeStore(options: {
     const waiting: PendingMark[] = [];
     for (const entry of saved ?? []) {
       if (!("taken" in entry)) waiting.push(entry);
-      else if (found) {
-        replay(entry);
-        settling.push(entry);
-      }
+      else if (found && replay(entry)) settling.push(entry);
+      // Kept, never sent, until a list holding its effect is saved.
+      else unplaced.push(entry);
     }
     marks = [...waiting, ...marks];
     loaded = true;
     // Shown first, so a row past its expiry goes before the list is saved.
     followList();
-    if (settling.length > 0) settle();
-    else if (waiting.length !== (saved?.length ?? 0)) saveMarks();
+    settle();
     startPull();
     void send();
   }
