@@ -2515,7 +2515,7 @@ async function runDeleteRepro(
       kind === "file-manager-capture-stop-early" ||
       kind === "file-manager-capture-stop"
     ) {
-      // Step 2: A's file goes from disk outside dohc while live editing is on (#3129).
+      // Step 2: A's file goes from disk outside dohc while live editing is on.
       // "file-manager-capture-stop-early" stops before capture can record the delete.
       step = "2-file-manager-delete";
       await unlink(join(rootA, oldPath));

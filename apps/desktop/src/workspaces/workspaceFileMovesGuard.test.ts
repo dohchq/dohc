@@ -9,7 +9,7 @@ import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { LiveFolderError, LivePageOwnedError } from "./workspaceEngineCapture";
 import { moveWorkspacePathByHand, prepareMoveWorkspacePathAs } from "./workspaceFileMoves";
 
-// #3089: every route that renames or moves a live page waits for the move
+// Every route that renames or moves a live page waits for the move
 // guard first, before it takes the workspace lock or calls the capture.
 
 // Counts every node:fs/promises call, to price a move's disk work.

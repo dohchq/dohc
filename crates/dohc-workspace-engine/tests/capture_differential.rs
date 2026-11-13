@@ -8,9 +8,9 @@
 //! secret = { byteLength } only; absence carries `everTracked` (any
 //! moments/secret_moments rows) so retired and NEVER-TRACKED stay distinct.
 //!
-//! Fixtures are DISK-DRIVEN only — the ratified delta: TS `writeIfChanged`
-//! ignores `metadata_origin` (safe there because the desktop materializes API
-//! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
+//! Fixtures are disk-driven only: TS `writeIfChanged` ignores
+//! `metadata_origin` (safe there because the desktop materializes API writes
+//! to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
 use crate::common;

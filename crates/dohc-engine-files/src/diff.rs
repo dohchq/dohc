@@ -1,15 +1,13 @@
 //! Scan-generation diff ("hash-changed"): compare a prior scan generation's
 //! manifest against a fresh listing to classify **added / changed / removed**.
 //!
-//! Classification is by content hash and size, never mtime — "hashes, not
-//! timestamps, are the source of truth" (the retired reference accelerator's own
-//! contract). The manifest's recorded mtime feeds only the scanner's hash-reuse
-//! short-circuit (the amended N8 rule on [`crate::scan::FileEntry`]). The classification
-//! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
-//! proof (a flipped hash comparison) exercises the real machinery with only the
-//! predicate mutated — the differential harness must be able to catch exactly
-//! this class of bug; an earlier differential test passed against a flipped
-//! comparison because both sides shared the predicate.
+//! Classification is by content hash and size, never mtime. The manifest's
+//! recorded mtime feeds only the scanner's hash-reuse short-circuit (see
+//! [`crate::scan::FileEntry`]). The classification predicate is factored into
+//! [`diff_core`] behind a seam so the seeded-bug proof (a flipped hash
+//! comparison) exercises the real machinery with only the predicate mutated.
+//! A differential test whose two sides share the predicate passes against a
+//! flipped comparison, so the harness must catch exactly this class of bug.
 
 use crate::bounds::ScanBounds;
 use crate::error::FilesError;
@@ -24,8 +22,8 @@ pub struct ManifestEntry {
     pub sha256: String,
     /// The mtime (ms since epoch) observed by the scan that hashed `sha256`,
     /// or `0` when no trustworthy observation exists. Only a non-zero value
-    /// authorizes the scanner's hash-reuse short-circuit (the amended N8 rule
-    /// on [`crate::scan::FileEntry`]); `0` always re-hashes.
+    /// authorizes the scanner's hash-reuse short-circuit (see
+    /// [`crate::scan::FileEntry`]); `0` always re-hashes.
     pub mtime_ms: i64,
 }
 
@@ -80,7 +78,6 @@ impl ScanManifest {
             .retain(|path, _| !crate::floor::is_excluded_file(path));
     }
 
-    /// Number of tracked entries.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -310,9 +307,9 @@ mod tests {
         ScanManifest { entries }
     }
 
-    // A dropped hash comparison: "unchanged" decided on size alone — the exact
-    // class of bug the CAL-2 lesson warns a tautological harness would miss,
-    // because a same-size content edit slips through as unchanged.
+    // A dropped hash comparison: "unchanged" decided on size alone. A
+    // tautological harness would miss this class of bug, because a same-size
+    // content edit slips through as unchanged.
     fn seeded_bug_unchanged(prior: &ManifestEntry, current: &FileEntry) -> bool {
         prior.size == current.size
     }

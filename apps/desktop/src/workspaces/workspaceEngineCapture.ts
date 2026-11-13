@@ -269,38 +269,29 @@ export async function probeEngineStoreRefusal(
   }
 }
 
-// Watcher-to-engine capture, named-version operations, and history/restore
-// for one workspace. The Rust daemon owns filesystem observation and version
-// materialization; this layer serializes the version operations, Y.Doc
-// sessions, and relay materialization that must not interleave with them,
-// and keeps the expected-event registry that stops the watcher re-capturing
-// dohc's own disk writes. Engine state lives under `<root>/.dohc/engine/`.
+// Capture, named-version operations, and history/restore for one workspace.
+// The Rust daemon watches the folder, ingests it, recognizes its own writes,
+// and materializes versions. Engine state lives under `<root>/.dohc/engine/`,
+// and the folder on disk always materializes the active version (default
+// Main).
 //
-// The workspace folder on disk always materializes the active version
-// (engine-owned, persisted in engine.db, default Main). Version operations
-// (create/switch/compare/merge/resolve) run as tasks on one chain, so they
-// can never interleave with each other or with Y.Doc session work.
+// All engine work here runs on one promise chain in the main process, off the
+// IPC hot path, so version operations (create/switch/compare/merge/resolve),
+// Y.Doc session work, and relay materialization never interleave. A failed
+// background task logs through onError and the chain stays alive; version and
+// restore operations reject to their caller so the UI can surface the failure.
 //
-// What the engine owns (shared policy, not local heuristics):
-//   - resolveEffectivePolicy (@dohc/security-contract) decides engine
-//     ownership: the classifyEngineFilePath hard floor (ignored segments,
-//     `.env`-style secret paths, the same floor engine search uses) that
-//     .dohc policy files can never override, plus workspace policy from
-//     .dohc/files.toml which can only narrow (tracked = false), never widen.
-//   - `.dohc/files.toml` and `.dohc/visibility.toml` are re-read at the top
-//     of every serialized task.
+// resolveEffectivePolicy (@dohc/security-contract) decides engine ownership:
+// the classifyEngineFilePath hard floor (ignored segments, `.env`-style
+// secret paths, the same floor engine search uses), which .dohc policy files
+// can never override, plus .dohc/files.toml, which can only narrow (tracked =
+// false). `.dohc/files.toml` and `.dohc/visibility.toml` are re-read at the
+// top of every serialized task.
 //
-// The daemon owns capture: it watches the folder, ingests it, and recognizes
-// its own writes. The chain still writes the folder for restore, merge and
-// relay materialization, and coordinated renames. A removal it makes is
-// registered as an expected engine event, with expiry, so the detached-debt
-// cleanup and a failing-close session can tell dohc's own removal from an
-// external delete.
-//
-// All engine work runs on one internal promise chain in the main process,
-// off the IPC hot path. A failed background task logs through onError and
-// the chain stays alive; version and restore operations reject to their
-// caller so the UI can surface the failure.
+// The chain still writes the folder for restore, merge, relay
+// materialization, and coordinated renames. A removal it makes is registered
+// as an expected engine event, with expiry, so the detached-debt cleanup and
+// a failing-close session can tell dohc's own removal from an external delete.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 export const YDOC_UNCERTAIN_FAILURE_BACKOFF_MS = TRANSPORT_REBIND_MAX_BACKOFF_MS;
@@ -497,8 +488,7 @@ export interface WorkspaceEngineYDocCloseOptions {
 }
 
 // The desktop adds restart recovery and adapts external-edit outcomes around
-// the Rust client session. Keep that small delta local instead of importing
-// the retired in-process provider's public type into production.
+// the Rust client session. Keep that small delta local.
 export type WorkspaceEngineYDocProviderSession = Omit<
   EngineYdocProviderSession,
   | "head"
@@ -626,56 +616,43 @@ export interface WorkspaceEngineCapture {
     momentId: string;
     deduped: boolean;
   }>;
-  // WS-G2-C-2 editor binding: open a live engine Y.Doc session for one rich
-  // file through this capture's Rust workspace sessions. The session journals
-  // editor edits as ydoc.update ops and, on each debounced settle, projects the
-  // Markdown in the daemon and mirrors the on-disk .md through this capture's
-  // disk writer. While the session is live its path is marked live-ydoc-driven, so
-  // the watcher's observation of the settle's own.md write is deferred (never
-  // re-captured as an ordinary moment.append — which on a shared workspace
-  // would double-replicate and collide (P0D) with the ydoc.update stream). The
-  // returned session's close() lifts the guard. Rejects (secret path,
-  // already-live, path-not-in-version) propagate to the caller, which uses the
-  // plain editor — except path-not-in-version, which the caller must surface as
-  // a refusal rather than a writable fallback.
-  // Runs on the capture chain, so the session's version binding is decided in
-  // the same serialized step that registers it as live: a version operation
-  // either vacates this session or runs after it, never around it.
+  // Opens a live engine Y.Doc session for one rich file. The session journals
+  // editor edits as ydoc.update ops and, on each debounced settle, projects
+  // the Markdown in the daemon and writes the on-disk .md. While it is live
+  // its path is marked live-ydoc-driven, so the watcher's observation of the
+  // settle's own .md write is deferred. Re-captured as a moment.append, that
+  // write would double-replicate on a shared workspace and collide with the
+  // ydoc.update stream. The returned session's close() lifts the guard.
+  // Rejects (secret path, already-live) propagate to the caller, which uses
+  // the plain editor. A path-not-in-version reject must surface as a refusal,
+  // never as a writable fallback.
+  // Runs on the capture chain, so a version operation either vacates this
+  // session or runs after it, never around it.
   //
-  // ABSENT-HEAD CONTRACT (canonical; the daemon and the client both point
+  // Absent-head contract (canonical; the daemon and the client both point
   // here). The daemon does not refuse an open for a path the entered version
-  // has no snapshot for — it derives an object id and binds an empty doc, and
-  // that branch is what makes a just-created file editable before capture
-  // ingests it. So this layer, which knows why the open was asked for, owns
-  // the decision.
+  // has no snapshot for: it binds an empty doc, which makes a just-created
+  // file editable before capture ingests it. This layer owns the decision.
+  // The bind is empty only with `head "absent"` and `lineage "absent"`. A
+  // head-absent open with a lineage is a crash-orphaned draft whose CRDT rows
+  // are the only copy of those edits, so it binds. For an empty bind, the
+  // file on disk decides:
   //
-  // The bind is empty only when the daemon has neither a snapshot nor durable
-  // CRDT state: `head "absent"` And `lineage "absent"`. A head-absent open
-  // with a lineage is the crash-orphaned draft the daemon deliberately
-  // resurrects, whose CRDT rows are the only copy of those edits — it binds.
-  //
-  // For a genuinely empty bind, the on-disk artifact decides:
-  //
-  //   empty file on disk -> creation. Bind it. `createFile` writes "" with
-  //                         `wx` and opens straight after, so an empty file
-  //                         admits creation exactly.
-  //   nothing on disk -> the path is not in this version. Refuse, and the
+  //   empty file         -> creation. Bind it. `createFile` writes "" with
+  //                         `wx` and opens straight after.
+  //   nothing on disk    -> the path is not in this version. Refuse, and the
   //                         caller must not downgrade to the plain editor.
   //   file with content  -> an uncaptured artifact. The empty bind carries no
-  //                         seed (actor.rs seeds from the head), so settling
-  //                         it would erase the file. Refuse the SESSION only;
-  //                         the plain editor shows and writes the real bytes.
+  //                         seed, so settling it would erase the file. Refuse
+  //                         the session only; the plain editor shows and
+  //                         writes the real bytes.
   //
-  // Size, not mere existence: on Windows `lstat` matches case-insensitively,
-  // so an open of `notes/CASEONLY.md` finds `notes/caseOnly.md` while the
-  // daemon's head lookup (case-sensitive) does not. Existence alone would call
-  // that creation and settle an empty doc over the real file.
-  //
-  // Without the refusal, clicking a file that a version switch removed while
-  // the click was queued behind it opens an empty writable editor over a path
-  // the switch just deleted, and the first keystroke settles a phantom file
-  // into the entered version. The disk check runs on the capture chain
-  // with the version binding, so a switch cannot land between them.
+  // Size decides, not existence: on Windows `lstat` matches without regard to
+  // case, so an open of `notes/CASEONLY.md` finds `notes/caseOnly.md` while
+  // the daemon's case-sensitive head lookup does not, and existence alone
+  // would settle an empty doc over the real file. The disk check runs on the
+  // capture chain with the version binding, so a version switch cannot remove
+  // the path between them and leave an empty writable editor over it.
   openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
     allowLossySourceSha256?: string;
@@ -703,9 +680,9 @@ export interface WorkspaceEngineCapture {
     // The honest save state for this document, reported on every settle:
     // "settling" when one starts, "saved" only when the projection and the.
     // Md actually landed, "error" when the settle failed and the file on
-    // disk is therefore behind the editor. A failed settle used to reach
-    // nothing at all — the doc kept reading "Saved" over a stale (or empty)
-    // file, which is silent data loss.
+    // disk is therefore behind the editor. A failed settle must report: a
+    // doc that keeps reading "Saved" over a stale (or empty) file is silent
+    // data loss.
     // Tokens identify settles across daemon generations. Lifecycle events are
     // separate from visible state: a busy outcome still reports "settling".
     // Opening and corrective status reports claim no edits. `failure` is the
@@ -728,7 +705,7 @@ export interface WorkspaceEngineCapture {
   // session whose tab closed still holds the document when its close was
   // refused. Answers false, writing nothing, when no session holds it.
   saveDeletedFileAgain(path: string): Promise<boolean>;
-  // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
+  // Flush + release any live Y.Doc session at or under a
   // path before a destructive op that does not run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
   // settle would resurrect the deleted file / orphan the object. No-op when
@@ -742,7 +719,7 @@ export interface WorkspaceEngineCapture {
   // before the capture releases its store.
   settleAndCloseAllLiveSessions(): Promise<void>;
   settleAndCloseLiveSessionsForSyncPause(): Promise<() => void>;
-  // Version operations (PR 0M-4). Mutating operations run on the capture
+  // Version operations. Mutating operations run on the capture
   // chain; reads are served directly by the store (which already orders
   // reads after its own writes). All reject to the caller on failure.
   listVersions(): Promise<WorkspaceVersionsSnapshot>;
@@ -804,7 +781,7 @@ export interface WorkspaceEngineCapture {
     conflictId: string,
     resolution: WorkspaceVersionConflictResolution,
   ): Promise<WorkspaceVersionConflictResolveOutcome>;
-  // History reads (PR 0M-5): the active version's moment timeline and one
+  // History reads: the active version's moment timeline and one
   // moment's full payload. Reads drain the capture chain first so the
   // timeline the UI paints always includes the batch whose onRecorded
   // notification triggered the refresh (read-your-writes; the chain never
@@ -828,7 +805,7 @@ export interface WorkspaceEngineCapture {
   // newest first, deletes and renames included. Record-only sync rows never
   // touched the file, so they are passed over.
   listObjectMomentsAfter(objectId: string, momentId: string): Promise<string[]>;
-  // Engine restore (PR 0M-5): returns the file to its state before the given
+  // Engine restore: returns the file to its state before the given
   // moment. Runs on the capture chain; records a forward "Restored <file>"
   // moment (history is never rewritten) and materializes the result to disk
   // with expected-event registration so the watcher's observation of our own
@@ -1102,9 +1079,9 @@ export function isDocumentTooDenseCause(error: unknown): boolean {
 
 // Blocked by something that clears on its own — a program outside dohc
 // holding the artifact, or dohc's own writers meeting inside SQLite. The same
-// answer #679 gave for the capture ladder, and deliberately the same SET the
+// answer as the capture ladder's, and deliberately the same set the
 // provider's own settle ladder re-arms on (`isTransientEngineRefusal`): every
-// reader of this predicate is deciding whether something ELSE is already
+// reader of this predicate is deciding whether something else is already
 // retrying. Narrower than the provider's set and this cancels a live retry;
 // wider and a failure nobody retries goes quiet.
 //
@@ -1188,12 +1165,11 @@ function isLineageChangedCause(error: unknown): boolean {
  * contention gets no state of its own and no copy of its own, because there
  * is nothing to tell the user.
  *
- * A close used to be the exception, because it released the session and left
- * nothing behind to retry. It no longer can: a teardown that meets a
- * transient blocker either keeps the session and is retried by the close
- * ladder, or releases only once the engine has the text and hands the
- * artifact to the detached debt. Either way a retry is coming, so the answer
- * no longer depends on where the failure was raised.
+ * A close is no exception: a teardown that meets a transient blocker either
+ * keeps the session and is retried by the close ladder, or releases only
+ * once the engine has the text and hands the artifact to the detached debt.
+ * Either way a retry is coming, so the answer does not depend on where the
+ * failure was raised.
  */
 function settleFailureSaveState(error: unknown): EngineYDocSaveState {
   if (error instanceof YdocOwnerDraftPendingError) {
@@ -2289,7 +2265,7 @@ export function createWorkspaceEngineCapture(
     if (deadYDocSessions.size === 0) publishCaptureOutcome();
   };
 
-  // THE AUTHORITATIVE live-session registry (WS-G2-C-2 gate fix). One entry per
+  // The authoritative live-session registry. One entry per
   // path with a live engine Y.Doc session; the single-canonical reservation
   // guarantees at most one session per path. Every lifecycle op that rewrites
   // or removes a path (version switch/merge/create, rename, delete) coordinates
@@ -2297,7 +2273,7 @@ export function createWorkspaceEngineCapture(
   // settle can never write a stale projection into a new version, resurrect a
   // moved/deleted path, or orphan the object.
   //
-  // Capture coexistence is now sha-precise, not a blanket skip: a healthy live
+  // Capture coexistence is sha-precise, not a blanket skip: a healthy live
   // session's own settle .md self-write is suppressed by its expected-event sha
   // (registered in onSettled before the disk write), so a genuine external edit
   // to a live path is captured normally instead of silently dropped. Only a
@@ -2331,8 +2307,8 @@ export function createWorkspaceEngineCapture(
     // data-integrity-critical teardown). Reused by the returned session's
     // close(), the renderer close IPC, and every lifecycle op below.
     close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
-    // This session's own way to apply a delete directly (codex P1-C
-    // follow-up on #746), read only while `status` is "failing-close":
+    // This session's own way to apply a delete directly,
+    // read only while `status` is "failing-close":
     // `observeFileEvents`'s synchronous delete pass calls it at
     // watcher-delivery time instead of relying solely on the TTL-bounded
     // no-debt tombstone map. A close-retry ladder's own doubling delay
@@ -2436,15 +2412,14 @@ export function createWorkspaceEngineCapture(
     // refused release puts the debt back — release-only — rather than
     // letting go of it. Rejects when the lease is still held.
     discard: () => Promise<void>;
-    // Set once the write is abandoned for good. A stood-down debt used to
-    // DELETE this entry, and `beginFileRename` read that absence as proof
-    // the write landed — recording the stale pre-lock artifact as if it had.
-    // Keeping the entry with this flag set is what lets the rename
-    // seam tell "abandoned" from "landed" instead of reading both as
-    // silence; `onError` already carries the stand-down's message, so
-    // nothing here needs to repeat it.
+    // Set once the write is abandoned for good. A stood-down debt keeps its
+    // entry with this flag set. If it deleted the entry, `beginFileRename`
+    // would read that absence as proof the write landed and record the
+    // stale pre-lock artifact as if it had. The flag lets the rename seam
+    // tell "abandoned" from "landed"; `onError` already carries the
+    // stand-down's message, so nothing here needs to repeat it.
     //
-    // Not immortal, and cleared only by PROOF, never by attempt: a
+    // Cleared only by proof, never by attempt: a
     // materialized settle of this exact path (`onSettled`) is the moment
     // "its last edit reached disk" becomes true, so that is what clears it —
     // an open alone proves only that no lease is held, not that anything
@@ -2466,13 +2441,11 @@ export function createWorkspaceEngineCapture(
   // registration door (`scheduleDetachedLockedSettle`) ask "did the
   // watcher just tell me this exact path is gone" instead.
   //
-  // Not invalidated by a later recreation (#681 round 8, codex P1 —
-  // reverted a same-round attempt at that shape once the certifier's S2(b)
-  // named the corruption it opens: a session that opened before the
-  // delete can still be mid-retry-ladder when a different session
-  // recreates the path; invalidating the tombstone on recreation would
+  // A later recreation does not invalidate it. A session that opened before
+  // the delete can still be mid-retry-ladder when a different session
+  // recreates the path, and invalidating the tombstone on recreation would
   // let the old session's late debt arm and settle its stale canonical
-  // doc over the new file). The memory discriminates by which session is
+  // doc over the new file. The memory discriminates by which session is
   // registering instead: `deletedSeq` is compared against that session's
   // own open at the consuming door, so a session that opened before
   // the delete (the stale one) still cancels, and a session that opened
@@ -2488,17 +2461,13 @@ export function createWorkspaceEngineCapture(
   // can step backward.
   let observationSeq = 0;
   const nextObservationSeq = (): number => ++observationSeq;
-  // Swept in place, at most once per PRUNE window (#681 round 9, codex
-  // P2 — round 8's version rebuilt the whole map, via a spread + filter +
-  // new Map, on every insert. A bulk deletion of a large tree calls
-  // `noteExternalDeleteWithNoDebt` once per path, and every one of those
-  // paths is fresh — nothing has crossed its own 10s TTL yet within the
-  // same burst — so that rebuild was quadratic busywork that found nothing
-  // to prune. Throttling to once per window turns a burst of N inserts
-  // into one O(map size) sweep instead of N of them; a sweep this throws
-  // away is still safe because `consumeRecentExternalDeleteWithNoDebt`
-  // checks its own entry's expiry directly, so a throttled sweep can never
-  // let an expired tombstone match.
+  // Swept in place, at most once per prune window. A bulk deletion of a
+  // large tree calls `noteExternalDeleteWithNoDebt` once per path, and none
+  // of those paths has crossed its 10s TTL within the burst, so a sweep on
+  // every insert would be quadratic and find nothing to prune. Throttling
+  // turns a burst of N inserts into one O(map size) sweep. A skipped sweep
+  // is safe: `consumeRecentExternalDeleteWithNoDebt` checks its own entry's
+  // expiry directly, so an expired tombstone can never match.
   const RECENT_EXTERNAL_DELETE_PRUNE_INTERVAL_MS = 1_000;
   let recentExternalDeletesPrunedAtMs = -Infinity;
   function pruneRecentExternalDeletesWithNoDebt(): void {
@@ -3876,7 +3845,7 @@ export function createWorkspaceEngineCapture(
       // lead the armed settle (a "Saved" over content it never carried) nor
       // lag it (a settle that saves the edit while vouching for a seq below
       // it, leaving the document on "Saving…" with nothing left to arm
-      // another settle). #514, and its two review rounds.
+      // another settle).
       const armed = announceOnce(onArmed);
       const keyed = confirmRecording && applyOptions?.idempotencyKey !== undefined;
       const capturedOptions = {
@@ -4547,7 +4516,7 @@ export function createWorkspaceEngineCapture(
       }
       // A tracked text file whose bytes stop round-tripping as UTF-8 keeps its
       // object identity; the moment says so honestly instead of pretending it
-      // was an ordinary update (the pre-WS-G1 path retired the file here).
+      // was an ordinary update.
       const becameBinary = current !== null && current.contentKind !== "binary";
       await engine.writeBinaryFile({
         workspaceId,
@@ -4607,9 +4576,8 @@ export function createWorkspaceEngineCapture(
   async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
     if (!detachedLockedDebts.has(event.path)) {
       // `observeFileEvents`'s own synchronous pass, at watcher-delivery time,
-      // already recorded a delete's no-debt tombstone (codex P1-C on
-      // #746) — nothing is left to do for a path with no debt by the time
-      // this enqueued task runs.
+      // already recorded a delete's no-debt tombstone. Nothing is left to do
+      // for a path with no debt by the time this enqueued task runs.
       return;
     }
     if (event.operation === "delete") {
@@ -4812,7 +4780,7 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  // The secret half of a version switch (PR 08): protected files follow the
+  // The secret half of a version switch: protected files follow the
   // version. Plaintext is produced here through the store's single authorized
   // materialization accessor, held only in the in-memory operation list on
   // its way to the workspace folder, and every write/delete registers an
@@ -5170,19 +5138,15 @@ export function createWorkspaceEngineCapture(
       // Discharge it first, on the same terms the release that orphaned it
       // used: `settleOnRefusal: false`.
       //
-      // That flag is the whole point, and an earlier round of this PR had
-      // the reasoning wrong. It said the discharge could settle because "the
-      // refusal proved content exists" — conflating content existing in the
-      // DOC with the disk being captured. The danger was never calling the
-      // path missing. It is rule 1 above: this doc was seeded from neither a
-      // head nor a snapshot, so settling it writes whatever replication
-      // delivered over bytes the watcher has not ingested yet. Without the
-      // flag the provider escalates a repeated UnsettledClose to a settling
-      // close (ydocProviderSession), and a quick retry on a dirty orphan
-      // materializes the Y.Doc over the user's uncaptured file (#564, codex
-      // r20).
+      // The discharge must not settle. Content existing in the doc does not
+      // mean the disk is captured: this doc was seeded from neither a head
+      // nor a snapshot (rule 1 above), so settling it writes whatever
+      // replication delivered over bytes the watcher has not ingested yet.
+      // Without the flag the provider escalates a repeated UnsettledClose to
+      // a settling close (ydocProviderSession), and a quick retry on a dirty
+      // orphan materializes the Y.Doc over the user's uncaptured file.
       //
-      // A terminal refusal on an orphan now evicts, so the next open binds
+      // A terminal refusal on an orphan evicts, so the next open binds
       // the preserved lineage. A transient or workspace-open refusal
       // retains the orphan and waits it out through the existing ladders.
       //
@@ -5235,29 +5199,22 @@ export function createWorkspaceEngineCapture(
       };
       // How many updates entered this document, and how many of them a
       // committed settle carried. The close downgrade below needs proof that
-      // the text settled, and a successful RELEASE is not that proof:
+      // the text settled, and a successful release is not that proof:
       // `close_session` checks `last_settled_sha` only before a local-only
-      // PRUNE, while a replicated lineage — a synced workspace, promoted by
-      // `claim_base` on the first pulled `ydoc.update` — compacts instead and
-      // never prunes, so its release succeeds over unsettled text
-      // (crates/dohc-engine-collab/src/durable.rs). The desktop therefore
-      // evidences its own claim rather than inferring it from a release whose
-      // meaning depends on the regime.
+      // prune, while a replicated lineage compacts instead and never
+      // prunes, so its release succeeds over unsettled text
+      // (crates/dohc-engine-collab/src/durable.rs). So the desktop counts.
       //
-      // Settles overlap, and they do not finish in the order they start:
-      // runSettle announces a start before it queues, and a settle that
-      // aborts on the journal reports its failure without ever reaching the
-      // settle chain, so it can finish ahead of one queued before it. Order
-      // is therefore not a sound pairing, and neither a shared slot nor a
-      // queue can be right. Each settle's claim is keyed by the settle
-      // itself: its token, and the generation that minted the token — every
-      // daemon generation runs its own settle chain and starts counting at 1
-      // again, so the token alone repeats across a restart.
+      // Settles overlap and do not finish in the order they start: a settle
+      // that aborts on the journal never reaches the settle chain, so it
+      // can finish ahead of one queued before it. Each settle's claim is
+      // therefore keyed by its token and the generation that minted it.
+      // Every daemon generation starts counting at 1 again, so the token
+      // alone repeats across a restart.
       //
-      // Counting is coarse for the same reason: an update that leaves the
-      // projection unchanged still marks the document unsettled, because
-      // over-counting only costs loudness while under-counting would report a
-      // save that never happened.
+      // An update that leaves the projection unchanged still counts:
+      // over-counting only costs loudness, while under-counting would
+      // report a save that never happened.
       let updatesSeen = 0;
       let updatesSettled = 0;
       let changedOutside = false;
@@ -5269,9 +5226,8 @@ export function createWorkspaceEngineCapture(
       // refusal before its settle started from that settle's own failure.
       let settleStarts = 0;
       const settleClaims = new Map<string, number>();
-      // WHEN this settle started (codex P1 on the synchronous
-      // tombstone): the no-debt tombstone clear below must not erase a
-      // delete newer than the write it certifies. A settle's own
+      // When this settle started. The no-debt tombstone clear below must
+      // not erase a delete newer than the write it certifies. A settle's own
       // completion callback can run late — behind an occupied capture
       // chain, or simple scheduling — so an external delete landing
       // after the write already materialized, but before this callback
@@ -5362,26 +5318,20 @@ export function createWorkspaceEngineCapture(
         // covered too. An open alone is not this proof: it shows no
         // conflicting lease, not that anything reached disk.
         //
-        // The same proof also retires this path's no-debt tombstone (#681
-        // round 9, codex P1): a session is classified once, at open,
-        // against a delete it predates, and stays classified that way
-        // forever otherwise — even after landing this settle proves the
-        // deletion's premise (the path is gone) no longer holds. Without
-        // this, a still-later transient close failure for the same
-        // session, over edits made after this recovery, would read as
-        // belonging to the deleted incarnation and get wrongly cancelled.
-        // The proof holds because the engine refuses a settle while a file
-        // this document had is missing, including in a replacement after a
-        // restart, which names the document it continues. rpc_ydoc.rs tests
-        // both, `…after_an_external_delete…` and `…after_a_restart…`.
+        // The same proof retires this path's no-debt tombstone. A session
+        // is classified once, at open, against a delete it predates. Left
+        // in place, the tombstone would make a later transient close
+        // failure for this session, over edits made after this recovery,
+        // read as the deleted incarnation's and get cancelled. The proof
+        // holds because the engine refuses a settle while a file this
+        // document had is missing, including in a replacement after a
+        // restart. rpc_ydoc.rs tests both, `…after_an_external_delete…`
+        // and `…after_a_restart…`.
         //
-        // Only a tombstone that predates this settle's own start (codex
-        // P1 follow-up on the synchronous recording): this callback
-        // can run late, behind an occupied capture chain, and a delete
-        // landing after the write already materialized but before this
-        // callback runs must survive — clearing it here would erase the
-        // one place that evidence is recorded, purely because an older
-        // settle's completion happened to run after it.
+        // Only a tombstone that predates this settle's own start is
+        // cleared: this callback can run late, behind an occupied capture
+        // chain, and a delete that lands after the write materialized but
+        // before this callback runs must survive.
         const staleTombstone = recentExternalDeletesWithNoDebt.get(input.path);
         if (
           staleTombstone !== undefined &&
@@ -5399,39 +5349,35 @@ export function createWorkspaceEngineCapture(
         const clearedStandDown = detachedLockedDebts.get(input.path);
         if (clearedStandDown?.stoodDown) {
           clearedStandDown.stoodDown = false;
-          // The flag alone does not say whether L is still owed — only
-          // that older generation's own closure knows that (#681 round 6,
-          // codex P2-A). Ask it, on the chain (this settle's completion
-          // runs off it): with nothing owed, paying now just retires the
-          // entry — the `writeCancelled` branch below already does that
-          // for a non-stood-down debt, and skipping this left a fully
-          // discharged debt lingering forever (a later delete then traced
-          // a cancellation for a write that was never pending, and the
-          // closure graph stayed retained past workspace stop). With a
-          // release still refused, the same call re-arms that retry
-          // exactly as it would have on its own schedule — the O3 case
-          // this settle must never strand. Fire-and-forget: a stalled
-          // release here must never fail this settle's own success.
+          // The flag alone does not say whether L is still owed. Only
+          // that older generation's own closure knows. Ask it, on the
+          // chain (this settle's completion runs off it). With nothing
+          // owed, paying now retires the entry, as the `writeCancelled`
+          // branch below does for a non-stood-down debt. A discharged
+          // debt left in place would make a later delete trace a
+          // cancellation for a write that was never pending, and would
+          // keep the closure graph retained past workspace stop. With a
+          // release still refused, the same call re-arms that retry on
+          // its own schedule, so this settle never strands it.
+          // Fire-and-forget: a stalled release here must never fail this
+          // settle's own success.
           enqueue(`ydoc close retry of ${input.path}`, () =>
             clearedStandDown.pay().catch((error: unknown) => {
               onError(`ydoc close retry of ${input.path}`, error);
             }),
           );
         }
-        // The ENGINE owns the artifact: a settle it reports as
+        // The engine owns the artifact: a settle it reports as
         // materialized either wrote the file or found those bytes already
-        // there. The desktop used to write them again ("the mirror of the same
-        // bytes"), which was redundant every time it agreed with the engine
-        // and destructive the one time it did not — an unchanged projection is
-        // answered from the lineage without touching the file, so the mirror
-        // replaced whatever an outside writer had put there. The desktop now
-        // writes nothing here. It reads the file to decide what to REPORT.
+        // there. The desktop writes nothing here. An unchanged projection
+        // is answered from the lineage without touching the file, so a
+        // second write would replace whatever an outside writer had put
+        // there. The desktop reads the file to decide what to report.
         //
         // The digest comes from a bounded streaming hash, not from
         // readDiskTextState: that reader answers "can capture own this?" and
-        // returns no sha at all past its 5 MiB cap, which would have read as
-        // "no proof of drift" for the largest files — the worst case to guess
-        // wrong about.
+        // returns no sha at all past its 5 MiB cap, which would read as
+        // "no proof of drift" for the largest files.
         const digest = await digestSettledFile(rootPath, input.path);
         if (digest.kind === "unverifiable") {
           // dohc could not check the file, which is not the same as knowing it
@@ -5478,8 +5424,8 @@ export function createWorkspaceEngineCapture(
       // behind — a settle that never lands is the user's content going
       // nowhere.
       //
-      // #496 corrects this report from the close path below, and only ever
-      // DOWNWARDS in loudness. Reporting the failure first and withdrawing it
+      // The close path below corrects this report, and only ever
+      // downwards in loudness. Reporting the failure first and withdrawing it
       // once the release proves it benign is deliberate: a report deferred
       // until the outcome is known can be dropped, and a dropped settle
       // failure is the silent loss this callback exists to prevent. An extra
@@ -5584,38 +5530,31 @@ export function createWorkspaceEngineCapture(
       // only when teardown succeeds: a failing close retains a
       // failing-close entry so the reservation/retry are not lost and capture
       // stays deferred for the path.
-      // THE DETACHED LOCKED-WRITE DEBT.
       //
-      // A replicated lineage compacts on release without the local-only
-      // pending-job guard (durable.rs), so a close can RELEASE successfully
-      // over a locked settle: the provider throws
-      // YdocReleasedWithSettleFailureError, and the session and its entry
-      // are both gone. The per-entry ladder below cannot pay that debt, so
-      // this one does — it reopens enough state to settle, and an unchanged
-      // projection routes through the engine's idempotent settle, which
-      // replays the pending write.
+      // The detached locked-write debt. A replicated lineage compacts on
+      // release without the local-only pending-job guard (durable.rs), so
+      // a close can release successfully over a locked settle: the
+      // provider throws YdocReleasedWithSettleFailureError, and the session
+      // and its entry are both gone. This debt reopens enough state to
+      // settle, and an unchanged projection routes through the engine's
+      // idempotent settle, which replays the pending write.
       //
-      // It pays ON the capture chain, the serialization point every version
-      // operation runs through, and re-checks the world at fire time. That
-      // is what gives the debt exactly one owner and keeps it behind the
-      // version fence:
+      // It pays on the capture chain and re-checks the world at fire time,
+      // which gives the debt one owner and keeps it behind the version
+      // fence:
       //
       // - A live entry for the path takes the debt. Opening a document
       //   settles only a lineage the engine reports unsettled, so the live
-      //   session's settle is asked for explicitly. An open cannot
-      //   interleave with a chain task, which is what makes the check
-      //   authoritative.
+      //   session's settle is asked for explicitly.
       // - A workspace on another version drops it with a trace. Reopening
-      //   the captured version here would run outside the fence and could
-      //   write the old version's projection over the active one. Nothing
-      //   durable is lost: the fence replays pending materializations before
-      //   any switch scans the filesystem (lib.rs,
-      //   materialize_replay_pending_for_fence — fatal on failure), so a
-      //   succeeded switch already paid or carried it.
+      //   the captured version here could write the old version's
+      //   projection over the active one. Nothing durable is lost: the
+      //   fence replays pending materializations before any switch scans
+      //   the filesystem (lib.rs, materialize_replay_pending_for_fence).
       //
-      // The payment is callable from the debt's own timer (wrapped in
-      // `enqueue`) and inline by another chain task that must drain the debt
-      // before touching the path — a rename, most of all.
+      // The debt's own timer calls the payment (wrapped in `enqueue`), and
+      // so does a chain task that must drain the debt before touching the
+      // path, such as a rename.
       let detachedRetryMs = teardownRetry.initial;
       // One debt, one timer.
       let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5718,7 +5657,7 @@ export function createWorkspaceEngineCapture(
           ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
           : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`;
 
-      // `observeFileEvents`'s direct-arm door (codex P1-C follow-up):
+      // `observeFileEvents`'s direct-arm door:
       // called at watcher-delivery time, bypassing the TTL-bounded
       // no-debt tombstone map entirely, so nothing here can expire before
       // a later-stage retry arrives to ask. The same age discrimination
@@ -5737,7 +5676,7 @@ export function createWorkspaceEngineCapture(
       // separate close-retry ladder (`scheduleTransientCloseRetry`) that
       // owns the unreplicated shape and never registers a debt at all. A
       // delete landing after registration but before one of those retries
-      // used to reach neither fence. Both ask here, at the last point
+      // would reach neither fence, so both ask here, at the last point
       // before their own write. `writeCancelled` makes the stand-down
       // sticky: once one retry stands down, every later retry short-circuits
       // without re-consuming or re-announcing the same tombstone.
@@ -5873,11 +5812,11 @@ export function createWorkspaceEngineCapture(
             armDetachedLockedRetry();
             return;
           }
-          // The active-version read lives inside the guarded block (#595
-          // it can reject (the reconnect ladder exhausted, the
-          // engine refusing the read), and rejecting outside left the debt
-          // in the registry with no timer scheduled — stranded until an
-          // unrelated lifecycle action or a restart. A failure here
+          // The active-version read lives inside the guarded block. It
+          // can reject (the reconnect ladder exhausted, the engine
+          // refusing the read), and a rejection outside would leave the
+          // debt in the registry with no timer scheduled, stranded until
+          // an unrelated lifecycle action or a restart. A failure here
           // re-arms like any other.
           const activeVersionId = await activeVersionIdOf(engine);
           if (activeVersionId !== versionId) {
@@ -6050,50 +5989,34 @@ export function createWorkspaceEngineCapture(
           throw error;
         }
       };
-      // The registration door. A close can reach
-      // here two ways: directly, when a release succeeds over a failed
-      // settle (this debt is fresh — `writeCancelled` is still false);
-      // or off the chain, after a transient close retry ladder that runs
-      // for as long as TEARDOWN_RETRY_CAP_MS allows — seconds wide in
-      // production, unlike the delete/move seams #697 already fences on
-      // the chain. `discardDetachedLockedDebt`'s own re-registration
-      // (`writeCancelled` already true) is release-only by then — no
-      // write is left to resurrect anything, so it always registers.
+      // The registration door. A close reaches here directly, when a
+      // release succeeds over a failed settle, or off the chain, after a
+      // transient close retry ladder that runs for up to
+      // TEARDOWN_RETRY_CAP_MS. `discardDetachedLockedDebt`'s own
+      // re-registration (`writeCancelled` already true) is release-only,
+      // with no write left to resurrect anything, so it always registers.
       //
-      // A fresh debt is different: its ladder can reopen the canonical
-      // Y.Doc and settle it back to disk, recreating a file an external
-      // delete removed anywhere in that window. `cleanupDetachedDebtForEvent`
-      // cannot have cleaned up a debt that did not exist yet when the
-      // delete's watcher event ran, but it does remember the path
-      // (`noteExternalDeleteWithNoDebt`) — consuming that memory here,
-      // at the door, is what cancels this write with the same trace the
-      // watcher's own cleanup uses, instead of arming a ladder that
-      // would resurrect the file (or, if it later stood down instead,
-      // strand a marker blocking an unrelated file recreated at this
-      // path). A raw disk stat cannot stand in for this: an absent path
-      // means "deleted" and "never written yet" identically, and most
+      // A fresh debt's ladder can reopen the canonical Y.Doc and settle it
+      // back to disk, recreating a file an external delete removed in that
+      // window. `cleanupDetachedDebtForEvent` cannot clean up a debt that
+      // did not exist when the delete's watcher event ran, but it
+      // remembers the path (`noteExternalDeleteWithNoDebt`). Consuming
+      // that memory here cancels this write with the same trace the
+      // watcher's cleanup uses. A raw disk stat cannot stand in: an absent
+      // path means "deleted" and "never written yet" alike, and most
       // pending writes are their document's first materialization.
       //
-      // This session's own age is what keeps that memory from also
-      // cancelling a path's later recreation (#681 round 8, codex P1 —
-      // a same-round attempt to invalidate the memory on any recreation
-      // was reverted once the certifier's S2(b) named the corruption it
-      // opened: an old session can still be mid-retry-ladder when a
-      // different session recreates the path, and invalidating on the
-      // recreation event alone would let the old session's late debt
-      // arm and settle its stale canonical doc over the new file).
-      // `consumeRecentExternalDeleteWithNoDebt` only matches a session
-      // that opened before the recorded delete — the incarnation that
-      // deletion actually orphaned. A session opened after it (this
-      // path's recreation, or any fresh open past that point) reads no
-      // match here and registers normally: its content is not what the
-      // deletion removed.
+      // `consumeRecentExternalDeleteWithNoDebt` matches only a session
+      // that opened before the recorded delete, so a path's later
+      // recreation registers normally. The memory is never invalidated on
+      // recreation: an old session can still be mid-retry-ladder then, and
+      // its late debt would settle its stale canonical doc over the new
+      // file.
       //
-      // BEST-EFFORT, not a fence: the watcher's own memory expires
+      // Best-effort, not a fence: the watcher's memory expires
       // (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`), and a delete landing after
-      // that window, or after this door already registered, is not
-      // caught here — `cleanupDetachedDebtForEvent` remains the
-      // authoritative door for those.
+      // that window, or after this door registered, is not caught here.
+      // `cleanupDetachedDebtForEvent` is the authoritative door for those.
       const scheduleDetachedLockedSettle = (): void => {
         if (stopped) return;
         const tombstone = writeCancelled
@@ -6240,7 +6163,7 @@ export function createWorkspaceEngineCapture(
         return closing;
       };
       // A settle over a deleted file is refused and reads as a failed save, so
-      // a document History fully holds closes without one (dohc#2366).
+      // a document History fully holds closes without one.
       const releasedRecordedDeletedDocument = async (
         opts?: WorkspaceEngineYDocCloseOptions,
       ): Promise<boolean> => {
@@ -6327,45 +6250,35 @@ export function createWorkspaceEngineCapture(
               return;
             }
             // The settle met a head the daemon's capture had already
-            // moved — an edit made outside dohc, ingested before this close.
+            // moved: an edit made outside dohc, ingested before this close.
             //
-            // This error, not the refusal, is what makes that benign. The
-            // refusal alone proves nothing: the release that follows it can
-            // refuse too (`UnsettledClose`, when the CRDT projection no
-            // longer matches `last_settled_sha` —
+            // This error, not the refusal, makes that benign. The release
+            // that follows a refusal can refuse too (`UnsettledClose`,
             // crates/dohc-engine-collab/src/durable.rs), and the daemon then
-            // reinserts the session entry (crates/dohc-workspace-engine/
-            // src/lib.rs, ydoc_close_inner) — the doc stays reserved, live,
-            // and unsaved. The provider throws this error only after the
-            // release completed, so it is the one signal that the session is
-            // gone and the settle was the only casualty.
+            // reinserts the session entry (ydoc_close_inner in
+            // crates/dohc-workspace-engine/src/lib.rs), so the doc stays
+            // reserved, live, and unsaved. The provider throws this error
+            // only after the release completed, and only from a close. The
+            // token is looked up from the exact failure this close carries,
+            // so the correction never withdraws another failure's `error`.
             //
-            // Being a close is structural — the provider constructs this
-            // error nowhere else — and the token is looked up from the exact
-            // failure this close carries, so the correction can never
-            // withdraw a different failure's `error`.
+            // `changed-on-disk` makes two assertions to the user, and each
+            // needs its own proof:
             //
-            // The refusal itself is not enough to name the outcome, because
-            // it does not mean what the state would claim. `changed-on-disk`
-            // makes two assertions to the user, and each needs its own proof:
-            //
-            //  1. "your text is safe in History" — every update this document
-            //     received is in a committed settle. A release cannot stand
-            //     in for this: it proves settlement only for a local-only
-            //     PRUNE, while a replicated lineage compacts and releases
-            //     cleanly over unsettled text.
-            //  2. "the file changed outside dohc" — the file does not hold
+            //  1. "your text is safe in History": every update this document
+            //     received is in a committed settle. A release proves that
+            //     only for a local-only prune; a replicated lineage compacts
+            //     and releases cleanly over unsettled text.
+            //  2. "the file changed outside dohc": the file does not hold
             //     this document's last settled bytes. The engine raises
-            //     ConflictStaleTarget for any divergence of the HEAD, which
-            //     includes a path rebound to another object and a settle
+            //     ConflictStaleTarget for any divergence of the head,
+            //     including a path rebound to another object and a settle
             //     whose materialization was blocked or superseded
-            //     (crates/dohc-engine-runtime/src/actor.rs) — cases where the
-            //     durable head moved while the disk still holds our own
-            //     bytes. So read the file, exactly as the ordinary settled
-            //     path does.
+            //     (crates/dohc-engine-runtime/src/actor.rs), where the disk
+            //     still holds our own bytes. So read the file, as the
+            //     ordinary settled path does.
             //
-            // Fail either proof and the close stays loud, which is where this
-            // correction started.
+            // Fail either proof and the close stays loud.
             const failedToken =
               typeof error.cause === "object" && error.cause !== null
                 ? settleFailureTokens.get(error.cause)
@@ -6495,8 +6408,8 @@ export function createWorkspaceEngineCapture(
       if (head === "absent") {
         const disk = await absentHeadDiskState(rootPath, input.path);
         absentHeadDisk = disk;
-        // Three rules, IN THIS ORDER. They used to be tangled into one
-        // condition, and the order is the whole correctness argument:
+        // Three rules, in this order. The order is the correctness
+        // argument:
         //
         //  1. Content on disk always refuses a fresh bind. A resurrected
         //     lineage refuses only where capture can eventually reach it.
@@ -6506,25 +6419,20 @@ export function createWorkspaceEngineCapture(
         //  3. Nothing on disk, nothing replicated: the path is not in this
         //     version. Refuse — and release without ever settling.
         //
-        // The admit paths (1's inverse, and 2) deliberately do not recheck
-        // the artifact after deciding to admit. Rule 2's admit is
-        // straight-line to the registration below — no window there. Rule
-        // 1's inverse is not: `captureWillReachPath` below reads the
-        // policy and the disk again, so a writer can land inside that
-        // read. That window, and the open-ended one after admission (a
-        // writer that fills the file once this call has already
-        // returned), are both bounded the same way: the settle refuses to
-        // materialize over a file that drifted from what it settled
-        // (digestSettledFile here, the materialized-sha comparison in
-        // actor.rs). Before this change the open admitted every
-        // absent-head bind unconditionally, so these rules only ever
-        // narrow that surface.
-        // Both rules below release the session and then describe the DISK.
-        // A release the BUDGET refused describes neither: nothing was
-        // released, the daemon still holds the restart-safe session, and a
-        // disk verdict is one main answers with a plain `available:false` —
-        // the writable plain editor, over a live session (#533/#567's
-        // double writer). The deadline keeps its own classification, which
+        // The admit paths (1's inverse, and 2) do not recheck the artifact
+        // after deciding to admit. A writer can land while
+        // `captureWillReachPath` below reads the policy and the disk
+        // again, or after this call returns. Both windows are bounded the
+        // same way: the settle refuses to materialize over a file that
+        // drifted from what it settled (digestSettledFile here, the
+        // materialized-sha comparison in actor.rs).
+        //
+        // Both rules below release the session and then describe the disk.
+        // A release the budget refused describes neither: nothing was
+        // released, the daemon still holds the restart-safe session, and
+        // main answers a disk verdict with a plain `available:false`, the
+        // writable plain editor, which would be a second writer over a
+        // live session. The deadline keeps its own classification, which
         // main answers with `engineMayHoldDocument`.
         const releaseOrRefuse = async (): Promise<void> => {
           // Marked before the release, not after: no caller receives this
@@ -6837,13 +6745,13 @@ export function createWorkspaceEngineCapture(
       // below. A close-retry's own removal check runs off the capture
       // chain, on its own timer, and a chain busy with reconciliation or a
       // version op can leave the cleanup task queued behind that work for
-      // as long as it runs. A retry firing inside that window used to find
-      // no tombstone at all — nothing had recorded it yet — and resurrect
+      // as long as it runs. A retry firing inside that window would find
+      // no tombstone, because nothing had recorded it yet, and resurrect
       // the file. `detachedLockedDebts` and `expectedEvents` are plain
       // maps a synchronous read sees exactly as fresh as the enqueued
       // read would, so recording immediately only narrows the window.
       //
-      // A retrying entry also gets armed directly (codex P1-C follow-up):
+      // A retrying entry also gets armed directly:
       // the tombstone's own TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`) caps at
       // the same 10s the close-retry ladder's doubling delay eventually
       // reaches, so a delete landing right after one retry can otherwise
@@ -7498,7 +7406,7 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("create version", async () => {
         const engine = await engineStore();
         const fromVersionId = await activeVersionIdOf(engine);
-        // WS-G2-C-2: create-and-switch makes the new fork active,
+        // Create-and-switch makes the new fork active,
         // so a session still live on the old version would settle a stale
         // projection into a version it no longer owns. Vacate live sessions
         // first, exactly as switchVersion does.
@@ -7538,7 +7446,7 @@ export function createWorkspaceEngineCapture(
         }
         // Fail closed before any mutation: an unknown target throws here.
         await listTextFileMetadata(engine, versionId);
-        // WS-G2-C-2: a live Y.Doc session pins its old versionId+
+        // A live Y.Doc session pins its old versionId+
         // path. Materializing another version into the same folder while it
         // stays live would let a later settle write a stale projection into the
         // now-active version (two-canonical / two-lineage corruption). Flush +
@@ -7667,7 +7575,7 @@ export function createWorkspaceEngineCapture(
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         const correlationId = `version-merge-${createId()}`;
-        // WS-G2-C-2: a merge materializes results into the active
+        // A merge materializes results into the active
         // folder. Vacate live sessions first so a later settle can't overwrite
         // the merged result / reopen a stale lineage.
         await settleAndCloseLiveYDocSessions(() => true, "Saved latest edits before merging");
@@ -9169,13 +9077,13 @@ export function createWorkspaceEngineCapture(
           }
         };
         await ensureMoveAllowed();
-        // PREFIX, not just exact endpoint: this method also serves directory
+        // Prefix, not just exact endpoint: this method also serves directory
         // moves, so a live session or a detached debt for `dir/note.md`
         // rides a move of `dir`. Left unvacated/undrained, either can
-        // materialize or reopen the moved-away child path mid-move — #738,
-        // the same prefix rule the delete seam already applies to its own
-        // path. Both the vacate right below and the debt drain further down
-        // share this one match.
+        // materialize or reopen the moved-away child path mid-move. The
+        // delete seam applies the same prefix rule to its own path. Both the
+        // vacate right below and the debt drain further down share this one
+        // match.
         const isSourceSide = (candidate: string): boolean => pathIsAtOrUnder(candidate, fromPath);
         const endpointMatch = (candidate: string): boolean =>
           isSourceSide(candidate) || pathIsAtOrUnder(candidate, toPath);
@@ -9188,40 +9096,34 @@ export function createWorkspaceEngineCapture(
         // behind. Without this order, reopening and immediately renaming
         // would refuse on a marker the session was about to clear itself.
         //
-        // WS-G2-C-2: required regardless — a live session over
+        // Required regardless: a live session over
         // either endpoint must be flushed + released before the file moves,
         // or a later settle would write the old path, resurrecting the
         // moved-from file / orphaning the object. Vacate first (a teardown
         // failure fails the rename).
         await settleAndCloseLiveYDocSessions(endpointMatch, "Saved latest edits before renaming");
-        // A DETACHED locked-write debt is another live thing a
-        // rename must vacate — its session is gone, so the vacate above
-        // cannot see it, and without this drain the rename would read the
-        // stale pre-lock artifact, record old bytes, and leave the retry
-        // targeting the moved-from path. We are on the chain, so nothing
-        // interleaves with the payment.
+        // A detached locked-write debt is another live thing a rename must
+        // vacate. Its session is gone, so the vacate above cannot see it,
+        // and without this drain the rename would read the stale pre-lock
+        // artifact, record old bytes, and leave the retry targeting the
+        // moved-from path. We are on the chain, so nothing interleaves with
+        // the payment.
         //
-        // The payment must prove it landed: it resolves when
-        // it merely re-armed against a still-held lock, and proceeding there
-        // would read the stale pre-lock artifact and commit it through
-        // writeIfChanged — replacing the canonical Y.Doc head with pre-lock
-        // text, which the finisher's path rollback cannot undo. The registry
-        // is the proof: still named after the payment means it did not land,
-        // so the rename refuses and the debt survives for the retry ladder.
+        // The payment must prove it landed. It also resolves when it only
+        // re-armed against a still-held lock, and proceeding there would
+        // commit the stale artifact through writeIfChanged, replacing the
+        // canonical Y.Doc head with pre-lock text, which the finisher's path
+        // rollback cannot undo. The registry is the proof: a debt still
+        // named after the payment did not land, so the rename refuses and
+        // the debt survives for the retry ladder.
         //
-        // Read it in that direction ONLY. Absence still means paid — a
-        // stood-down debt on the SOURCE refuses the rename instead,
-        // below. One on the DESTINATION is left alone: `movePath` never
-        // overwrites an existing destination (workspaceFiles.ts, `destExists`)
-        // — a move onto a path that is still there fails on its own with the
-        // standard, followable "Destination already exists" refusal, before
-        // this debt is ever relevant. Cancelling it here at prepare time
-        // (before the disk move even runs) destroyed the marker for a move
-        // that could then fail, leaving the abandoned write undefended
-        //  — the two scenarios that actually need
-        // covering are handled elsewhere: an externally removed destination
-        // clears through the watcher's own delete-cancel, and an existing
-        // one is `movePath`'s refusal, not this one's.
+        // Absence still means paid. A stood-down debt on the source refuses
+        // the rename, below. One on the destination is left alone and never
+        // cancelled here: cancelling before the disk move runs would destroy
+        // the marker for a move that can still fail. `movePath` never
+        // overwrites an existing destination (workspaceFiles.ts,
+        // `destExists`), and an externally removed destination clears
+        // through the watcher's own delete-cancel.
         await payDebtsBeforeMove(fromPath, endpointMatch, isSourceSide);
         // The drain above sees only the debts that exist NOW. The filesystem
         // move runs off this chain, after the finisher is handed back, so an

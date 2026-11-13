@@ -70,8 +70,8 @@ async function open(detail: WorkspaceEngineMomentDetail) {
 }
 
 // A restore that stops a note's last Edit access can leave it and other
-// shared notes stuck (#3090), so More offers no Restore shared file, even
-// for the Markdown change it used to offer it on. Open file still works.
+// shared notes stuck, so More offers no Restore shared file, even on a
+// Markdown change. Open file still works.
 it("does not offer Restore shared file on a Markdown change", async () => {
   const { moment } = await open(textDetail);
   expect(moment.contentKind).toBeUndefined();

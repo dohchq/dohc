@@ -2,9 +2,8 @@
 //!
 //! The workspace actor is keyed by true file identity — POSIX `(st_dev,
 //! st_ino)`, Windows `(volume serial, file index)` — **not** by a lexical or
-//! canonicalized path string (`plan §Workspace actor model`). This is the
-//! correct enforcement of the rewrite's core invariant (one writer per
-//! physical database): a path-based key silently forks a second writer for
+//! canonicalized path string. This enforces the core invariant (one writer
+//! per physical database): a path-based key silently forks a second writer for
 //! filename-case aliases (`engine.db` vs `ENGINE.DB` on case-insensitive
 //! volumes), file symlinks, and hard links — each of which addresses the *same*
 //! bytes. File identity collapses all of them onto one key.

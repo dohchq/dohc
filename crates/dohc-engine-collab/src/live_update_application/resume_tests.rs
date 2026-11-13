@@ -175,14 +175,13 @@ fn a_partly_applied_suffix_resumes_again_from_its_new_boundary() {
     replays(&mut f, &last, |f| settled(f, Some(seed.clone()), "second-resumed"));
 }
 
-/// Sol's merge-review finding 3: a note the reader built stops and resumes
-/// with its file settled at B while its Y.Doc also holds a Carried edit. The
-/// reader cannot prove that file shows the whole Y.Doc, so capture, resume
-/// and adoption each prove accepted state at B and replay the Carried edit
-/// onto it. Sol's merge-fix finding 1: once adopted, the successor proves
-/// that source again at B, by an adoption replay after a lost
-/// acknowledgement and by resume, after a restart and after it settles past
-/// B, with no writes.
+/// A note the reader built stops and resumes with its file settled at B while
+/// its Y.Doc also holds a Carried edit. The reader cannot prove that file
+/// shows the whole Y.Doc, so capture, resume and adoption each prove accepted
+/// state at B and replay the Carried edit onto it. Once adopted, the
+/// successor proves that source again at B, by an adoption replay after a
+/// lost acknowledgement and by resume, after a restart and after it settles
+/// past B, with no writes.
 #[test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
@@ -340,7 +339,7 @@ fn the_settled_source_proof_refuses_any_unexplained_difference() {
     }
 }
 
-/// Opus's review of the 4b1c fixes: seeds may share a native sequence with
+/// Seeds may share a native sequence with
 /// each other and one native update, never two native updates. The current
 /// activation's pending native update, its journal row compacted so that any
 /// recorded time passes, settles; a second native update at its sequence
@@ -383,7 +382,7 @@ fn attribution_unavailable(f: &Fixture) -> bool {
     f.store.table_row_count("live_settlement_attribution_unavailable").unwrap() > 0
 }
 
-/// Opus's review of the 4b1c fixes: only the current adoption's own refusal
+/// Only the current adoption's own refusal
 /// leaves a new settlement without attribution. A root whose own refused
 /// seed sits at its coverage floor settles with attribution unavailable. A
 /// successor whose predecessor's refused seed sits at that floor settles with
@@ -414,7 +413,7 @@ fn only_the_current_adoptions_refusal_makes_attribution_unavailable() {
     assert!(!attribution_unavailable(&f), "a predecessor's refusal its chain already covered");
 }
 
-/// Sol's N1 on round 2: the relay refused the owner's edit X, the owner saved
+/// The relay refused the owner's edit X, the owner saved
 /// the copy, and retirement kept X with its bytes. Settled at B and released
 /// with nothing Carried, the Y.Doc returns to accepted state at B, so Resume
 /// captures from that state with no seed and nothing delivers X again. The

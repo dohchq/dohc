@@ -915,9 +915,8 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("routes a background smoke failure through onFailure and the restart path", async () => {
-    // The smoke's own rejection reaches onFailure unwrapped and non-terminal
-    // — the same error the blocking smoke used to throw out of start(). The
-    // kill is a replacement (transport-error, like a wedge kill), and its
+    // The smoke's own rejection reaches onFailure unwrapped and non-terminal.
+    // The kill is a replacement (transport-error, like a wedge kill), and its
     // exit carries the failure into the ordinary restart machinery, whose
     // relaunch runs the blocking smoke and takes over.
     const clients: SelfExitingClient[] = [];

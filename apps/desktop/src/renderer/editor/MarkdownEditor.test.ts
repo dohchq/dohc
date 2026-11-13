@@ -209,7 +209,7 @@ describe("MarkdownEditor collaboration selection", () => {
       // Adding awareness changes `extensions`' identity — one of
       // useEditor's own rebuild deps — which destroys the bound editor and
       // constructs a fresh one, exercising the same y-tiptap
-      // _forceRerender path #705 fixed for the initial mount.
+      // _forceRerender path as the initial mount.
       awareness = new Awareness(ydoc);
       view.rerender(
         createElement(MarkdownEditor, {
@@ -1061,17 +1061,16 @@ describe("MarkdownEditor read-only links", () => {
   });
 });
 
-// A tiptap editor reports the user's edits through `onUpdate`. This component
-// used to ignore every one of them until an animation frame set a
-// `dirtyTrackingReady` ref, which made "did the app hear the edit?" a question
-// about timing: an edit that arrived before the frame was applied to
-// ProseMirror's document and never reported, so the editor showed the text
-// while the app said "Saved" and scheduled no save at all.
+// A tiptap editor reports the user's edits through `onUpdate`. The component
+// must report every one. A gate that ignored updates until an animation frame
+// would make "did the app hear the edit?" a question about timing: an edit
+// that arrived before the frame would be applied to ProseMirror's document
+// and never reported, so the editor would show the text while the app said
+// "Saved" and scheduled no save at all.
 //
-// Holding the frame open is what makes that window permanent instead of a
-// 16ms race. These tests fail deterministically if the gate returns, and they
-// are the reason it cannot: nothing about a frame decides whether a keystroke
-// counts.
+// Holding the frame open makes that window permanent instead of a 16ms race,
+// so these tests fail deterministically if such a gate returns. Nothing about
+// a frame decides whether a keystroke counts.
 describe("MarkdownEditor dirty tracking", () => {
   function holdAnimationFrames(): void {
     vi.stubGlobal("requestAnimationFrame", () => 1);

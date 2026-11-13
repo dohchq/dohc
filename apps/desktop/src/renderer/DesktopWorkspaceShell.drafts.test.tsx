@@ -1015,11 +1015,11 @@ describe("explorer destructive change flush boundaries", () => {
   });
 });
 
-// #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
-// live in a module store keyed by workspace + path; the shell owns the two
-// integrations under test — path remapping on explorer renames, and the
-// distinction between recovery (dot, no save promise) and savable-dirty
-// (dot and the version-switch save-first prompt).
+// Set-aside draft recovery at the shell seams. The drafts live in a module
+// store keyed by workspace + path. The shell owns the two integrations under
+// test: path remapping on explorer renames, and the distinction between
+// recovery (dot, no save promise) and savable-dirty (dot and the
+// version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
   it.each(["EBUSY"])(
     "reports a %s draft read failure in Notices and retries discovery",

@@ -1182,7 +1182,7 @@ describe("relay link grants", () => {
       status: "active",
     });
 
-    // Higher link levels remain a storage state-machine concern in Phase 2.
+    // Higher link levels remain a storage state-machine concern.
     const linkGrantId = "storage-seeded-edit-link";
     const firstSecret = Buffer.alloc(32, 1).toString("base64url");
     expect(

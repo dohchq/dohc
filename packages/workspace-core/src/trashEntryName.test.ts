@@ -94,11 +94,10 @@ describe("the component limit, and its unit", () => {
   });
 });
 
-// #613 twice over. The rule predicted which limit applied and was wrong both
-// ways: first that the component limit was the only one, then that MAX_PATH
-// always binds -- which took deletion away from deep workspaces on hosts
-// where long paths work. It offers candidates now, and the caller asks the
-// filesystem.
+// The rule offers candidates, and the caller asks the filesystem. It cannot
+// predict which limit applies: the component limit is not the only one, and
+// MAX_PATH does not always bind, because long paths work on some hosts and
+// deep workspaces there must still be able to delete.
 describe("the ladder, longest name first", () => {
   const TRASH_DIR =
     "C:\\Users\\ice\\AppData\\Local\\Temp\\dohc-mcp-test-bJMVxX\\ws\\.dohc\\local\\trash";

@@ -312,8 +312,8 @@ async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
 
 // `.` and `..` are not names, they are directions. `join` folds them away
 // before `mkdtemp` appends its suffix, so a `.` prefix would put the scratch
-// beside the run root and a `..` prefix beside the managed parent — loose in
-// %TEMP%, which is the shape of #605 itself. Neither the reporter, which reads
+// beside the run root and a `..` prefix beside the managed parent, loose in
+// %TEMP%. Neither the reporter, which reads
 // the run root's children, nor the sweep, which reads run roots, would ever see
 // it. They fall back like every other prefix that cannot be a name.
 //

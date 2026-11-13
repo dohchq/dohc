@@ -6,7 +6,7 @@
 //! to log or serialize by accident. The passphrase-wrapped data-key envelope is
 //! TypeScript-only (`secretKeyEnvelope.ts`); the engine transports it opaquely.
 //!
-//! Invariants this crate upholds (`plan §Product invariants`):
+//! Invariants this crate upholds:
 //! - **Plaintext never leaks.** The only cleartext carrier is
 //!   [`SecretPlaintext`], which has no `Display`/`Serialize`, redacts under
 //!   `Debug`, and zeroizes on drop. Everything persisted or replicated is

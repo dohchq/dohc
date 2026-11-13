@@ -235,7 +235,7 @@ export async function createWorkspaceFolderWithFreshness(input: {
   // dohc's own state folder, which the root must not be or contain.
   stateDir: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
-  // Join flow (0P-C): a fresh folder adopting a synced workspace's identity
+  // Join flow: a fresh folder adopting a synced workspace's identity
   // gets the sync id instead of a random one, so the local engine store and
   // the relay bucket agree from the first pull. Ignored when the folder is
   // already a dohc workspace (an existing manifest's identity always wins —

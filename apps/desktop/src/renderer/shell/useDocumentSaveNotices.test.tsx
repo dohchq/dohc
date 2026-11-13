@@ -528,7 +528,7 @@ describe("document save notices", () => {
     expect(screen.queryByTestId("connection-notices")).toBeNull();
   });
 
-  // #2463. A note closed over a change made outside dohc before the capture
+  // A note closed over a change made outside dohc before the capture
   // poll noticed it: its refused save first reads as a failure, then main
   // says the file changed outside dohc. No failed-save row may stay.
   it("clears a closing note's failed save when main says the file changed outside dohc", () => {

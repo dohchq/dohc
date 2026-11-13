@@ -1442,7 +1442,7 @@ pub fn switch_projection_job_id(
 
 /// The `(path, sha256)` pairs that `version`'s plaintext switch has yet to
 /// write where no file was. Another version's pending write at the same path
-/// does not count (dohc#3622).
+/// does not count.
 fn unwritten_switch_writes(
     conn: &Connection,
     workspace: &str,
@@ -2212,7 +2212,7 @@ fn head_sha256(head: &SnapshotRecord) -> Option<&str> {
 }
 
 /// Text capture's result for a head that already holds `text`. A file recorded
-/// as binary before code files were stored as text (#2666) keeps its binary
+/// as binary before code files were stored as text keeps its binary
 /// head, so its result pairs the captured text with that head's moment.
 fn capture_result_for_moment(
     conn: &Connection,

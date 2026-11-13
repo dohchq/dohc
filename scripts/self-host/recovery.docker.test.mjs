@@ -8,8 +8,10 @@ import test from "node:test";
 import { archiveDeployment } from "./archive.mjs";
 
 // Not in the root test list: it needs Docker and the image named by DOHC_RECOVERY_TEST_IMAGE.
-// See docs/how-to/self-host-recovery.md.
-// Use the built self-host image so the bundled command resolves its real runtime dependencies.
+// Run it with: DOHC_RECOVERY_TEST_IMAGE=<image> node --test scripts/self-host/recovery.docker.test.mjs
+// Build the image from this checkout, so the bundled command resolves its real runtime dependencies.
+// It proves cold snapshot repair after corruption, production reopen, salvage, and private volume archival.
+// It does not prove that an arbitrary old archive restores.
 test(
   "Docker cold repair and private deployment archive",
   { skip: !process.env.DOHC_RECOVERY_TEST_IMAGE, timeout: 120_000 },

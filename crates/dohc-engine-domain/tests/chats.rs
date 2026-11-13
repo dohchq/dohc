@@ -2379,8 +2379,6 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
 
 // ---------------------------------------------------------- bounded reads
 
-// -------------------------------------------- codex review round 2 fixes
-
 #[test]
 fn save_bookmark_rejects_unsafe_destination_path() {
     let scratch = ScratchDir::new().expect("scratch");

@@ -294,7 +294,7 @@ impl ObservationWalker {
     }
 }
 
-/// Which files a scan reads, by Git's racy-clean rule (#2904): a file written
+/// Which files a scan reads, by Git's racy-clean rule: a file written
 /// this recently, or last read while it was, is read again, since a second
 /// write in the same clock step keeps its size and times.
 struct ContentRule {
@@ -1098,8 +1098,7 @@ mod tests {
         f.scan(&f.cursor());
         let cursor = f.cursor();
         assert_eq!(f.scan(&cursor), vec![]);
-        // Within one clock step, a second write keeps the size and times
-        // (#2904).
+        // Within one clock step, a second write keeps the size and times.
         write("b");
         assert_eq!(
             f.scan(&cursor),

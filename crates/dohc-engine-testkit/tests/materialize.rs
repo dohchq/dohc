@@ -1,6 +1,6 @@
 //! Crash-injection matrix for the durable materialization pipeline
-//! (`dohc-engine-files::materialize`, `TEST_ORACLE.md` §3.3 points 12-16 and
-//! §3.10 the bounded-retry contract). Each test drives the five-step pipeline,
+//! (`dohc-engine-files::materialize`) and its bounded-retry contract. Each
+//! test drives the five-step pipeline,
 //! injects a crash (or an external write / transient lock / superseding
 //! generation), then proves the recovery contract by reopening the store and
 //! replaying — durability is never trusted from the in-process outcome flag.

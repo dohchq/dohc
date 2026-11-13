@@ -385,17 +385,11 @@ export class EngineWorkspaceSessions {
   private readonly retryBudgets = new AsyncLocalStorage<{
     signal?: AbortSignal;
     budgetMs: number;
-    // The clock starts at the FIRST FAILURE, not at region entry, because the
-    // budget bounds recovery and a healthy attempt is not recovery (#564,
-    // codex P1). Anchored at entry, a legitimately slow open — a large
-    // document's lineage resurrection, the slow case #514 fought — spent the
-    // budget on work that was succeeding, and one transport blip after it was
-    // then refused a retry that would have bound. That made this a limit
-    // rejecting valid work, which AGENTS.md says must be measured first; the
-    // measurement on record covers the JS chain path, not daemon restart or
-    // lineage recovery. Anchoring at the first failure removes the case
-    // instead: what remains bounded is the recovery window, and that IS
-    // derived from the transport contract it is built from
+    // The clock starts at the first failure, not at region entry, because the
+    // budget bounds recovery and a healthy attempt is not recovery. A slow
+    // healthy open, such as a large document's lineage resurrection, must not
+    // spend the budget and leave a later transport failure with no retry.
+    // The recovery window is derived from the transport contract
     // (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS).
     failedAtMs: number | null;
     // Region entry. Reporting only — it bounds nothing, and must not, or the
@@ -978,14 +972,13 @@ export class EngineWorkspaceSessions {
    * What happens after one failed attempt, for every ladder that has them:
    * the operation retries, the open ladder, and the client-churn loop.
    *
-   * The gates used to be applied by each ladder remembering to apply them,
-   * and the churn loop forgot one — its terminal throw ran ahead of the
-   * deadline check, so a churn-exhausted open past its budget rejected with
-   * `EngineWorkspaceRebindError`. Main maps only the deadline error to the
-   * read-only retry surface, so that downgraded an engine-owned document to
-   * the writable plain editor: the disk/Y.Doc race the budget exists to
-   * prevent. One method owns the sequence now — a fourth ladder
-   * either asks here or is visibly hand-rolling gates it should not.
+   * One method owns the gates so that no ladder can skip one. A
+   * churn-exhausted open past its budget must reject with
+   * `EngineWorkspaceRetryDeadlineError`, not `EngineWorkspaceRebindError`.
+   * Main maps only the deadline error to the read-only retry surface, and
+   * any other error downgrades an engine-owned document to the writable
+   * plain editor: the disk/Y.Doc race the budget exists to prevent. A new
+   * ladder must ask here.
    *
    * Throws `EngineWorkspaceRetryDeadlineError` when a deadline is spent,
    * including on the last allowed attempt, which can start inside the budget
@@ -999,8 +992,8 @@ export class EngineWorkspaceSessions {
     workspaceId: string;
     attempt: number;
     lastAttempt: boolean;
-    // Transport retries wait; an `afterReconnect` retry takes no backoff at
-    // all, and used to skip these gates entirely because of it.
+    // Transport retries wait. An `afterReconnect` retry takes no backoff, and
+    // still passes these gates.
     backoff: boolean;
     delayMs?: number;
     // Ends the backoff early; the caller decides what that means.
@@ -1014,20 +1007,18 @@ export class EngineWorkspaceSessions {
       checkDeadline();
       return "stop";
     }
-    // At quit a BOUNDED region's failure is final: free the caller in one
+    // At quit a bounded region's failure is final: free the caller in one
     // attempt rather than spend the budget on a daemon that is not coming
     // back.
     //
-    // Only a bounded region. `beginShutdown` is a global flag doing a scoped
-    // job, and the scope is the document open — the one thing #564 asked to
-    // stop waiting on, and the one thing safe to abandon, because an opening
-    // document is read-only and holds no edit. Work outside a region
-    // is the opposite obligation: an already-open document retrying a journal
-    // write holds the user's only copy in its canonical Y.Doc, and abandoning
-    // that retry discards the edit while `closeAllEngineYDocSessions` swallows
-    // the failure. An open that cannot finish is abandoned;
-    // a write already accepted is not.
-    //
+    // Only a bounded region. `beginShutdown` is a global flag, and its scope
+    // is the document open, which is safe to abandon because an opening
+    // document is read-only and holds no edit. Work outside a region is the
+    // opposite obligation: an already-open document retrying a journal write
+    // holds the user's only copy in its canonical Y.Doc, and abandoning that
+    // retry discards the edit while `closeAllEngineYDocSessions` swallows the
+    // failure. An open that cannot finish is abandoned; a write already
+    // accepted is not.
     const abandonable = this.activeBudget() !== undefined;
     if (this.shuttingDown && abandonable) {
       return "stop";
@@ -1338,13 +1329,11 @@ export class EngineWorkspaceSessions {
         lastError = error;
         this.noteBudgetAttempt(error);
         // Every retry decision this ladder makes settles here, including the
-        // ones for errors it re-opens immediately. Gating only the
-        // "daemon may be relaunching" errors left a bare `continue` behind it,
-        // and that is the door an `afterBackoff` refusal walked through: six
-        // immediate opens, no deadline, no shutdown, and no backoff against
-        // an overload the daemon had just declared. A daemon-down open is
-        // also where a caller can spend a whole ladder holding the capture
-        // chain, which is what #564 is about.
+        // ones for errors it re-opens immediately. A bare `continue` would let
+        // an `afterBackoff` refusal re-open at once: six immediate opens, no
+        // deadline, no shutdown check, and no backoff against an overload the
+        // daemon had just declared. A daemon-down open is also where a caller
+        // can spend a whole ladder holding the capture chain.
         const next = await this.settleAttempt({
           workspaceId: workspace.workspaceId,
           attempt,
@@ -1403,22 +1392,21 @@ export class EngineWorkspaceSessions {
         settle();
       }
       if (this.source.currentClient() !== client) {
-        // Not awaited, and that is the point. This is cleanup for a client
-        // generation nobody will use again: no caller reads its result, and
-        // the `.catch` already says failure is acceptable. Awaiting it put a
-        // daemon request with no deadline between two doors — a stale client
-        // that is connected but unresponsive held the region here, past its
-        // budget and past quit, with the gates one line away (#564, codex
-        // r19). The doors bound what starts; nothing may block the region
-        // between them either.
+        // Not awaited, on purpose. This is cleanup for a client generation
+        // nobody will use again: no caller reads its result, and the `.catch`
+        // already says failure is acceptable. Awaiting it would put a daemon
+        // request with no deadline between two doors, so a stale client that
+        // is connected but unresponsive could hold the region here past its
+        // budget and past quit. The doors bound what starts; nothing may
+        // block the region between them either.
         void this.closeBinding(binding).catch(() => undefined);
         // A churned open is a failed daemon attempt the budget paid for. Left
         // uncounted, a wait this ladder caused reported "across 0 attempts".
         this.noteBudgetAttempt();
         const lastAttempt = attempt >= this.transportRebindAttempts;
-        // The client-churn ladder settles like every other ladder (#564,
-        // codex): without these gates, churning generations held a caller
-        // through six full opens — past its deadline and past quit.
+        // The client-churn ladder settles like every other ladder. Without
+        // these gates, churning generations hold a caller through six full
+        // opens, past its deadline and past quit.
         const churn = new Error("Rust engine client changed while opening the workspace.");
         const next = await this.settleAttempt({
           workspaceId: workspace.workspaceId,
@@ -1572,9 +1560,7 @@ export class EngineWorkspaceSessions {
   }
 
   // Refuses through the shared .dohc guard copy, so this surface says what
-  // the desktop and the MCP server say. It used to answer "must not be
-  // a symlink" for a plain file, and print the absolute host path back at the
-  // user.
+  // the desktop and the MCP server say.
   //
   // Presence-keyed, not errno-keyed: EEXIST is what a file squat raises, but a
   // dangling symlink squat raises ENOENT. When something is at the path, the

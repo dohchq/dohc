@@ -1385,7 +1385,7 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
-  // #2719: the engine refuses a note's next edit once too many wait to reach the server, before any pass reports it.
+  // The engine refuses a note's next edit once too many wait to reach the server, before any pass reports it.
   it("names a note whose edits the engine paused until a pass empties its queue", async () => {
     const { f, credentials } = await quarantinedOwner([
       { path: "notes/plan.md", objectId: "object" },

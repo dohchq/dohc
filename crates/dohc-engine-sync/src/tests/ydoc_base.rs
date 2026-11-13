@@ -1135,8 +1135,8 @@ fn assert_refused_fold(initial: &str, chosen_file_head: bool) {
     // `&gt;` — so the fold would commit a lineage projecting bytes the user
     // never chose while stamping last_settled_sha with the chosen text's
     // hash in the same statement: the head file saying one thing, the CRDT
-    // another, and the marker asserting they agree. That is the silent
-    // reversal this PR exists to close, arriving through the fold itself.
+    // another, and the marker asserting they agree. That is a silent
+    // reversal, arriving through the fold itself.
     //
     let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)

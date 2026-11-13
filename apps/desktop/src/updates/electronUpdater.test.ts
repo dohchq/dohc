@@ -280,12 +280,12 @@ describe("electron updater actions", () => {
     expect(controller.downloadUpdate().accepted).toBe(true);
   });
 
-  // The latch is pulled ONCE. What a second request means
-  // changed in r18: it used to be refused, which stranded the update whenever
-  // a recovery warning vetoed the first restart's unload. The restart is not
-  // lost — electron-updater installs it on the next quit — so a second
-  // request completes it by quitting, and this is MAIN's fact to hold, not a
-  // renderer module variable a reload resets.
+  // The latch is pulled once. A second request is not refused: refusing it
+  // would strand the update whenever a recovery warning vetoed the first
+  // restart's unload. The restart is not lost, because electron-updater
+  // installs it on the next quit, so a second request completes it by
+  // quitting. Main holds this fact, not a renderer module variable a reload
+  // resets.
   it("on macOS, installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
     const app = fakeApp(updater);

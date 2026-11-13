@@ -18,9 +18,9 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-D — INDEXED ENGINE SEARCH MOUNTED IN THE DESKTOP (plan PR 11/17 scope):
+// Indexed engine search in the desktop:
 // a workspace's search panel routes through the engine's FTS index
-// and returns FILES and CHAT MESSAGES in one result list; a chat hit renders
+// and returns files and chat messages in one result list; a chat hit renders
 // a distinguishable row and opens the Chats panel on its thread. The `.env`
 // family (including `.env.local`) is never findable and never present in the
 // raw FTS tables.
@@ -60,8 +60,8 @@ test("search finds file content and a chat message; .env.local content never sur
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    // Disk state: one ordinary tracked file plus a `.env.local` (the family
-    // member that originally fell through the secret classifier).
+    // Disk state: one ordinary tracked file plus a `.env.local` (a family
+    // member the secret classifier must catch).
     await writeWorkspaceFiles(temp, [
       {
         path: "notes/roadmap.md",

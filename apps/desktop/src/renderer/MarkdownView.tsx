@@ -320,7 +320,7 @@ export function MarkdownView(props: {
   liveEditingPaused?: "refused" | "full";
   // Opens Live documents at this note's row, the way out of a refused pause.
   onOpenLiveDocuments?: (path: string) => void;
-  // G2-C-3 version-switch re-bind token (the shell's versionEpoch), forwarded
+  // Version-switch re-bind token (the shell's versionEpoch), forwarded
   // to useEngineDoc so switching the active version reopens the engine session
   // against the new version's lineage.
   reopenKey?: number;
@@ -425,14 +425,14 @@ export function MarkdownView(props: {
       setSaveState(SAVING);
     }
   }, [engine.available, pendingMarkdownOwner]);
-  // The engine open runs ON the capture chain, so a document opened
+  // The engine open runs on the capture chain, so a document opened
   // while that chain is busy (startup reconciliation of a 1,000-file
   // workspace, a version switch) waits before dohc knows whether it is
   // engine-backed. `available: false` alone cannot tell that wait apart from
-  // "not engine-backed", so this surface used to answer it with the plain
-  // editor — writable, autosaving straight TO disk — while the session about
-  // to bind seeded from the engine head. Keystrokes in that window took a path
-  // that session never sees. Nothing here is writable until the open answers.
+  // "not engine-backed". The plain editor is writable and autosaves straight
+  // to disk, while the session about to bind seeds from the engine head, so
+  // keystrokes in that window would take a path that session never sees.
+  // Nothing here is writable until the open answers.
   // The read view's text stays until the live editor can replace it in one
   // frame, never with loading rows between them.
   const editorSettled = useLiveEditorSettled(engine.doc !== null);
@@ -1009,17 +1009,17 @@ export function MarkdownView(props: {
   // autosave the file the version switch removed back into the version as a
   // phantom. Hand the refusal up; the caller replaces the document.
   //
-  // A pending draft reached disk by two routes, and turning the document
-  // read-only closed neither, because both held a stale `readOnly`: the armed
-  // 800ms autosave (see writeDraftNow) and the unmount flush below, which had
-  // `readOnly` in its deps and so ran its previous cleanup on the very
-  // false->true transition with `readOnly === false` captured. Making the
-  // document read-only was itself the write. Both now read `readOnlyRef`.
+  // A pending draft can reach disk by two routes: the armed 800ms autosave
+  // (see writeDraftNow) and the unmount flush below. Both read `readOnlyRef`,
+  // never a captured `readOnly`. With `readOnly` in its deps, the unmount
+  // flush would run its previous cleanup on the false->true transition with
+  // `readOnly === false` captured, so making the document read-only would
+  // itself be the write.
   //
-  // #567 decided the `opening` half: a reopen cancels the armed autosave and
-  // sets the draft aside (the render-phase capture above), and every write
-  // path refuses while `opening` holds, via `openingRef` — assigned during
-  // render for the same reason as `readOnlyRef`.
+  // A reopen cancels the armed autosave and sets the draft aside (the
+  // render-phase capture above), and every write path refuses while `opening`
+  // holds, via `openingRef`, assigned during render for the same reason as
+  // `readOnlyRef`.
   //
   // The draft is reported, not written: the user typed into a file this
   // version does not have, and nothing else would tell them it went nowhere.
@@ -2061,13 +2061,13 @@ export function MarkdownView(props: {
       // `opening` — and this cleanup is already willing to write this exact
       // value, so keeping it can only be safer than losing it.
       //
-      // Declared unpinned, and it stays that way after #564. No test enters
-      // this branch with a draft the render-phase capture did not already
-      // take: reaching it needs the engine open and the file read to land in
-      // the same batch. Both conditions are conservative on purpose —
-      // `openingRef` holds the last rendered value and `writesBlocked` reads
-      // the parent's ref, so neither depends on this view living long enough
-      // to observe the refusal. Kept as a backstop, not as covered code.
+      // Declared unpinned. No test enters this branch with a draft the
+      // render-phase capture did not already take: reaching it needs the
+      // engine open and the file read to land in the same batch. Both
+      // conditions are conservative on purpose: `openingRef` holds the last
+      // rendered value and `writesBlocked` reads the parent's ref, so neither
+      // depends on this view living long enough to observe the refusal. Kept
+      // as a backstop, not as covered code.
       const current = localBuffer.getSnapshot();
       if (
         activeLocalBuffer.current === localBuffer &&
@@ -2201,9 +2201,9 @@ export function MarkdownView(props: {
     [],
   );
 
-  // The restore half of #567: each set-aside draft stays copyable until the
-  // user takes it or dismisses it. Rendered in both branches below — the
-  // reopen can resolve into either editor.
+  // Each set-aside draft stays copyable until the user takes it or dismisses
+  // it. Rendered in both branches below, because the reopen can resolve into
+  // either editor.
   // The read-only view that follows an ended share closes the live session,
   // so the draft that turn set aside is remembered here to keep its words.
   const readOnlyDraftId = useRef<number | null>(null);
@@ -2485,11 +2485,11 @@ export function MarkdownView(props: {
                     // document, or refuse. This branch shows the disk, and until
                     // the engine open answers there is no telling whether the
                     // disk is the document — a session that binds a moment later
-                    // may hold replicated updates the file has never seen (#564,
-                    // codex r19/r21). Refuse for the whole unresolved window,
-                    // which the editor beside this menu already spends read-only
-                    // or opening. The refusal reads "Document not open", and the
-                    // notice below offers the retry that resolves it.
+                    // may hold replicated updates the file has never seen.
+                    // Refuse for the whole unresolved window, which the editor
+                    // beside this menu already spends read-only or opening. The
+                    // refusal reads "Document not open", and the notice below
+                    // offers the retry that resolves it.
                     //
                     // `opening` is the wait and `engineMayHoldDocument` is the
                     // wait giving up; both mean the same thing to an export. Once
@@ -2625,9 +2625,9 @@ export function MarkdownView(props: {
         </div>
       ) : props.truncated ? (
         // A truncated read is already a bounded prefix and is permanently
-        // read-only. Rendering that prefix as rich Markdown used to schedule
-        // every remaining block for idle backfill, growing a 3 MiB document
-        // past 136,000 DOM nodes after the first window painted. CodeMirror
+        // read-only. Rendering that prefix as rich Markdown would schedule
+        // every remaining block for idle backfill and grow a 3 MiB document
+        // past 136,000 DOM nodes after the first window paints. CodeMirror
         // keeps the source readable with a viewport-bounded DOM and makes the
         // partial-file boundary explicit instead of presenting it as a whole
         // rich document. Keep view-markdown: callers use it as the mounted

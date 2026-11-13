@@ -1,9 +1,9 @@
-# R11a Y.Doc durable cache — the Rust-owned durable Y.Doc update log, snapshots,
-# compaction, leases, replication of `ydoc.update` ops, and the settle pipeline.
+# The Rust-owned durable Y.Doc update log, snapshots, compaction, leases,
+# replication of `ydoc.update` ops, and the settle pipeline.
 #
-# PINNED INTEROP PAIR (audited together by the yrs interop harness; a lone upgrade of
-# either side can silently reopen interop divergence — re-run the spike + the
-# cross-engine fixtures before bumping):
+# Pinned interop pair, audited together by the yrs interop harness. A lone upgrade
+# of either side can silently reopen interop divergence. Re-run the spike and the
+# cross-engine fixtures before bumping:
 #   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below, matching yrs-interop)
 [package]
 autotests = false
@@ -33,19 +33,15 @@ held-proof-memory = []
 memchr = "2.8.3"
 dohc-engine-reader = { path = "../dohc-engine-reader" }
 tokio = { version = "1", features = ["sync", "time"] }
-# The durable store (single writer, migration ledger with the R11a ydoc tables,
-# content-addressed binary_blobs, the R04 materialization-job pipeline).
+# The durable store: single writer, migration ledger with the ydoc tables,
+# content-addressed binary_blobs, and the materialization-job pipeline.
 dohc-engine-storage = { path = "../dohc-engine-storage" }
-# `store::CAPTURE_ORIGIN` — the domain layer's own name for the
-# capture-owned `metadata_origin` value, which `captured_head_sha` reads
-# directly instead of re-deriving it from a job-row heuristic (#723). The
-# coupling was already real: this crate's durable SQL reads and writes the
-# domain schema's own tables (`snapshots`, `materialization_jobs`) directly.
-# Declaring the dependency just makes that checkable at compile time instead
-# of by convention. `ydoc_full_state_size.rs`'s dev-only need for
-# `MAX_TEXT_BYTES` — the largest document body the store accepts, which
-# `MAX_YDOC_UPDATE_BYTES` is measured against (#549) — rides the same real
-# dependency now, so its former standalone dev-dependency is gone.
+# `store::CAPTURE_ORIGIN`, the domain layer's name for the capture-owned
+# `metadata_origin` value, which `captured_head_sha` reads directly. This
+# crate's durable SQL also reads and writes the domain schema's tables
+# (`snapshots`, `materialization_jobs`). The dev-only `ydoc_full_state_size.rs`
+# uses `MAX_TEXT_BYTES`, the largest document body the store accepts, which
+# `MAX_YDOC_UPDATE_BYTES` is measured against.
 dohc-engine-domain = { path = "../dohc-engine-domain" }
 # The ydoc SQL runs against the store's connection/transaction through its
 # read_with/write_with seams. Pinned to storage's exact rusqlite so the shared

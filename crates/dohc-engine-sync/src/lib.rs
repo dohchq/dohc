@@ -1,4 +1,4 @@
-//! R10 replication, cursor, share, and relay-client substrate.
+//! Replication, cursor, share, and relay-client substrate.
 //!
 //! This core crate owns durable operation coordinates and their crash
 //! boundaries. It deliberately has no HTTP, async runtime, thread, process, or

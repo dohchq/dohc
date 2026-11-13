@@ -138,10 +138,10 @@ fn imported_activation_retains_original_source_without_minting_native_seed() {
     assert!(ack.adoption_replayed);
 }
 
-/// Opus's round 3a note: a registration that serves no activation outlives
-/// Phase A, and after a reconnect one could adopt the retired activation,
-/// committing an adoption whose answer is withheld. The replacement owner
-/// keeps the retired set, and adoption refuses before writing anything.
+/// A registration that serves no activation outlives Phase A. After a
+/// reconnect, one could adopt the retired activation and commit an adoption
+/// whose answer is withheld, so the replacement owner keeps the retired set
+/// and adoption refuses before writing anything.
 #[test]
 fn a_retired_activation_never_adopts_after_a_reconnect() {
     let mut f = imported_fixture();

@@ -106,8 +106,8 @@ function fileSnapshot(path: string): TextFileSnapshot {
 }
 
 describe("resolveEngineSearchPolicy", () => {
-  // Search fails closed on policy errors (capture stays floor-only per
-  // WS-F): resolveEffectivePolicy defaults tracked paths to searchable, so
+  // Search fails closed on policy errors (capture stays floor-only):
+  // resolveEffectivePolicy defaults tracked paths to searchable, so
   // null rules from an unparseable file would widen search.
   it("blocks search outright when the policy snapshot carries errors", () => {
     const decision = resolveEngineSearchPolicy(snapshot({ errors: ["files.toml: bad TOML"] }));

@@ -27,7 +27,7 @@ pub enum DomainError {
     WorkspaceNotFound,
 
     /// The referenced version id does not exist in this workspace (fails closed;
-    /// history/read/restore never invent a version — `TEST_ORACLE.md` §1).
+    /// history/read/restore never invent a version).
     #[error("version not found")]
     VersionNotFound,
 

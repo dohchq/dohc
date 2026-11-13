@@ -32,7 +32,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
   const { warmCredentialCache, currentCredentials, normalizeServerUrl, findWorkspace } =
     dependencies;
 
-  // Presence (MU-C5) relay bounds. Publish/leave are quick, so a 15s cap frees a
+  // Presence relay bounds. Publish/leave are quick, so a 15s cap frees a
   // hung socket. The poll is a long-poll: its own AbortSignal (presenceCancel)
   // governs, and this safety cap only fires if the relay stalls past its hold
   // (<=30s) so an IPC invoke can never dangle forever.
@@ -100,7 +100,7 @@ export function createPresenceIpc<Sender extends RendererWorkspaceSender>(depend
   }): void {
     const { registerHandler, assertTrustedSender, rendererWorkspaceSessions } = dependencies;
 
-    // Ephemeral presence (MU-C5): the renderer never receives the relay bearer
+    // Ephemeral presence: the renderer never receives the relay bearer
     // token — its presence transport calls presencePublish/presencePoll/
     // presenceCancel, and MAIN (the sole token holder) makes the actual relay
     // presence request. Scope is authorized here before the relay (which

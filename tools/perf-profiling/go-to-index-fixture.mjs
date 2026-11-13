@@ -1,4 +1,4 @@
-// Pure renderer workload for PR 1. Packaged admission and timing remain separate.
+// Pure renderer workload. Packaged admission and timing run separately.
 export const GO_TO_COUNTS = Object.freeze({
   files: 5000,
   folders: 50,

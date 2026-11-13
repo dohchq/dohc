@@ -18,9 +18,9 @@ fn run(observations: &[TickObservation]) -> (Vec<std::time::Duration>, DriverSta
 
 #[test]
 fn a_watch_that_dies_every_tick_backs_off_instead_of_rescanning_hot() {
-    // The regression: a watch that dies right after every start used to
-    // rebuild the layer (actor + watcher + full baseline scan) every
-    // 500ms forever, because the drop-and-restart path skipped the sleep.
+    // A watch that dies right after every start must back off. Without the
+    // sleep on the drop-and-restart path, it rebuilds the layer (actor +
+    // watcher + full baseline scan) every 500ms forever.
     let (delays, status, _) = run(&[TickObservation::WatchLost; 4]);
     assert_eq!(
         delays,

@@ -65,7 +65,7 @@ export function createShareReadQueries(
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
 ) {
-  // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
+  // The thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
   // resolver (= per request): the filter asks about the same threadId across
@@ -91,7 +91,7 @@ export function createShareReadQueries(
         threadCache.set(threadId, bound);
         return bound;
       },
-      // #646 PR2, memoized for the same reason: the file-chat filter asks
+      // Memoized for the same reason: the file-chat filter asks
       // about the same threadId and the same objectId across every
       // thread-scoped row of a page.
       threadFileBinding: (threadId) => {

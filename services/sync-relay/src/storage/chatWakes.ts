@@ -21,14 +21,12 @@ export const CHAT_WAKE_RETRIES = "sync_relay_chat_wake_retries";
 // Runners: each of an owner's computers declares, per owned workspace, the
 // agents it can run there. A row is one agent on one computer, keyed by the
 // install ID, so equal agent IDs on two computers stay apart. The computer's
-// label names a claim's winner. Rows go with the workspace.
-//
-// A declaration holds for CHAT_RUNNER_LEASE_MS from `updated_at_ms`, which
-// every declaration sets, the same one again included. A signed-in computer
-// declares again about daily; one that doesn't, because it quit after
-// signing out or its last declaration lost a race with an older one, stops
-// being a wake target when its lease ends. Its rows stay until it declares
-// again or a newer computer takes its place.
+// label names a claim's winner. A declaration holds for CHAT_RUNNER_LEASE_MS
+// from `updated_at_ms`, which every declaration sets, the same one again
+// included. A signed-in computer declares again about daily; one that doesn't
+// stops being a wake target when its lease ends, and its rows stay until it
+// declares again or a newer computer takes its place. Rows go with the
+// workspace.
 //
 // Wakes: one row per wake target of a published phone message, per
 // generation. It names the message and its actual thread by ID and holds no
@@ -36,9 +34,8 @@ export const CHAT_WAKE_RETRIES = "sync_relay_chat_wake_retries";
 // claim it: `[{installId, agentId, label, matched: {handle} | {displayName}}]`.
 // Only one computer wins a row. A retry adds the next generation.
 // `change_seq` is the account's head when the row last changed, which
-// computers read after. Rows go with the workspace, and 30 days after they end.
-//
-// Heads: each account's last `change_seq`.
+// computers read after; the heads table holds each account's last
+// `change_seq`. Rows go with the workspace, and 30 days after they end.
 //
 // Retries: each phone Try again that answered a generation, by the account
 // and the phone's operation ID, with the wake it named and the generation it

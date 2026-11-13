@@ -283,7 +283,7 @@ describe("createPresenceChannel", () => {
     await flush(); // the failed poll has parked the loop in its retry sleep
     expect(polls).toBe(1);
     // stop() must resolve the sleeping promise so the loop observes `stopped`
-    // and returns — before the fix it dangled until the 60s timer was GC'd.
+    // and returns. Otherwise it dangles until the 60s timer is collected.
     const outcome = await Promise.race([
       channel.stop().then(() => "terminated"),
       new Promise<string>((resolve) => setTimeout(() => resolve("leaked"), 250)),

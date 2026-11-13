@@ -317,7 +317,7 @@ it("retains an abort-ignoring pass after its deadline until both stop calls fini
   expect(runPass).toHaveBeenCalledTimes(1);
 });
 
-// #3089: the move guard's targeted slot.
+// The move guard's targeted slot.
 type Pass = { documentCount: number; acknowledged: boolean };
 
 it("runs a targeted turn only between ordinary passes, and answers it", async () => {

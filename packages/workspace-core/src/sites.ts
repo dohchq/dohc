@@ -314,7 +314,7 @@ function getCandidate(candidates: Map<string, Candidate>, root: string): Candida
 // Exported so MCP's own site detector can apply the same safe-relative-path
 // rule to a configured build.output — the two detectors reporting different
 // values for the identical dohc.json is a contract violation, not just an
-// inconsistency (round-15 finding 12).
+// inconsistency.
 export function safeRelativeConfigPath(value: string): string | undefined {
   if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\")) {
     return undefined;
@@ -629,8 +629,7 @@ function includesWebScriptToken(haystack: string, token: string): boolean {
 // package.json look like a web project" rule desktop's discoverSites
 // already does — testing only whether any script exists (rather than
 // whether one actually names a web dependency or tool) is a materially
-// looser test that disagrees with desktop's Sites view on the same input
-// (round-16 finding 9).
+// looser test that disagrees with desktop's Sites view on the same input.
 export function hasWebScript(pkg: PackageJson | undefined): boolean {
   const scripts = packageScripts(pkg);
   return Object.entries(scripts).some(([name, value]) => {

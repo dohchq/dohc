@@ -1103,10 +1103,10 @@ describe("owner live documents", () => {
   // The notice's Try again is main's own retry command, not a repaint. A
   // retry with no reason toasts once it has lasted 15 s.
 
-  // edges-05, share-09: a relay outage read "Saving…" for its whole length,
-  // and the row that came three failures later named no cause and offered
-  // nothing to do. Codex on #1233: the first failed pass toasts, and later
-  // passes of the same failure only update the row.
+  // A relay outage must not read "Saving…" for its whole length, with a row
+  // three failures later that names no cause and offers nothing to do. The
+  // first failed pass toasts, and later passes of the same failure only
+  // update the row.
 
   // Busy is not broken: a workspace still taking in files says nothing about
   // its server connection, and the next activity reads it again.

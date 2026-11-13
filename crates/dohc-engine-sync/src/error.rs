@@ -82,8 +82,8 @@ pub enum SyncError {
         actual_bytes: usize,
         limit_bytes: usize,
     },
-    /// The Markdown reader refused the note as larger than it can check
-    /// (#3575). Asking again gives the same answer until the note changes.
+    /// The Markdown reader refused the note as larger than it can check.
+    /// Asking again gives the same answer until the note changes.
     #[error(
         "This note is too large or too dense for dohc to check. Split it, or make its tables smaller."
     )]
@@ -288,32 +288,26 @@ impl RelayError {
     /// because of this failure, or `None` when the pull must abort instead.
     ///
     /// `SyncError::share_disposition` answers this question for the boundary,
-    /// which refuses an op before replay. This answers it for the REPLAY,
+    /// which refuses an op before replay. This answers it for the replay,
     /// where the failures come back from the transport.
     ///
-    /// One question decides it: **can this op ever succeed?**
+    /// One question decides it: can this op ever succeed?
     ///
-    /// - PERMANENT — no. The op will be refused identically forever, so the
+    /// - Permanent: no. The op will be refused identically forever, so the
     ///   cursor must move past it or the share freezes on it. Skipping loses
     ///   nothing that was ever going to arrive.
-    /// - Repairable — yes, once someone fixes the thing that is wrong. The
+    /// - Repairable: yes, once someone fixes the thing that is wrong. The
     ///   cursor must not move past it: advancing would drop content that was
     ///   still coming, and nothing would bring it back.
-    /// - Pending — yes, once the sender finishes. `BlobMissing`. Same
+    /// - Pending: yes, once the sender finishes. `BlobMissing`. Same
     ///   disposition as repairable, named apart because the fix is a normal
     ///   step rather than a failure.
     ///
-    /// Only the permanent class is skipped. That is what keeps this change
-    /// from trading a frozen share for silently dropped data: an op the
-    /// recipient could still receive is never advanced past.
-    ///
-    /// The code travels with the decision instead of coming from a total
-    /// `RelayError::code`. `map_relay_code` in the runtime crate already owns
-    /// the wire code for every relay failure, and a second total mapping here
-    /// would be a second naming authority for the same thing.
-    ///
-    /// No wildcard arm, for the reason the boundary's twin has none: a new
-    /// variant must answer the question rather than inherit an answer.
+    /// Only the permanent class is skipped, so an op the recipient could
+    /// still receive is never advanced past. The code travels with the
+    /// decision because `map_relay_code` in the runtime crate already owns
+    /// the wire code for every relay failure. No wildcard arm: a new variant
+    /// must answer the question rather than inherit an answer.
     pub(crate) const fn share_replay_refusal_code(&self) -> Option<&'static str> {
         match self {
             // PERMANENT. These bytes hashed to the sha the op named, so they

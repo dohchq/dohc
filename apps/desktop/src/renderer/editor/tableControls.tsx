@@ -15,52 +15,29 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import { listenForDismiss } from "../ui/useDismiss";
-// Table row/column/header controls — Notion-style handles + menus layered on
-// TableKit's existing commands (addRowBefore/After, deleteRow,
-// addColumnBefore/After, deleteColumn, toggleHeaderRow, deleteTable).
+// Table row, column, and header controls: hover handles, "+" strips on the
+// right and bottom edges, and menus layered on TableKit's existing commands.
 // TableKit ships every command already; this file is only the missing UI.
+// Hovering a cell reveals exactly one handle for its column and one for its
+// row. Dragging a handle reorders. Row boundaries expose a separate resize
+// affordance so reorder and resize remain distinct gestures.
 //
-// Interaction model (mirrors Notion's simple tables):
-// - Hovering a cell reveals exactly one small pill handle above its column
-//   and one beside its ROW (the plugin's mousemove handler toggles
-//   `is-active` on the matching grips) — not a bar on every row/column at
-//   once. Clicking a handle selects the row/column and opens its options
-//   menu (insert before/after, align, duplicate, delete).
-// - Hovering the table reveals slim "+" strips hugging the full right edge
-//   (append column) and bottom edge (append row), plus a "⋯" table menu at
-//   the top-left corner (toggle header row, delete table).
-// - Dragging a handle reorders rows/columns with an insertion-line preview.
-//   Row boundaries also expose a separate resize affordance so reorder and
-//   resize remain distinct gestures.
+// Only what survives a Markdown round-trip gets UI. GFM tables express
+// per-column alignment in the delimiter row (`:---`, `:---:`, `---:`) but not
+// merged cells, so there is alignment UI and deliberately no merge or split
+// UI. Alignment lives on the standard `align` cell attr that
+// @tiptap/extension-table already serializes to and parses from the
+// delimiter row, so the round-trip needs no custom serializer.
 //
-// GFM round-trip caveat (see AGENTS.md "text is the primitive"): markdown
-// tables express per-COLUMN alignment via the delimiter row (`:---`, `:---:`,
-// `---:`) but not merged cells. So there is per-column alignment UI (the
-// column grip menu's Align left/center/right, applied to every cell in the
-// column) but deliberately no merge/split UI — only what survives a markdown
-// round-trip. Alignment lives on the standard `align` cell attr that
-// @tiptap/extension-table already serializes to / parses from the GFM
-// delimiter row, so the round-trip is lossless with no custom serializer.
-//
-// Grip placement: each grip is a ProseMirror decoration widget nested
-// *inside* the relevant cell (first-row cell for a column grip,
-// first-cell-of-row for a row grip) but rendered in the table's outer margin
-// via negative CSS offsets (a column grip floats above its column, a row grip
-// floats left of its row — Notion-style), so grip chrome never overlaps or
-// reflows cell text. Nesting the widget inside the cell (rather than a
-// JS-measured floating overlay) is what keeps each grip glued to its
-// column/row during a live column-resize drag: prosemirror-tables mutates
-// cell/col widths directly on the DOM (see prosemirror-tables'
-// columnresizing.ts) without dispatching a transaction until mouseup — the
-// same trick it uses to render its own `.column-resize-handle` widget nested
-// inside the cell. A widget that is a DOM descendant of the cell inherits the
-// live-resized box for free through ordinary CSS layout (`position: absolute`
-// against the cell's `position: relative`; the negative top/left offsets only
-// shift the grip into the margin — the edge it hugs still tracks the cell);
-// a JS-measured overlay driven off `docChanged`/ResizeObserver would visibly
-// lag until the drag finishes. This mirrors the block gutter (`blockControls`
-// inline in MarkdownEditor.tsx): a widget nested one position inside the
-// target node, hover-revealed via a `Decoration.node` class on an ancestor.
+// Each grip is a ProseMirror decoration widget nested inside its cell
+// (first-row cell for a column grip, first cell of the row for a row grip)
+// and drawn in the table's outer margin with negative CSS offsets, so it
+// never overlaps or reflows cell text. Keep the widget inside the cell. During
+// a column-resize drag, prosemirror-tables changes cell widths on the DOM
+// and dispatches no transaction until mouseup (see its columnresizing.ts). A
+// nested widget follows the resized cell through CSS layout. A JS-measured
+// overlay driven by `docChanged` or ResizeObserver would lag until the drag
+// ends.
 
 import { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import {

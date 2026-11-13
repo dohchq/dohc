@@ -547,10 +547,9 @@ export async function listWorkspaceFiles(
   return { ok: true as const, root: root.normalized, entries };
 }
 
-// Secret-backed files (PR 08, plan agent-access default = deny): dohc-
-// controlled agent surfaces never share secret file contents. The floor is
-// the same classifyEngineFilePath rule the engine enforces everywhere —
-// policy files can never unmark it.
+// Secret-backed files: dohc-controlled agent surfaces never share secret file
+// contents. The floor is the same classifyEngineFilePath rule the engine
+// enforces everywhere, and policy files can never unmark it.
 const SECRET_READ_DENIED_REASON =
   "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
 
@@ -1270,10 +1269,8 @@ export async function workspaceStatus(ctx: ToolContext) {
   };
 }
 
-// Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed together with
-// the retired workspace-api file/sync routes (/workspaces/:id/files,
-// /sync/apply). Cloud sync is now automatic per workspace via the sync relay;
-// workspace history is read through dohc_list_changes (engine moments) below.
+// Cloud sync is automatic per workspace via the sync relay. Workspace history
+// is read through dohc_list_changes (engine moments) below.
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
@@ -1622,8 +1619,7 @@ async function detectSiteAt(
   // Every entry `detectedBuildOutputs` already required a passing isFile()
   // check above; a configured output only joins them once its own check
   // here passes too — so realBuildOutputs never needs a second stat of a
-  // path this function already confirmed. detectApps' own walk used to
-  // re-stat each of these itself to learn the same thing.
+  // path this function already confirmed.
   const realBuildOutputs = [...detectedBuildOutputs];
   if (configuredBuildOutput) {
     const configuredIndexInfo = await stat(
@@ -2338,7 +2334,7 @@ export async function makeLink(
   return requestCli(ctx, "link", { target });
 }
 
-// --- groups (PR 12/15 slice, WS-E) ----------------------------------------
+// --- groups ----------------------------------------------------------------
 
 // Group discovery for agents: names, slugs, kinds, and each group's
 // threads (id + display title) so a follow-up reply/read has real ids to

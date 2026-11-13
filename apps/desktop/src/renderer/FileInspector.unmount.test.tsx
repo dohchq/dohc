@@ -93,10 +93,10 @@ async function settleUserEventAction<T>(pending: Promise<T>): Promise<T> {
 // WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
 // a test needs source mode. The test ids are pinned by e2e and must not change.
 
-// The P1 trap: typing arms an 800ms autosave, and unmounting
-// (tab close, tab switch — the inspector is keyed by the active tab) used to
-// clear the timer without flushing, silently dropping the draft. The unmount
-// cleanup must fire the pending draft through writeWorkspaceText.
+// Typing arms an 800ms autosave, and unmounting (tab close, tab switch: the
+// inspector is keyed by the active tab) must not clear the timer without
+// flushing, which would silently drop the draft. The unmount cleanup must
+// fire the pending draft through writeWorkspaceText.
 describe("markdown editor unmount flush", () => {
   const bridgeMock = {
     platform: "linux" as const,
@@ -277,9 +277,8 @@ describe("markdown editor unmount flush", () => {
   });
 
   it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
-    // codex P3 follow-up: a read-only doc can't edit, but viewing raw source
-    // is still a view. The palette toggle opens the read-only source editor and
-    // never writes.
+    // A read-only doc can't edit, but viewing raw source is still a view.
+    // The palette toggle opens the read-only source editor and never writes.
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Big\n",
       truncated: true,

@@ -1567,10 +1567,9 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
     candidate.ct_eq(expected).into()
 }
 
-/// Regression coverage for the two deferred R13 daemon-liveness items (R14
-/// hardening): halting admission when the response writer is broken (no
-/// silent black hole), and draining in-flight work before the daemon closes
-/// workspaces. Cancellable admission for `workspace.open` is covered in
+/// Daemon-liveness coverage: admission halts when the response writer is
+/// broken, and in-flight work drains before the daemon closes workspaces.
+/// Cancellable admission for `workspace.open` is covered in
 /// `dohc_workspace_engine::tests` (the `open_lock` seam lives in `lib.rs`).
 #[cfg(test)]
 mod tests {
@@ -3236,8 +3235,8 @@ mod tests {
         let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
 
         // The input never ends on its own; only halted admission can make
-        // this terminate. Without the fix, the daemon would read forever and
-        // this `timeout` would fire.
+        // this terminate. Otherwise the daemon would read forever and this
+        // `timeout` would fire.
         let outcome = tokio::time::timeout(
             Duration::from_secs(10),
             run_transport(
@@ -3308,8 +3307,8 @@ mod tests {
         );
     }
 
-    /// F2 regression: a read ERROR (not just EOF) must still fall through to
-    /// the cancel/drain/close tail -- it must not propagate straight out,
+    /// A read error (not just EOF) must still fall through to the
+    /// cancel/drain/close tail. It must not propagate straight out,
     /// abandoning in-flight work and skipping the workspace close. Socket
     /// transports report ECONNRESET as their normal close.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

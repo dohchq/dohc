@@ -26,35 +26,33 @@ import {
   type DatasetRunHost,
 } from "./datasetAutomationRun";
 
-// Undo for a dataset automation's run (AGENTS.md: every reversible change
-// gets a way back). Like document Undo, each field the runs wrote goes back
-// to what it held before their last unbroken chain of writes to it, and only
-// while it still holds what that chain left, so an Undo that stops part way
-// never leaves a field between two of the runs' writes. A write that found
-// someone else's value starts the chain again, so their value is what comes
-// back. The edit a stopped run may have landed without recording it counts,
-// with the value before it as another value the chain may have left. It is sent through the approved edit
-// that last wrote the field, as the person who clicks Undo, at the version the
-// runs left the record. A record someone changed since is refused as stale;
-// then only fields that still hold what the runs wrote go back, and the rest
-// keep the later change. A field any edit wrote that the rules do not mark
-// reversible stays.
+// Undo for a dataset automation's run. Like document Undo, each field the
+// runs wrote goes back to what it held before their last unbroken chain of
+// writes to it, and only while it still holds what that chain left, so an
+// Undo that stops part way never leaves a field between two of the runs'
+// writes. A write that found someone else's value starts the chain again, so
+// their value is what comes back. An edit a stopped run may have landed
+// without recording counts, with the value before it as another value the
+// chain may have left. The field goes back through the approved edit that
+// last wrote it, as the person who clicks Undo, at the version the runs left
+// the record. A record someone changed since is refused as stale; then only
+// fields that still hold what the runs wrote go back, and the rest keep the
+// later change. A field the rules do not mark reversible stays.
 //
 // An action goes back through its reverse action, newest first, with the
-// undo its own result carried, keyed by the commit it made. The first
-// reverse the dataset refuses stops the Undo, since an older action's
-// reverse may expect the state a newer one left. An action the rules give
-// no reverse stays. Only a dataset whose operations someone wrote has
-// actions, and only a generated one adds records or runs edits, so one run
-// never mixes actions with the rest.
+// undo its own result carried, keyed by the commit it made. The first reverse
+// the dataset refuses stops the Undo, since an older action's reverse may
+// expect the state a newer one left. An action the rules give no reverse
+// stays. Only a dataset whose operations someone wrote has actions, and only
+// a generated one adds records or runs edits, so one run never mixes actions
+// with the rest.
 //
 // A record the runs added is deleted first, through an approved delete its
 // run's plan recorded that every editor can still use, at the version the
 // runs left it. A record someone else wrote between two of the runs' writes,
 // or since their last, stays; so does one no such delete reaches. The person
-// first reads a preview, made from each added record as it is now, and
-// chooses among several deletes there. Undo sends only the deletes of the
-// preview they confirmed.
+// first reads a preview, made from each added record as it is now, and Undo
+// sends only the deletes of the preview they confirmed.
 //
 // Every reverse and delete is saved in one list before the first is sent, so
 // an Undo that stops part way sends exactly the same requests again and

@@ -296,7 +296,7 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
 // The level a recipient holds on a path/version share, from the same
 // one place the relay and the engine read it. All three levels read the same
-// files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
+// files; comment and edit open chat, and edit opens writes.
 // The chat grant's own binary access is a different field.
 const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
@@ -1620,7 +1620,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   // warning reads as "no warning", which is the safe reading.
   atomicPlacementUnavailable: z.boolean().optional(),
   // True when the workspace is on a network share, whose server, not dohc,
-  // decides who can read its History (#2379). Omitted otherwise.
+  // decides who can read its History. Omitted otherwise.
   onNetworkShare: z.boolean().optional(),
   recoveryUnavailable: z.boolean().optional(),
   // Why protected files such as `.env` wait on the workspace secret key, as
@@ -2419,7 +2419,7 @@ export const EngineMomentDetailRecord = EngineMomentFields.omit({
     // "Contents are protected" / "Binary contents" instead of a diff.
     beforeText: MOMENT_TEXT.nullable(),
     afterText: MOMENT_TEXT.nullable(),
-    // Per-side content kinds (WS-G1): a text/binary transition moment has one
+    // Per-side content kinds: a text/binary transition moment has one
     // text side and one binary side; each side presents by its own kind.
     beforeBinary: ENGINE_MOMENT_BINARY_SIDE.optional(),
     afterBinary: ENGINE_MOMENT_BINARY_SIDE.optional(),
@@ -2448,7 +2448,7 @@ export const RestoreEngineMomentFileResult = z.object({
 });
 export type RestoreEngineMomentFileResult = z.infer<typeof RestoreEngineMomentFileResult>;
 
-// Linked Chats (PR 0M-5): per-file Chats stored in
+// Linked Chats: per-file Chats stored in
 // the engine, linked to the file's stable engine object id so the link
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
@@ -2841,7 +2841,7 @@ export const ChatRunRecordsForThreadResult = z.object({
 });
 export type ChatRunRecordsForThreadResult = z.infer<typeof ChatRunRecordsForThreadResult>;
 
-// Reactions (WS-MU-C2). A reaction is durable, commutative chat data — an
+// Reactions. A reaction is durable, commutative chat data — an
 // emoji reaction by an author on a message. The renderer never supplies
 // identity: main derives the reactor from the local user, exactly like a sent
 // message. Emojis are short graphemes, never message bodies.
@@ -2879,7 +2879,7 @@ export const ChatReactionRecord = z.object({
 });
 export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
-// Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
+// Chats channels: workspace-wide Chats organized in
 // channels, plus per-thread monotonic read cursors. Same gate as the file
 // rail: every handler needs the workspace's engine capture.
 const CHAT_CHANNEL_NAME_MAX = 80;
@@ -2899,7 +2899,7 @@ export const ChatChannelRecord = z.object({
   updatedAtMs: z.number(),
   threadCount: z.number().int().min(0),
   unreadCount: z.number().int().min(0),
-  // MU-C4: the channel's cross-machine wire identity — what shared-channel
+  // The channel's cross-machine wire identity — what shared-channel
   // grants key on. Absent/null for channels with no recorded wire mapping.
   wireId: z.string().min(1).max(256).nullable().optional(),
 });
@@ -3173,7 +3173,7 @@ export type SetChatReactionResult = z.infer<typeof SetChatReactionResult>;
 
 export const EMAIL_STRING = z.email().max(320);
 
-// Direct messages (WS-MU-C3). A DM is a `kind:"dm"` channel plus one MU-C4
+// Direct messages. A DM is a `kind:"dm"` channel plus one shared-channel
 // chat grant per participant, riding the shared-channel lane. The
 // whole surface is gated on collaboration (signed in + relay): a solo user
 // sees none of it. Identity is always main-derived — the renderer never
@@ -3278,8 +3278,8 @@ export const StartDmResult = z.object({
 });
 export type StartDmResult = z.infer<typeof StartDmResult>;
 
-// Ephemeral presence (MU-C1 / MU-C5). The renderer's presence transport is
-// IPC-PROXIED so the relay bearer token never reaches the renderer: main holds
+// Ephemeral presence. The renderer's presence transport is
+// IPC-proxied so the relay bearer token never reaches the renderer: main holds
 // cachedCredentials.token and makes the actual relay presence request. These
 // payloads carry only the scope, an opaque display state, and the long-poll
 // bookkeeping. The scope is authorized in MAIN (the caller's own workspace, or
@@ -3439,39 +3439,30 @@ export const PresenceResult = z.discriminatedUnion("ok", [
 ]);
 export type PresenceResult = z.infer<typeof PresenceResult>;
 
-// Named versions (PR 0M-4). Product vocabulary only:
+// Named versions. Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
 // attached.
 const WORKSPACE_VERSION_NAME_MAX = 80;
-// Conflict and compare sides are the same hydrated stored bodies the timeline
-// carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
-// `versionCompare.ts`), so they carry the engine's own text contract.
+// Conflict and compare sides are the hydrated stored bodies the timeline
+// carries, passed through verbatim, so the bound is the engine's storage
+// contract, not a transport ceiling. A side at that size does arrive:
+// `compareVersionFilesPage` hydrates each differing path by `readTextBlob`,
+// and `listTextConflicts` hydrates through `versionedText.readBlob` each side
+// the engine withheld from a row past 8 MiB minus envelope headroom
+// (`conflicts_list`, crates/dohc-workspace-engine/src/lib.rs).
 //
-// Compare rows use this bound to its full height: `compareVersionFilesPage`
-// hydrates each differing path by `readTextFile` -> `readTextBlob`, so a
-// compare side at the engine's contract does arrive.
+// Do not add a second hand-copied constant. The one place the client mirrors
+// the frame cap is `engineTextLimits.ts`, where `CONFLICT_ROW_HARD_CAP_BYTES`
+// is derived from the frame constant the drift guard covers.
 //
-// Conflict listing keeps up too: a row past 8 MiB minus envelope
-// headroom is degraded to withheld metadata rather than refused
-// (`conflicts_list`, crates/dohc-workspace-engine/src/lib.rs), and
-// `listTextConflicts` hydrates each withheld side through
-// `versionedText.readBlob`. So a conflict side at the engine's storage
-// contract arrives on every lane this bound covers.
-//
-// The bound stays the engine's storage contract rather than any transport
-// ceiling: a second hand-copied constant is the drift #517 was filed about.
-// The one place the client mirrors the frame cap is `engineTextLimits.ts`,
-// where `CONFLICT_ROW_HARD_CAP_BYTES` is derived from the frame constant the
-// drift guard already covers.
-//
-// The combined resolution (`keep-combined` below) is the one REQUEST use, and
+// The combined resolution (`keep-combined` below) is the one request use, and
 // its contract is not this one: the engine bounds a combined resolution by the
-// control frame that carries the whole request, measured in JSON-ENCODED bytes
+// control frame that carries the whole request, measured in JSON-encoded bytes
 // (`crates/dohc-workspace-engine/src/lib.rs`, `resolve_request_encoded_bytes`).
-// Encoded, so escaping counts: a newline-heavy body is twice its raw size on
-// the wire, and this character bound cannot see that. This bound only keeps an
-// unbounded string off the wire; the engine decides what applies.
+// Escaping counts: a newline-heavy body is twice its raw size on the wire, and
+// this character bound cannot see that. This bound only keeps an unbounded
+// string off the wire; the engine decides what applies.
 const VERSION_TEXT = engineStoredText("version text");
 
 export const WorkspaceVersionRecord = z.object({
@@ -3567,7 +3558,7 @@ export const WorkspaceVersionConflict = z.object({
   path: PATH_STRING,
   sourceVersionId: OPAQUE_ID,
   targetVersionId: OPAQUE_ID,
-  // Additive (0P-C): where the conflict came from — a version merge, or two
+  // Where the conflict came from — a version merge, or two
   // machines editing the same file while apart ("sync"). The review UI
   // labels the sides accordingly ("On this machine" / "On another machine").
   origin: z.enum(["merge", "sync"]).default("merge"),
@@ -4523,7 +4514,7 @@ export const workspaceSyncOperations = {
   },
 } as const satisfies OperationTable;
 
-// Join a synced workspace on this machine (0P-C): a sync code copied from
+// Join a synced workspace on this machine: a sync code copied from
 // the machine that already has the workspace, plus a local folder chosen
 // through the picker (main re-validates the approved-root provenance).
 export const CloudJoinWorkspacePayload = z.object({
@@ -5616,7 +5607,7 @@ export const WithdrawShareChangesResult = z.object({
 });
 export type WithdrawShareChangesResult = z.infer<typeof WithdrawShareChangesResult>;
 
-// ---- Shared channels (MU-C4) ----
+// ---- Shared channels ----
 // A chat grant: a whole channel (threads + messages + reactions)
 // shared to another relay account, read-write by default, read-only as the
 // broadcast opt-in. Granted rows manage who a channel is shared with;
@@ -5647,10 +5638,10 @@ export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 // cap would otherwise fail the parse below, reject the IPC call, and clear
 // every cached row on the sharing surface.
 //
-// It does not gate joining. #640 deleted that use: the joined lane is now
-// answered per channel the caller names, so its response size no longer
-// depends on how many channels the account has ever joined, and nothing about
-// the read needs a join to be refused. See scopeJoinedChannels.
+// It does not gate joining. The joined lane is answered per channel the
+// caller names, so its response size does not depend on how many channels
+// the account has ever joined, and nothing about the read needs a join to be
+// refused. See scopeJoinedChannels.
 export const MAX_CHAT_CHANNEL_SHARE_ROWS = 4096;
 
 export const ChatChannelShareGrantRow = z.object({
@@ -8433,9 +8424,9 @@ export const noticeOperations = {
   },
 } satisfies OperationTable;
 
-// WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
+// Engine Y.Doc binding IPC. The renderer mints a bounded sessionId
 // per open; main constructs the node-only live session (through the workspace's
-// engine capture, reusing its store) and STREAMS remote CRDT deltas back over
+// engine capture, reusing its store) and streams remote CRDT deltas back over
 // the desktop:engine-ydoc-remote-update event channel. Updates cross IPC as raw
 // Uint8Array (structured clone).
 const ENGINE_YDOC_SESSION_ID = z.string().min(1).max(ENGINE_YDOC_SESSION_ID_MAX_CHARS);
@@ -8577,8 +8568,8 @@ export const OpenEngineYDocSessionResult = z.object({
   // engine was unreachable, an open whose refusal could not release its
   // own session, and a session main holds whose close failed. Like
   // notInVersion, it must not downgrade to the writable plain editor: a plain
-  // autosave beside a session the engine still binds takes the disk path #533
-  // closed. The caller stays read-only, states the reason, and offers a retry —
+  // autosave beside a session the engine still binds is a second writer to
+  // the file. The caller stays read-only, states the reason, and offers a retry —
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: z.boolean().optional(),
   // The engine committed the drawing, but its image records conflict with
@@ -9070,7 +9061,7 @@ export interface DohcDesktopBridge
   chatRunRecordsForThread(
     payload: ChatRunRecordsForThreadPayload,
   ): Promise<ChatRunRecordsForThreadResult>;
-  // Direct messages (WS-MU-C3): reconcile DM state with the relay and list the
+  // Direct messages: reconcile DM state with the relay and list the
   // workspace's DMs; start (or continue) a DM with a recipient set.
   syncDms(payload: SyncDmsPayload): Promise<SyncDmsResult>;
   acceptDm(payload: AcceptDmPayload): Promise<AcceptDmResult>;
@@ -9078,7 +9069,7 @@ export interface DohcDesktopBridge
   requestDmAgain(payload: RequestDmAgainPayload): Promise<void>;
   startDm(payload: StartDmPayload): Promise<StartDmResult>;
   leaveDm(payload: LeaveDmPayload): Promise<void>;
-  // Ephemeral presence (MU-C5): IPC-proxied so the relay bearer token stays in
+  // Ephemeral presence: IPC-proxied so the relay bearer token stays in
   // main. publish (or leave) a presence state and long-poll for peer changes;
   // presenceCancel aborts an in-flight poll on unmount / workspace switch.
   presencePublish(payload: PresencePublishPayload): Promise<PresenceResult>;
@@ -9228,7 +9219,7 @@ export interface DohcDesktopBridge
   // batches that belong to a superseded search.
   onFolderAppChanged(listener: (answer: FolderAppAnswer) => void): () => void;
   onSearchResults(listener: (batch: SearchResultsEvent) => void): () => void;
-  // WS-G2-C-2 engine Y.Doc editor binding. The renderer mints a sessionId and
+  // Engine Y.Doc editor binding. The renderer mints a sessionId and
   // opens a live engine Y.Doc session for a supported live file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
   // store). available:false => not engine-backed
@@ -9266,7 +9257,7 @@ export interface DohcDesktopBridge
     listener: (event: EngineYDocLineageReplacementEvent) => void,
   ): () => void;
   // The document's real save state, pushed on every settle outcome. The editor
-  // must never claim "Saved" from anything else: a settle can fail (and used to
-  // fail silently) while the renderer's own timer said the doc was safe.
+  // must never claim "Saved" from anything else: a settle can fail while the
+  // renderer's own timer says the doc is safe.
   onEngineYDocSaveState(listener: (event: EngineYDocSaveStateEvent) => void): () => void;
 }

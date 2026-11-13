@@ -21,8 +21,8 @@ export function engineBinaryCandidates(): string[] {
   // dirname(command) and then spawns `command` from there, so a relative
   // override like ./artifacts/engine.exe would be resolved a second time
   // against its own directory — artifacts/artifacts/engine.exe — and fail the
-  // startup handshake. The relay suite used to call resolve() itself; that
-  // normalisation belongs here now that discovery is shared.
+  // startup handshake. Every suite shares this discovery, so the
+  // normalisation belongs here.
   if (override) return [resolve(override)];
   const name = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
   return [

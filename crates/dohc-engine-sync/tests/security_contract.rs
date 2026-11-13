@@ -69,10 +69,9 @@ fn fixture() -> Fixture {
 /// narrows the share classifier asserted below, not this one: the write floor
 /// normalizes backslashes and percent-encoding itself, platform-independently.
 ///
-/// Without this the generated `write` column was deserialized by nothing, so
+/// Without this test nothing deserializes the generated `write` column, so
 /// the two write classifiers could diverge, someone could regenerate the
-/// fixture, and the gate would stay green — the silent divergence #368 exists
-/// to close.
+/// fixture, and the gate would stay green.
 #[test]
 fn generated_ts_write_floor_matches_the_rust_write_floor() {
     for vector in fixture().vectors {
@@ -98,20 +97,16 @@ fn generated_ts_write_floor_matches_the_rust_write_floor() {
 ///
 /// `classify_share_path` reads that verdict from
 /// `dohc_engine_files::policy::normalized_path_is_secret`, so the two sets are
-/// equal by construction and a new secret class reaches both callers at once.
-/// A vector list cannot claim that — it proves only the shapes it names.
-///
-/// This test guards the one thing construction cannot: a future edit that
-/// restates the rules at the boundary instead of calling the shared one, which
-/// is the shape returning. A widened pre-check is deliberately not
-/// guarded — the grammar and ignored-segment checks run first, so widening one
-/// turns a secret verdict into `Unsafe` or `Ignored`, which is still refused.
+/// equal by construction. This test guards what construction cannot: an edit
+/// that restates the rules at the boundary instead of calling the shared one.
+/// A widened pre-check is not guarded: the grammar and ignored-segment checks
+/// run first, so widening one turns a secret verdict into `Unsafe` or
+/// `Ignored`, which is still refused.
 ///
 /// Both directions are asserted, because either side gaining a class alone is
 /// drift. `Ignored` and `Unsafe` count as agreement: both gates admit only
-/// `Tracked`, so a path either of them refuses can be neither written nor
-/// deleted, whichever word it is refused under. That absorbs the two places
-/// the domains genuinely differ, and each has a vector here:
+/// `Tracked`, so a path either refuses can be neither written nor deleted.
+/// That absorbs the two places the domains differ, each with a vector here:
 ///
 /// - `shared-with-me/...` is a write reservation the files policy owns and the
 ///   share classifier knows nothing about, so the classifier reads such a path

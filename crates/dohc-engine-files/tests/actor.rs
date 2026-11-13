@@ -1,4 +1,4 @@
-//! FilesActor traces (the CAL-3 tokio-loop calibration signal): scan/reconcile
+//! FilesActor traces: scan/reconcile
 //! round-trip through the async command loop while the blocking scan/hash work
 //! stays on the dedicated worker thread; the injected watcher-overflow signal
 //! driving a dirty-generation reconcile; a deadline that trips cleanly; and

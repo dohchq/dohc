@@ -15,7 +15,7 @@ export type WikilinkFile = {
    *  name/title or the body's first H1. May be null; fallbacks to
    *  the leaf of the path (e.g. `a`). */
   title?: string | null;
-  /** D4.8e — rename-proof fileId from frontmatter. Consumers use it to
+  /** Rename-proof fileId from frontmatter. Consumers use it to
    *  keep references stable when the file path changes. */
   fileId?: string | null;
 };
@@ -193,12 +193,12 @@ function buildWikilinkDecorations(
 ): DecorationSet {
   const decorations: Decoration[] = [];
   for (const [index, r] of previews.entries()) {
-    // D4.8c — Obsidian-style live preview toggle. When the cursor
-    // is inside the wikilink range, render it as SOURCE (the raw
-    // [[path]] text styled lightly) so the user can see + edit
+    // Obsidian-style live preview toggle. When the cursor
+    // is inside the wikilink range, render it as source (the raw
+    // [[path]] text styled lightly) so the user can see and edit
     // the link in place. When the cursor is outside, render the
-    // pill (preview mode). Without this toggle, the cursor was
-    // invisible whenever it landed inside the hidden-text region.
+    // pill (preview mode). Without this toggle, the cursor is
+    // invisible whenever it lands inside the hidden-text region.
     if (r.source) {
       decorations.push(
         Decoration.inline(r.from, r.to, {

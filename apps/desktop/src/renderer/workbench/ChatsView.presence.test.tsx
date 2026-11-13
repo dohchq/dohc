@@ -15,8 +15,8 @@ import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent } from "../../testing/agentSettings";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../collab/presenceChannel";
 
-// MU-C1 — presence in the Chats surface: gated by collaboration, calm, and
-// dormant for solo.
+// Presence in the Chats surface: gated by collaboration, calm, and dormant
+// for solo.
 
 type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
   workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
@@ -89,7 +89,7 @@ const bridgeMock = {
   markChatThreadRead: vi.fn(),
   listChatReactions: vi.fn(),
   sendChatMessage: vi.fn(),
-  // MU-C4 shared-channel surface: ChatsView loads share state on mount, so
+  // Shared-channel surface: ChatsView loads share state on mount, so
   // the presence tests must stub it even though they exercise a solo view.
   listChatChannelShares: vi.fn(),
   onCloudSessionChanged: vi.fn(),
@@ -100,7 +100,7 @@ const bridgeMock = {
   createChatChannel: vi.fn(),
   startChannelThread: vi.fn(),
   setChatReaction: vi.fn(),
-  // DM presence (MU-C3 x MU-C1): the DM surface loads through syncDms.
+  // DM presence: the DM surface loads through syncDms.
   syncDms: vi.fn(),
   acceptDm: vi.fn(),
   declineDm: vi.fn(),

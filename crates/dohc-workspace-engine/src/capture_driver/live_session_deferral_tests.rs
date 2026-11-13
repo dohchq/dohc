@@ -267,10 +267,10 @@ impl Harness {
     }
 }
 
-// dohc#2342. A file capture recorded is deleted outside dohc while its
-// document is open. The session still holds the head and refuses every save
-// over the missing file, so capture leaves the head alone. Capture is waiting,
-// not failing, so it stays clean. The release alone brings the delete back.
+// A file capture recorded is deleted outside dohc while its document is open.
+// The session still holds the head and refuses every save over the missing
+// file, so capture leaves the head alone. Capture is waiting, not failing, so
+// it stays clean. The release alone brings the delete back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deleted_file_a_live_session_holds_is_retired_once_released() {
     let harness = Harness::new();
@@ -993,7 +993,6 @@ async fn fix1_no_hold_placement_replay_cost() {
     );
 }
 
-// #2413 will publish link-rewrite jobs through this same placement boundary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn placement_against_a_deferred_writes_old_base_conflicts_without_overwriting() {
     let harness = Harness::new();
@@ -1237,10 +1236,10 @@ fn head_sha256(db: &Path, version: &str, path: &str) -> String {
         .expect("read the head")
 }
 
-// dohc#3621. A switch that fails before replacing a file leaves the previous
-// version's bytes on disk, and capture refuses them for the active version.
-// The refusal must still track those bytes, so a later edit arrives as a
-// change that claims the active head instead of a new file capture skips.
+// A switch that fails before replacing a file leaves the previous version's
+// bytes on disk, and capture refuses them for the active version. The refusal
+// must still track those bytes, so a later edit arrives as a change that
+// claims the active head instead of a new file capture skips.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_edit_after_a_switch_write_waits_is_recorded() {
     const MAIN: &str = "Main's note.\n";

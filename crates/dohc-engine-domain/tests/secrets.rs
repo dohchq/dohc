@@ -876,12 +876,11 @@ fn capture_secret_ownership_is_enforced_in_both_directions() {
     assert!(retired.is_some(), "capture retires the tip it owns");
 }
 
-/// The three capture-ownership decisions used to key on
-/// `metadata_origin == "local-file"`, which is a member of the closed origin
-/// set an RPC caller or a replication peer may supply — so a remote writer
-/// could claim disk ownership it never had. Ownership now rides the
-/// engine-stamped `capture_owned` column, and the `write()` helper here writes
-/// exactly the spoof shape: origin `local-file` with
+/// `metadata_origin == "local-file"` is a member of the closed origin set an
+/// RPC caller or a replication peer may supply, so capture ownership must not
+/// key on it: a remote writer could claim disk ownership it never had.
+/// Ownership rides the engine-stamped `capture_owned` column. The `write()`
+/// helper here writes exactly the spoof shape: origin `local-file` with
 /// `SecretDiskIntent::Materialize` (plaintext not observed on disk).
 #[test]
 fn capture_ownership_does_not_follow_from_the_caller_supplied_origin() {

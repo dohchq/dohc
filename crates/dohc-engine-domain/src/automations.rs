@@ -23,7 +23,7 @@ use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, StorageError, TxnOutcome,
 };
 
-/// The product chain limit from the settled Phase 4 block: an automation's
+/// The product chain limit: an automation's
 /// writes carry depth one greater than their trigger, and a change already at
 /// this depth triggers nothing. Distinct from the wire bound
 /// (`MAX_CHANGE_ATTRIBUTION_DEPTH`), which only keeps declared values sane.
@@ -390,7 +390,7 @@ impl AutomationClaimState {
 /// The durable per-change key a claim holds. A synced-lineage field change
 /// keys on its replication coordinate — the one identifier every peer
 /// derives identically — and a field change no other device can see keys on
-/// this device's history row id (the settled Phase 4 fallback). An added or
+/// this device's history row id. An added or
 /// removed record keys on the moment that moved its file into or out of
 /// the Collection, together with the change kind, so however often
 /// reconcile derives the same change it claims it once.

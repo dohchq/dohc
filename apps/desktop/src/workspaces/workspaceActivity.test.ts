@@ -1544,7 +1544,7 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
-  // Failed-join rollback (0P-C gate fix): close() tears down exactly one
+  // Failed-join rollback: close() tears down exactly one
   // workspace — engine stopped, entry forgotten — leaving others untouched.
   // A pass someone asked for reads as syncing, not as the failure it may
   // clear; an automatic pass does not hide the failure.

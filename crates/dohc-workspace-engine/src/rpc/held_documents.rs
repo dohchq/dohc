@@ -395,7 +395,7 @@ fn inspection_outline(inspected: &HeldDocumentInspection) -> (Value, bool) {
         _ => (Value::Null, false),
     };
     result["preservation"] = preservation;
-    // Resolution is not recorded yet; the round that adds it fills this.
+    // Resolution is not recorded yet.
     result["resolution"] = Value::Null;
     (result, outside)
 }
@@ -468,9 +468,9 @@ mod tests {
     use dohc_engine_sync::HeldBindingStatus;
     use dohc_engine_sync::ReleasedHoldContinuation;
 
-    /// Plan r3, inspection authority: the handlers themselves require the
-    /// configured host's own current connection and a workspace it attached,
-    /// whatever let the request through, and refuse once either ends.
+    /// The handlers themselves require the configured host's own current
+    /// connection and a workspace it attached, whatever let the request
+    /// through, and refuse once either ends.
     #[tokio::test]
     async fn held_document_reads_answer_only_the_configured_host_for_its_workspaces() {
         let attached = dohc_engine_testkit::ScratchDir::new().unwrap();
@@ -699,11 +699,10 @@ mod tests {
         }
     }
 
-    /// Sol's r2a finding 4: Markdown waiting for the egress budget is
-    /// released only to a caller that may still have it. With the budget
-    /// exhausted, the host's connection retires, or its workspace detaches,
-    /// during the wait; once the budget frees, the read refuses instead of
-    /// answering with the blob.
+    /// Markdown waiting for the egress budget is released only to a caller
+    /// that may still have it. With the budget exhausted, the host's
+    /// connection retires, or its workspace detaches, during the wait; once
+    /// the budget frees, the read refuses instead of answering with the blob.
     #[tokio::test]
     async fn markdown_waiting_for_egress_rechecks_authority_once_the_budget_frees() {
         for detach in [false, true] {
@@ -753,10 +752,9 @@ mod tests {
         }
     }
 
-    /// Sol's ruling B, item 4: an inspection's proof runs off the workspace's
-    /// actor. While one holds at its snapshot, the host's discovery RPC, which
-    /// reads on that actor, completes; the inspection answers once its proof
-    /// goes on.
+    /// An inspection's proof runs off the workspace's actor. While one holds
+    /// at its snapshot, the host's discovery RPC, which reads on that actor,
+    /// completes; the inspection answers once its proof goes on.
     #[tokio::test]
     async fn host_rpcs_complete_while_an_inspection_proof_holds() {
         let root = dohc_engine_testkit::ScratchDir::new().unwrap();
@@ -799,10 +797,9 @@ mod tests {
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
-    /// Sol's ruling B, item 6: each caller's own deadline ends only its own
-    /// wait. Two callers share a proof held at its snapshot; the one whose
-    /// deadline passes answers that, and the other answers once the proof
-    /// goes on.
+    /// Each caller's own deadline ends only its own wait. Two callers share a
+    /// proof held at its snapshot; the one whose deadline passes answers
+    /// that, and the other answers once the proof goes on.
     #[tokio::test]
     async fn each_callers_deadline_ends_only_its_wait() {
         let root = dohc_engine_testkit::ScratchDir::new().unwrap();
@@ -961,11 +958,11 @@ mod tests {
         }
     }
 
-    /// Sol's ruling B, item 1: discovery lists summaries, never bindings, as
-    /// many as fit the budget, and claims more only with one listed. Reading
-    /// on after the last one listed reaches every held document once, a
-    /// summary that fits only a page of its own included; one that fits no
-    /// page is corrupt state, not an empty page that claims more.
+    /// Discovery lists summaries, never bindings, as many as fit the budget,
+    /// and claims more only with one listed. Reading on after the last one
+    /// listed reaches every held document once, a summary that fits only a
+    /// page of its own included; one that fits no page is corrupt state, not
+    /// an empty page that claims more.
     #[test]
     fn discovery_pages_by_bytes_and_always_progresses() {
         let mut all: Vec<_> = (0..40)
@@ -1044,10 +1041,10 @@ mod tests {
         );
     }
 
-    /// Sol's ruling B, item 3: however many findings there are, each reason
-    /// lists its exact total and at most eight of them, in namespace and
-    /// contribution order, while they fit; the status is the worst over every
-    /// finding, a reason the budget left without an example included.
+    /// However many findings there are, each reason lists its exact total and
+    /// at most eight of them, in namespace and contribution order, while they
+    /// fit; the status is the worst over every finding, a reason the budget
+    /// left without an example included.
     #[test]
     fn findings_list_a_few_examples_per_reason_with_exact_totals_and_the_worst_status() {
         let located = |reason, namespace: Option<&str>, index: Option<usize>| PreservationFinding {
@@ -1176,9 +1173,9 @@ mod tests {
         );
     }
 
-    /// Sol's ruling B: a hold covering 50,000 contributions, every one
-    /// merged, answers within the response budget, and its contribution
-    /// artifact names every one with its authors, none left out.
+    /// A hold covering 50,000 contributions, every one merged, answers within
+    /// the response budget, and its contribution artifact names every one
+    /// with its authors, none left out.
     #[test]
     fn a_large_hold_answers_within_budget_and_its_artifact_keeps_every_contribution() {
         let covered: Vec<_> = (0..50_000).map(contribution).collect();
@@ -1301,11 +1298,11 @@ mod tests {
         assert_eq!(answer["preservation"]["contributionsTooLarge"], false);
     }
 
-    /// Opus's r2c-3c-6 finding 1: an inspection whose artifact would pass
-    /// what one blob streams still answers its preservation, outline and
-    /// Markdown alike, and names no artifact, saying it is too large. Its
-    /// Markdown streams; its contributions stream nothing. Opus's r2c-3c-8
-    /// finding 4: its merged list's commitment still answers.
+    /// An inspection whose artifact would pass what one blob streams still
+    /// answers its preservation, outline and Markdown alike, and names no
+    /// artifact, saying it is too large. Its Markdown streams; its
+    /// contributions stream nothing. Its merged list's commitment still
+    /// answers.
     #[test]
     fn an_artifact_too_large_to_stream_leaves_the_preservation_answering() {
         let markdown = "# Plan\n".repeat(10_000);

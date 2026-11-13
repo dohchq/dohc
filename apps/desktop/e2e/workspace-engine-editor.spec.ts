@@ -23,11 +23,11 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-G2-C-2 editor-on-engine round trip. A rich markdown file edits
+// Editor-on-engine round trip. A rich markdown file edits
 // through the engine Y.Doc provider (recordUpdate +
 // debounced settle). The load-bearing proof: a
 // live edit journals only as ydoc.update — not a duplicate moment.append that
-// would collide (P0D) with the ydoc.update stream on a shared workspace — and
+// would collide with the ydoc.update stream on a shared workspace — and
 // the .md + engine.db reflect it, and a reopen resumes the rich content. The
 // SQLite readers (withEngineDb / ydocUpdateCount / replication* / moment*) live
 // in ./helpers/engineDb — shared with workspace-collab-decoupling.spec so the
@@ -217,15 +217,15 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 
     // The load-bearing assertion: the edit replicates as ydoc.update ops, and
     // the watcher's observation of the settle's own.md write was deferred — so
-    // the typed sentence never became a moment.append (a double-journal that on
-    // a shared workspace would collide as a P0D). Since a ydoc.update payload is
+    // the typed sentence never became a moment.append (a double-journal that
+    // would collide on a shared workspace). Since a ydoc.update payload is
     // opaque, the sentinel plaintext must appear in NO replication op at all.
-    // Post-cutover a LOCAL workspace journals no outbound replication ops at
+    // A LOCAL workspace journals no outbound replication ops at
     // all (emit_outbound requires Regime::Replicated), so on this fixture the
     // replication-op assertions below are structural only — the LOAD-BEARING
     // double-journal check is the moments table: the settle projects exactly
     // one sentinel moment, and a capture re-observing the settle's own.md
-    // self-write (the P0D class) would append a second.
+    // self-write would append a second.
     expect(
       momentTextsForPath(temp.rootPath, "notes/rich.md").filter((t) => t.includes(sentinel)),
     ).toHaveLength(1);
@@ -580,11 +580,11 @@ test("renaming a property of a live document keeps its place and comments throug
   }
 });
 
-// WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +
-// close the session FIRST. Otherwise the live session keeps its old versionId
-// and a later settle writes a stale projection into the now-active version
+// A version op while a rich doc is live must settle + close the session
+// first. Otherwise the live session keeps its old versionId and a later
+// settle writes a stale projection into the now-active version
 // (two-canonical / two-lineage corruption). Here a version is created through
-// the product bridge while the editor is open; the fix flushes the in-flight
+// the product bridge while the editor is open; the app flushes the in-flight
 // edit and releases the session before materializing.
 test("creating a version while a rich doc is live flushes + closes the session (no stale projection, edit preserved)", async () => {
   const temp = await createTempWorkspace();

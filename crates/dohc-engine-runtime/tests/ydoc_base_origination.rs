@@ -387,7 +387,7 @@ struct OversizedLineage {
 
 /// One projectable document whose accumulated CRDT history is too large to
 /// originate as a base. The visible text stays at 1 MiB while interior
-/// replacements add the unbounded revision-churn headroom described by #549.
+/// replacements add unbounded revision-churn headroom.
 fn oversized_lineage() -> &'static OversizedLineage {
     static LINEAGE: OnceLock<OversizedLineage> = OnceLock::new();
     LINEAGE.get_or_init(|| {
@@ -1305,11 +1305,11 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     supervisor.close(&db).expect("close actor");
     let store = EngineStore::open(&db, 9_107).expect("reopen for assertions");
 
-    // The decline says WHY. It used to be `Ok(None)` — the same answer
-    // origination gives for "already claimed", "this workspace does not
-    // replicate", and "a dependency is unresolved" — so a document that had
-    // quietly stopped being shareable was indistinguishable from one that had
-    // nothing to do.
+    // The decline says why. `Ok(None)` is the answer origination gives for
+    // "already claimed", "this workspace does not replicate", and "a
+    // dependency is unresolved", so it would make a document that had quietly
+    // stopped being shareable indistinguishable from one that had nothing to
+    // do.
     let declined = append
         .sharing_declined
         .expect("a lineage past the base cap declines OUT LOUD");
@@ -1888,8 +1888,8 @@ async fn settle_note(
         .expect("settle the note");
 }
 
-/// The first version a New page note claims must name its schema version
-/// (#3790). Nothing seeds such a note, so its editor's update holds only the
+/// The first version a New page note claims must name its schema version.
+/// Nothing seeds such a note, so its editor's update holds only the
 /// typed body, and the live host refuses a first version without the version.
 fn assert_first_version_names_its_schema_version(store: &EngineStore, case: &str) {
     let ops = read_local_ydoc_ops(store);

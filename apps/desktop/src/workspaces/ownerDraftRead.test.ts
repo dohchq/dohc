@@ -90,7 +90,7 @@ describe("readOwnerDraftState", () => {
     expect(engine.ownerYDocOpenDraft).not.toHaveBeenCalled();
   });
 
-  // #2705 review: each of these read from the file before, and still does.
+  // Each of these reads from the file.
   it("leaves the file as the text of a frozen draft, a fork, or a workspace without owner delivery", async () => {
     const frozen = client([[draft("plan", "plan.md", 1, "quarantined")]]);
     expect(await readOwnerDraftState(frozen as never, "handle", "plan.md", main)).toBeNull();

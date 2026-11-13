@@ -27,9 +27,9 @@ export function ChatsView(props: TestChatsViewProps) {
   );
 }
 
-// Chats view (PR 13, WS-E): fast, natural chat — the channel composer sends
-// on Enter with NO title prompt, unread badges derive from the store's read
-// cursors, and the Files grouping cross-links to the file rail.
+// Chats view: fast, natural chat. The channel composer sends on Enter with
+// no title prompt, unread badges derive from the store's read cursors, and
+// the Files grouping cross-links to the file rail.
 
 export const NOW = 1_700_000_000_000;
 

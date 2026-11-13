@@ -108,7 +108,7 @@ async fn native_watcher_create_and_delete_drive_dirty_reconcile_without_dropping
     watcher.stop().expect("stop");
 }
 
-/// R14 F1 regression: delete-then-recreate the watched root inside the health
+/// Delete-then-recreate the watched root inside the health
 /// poll window. The recreated directory exists (so an existence-only check
 /// would see a healthy directory and do nothing), but the OS watch is still
 /// bound to the DELETED object -- so a file created in the new root would be

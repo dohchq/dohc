@@ -304,7 +304,7 @@ describe("cloud device-flow login", () => {
   });
 
   it("captures the Better Auth user id as the OPAQUE reactor identity (never the email)", async () => {
-    // WS-MU-C2 security: the reactor author key is a REPLICATED CRDT cell key, so
+    // Security: the reactor author key is a replicated CRDT cell key, so
     // it must be the opaque Better Auth user id, never the raw email (PII would
     // otherwise replicate to every peer and persist in the immutable history).
     const store = memoryStore();

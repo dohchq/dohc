@@ -309,7 +309,7 @@ struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
     version_id: Option<String>,
-    // Required (#646 PR1): the level the caller pinned from the relay's own
+    // Required: the level the caller pinned from the relay's own
     // selector. No default here — a grant whose level cannot be read is not
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
@@ -2628,12 +2628,11 @@ mod tests {
             .collect()
     }
 
-    /// Sol's and Opus's review: changed paths, refusals and declined shares
-    /// went out whole, so they alone could pass the budget. Each list now
-    /// stops where it no longer fits and counts what it leaves out. The held
-    /// and departed lists keep their shares and page on, and a document the
-    /// pass moved from ready to held is named, only by what the relay needs,
-    /// though the page stops before it.
+    /// Changed paths, refusals and declined shares sent whole could alone
+    /// pass the budget. Each list stops where it no longer fits and counts
+    /// what it leaves out. The held and departed lists keep their shares and
+    /// page on, and a document the pass moved from ready to held is named,
+    /// only by what the relay needs, though the page stops before it.
     #[test]
     fn a_pass_reporting_more_than_fits_cuts_each_list_and_counts_what_it_leaves_out() {
         let held = waiting(2_000);

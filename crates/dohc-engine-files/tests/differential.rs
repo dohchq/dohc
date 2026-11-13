@@ -1,34 +1,30 @@
-//! Differential harness (CAL-3 calibration signal).
+//! Differential harness.
 //!
-//! The goldens are the retired reference accelerator's own committed fixtures
-//! (`tests/fixtures/workspace-kernel/*.json`). Note the honest scope of what each
-//! field proves:
+//! The goldens are the committed fixtures in
+//! `tests/fixtures/workspace-kernel/*.json`. The engine that wrote them is
+//! gone, so they are a pinned independent oracle, not one half of a
+//! two-engine comparison. What each field proves:
 //!
-//! - `size` and `sha256` are **engine-independent** ground truth — any correct
+//! - `size` and `sha256` are engine-independent ground truth. Any correct
 //!   implementation computes the same bytes, so agreement confirms this crate
-//!   computes them correctly, but it is not itself a cross-engine parity check.
-//!   The accelerator and its TS client are gone (the Rust daemon owns capture),
-//!   so these fixtures are now a pinned independent oracle rather than one half
-//!   of a two-engine comparison.
-//! - The **engine-SPECIFIC** surface — media-type classification and every
+//!   computes them correctly.
+//! - The engine-specific surface is media-type classification and every
 //!   path-floor decision (reserved segments, nested reserved, write-temp
-//!   prefix, db-sidecar keep-vs-exclude) — is where a divergence actually
-//!   hides, so those are covered exhaustively here
-//!   (`scan_media_types_cover_every_branch`, `floor_rules_cover_keep_and_exclude`)
-//!   rather than by the two media types the JSON fixtures happen to include.
+//!   prefix, db-sidecar keep-vs-exclude). A divergence hides there, so
+//!   `scan_media_types_cover_every_branch` and
+//!   `floor_rules_cover_keep_and_exclude` cover it exhaustively, beyond the
+//!   two media types the JSON fixtures include.
 //!
-//! The extended trace exercises the divergence-prone paths the CAL-2 tautology
-//! lesson demands: added/changed/removed, a size-cap boundary, a path-floor
-//! exclusion, a rename (remove+add), and a cancellation mid-scan leaving
-//! resumable state — with every field a divergence could hide in captured in
-//! the normalized state.
+//! The extended trace exercises the divergence-prone paths:
+//! added/changed/removed, a size-cap boundary, a path-floor exclusion, a
+//! rename (remove+add), and a cancellation mid-scan leaving resumable state.
+//! The normalized state captures every field a divergence could hide in.
 //!
 //! The seeded-bug-catch proof lives beside the diff engine
 //! (`src/diff.rs::seeded_bug_is_caught_by_the_golden`): it flips the hash
-//! comparison and shows the golden equality FAILS. This file adds the
-//! harness-level counterpart — a manifest whose only difference from the tree is
-//! one content hash flips the plan from empty to `changed`, proving the golden
-//! is sensitive to exactly the hash bit.
+//! comparison and shows the golden equality fails. This file adds the
+//! harness-level counterpart: a manifest whose only difference from the tree
+//! is one content hash flips the plan from empty to `changed`.
 
 use crate::common;
 

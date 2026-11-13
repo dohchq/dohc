@@ -912,7 +912,7 @@ it("never projects a preserved source that holds text the document lacks", () =>
 describe("live note capacity (#3575, #2534)", () => {
   // A note refused for its weight offers Copy as Markdown, which serializes the open note with this
   // function. The notes that reach the limit are mostly deleted blocks: a 100-block note that another
-  // program saved about 190 times, each save deleting the body and inserting every block (#3741).
+  // program saved about 190 times, each save deleting the body and inserting every block.
   it("serializes a note over the capacity, heavy with deleted blocks, to its current text", () => {
     const block = (n: number) =>
       n % 10 === 0

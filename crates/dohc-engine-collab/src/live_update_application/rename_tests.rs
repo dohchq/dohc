@@ -43,7 +43,7 @@ fn entry_of(f: &Fixture, delivery: &str) -> (String, i64, Option<i64>) {
         .unwrap()
 }
 
-/// Sol's round 4b ruling, rename: P carried C1 and C2 when it released, and
+/// P carried C1 and C2 when it released, and
 /// a person renamed the document before S captured it at its new path. S's
 /// coverage takes P's outbox at the old path, which the rename proves, and
 /// names each entry by its original outbox and sequence. S's seed opens the

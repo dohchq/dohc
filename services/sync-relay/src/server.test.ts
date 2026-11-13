@@ -1046,7 +1046,7 @@ describe("sync relay handler", () => {
     expect(fetched.ops).toEqual([]);
   });
 
-  // Gate finding: a missing blob in an owned workspace must be
+  // A missing blob in an owned workspace must be
   // distinguishable from a missing/foreign workspace so clients can degrade
   // honestly instead of reporting the whole workspace unavailable. The
   // isolation invariant is untouched: non-owners still get the fixed
@@ -1127,7 +1127,7 @@ describe("sync relay handler", () => {
     expect(oversized.status).toBe(413);
   });
 
-  // Gate finding (0P-D): the envelope is the only recovery path for the
+  // The envelope is the only recovery path for the
   // wrapped workspace key, so PUT /keys is create-only on first write and
   // compare-and-swap (If-Match: sha256) thereafter, and every replaced
   // envelope is retained in an audit history.
@@ -1185,7 +1185,7 @@ describe("sync relay handler", () => {
     ]);
   });
 
-  // Gate finding: unclassified errors (auth DB hiccup, unexpected SQLite
+  // Unclassified errors (auth DB hiccup, unexpected SQLite
   // failure) must become a generic 500 — never a crash, never a raw
   // error.message leak.
   it("returns a generic 500 when the auth backend fails, without leaking internals", async () => {
@@ -1417,11 +1417,10 @@ describe("sync relay handler", () => {
     expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
   });
 
-  // WS-G2-C1 GC-ROOT: a blob referenced by a live ydoc.update log op is a root
-  // and must not be collected out from under the rich-doc head — even with a
-  // zero grace window (so aging cannot save it) and even though a sibling
-  // orphan blob IS reclaimed in the same sweep. This is the relay side of the
-  // GC-root invariant G2-B documented; referencedBlobShas now counts the update.
+  // A blob referenced by a live ydoc.update log op is a GC root and must not
+  // be collected out from under the rich-doc head, even with a zero grace
+  // window (so aging cannot save it) and even though a sibling orphan blob is
+  // reclaimed in the same sweep. referencedBlobShas counts the update.
   it.each(["ydoc.update", "live.audit.base"])(
     "never GCs a blob referenced by %s, while collecting a sibling orphan",
     async (opKind) => {
@@ -1488,12 +1487,10 @@ describe("sync relay handler", () => {
     },
   );
 
-  // 0P sync-hardening item 4 GATE FIX (GC deletes a live blob mid-upload).
   // Blob upload is two-phase: PUT /blobs/:sha, then POST /log referencing it.
-  // A GC that ran between the two used to reclaim the blob (no log row referred
-  // to it yet), orphaning the content the pending log op depends on. The
-  // retention grace window makes a freshly-uploaded blob untouchable, so the
-  // append lands on durable content.
+  // A GC that runs between the two finds no log row referring to the blob.
+  // The retention grace window makes a freshly-uploaded blob untouchable, so
+  // the append lands on durable content.
   it("does not GC a freshly uploaded blob before its referencing log op is appended (item 4)", async () => {
     const clock = { now: 1_000_000 };
     const storage = await testStorage({ blobGraceMs: 10 * 60 * 1000 });
@@ -1556,11 +1553,10 @@ describe("sync relay handler", () => {
     ).toBe(200);
   });
 
-  // 0P sync-hardening GATE FIX (durable log referencing a missing blob). The
-  // grace window keeps a fresh blob alive across the PUT->POST gap, but it does
-  // not cover an old blob that ages past the grace, nor a blob GC'd after a
-  // failed /log that a retry re-references. The append validates every
-  // referenced blob IN-TRANSACTION and rejects the whole batch (retryable
+  // The grace window keeps a fresh blob alive across the PUT->POST gap, but it
+  // does not cover an old blob that ages past the grace, nor a blob GC'd after
+  // a failed /log that a retry re-references. The append validates every
+  // referenced blob in-transaction and rejects the whole batch (retryable
   // 422 blob_missing) rather than pinning the log to content the relay lost.
   it("rejects a log append referencing a blob the relay never received, atomically", async () => {
     const storage = await testStorage();
@@ -3203,11 +3199,10 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 });
 
-// WS-MU-C0 — the relay verifies that a chat op's claimed author equals
-// the authenticated pusher (actor.userId) before admitting it to the log. These
-// mirror PR-18's isolation rigor: a forged author is rejected atomically and
-// leaves the log unchanged. The honest path is admitted. An unattributed local
-// message cannot enter either relay log.
+// The relay verifies that a chat op's claimed author equals the authenticated
+// pusher (actor.userId) before admitting it to the log. A forged author is
+// rejected atomically and leaves the log unchanged. The honest path is
+// admitted. An unattributed local message cannot enter either relay log.
 describe("MU-C0 verified chat authorship", () => {
   function messageOp(originSeq: number, author: string | undefined, messageId = `m-${originSeq}`) {
     return {

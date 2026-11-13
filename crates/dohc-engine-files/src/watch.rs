@@ -61,7 +61,7 @@ const WATCH_REATTACH_BACKOFF: Duration = Duration::from_millis(200);
 /// otherwise idle).
 const WATCH_ROOT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A watcher event. Both kinds mark the generation dirty in CAL-3 (a full
+/// A watcher event. Both kinds mark the generation dirty (a full
 /// rescan supersedes any per-path delta), so the modeled property is
 /// coalescing-without-drop, not per-path routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,7 +942,7 @@ mod callback_tests {
     }
 }
 
-/// R14 robustness coverage: bounded re-attach and the startup deadline.
+/// Bounded re-attach and the startup deadline.
 /// [`attempt_reattach`] and [`await_ready_with_deadline`] are exercised
 /// directly (white-box) here because deterministically forcing a real
 /// `notify` backend to hang, specifically, is not practical in a fast unit

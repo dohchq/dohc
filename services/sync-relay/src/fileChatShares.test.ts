@@ -675,12 +675,12 @@ describe("chat over a file share", () => {
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-tampered");
   });
 
-  // P1 (review of bcdc31e0). A version share has NO paths, and
-  // `pathVisibleThroughShare` reads an empty path list as "every tracked
-  // path". For files that is bounded by the version check; chat has no
-  // version to check, so the same rule would have served the live discussion
-  // about every file on main — including files created long after the version
-  // and never in it. Chat follows PATHS, and only paths.
+  // A version share has no paths, and `pathVisibleThroughShare` reads an
+  // empty path list as "every tracked path". For files that is bounded by the
+  // version check; chat has no version to check, so the same rule would serve
+  // the live discussion about every file on main, including files created
+  // long after the version and never in it. Chat follows paths, and only
+  // paths.
   it("serves no chat at all through a version share, at any level", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -708,7 +708,7 @@ describe("chat over a file share", () => {
       expect(body, sentinel).not.toContain(sentinel);
     }
 
-    // And it accepts none either: chat is the only thing PR2 makes appendable,
+    // And it accepts none either: chat is the only thing that is appendable,
     // so a version share is not appendable at all.
     const push = await h(
       request(
@@ -721,11 +721,10 @@ describe("chat over a file share", () => {
     expect((await json(push)).code).toBe("share_read_only");
   });
 
-  // P1 (the confirmed suspect). A recipient's own thread is bound by PATH, and
-  // serving that string verbatim pinned the discussion to the path it was
-  // created at. The file then moves out of the share and the conversation
-  // keeps flowing — in both directions — about a file the share no longer
-  // covers.
+  // A recipient's own thread is bound by path. Serving that string verbatim
+  // would pin the discussion to the path it was created at: the file then
+  // moves out of the share and the conversation keeps flowing, in both
+  // directions, about a file the share no longer covers.
   it("stops a RECIPIENT-created thread when its file is renamed out of the share", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -833,13 +832,10 @@ describe("chat over a file share", () => {
     expect(chatOps(await readShareLog(h, shareId))).toHaveLength(0);
   });
 
-  // The asymmetry review probed for. A GRANTER's thread is bound by object, so
-  // it follows its file anywhere inside the share. A RECIPIENT's thread named
-  // its file by path, so an in-share rename used to kill it while the
-  // granter's survived — two threads on one file behaving differently.
-  //
-  // The accept door converts the binding, so both are object-bound now and
-  // both follow the file.
+  // A granter's thread is bound by object, so it follows its file anywhere
+  // inside the share. A recipient's thread names its file by path. The accept
+  // door converts that binding, so both threads are object-bound and both
+  // follow the file through an in-share rename.
   it("keeps both threads on a file when it is renamed within the share", async () => {
     const storage = await testStorage();
     const h = handler(storage);

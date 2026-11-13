@@ -12,7 +12,7 @@ export function canAppendTrailingNode(doc: ProseMirrorNode, nodeType: NodeType):
   // Markdown and Y.Doc updates can briefly expose a structurally incomplete
   // document while an editor is being replaced. ProseMirror's canReplace()
   // assumes the existing document is valid and throws from contentMatchAt()
-  // otherwise, which used to tear down the entire React renderer.
+  // otherwise, which would tear down the entire React renderer.
   if (!doc.type.validContent(doc.content)) return false;
 
   try {

@@ -221,8 +221,8 @@ mod tests {
         keep_request(parsed).map(|_| ()).unwrap_err().message
     }
 
-    /// Plan r3, copy creation: text past the in-band limit arrives whole,
-    /// with the binding, digest and contributions it was inspected with.
+    /// Text past the in-band limit arrives whole, with the binding, digest
+    /// and contributions it was inspected with.
     #[test]
     fn a_copy_past_the_inband_limit_arrives_whole() {
         let markdown = "# Plan\n\n".to_owned() + &"Kept paragraph.\n\n".repeat(8 * 1024);

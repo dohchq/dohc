@@ -279,7 +279,7 @@ export function appendLogBatchInTransaction(
   );
   assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
 
-  // Data-integrity gate (0P sync-hardening): a log op must never be made
+  // Data-integrity gate: a log op must never be made
   // durable while it references a blob the relay does not hold. The blob
   // GC grace window covers the fresh PUT->POST gap, but not an old blob
   // that ages past the grace, nor a blob GC'd after a failed /log that a

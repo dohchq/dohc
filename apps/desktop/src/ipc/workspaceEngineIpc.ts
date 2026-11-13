@@ -546,7 +546,7 @@ export function createWorkspaceEngineIpc<
   }
 
   function registerHistory(): void {
-    // Engine history + linked Chats (PR 0M-5). Workspaces read their
+    // Engine history + linked Chats. Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
 

@@ -314,13 +314,13 @@ fn passive_journal_echo_both_orders_have_one_history_and_equal_owner_evidence_an
     }
 }
 
-/// Sol's replica format: a restore the relay cancelled after its native fence
-/// reaches a replica as a control record. At the replica's exact generation
-/// and endpoint it advances the generation and nothing else, and a replay
-/// skips. The next delivery at the new generation then applies on the
-/// normal count and evidence chain. A forged or altered record refuses, and
-/// so does a delivery at the new generation without one, or one from the
-/// generation before after it.
+/// A restore the relay cancelled after its native fence reaches a replica as
+/// a control record. At the replica's exact generation and endpoint it
+/// advances the generation and nothing else, and a replay skips. The next
+/// delivery at the new generation then applies on the normal count and
+/// evidence chain. A forged or altered record refuses, and so does a
+/// delivery at the new generation without one, or one from the generation
+/// before after it.
 #[test]
 fn passive_replica_crosses_a_cancelled_restore_by_its_control_record() {
     use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;
@@ -829,14 +829,14 @@ fn a_restore_fence_decides_what_the_owner_holds() {
     }
 }
 
-/// Sol's round trip: the source settles, fences a restore, cancels it,
-/// accepts its next update at the new generation and settles that too, with
-/// no successor. That update's audit record carries the cancellation that
-/// explains its generation step. A fresh passive replica given the baseline,
-/// the control record and the update, then the audit and both settlements,
-/// matches the source after a restart and keeps the exact control record.
-/// The update without its control record refuses, and so does the audit
-/// record with its cancellation removed or altered.
+/// The source settles, fences a restore, cancels it, accepts its next update
+/// at the new generation and settles that too, with no successor. That
+/// update's audit record carries the cancellation that explains its
+/// generation step. A fresh passive replica given the baseline, the control
+/// record and the update, then the audit and both settlements, matches the
+/// source after a restart and keeps the exact control record. The update
+/// without its control record refuses, and so does the audit record with its
+/// cancellation removed or altered.
 #[test]
 fn passive_replica_round_trips_a_cancelled_restore_and_its_audit() {
     use dohc_engine_collab::live_update_application::passive::ReplicaRestoreCancellation;

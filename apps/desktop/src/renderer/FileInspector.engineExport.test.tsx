@@ -202,8 +202,8 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     // Editor mounts once the file text loads (async IPC).
     await screen.findByTestId("editor-stub");
 
-    // Inline properties always render under the title now — the state where
-    // serializeDraftRef used to return the stale disk body.
+    // Inline properties always render under the title. In this state
+    // serializeDraftRef must not return the stale disk body.
     await screen.findByTestId("properties-stub");
 
     await user.click(screen.getByTestId("document-menu-trigger"));

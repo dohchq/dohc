@@ -394,7 +394,7 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
   }
 });
 
-// Known M4 (#3211). A merge leaves the merge base where the version started,
+// A known defect. A merge leaves the merge base where the version started,
 // so a second merge of lines the version changed again asks which copy to
 // keep, though both copies are the person's own. The test expects the clean
 // result, and is marked as failing only once the second merge answers, so a

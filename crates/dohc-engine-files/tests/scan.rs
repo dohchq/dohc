@@ -273,7 +273,7 @@ fn symlink_directory_cycle_terminates_and_tracks_nothing_under_loop() {
     }
 }
 
-/// The amended-N8 short-circuit, pinned at the scanner seam: a matching
+/// The hash-reuse short-circuit, pinned at the scanner seam: a matching
 /// (size, mtime) pairing returns the manifest's recorded hash — provably
 /// without reading the file, because the recorded hash here is a deliberate
 /// lie that a re-hash could never produce — while a zero-mtime entry and a

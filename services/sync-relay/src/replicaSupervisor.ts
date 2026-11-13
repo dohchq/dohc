@@ -92,7 +92,7 @@ interface Entry {
   closing?: Promise<void>;
 }
 
-/** Explicit construction only. Production startup must wait for PR 6's readers. */
+/** Explicit construction only. Production startup does not construct it until its readers exist. */
 export function createReplicaSupervisor(options: ReplicaSupervisorOptions) {
   const limits = { ...REPLICA_SUPERVISOR_LIMITS, ...options };
   if (!isAbsolute(options.storeRoot)) throw new TypeError("Replica store root must be absolute.");

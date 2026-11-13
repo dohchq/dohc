@@ -2302,7 +2302,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRow,
 }
 
 /// Content-addressed sha256 (lowercase hex) of a text blob. Public so the
-/// differential harness can derive the expected content hashes (N8).
+/// differential harness can derive the expected content hashes.
 pub fn text_blob_sha256(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());

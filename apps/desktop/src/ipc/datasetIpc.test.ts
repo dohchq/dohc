@@ -1622,7 +1622,7 @@ it.each([
     ]) {
       for (const caller of ["window", "cli"]) {
         const answer = f.handler(caller, request);
-        // A list returns its refusal (#3016), as the CLI reads it.
+        // A list returns its refusal, as the CLI reads it.
         if (request.action === "list")
           expect(DatasetResult.parse(await answer)).toEqual({
             kind: "collections-refused",

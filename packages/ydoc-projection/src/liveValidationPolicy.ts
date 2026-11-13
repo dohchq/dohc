@@ -14,7 +14,7 @@ export const WORKER_LIVE_VALIDATION_POLICY: OrderedLiveUpdateCutPolicy = Object.
 
 /**
  * The most a note may weigh for a validator in a 512 MB heap to check it, so a note too dense to
- * check is refused rather than running the heap out (#3575, #2534). A note's weight is its Yjs
+ * check is refused rather than running the heap out. A note's weight is its Yjs
  * structs plus six for each block element, which costs about seven times a struct's memory. The
  * engine's Markdown reader builds the most from a note: in its heap, notes weighing up to 301,000
  * fit and notes from 316,000 did not, whatever their shape.

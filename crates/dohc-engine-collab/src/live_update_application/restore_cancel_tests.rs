@@ -147,7 +147,7 @@ fn reopen_store(f: &mut Fixture) {
     f._owner = ApplicationOwner::new("workspace".into()).unwrap();
 }
 
-/// Sol's proof test 1: a fence, its cancellation before admission, a
+/// A fence, its cancellation before admission, a
 /// restart and replay, then retirement and release at the fenced
 /// generation. The cancellation leaves content, native head, lineage origin,
 /// accepted endpoint and retained work as the fence left them, and the
@@ -206,7 +206,7 @@ fn a_cancelled_restore_retires_and_releases_at_its_fenced_generation() {
     }
 }
 
-/// Opus 1 and 5: with no binding, a cancellation holds only the lineage and
+/// With no binding, a cancellation holds only the lineage and
 /// generation the document proves. After a release that is the released
 /// generation; a document never registered proves nothing. A cancellation
 /// replayed after a later restore moved the document answers its own base
@@ -272,7 +272,7 @@ fn a_cancellation_without_a_binding_holds_only_the_proven_generation() {
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 2);
 }
 
-/// Sol's proof test 2: a successor captures and adopts from the predecessor
+/// A successor captures and adopts from the predecessor
 /// released at the cancelled generation, keeping the original lineage, the
 /// exact prefix and the retained work, through consecutive cancellations.
 /// A later genuine restore starts from the cancelled generations' real
@@ -338,7 +338,7 @@ fn a_successor_adopts_after_consecutive_cancellations_and_a_later_restore_applie
     assert!(matches!(cancel_named(&mut f, "genuine"), Err(ApplicationError::Conflict)));
 }
 
-/// Sol's proof test 3, as far as the engine reaches: after a cancellation
+/// As far as the engine reaches, after a cancellation
 /// and a successor, a collaborator's update at the new generation appends on
 /// the normal event count and digest chain and checkpoints there. After a
 /// restart both readers, settlement and publication read it back. A session
@@ -416,7 +416,7 @@ fn a_live_update_after_a_cancelled_generation_continues_the_accepted_chain() {
     assert_eq!(f.store.table_row_count("live_accepted_updates").unwrap(), 1);
 }
 
-/// Sol's test 5 and Opus 6: a cancellation proof that is missing or altered
+/// A cancellation proof that is missing or altered
 /// refuses each reader that crosses it, a restore already resumed refuses
 /// cancellation, and a fence that only prepared cancels and drops its
 /// proposal. A preparation past its limits fails; its cancellation does not.
@@ -526,7 +526,7 @@ fn cancellation_proofs_refuse_when_missing_or_altered() {
     cancel_fenced(&mut f, "restore");
 }
 
-/// Sol 1: a restore completes and resumes at generation 1, then one or two
+/// A restore completes and resumes at generation 1, then one or two
 /// restores fence and cancel. The lineage registers at the last generation,
 /// accepts an update and settles from the completed restore's settlement,
 /// crossing only the cancellations after it.
@@ -623,7 +623,7 @@ fn a_settlement_after_a_completed_restore_crosses_the_cancellations_after_it() {
     }
 }
 
-/// Sol 2: every reader binds a cancellation to the fence row it ends and to
+/// Every reader binds a cancellation to the fence row it ends and to
 /// the accepted history at its endpoint. One that names another host, origin
 /// or native head than its fence, or an endpoint the lineage never held,
 /// refuses retirement, adoption and both history readers.
@@ -722,7 +722,7 @@ fn a_cancellation_endpoint_receipt_is_read_exactly_from_its_metadata_head() {
     }
 }
 
-/// Sol 4 and Opus 5: a fence that would leave its lineage a cancelled chain longer
+/// A fence that would leave its lineage a cancelled chain longer
 /// than an event can cross refuses at admission. The chain counts from the
 /// generation of the lineage's accepted tip.
 #[test]
@@ -746,7 +746,7 @@ fn a_fence_past_the_readable_cancelled_chain_refuses() {
         .unwrap();
 }
 
-/// Sol 3: under a chain limit of 2, a lineage cancels four restores, split by
+/// Under a chain limit of 2, a lineage cancels four restores, split by
 /// an accepted event into two spans of 2. Crossing from the origin to the
 /// binding reads only the span after that event, while one chain over the
 /// whole history refuses.
@@ -783,7 +783,7 @@ fn a_crossing_reads_each_span_within_the_chain_limit() {
         .unwrap();
 }
 
-/// Opus 4: with no binding, a released lineage proves only the generation
+/// With no binding, a released lineage proves only the generation
 /// it released at. A later settled restore of another lineage of the
 /// document moves the document, not this lineage.
 #[test]
@@ -833,7 +833,7 @@ fn a_released_lineage_proves_its_own_generation_after_another_lineage_restores()
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
 }
 
-/// Sol 5 and Opus 6: a fence's answer, and a replay's, is durable before it is sent;
+/// A fence's answer, and a replay's, is durable before it is sent;
 /// a replay, which changes nothing, commits its marker.
 #[test]
 fn a_replayed_fence_commits_a_durable_answer() {

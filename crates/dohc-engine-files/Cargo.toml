@@ -26,7 +26,7 @@ sha2 = "0.11"
 thiserror = "2"
 # The actor command loop. The blocking scan/hash work stays on ONE dedicated
 # OS thread (never the async runtime); commands flow over tokio::sync channels
-# and the worker receives them via `blocking_recv` — the CAL-2 actor model.
+# and the worker receives them via `blocking_recv`.
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 # Cooperative cancellation tree: checked BETWEEN bounded
 # units (per-file / per-batch), never inside a hash of a single file's stream.

@@ -856,9 +856,9 @@ impl Phase<'_> {
     }
 }
 
-/// Sol's tails-cache ruling 3: what released-window protection costs as the
-/// released tail's history grows, fully proven or a long list of retained
-/// work that protects the lineage. For each history: `protection` decided
+/// What released-window protection costs as the released tail's history
+/// grows, fully proven or a long list of retained work that protects the
+/// lineage. For each history: `protection` decided
 /// with no kept tails and with them; then complete hosted passes of
 /// [`MEASURED_SAFE_ROWS`] safe rows and a held row, each materialized and
 /// committed, with the empty cache a restart leaves, with the actor's kept

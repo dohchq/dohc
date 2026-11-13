@@ -1,41 +1,31 @@
-//! [`LinkedChatStore`]: the chats domain over the R04 storage core.
+//! [`LinkedChatStore`]: the chats domain over the storage core.
 //!
-//! The chat surface — channels, threads, messages, per-thread read state,
-//! receiver-private follows / personal feed / bookmarks, and the durable agent
-//! dispatch ledger — composed ON the storage seam exactly like the versioning
-//! domain: reads via [`EngineStore::read_with`], every compound mutation via
-//! [`EngineStore::write_with`] so each compound write commits in one
-//! `BEGIN IMMEDIATE` transaction. Storage
-//! owns the connection, open ritual, transaction boundary, and the crash
-//! fault seam; this crate owns what a channel / thread / message / read-cursor /
-//! follow / bookmark / dispatch claim *means* (the TS `linkedChatStore.ts` +
-//! `agentDispatchStore.ts` oracle behavior).
+//! The chat surface is channels, threads, messages, per-thread read state,
+//! receiver-private follows, personal feed, bookmarks, and the durable agent
+//! dispatch ledger. It is composed on the storage seam like the versioning
+//! domain: reads go through [`EngineStore::read_with`], and every compound
+//! mutation goes through [`EngineStore::write_with`], so it commits in one
+//! `BEGIN IMMEDIATE` transaction. Storage owns the connection, open ritual,
+//! transaction boundary, and the crash fault seam. This crate owns what a
+//! channel, thread, message, read cursor, follow, bookmark, and dispatch claim
+//! mean.
 //!
 //! Content identity is caller-supplied: `channel_id`, `thread_id`,
-//! `message_id`, and `run_id` are inputs — the same determinism the
-//! versioning domain uses (`object_id`/`moment_id` are inputs). This keeps the
-//! differential harness able to pin exact rows. Local replication origins are
-//! store-owned and initialized lazily, while bookmark ids are deterministically
-//! derived from their owner and target, matching the TS store.
+//! `message_id`, and `run_id` are inputs, as `object_id` and `moment_id` are
+//! in the versioning domain. This lets the differential harness pin exact
+//! rows. Local replication origins are store-owned and initialized lazily.
+//! Bookmark ids are derived deterministically from their owner and target.
 //!
-//! **Parity-critical, non-tautological surfaces** (validated against real TS
-//! output, not Rust's own):
-//! - [`channel_slug_for_name`] — NFC + lowercase + dash-collapse slug (matrix
-//!   4.1b). A rename never forks channel state (durable rows key on
-//!   `channel_id`; the slug is a lookup alias).
-//! - [`linked_chat_projection_path`] — NFC projection fields feed a
-//!   `sha256` + base32-lowercase digest into `.dohc/chats/v1-<b32>.md` (matrix
-//!   4.1b). An NFD input yields the byte-identical path as the NFC input.
-//! - [`encode_feed_cursor`] / [`decode_feed_cursor`] — unpadded base64url of a
-//!   JSON `[createdAtMs, messageId]` body (matrix 4.8). A TS-minted cursor
-//!   round-trips; any decode/shape failure fails closed as `invalid-follow-target`.
-//!
-//! **Scoped to R10 (sync) or later, with notes in the crate docs**: the
-//! replication-op apply arms (`chat.*` receiver-private LWW application),
-//! reactions/decisions/attachment/mention indexing detail, and the desktop-side
-//! bookmark projection materialization. R09 ships the LOCAL write/read/list
-//! primitives, the atomic-send + read-CAS models, the generation-CAS bookmark
-//! outbox, and the single-writer dispatch ledger.
+//! Parity-critical surfaces, validated against real TS output:
+//! - [`channel_slug_for_name`]: NFC + lowercase + dash-collapse slug. A rename
+//!   never forks channel state (durable rows key on `channel_id`; the slug is
+//!   a lookup alias).
+//! - [`linked_chat_projection_path`]: NFC projection fields feed a
+//!   `sha256` + base32-lowercase digest into `.dohc/chats/v1-<b32>.md`. An NFD
+//!   input yields the byte-identical path as the NFC input.
+//! - [`encode_feed_cursor`] / [`decode_feed_cursor`]: unpadded base64url of a
+//!   JSON `[createdAtMs, messageId]` body. A TS-minted cursor round-trips; any
+//!   decode/shape failure fails closed as `invalid-follow-target`.
 
 mod dispatch;
 mod pending_replay;
@@ -176,7 +166,7 @@ const FEED_LIMIT_MAX: i64 = 100;
 const FEED_LIMIT_DEFAULT: i64 = 20;
 /// Hard upper bound on a single [`LinkedChatStore::list_messages`] page. A caller
 /// asking for more is clamped to this; the returned `next_after_message_order`
-/// cursor pages the rest. Keeps every read bounded (plan §Rust policy).
+/// cursor pages the rest. Keeps every read bounded.
 pub const MAX_MESSAGE_PAGE: i64 = 500;
 /// Maximum rows in one convenience list read. Channel and follow RPC lists
 /// use bounded keyset pages to continue beyond it.
@@ -1142,7 +1132,7 @@ pub struct ChatMessagePage {
 
 // --------------------------------------------------------------- parity helpers
 
-/// NFC-normalize a string (matrix 4.1b identity normalization).
+/// NFC-normalize a string (identity normalization).
 fn nfc(value: &str) -> String {
     value.nfc().collect()
 }
@@ -1532,7 +1522,7 @@ pub fn has_projection_control_char(value: &str) -> bool {
 }
 
 /// Encode a personal-feed cursor: unpadded base64url of the JSON body
-/// `[createdAtMs, messageId]` (`encodeFeedCursor`, matrix 4.8). Byte-parity with
+/// `[createdAtMs, messageId]` (`encodeFeedCursor`). Byte-parity with
 /// the TS `Buffer.from(JSON.stringify([...]), "utf8").toString("base64url")`.
 pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
     // serde_json serializes an i64 as an integer literal and a tuple as a JSON
@@ -1543,7 +1533,7 @@ pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
 }
 
 /// Decode a personal-feed cursor, failing closed as `invalid-follow-target` on
-/// any decode/shape violation (`decodeFeedCursor`, matrix 4.8). Accepts exactly
+/// any decode/shape violation (`decodeFeedCursor`). Accepts exactly
 /// the strings the TS engine emits (unpadded url-safe base64 of the JSON body).
 ///
 /// Deliberate divergence (Rust is stricter, fail-closed, on NON-engine-minted
@@ -1555,7 +1545,7 @@ pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
 /// string near the 256 boundary can be rejected on one engine and accepted on
 /// the other. Engine-MINTED cursors round-trip byte-exact on both sides (pinned
 /// by the differential); the divergence only tightens acceptance of adversarial
-/// client input, which is the safe direction. R10/differential must treat this
+/// client input, which is the safe direction. The differential must treat this
 /// as intended, not a bug.
 pub fn decode_feed_cursor(cursor: &str) -> Result<FeedCursorValue, DomainError> {
     let invalid = || DomainError::chat("invalid-follow-target", "Feed cursor is invalid.");

@@ -10,7 +10,7 @@ it.each(["owner", "view", "comment", "edit"] as const)(
     const expected: { name: string; inputSchema: Record<string, unknown> }[] = structuredClone(
       mainTools[level],
     );
-    // Hand-reviewed #1705 removals: desktop admission counts normalized UTF-8 bytes.
+    // Hand-reviewed removals: desktop admission counts normalized UTF-8 bytes.
     for (const name of ["dohc_start_file_chat", "dohc_start_group_chat", "dohc_reply_to_chat"]) {
       const tool = expected.find((tool) => tool.name === name);
       if (!tool) continue;

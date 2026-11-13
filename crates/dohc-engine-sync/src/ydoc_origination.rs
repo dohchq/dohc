@@ -206,7 +206,7 @@ pub fn originate_ydoc_base_in_tx(
         None
     };
     // After the catch-up check, which needs the head settled, and before the
-    // encode, so the first version names its schema version (#3790).
+    // encode, so the first version names its schema version.
     if !dohc_engine_collab::add_missing_schema_version_in_tx(tx, key, now_ms)
         .map_err(SyncError::corrupt)?
     {
@@ -217,7 +217,6 @@ pub fn originate_ydoc_base_in_tx(
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
-    // #549 owns the measured base-specific bound that replaces this check.
     // The decline is reported, not silent: it is the one branch here a
     // user can act on, and it is indistinguishable from the four benign ones
     // unless it says so.

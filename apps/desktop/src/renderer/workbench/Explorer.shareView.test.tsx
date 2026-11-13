@@ -6,13 +6,13 @@ import { Explorer, type ExplorerProps } from "./Explorer";
 
 afterEach(cleanup);
 
-// What A DELETE PROMISES (#802, sweep blocker 3 and delta findings 5 and 8).
+// What a delete promises.
 //
 // An ordinary workspace's delete goes to a trash with a recovery record, and
 // its notice offers Undo, so it runs without asking.
 //
 // A share view's delete removes the projection of a moment. There is no trash
-// on that path, so the local copy goes IRREVERSIBLY — and `AGENTS.md` requires
+// on that path, so the local copy goes irreversibly, and `AGENTS.md` requires
 // telling the user that before an irreversible change runs, not after. What
 // can still be taken back is the change, because the granter's copy is
 // untouched until they accept it. The dialog has to say that, or it is a

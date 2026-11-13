@@ -405,8 +405,8 @@ describe("makeMermaidPreviewPlugin — DOM wiring", () => {
     const renderCallsAfterPaint = render.mock.calls.length;
 
     // Type a character into the paragraph above the fence — this shifts the
-    // fence's doc position. Pre-fix, the position-derived key changed and PM
-    // destroyed the widget, leaving an empty canvas until a re-render.
+    // fence's doc position. A position-derived key would change and PM would
+    // destroy the widget, leaving an empty canvas until a re-render.
     editor.view.dispatch(editor.state.tr.insertText("X", 1));
 
     const widgetAfter = previewContainer(editor);

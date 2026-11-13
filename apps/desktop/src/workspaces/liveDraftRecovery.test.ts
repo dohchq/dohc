@@ -1147,7 +1147,7 @@ it("recovery text matches the witnessed settled artifact, including frontmatter 
   doc.destroy();
 });
 
-// dohc#2308. The capture sets a deleted file's text aside, and removes the
+// The capture sets a deleted file's text aside, and removes the
 // draft once a save writes the file. Notices follows through one event.
 it("tells only the workspace's windows after a write and a removal, and nothing after a failure", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-draft-events-"));

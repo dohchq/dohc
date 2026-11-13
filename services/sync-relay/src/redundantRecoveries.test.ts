@@ -164,8 +164,8 @@ describe("a copy of retained work published by two owner devices", () => {
     expect(other).not.toHaveProperty("redundantRecoveries");
   });
 
-  // Sol's Ruling A: a copy credits the authors of the retained work it keeps,
-  // and only the same authorship names the same copy.
+  // A copy credits the authors of the retained work it keeps, and only the
+  // same authorship names the same copy.
   const authors = [
     { kind: "agent", agentId: "earlier-agent", onBehalfOf: "owner", depth: 1 },
     { kind: "agent", agentId: "trip-agent", onBehalfOf: "owner", depth: 1 },

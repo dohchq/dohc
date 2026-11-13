@@ -512,9 +512,9 @@ export function replicationLogRows(rootPath: string): number {
   }
 }
 
-// `lstat`, not a read: a DIRECTORY answers a read with EISDIR, so a read-based
-// probe reported every existing folder as absent — and a test asserting a
-// folder was removed then passed whether or not it was.
+// `lstat`, not a read: a directory answers a read with EISDIR, so a read-based
+// probe reports every existing folder as absent, and a test asserting a
+// folder is gone then passes whether or not it is.
 export async function exists(path: string): Promise<boolean> {
   return lstat(path).then(
     () => true,

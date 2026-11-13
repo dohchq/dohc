@@ -124,10 +124,10 @@ afterEach(async () => {
   resetCollectionFieldWritesForTests();
 });
 
-// #567 / #579 review r4+r5: a set-aside draft that storage cannot keep lives
-// in renderer memory only, so closing or reloading the window is the one
-// irreversible exit. The guard announces it first — and carries the recovery
-// list, so the warning offers the very actions it demands.
+// A set-aside draft that storage cannot keep lives in renderer memory only,
+// so closing or reloading the window is the one irreversible exit. The guard
+// announces it first and carries the recovery list, so the warning offers
+// the very actions it demands.
 describe("RecoveryCloseGuard", () => {
   it("contains focus and returns it after the user goes back", async () => {
     const user = userEvent.setup();
@@ -207,10 +207,10 @@ describe("RecoveryCloseGuard", () => {
     ).toHaveLength(2);
     const row = rows.find((candidate) => candidate.textContent?.includes("a.md"))!;
     expect(rows.some((candidate) => candidate.textContent?.includes("other.md"))).toBe(true);
-    // The GLOBAL list names each row's workspace — two workspaces can hold
-    // the same path, and Copy/Dismiss must be tellable apart (#579 review,
-    // r7) — with the NAME the UI shows, not the raw UUID (#579 review,
-    // r10); an unregistered workspace falls back to its id.
+    // The global list names each row's workspace, because two workspaces can
+    // hold the same path and Copy/Dismiss must be tellable apart. It uses the
+    // name the UI shows, not the raw UUID; an unregistered workspace falls
+    // back to its id.
     const labels = screen
       .getAllByTestId("recovery-list-workspace")
       .map((label) => label.textContent);

@@ -2522,31 +2522,25 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
 /// timer stops.
 ///
 /// The scenarios vary accepted-history length and visible document size
-/// independently. Short scenarios hold 32 accepted updates on a bootstrap
-/// that already carries their document. Long ones hold 16412, with the latest
-/// checkpoint at event 16380. Large documents add 255 paragraphs to small
-/// ones. Scenarios with the same document size end with the same projected
+/// independently: 32 accepted updates or 16412, with the latest checkpoint at
+/// event 16380, and small documents or ones with 255 more paragraphs.
+/// `long-empty-updates` holds native state fixed and grows only accepted
+/// history. Scenarios with the same document size end with the same projected
 /// Markdown, and every measured interval makes the same 32 edits. Their
-/// native bytes still differ: a long edit history leaves tombstones that the
-/// native state and each update's delete set carry. `long-empty-updates`
-/// holds native state fixed and grows only accepted history. Each result
-/// records native sizes instead of assuming them.
+/// native bytes still differ, because a long edit history leaves tombstones,
+/// so each result records native sizes.
 ///
-/// Each scenario admits authentic incremental updates at monotonic cursors
-/// and settles the prefix in 32-update intervals plus one shorter final
-/// interval. Copies of that closed template then each take one fresh
-/// settlement of the last 32 updates. Half settle on the actor that admitted
-/// them; half restart the actor first. The template then settles the same
-/// interval and measures warm same-terminal replay, `owner_publication_prefix`
-/// on the settlement's journaled `moment.append` (first call on a new
-/// connection, then warm), and per actor restart the first replay and first
-/// publication. The operating system's file cache stays warm throughout.
+/// Each scenario measures fresh settlements of the last 32 updates, half on
+/// the actor that admitted them and half after an actor restart. It then
+/// measures warm same-terminal replay, `owner_publication_prefix` on the
+/// settlement's journaled `moment.append` (first call on a new connection,
+/// then warm), and per actor restart the first replay and first publication.
+/// The operating system's file cache stays warm throughout.
 ///
 /// Build the executable once under the repository's cargo budget, then run
 /// it serially. The first run writes the corpus; later runs and other builds
-/// read the same bytes. A `long-large.updates` copied from the first
-/// benchmark's single-file corpus reproduces that corpus's bytes. Scratch
-/// fixtures stay under DOHC_TEST_SCRATCH_ROOT and are removed on drop.
+/// read the same bytes. Scratch fixtures stay under DOHC_TEST_SCRATCH_ROOT
+/// and are removed on drop.
 ///
 ///   CARGO_BUILD_JOBS=<cores/4> cargo test -p dohc-engine-runtime --release --test live_settlement --no-run
 ///   DOHC_TEST_SCRATCH_ROOT=<task>/scratch DOHC_LIVE_HISTORY_CORPUS_DIR=<task>/corpus \

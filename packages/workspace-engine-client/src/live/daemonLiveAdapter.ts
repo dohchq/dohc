@@ -213,8 +213,8 @@ export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
 }
 
-// The engine's Markdown reader refused the note as too dense to check
-// (#3575). A note's past edits count, so asking again never clears it.
+// The engine's Markdown reader refused the note as too dense to check.
+// A note's past edits count, so asking again never clears it.
 export function isDocumentTooDenseRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "INTERNAL") === "document-too-dense";
 }

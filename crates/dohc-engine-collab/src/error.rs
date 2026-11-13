@@ -22,7 +22,7 @@ pub enum CollabError {
     /// has retries left. Asking again after a backoff starts the next one.
     #[error("dohc could not verify this file. Try again.")]
     MarkdownReaderRetryable,
-    /// The reader refused this note as larger than it can check (#3575).
+    /// The reader refused this note as larger than it can check.
     /// Asking again gives the same answer until the note shrinks.
     #[error("This note is too large or too dense for dohc to check. Split it, or make its tables smaller.")]
     MarkdownReaderCapacity,
@@ -203,7 +203,7 @@ pub enum CollabError {
     /// new document onto the renamed file's lineage, and open-time cannot
     /// reserve capture's order-disambiguated id pre-commit. The path becomes
     /// creatable again once a capture/local write mints the disambiguated
-    /// object (write caps over the wire are RPC-D scope).
+    /// object.
     #[error("the derived object id is live at another alias; write the file first")]
     ObjectAliasCollision,
 

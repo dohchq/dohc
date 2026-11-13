@@ -12,8 +12,8 @@ if (process.platform !== "win32") process.env.TMPDIR = realpathSync(tmpdir());
 
 // At most 8 concurrent workers. Fifteen of these suites open their own temp
 // `.dohc/engine/engine.db`, and past roughly eight the filesystem is the
-// constraint rather than the CPU — so a bigger machine must not buy more
-// contention. Evidence and the failure modes are on #392.
+// constraint rather than the CPU, so a bigger machine must not buy more
+// contention.
 const WORKER_CAP = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 4)));
 const require = createRequire(import.meta.url);
 const PURE_INSPECTOR_TEST = "src/renderer/FileInspector.test.tsx";

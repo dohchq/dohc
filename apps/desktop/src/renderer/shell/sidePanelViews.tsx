@@ -85,7 +85,7 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
           // would issue calls it refuses. The view states the fact, with the
           // one next step that can change it. A shared view never shows this
           // view: it has chat per file, in About, and no workspace-wide
-          // listing (the shape #627 came from).
+          // listing.
           <div
             data-testid="chats-off"
             className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"

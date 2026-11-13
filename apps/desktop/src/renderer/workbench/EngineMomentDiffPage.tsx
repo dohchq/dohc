@@ -291,9 +291,8 @@ export function EngineMomentDiffPage({
     [state],
   );
   // The diff is the expensive part of this page, and a moment's bodies never
-  // change while its tab is open. Build it once per moment: it used to run
-  // twice per render — once for the counts, once for the lines — and a
-  // hydrated 10 MiB body cost seconds each time.
+  // change while its tab is open. Build it once per moment, for both the
+  // counts and the lines: a hydrated 10 MiB body costs seconds each time.
   const prepared = useMemo(() => {
     if (!diffMoment) return null;
     const sides = momentDiffSides(diffMoment);
@@ -535,7 +534,7 @@ export function EngineMomentDiffPage({
   const summary = createdFile && !moment.summary ? "Created" : fileMomentSummary(moment);
   // The rarer ways back, and the file itself, wait behind More. Restore
   // shared file is not offered: a restore that stops a note's last Edit
-  // access can leave it and other shared notes stuck (#3090).
+  // access can leave it and other shared notes stuck.
   const moreItems: MenuItem[] = [
     ...(!readOnly && stopTarget
       ? [

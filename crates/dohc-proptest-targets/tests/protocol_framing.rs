@@ -1,4 +1,4 @@
-//! Cutover-blocking fuzz family 1/3: IPC framing/protocol validation.
+//! Fuzz coverage for IPC framing and protocol validation.
 //!
 //! Surfaces under test: `dohc_engine_protocol::frame::FrameDecoder`
 //! (incremental frame decode over a byte stream fed in arbitrary chunks --

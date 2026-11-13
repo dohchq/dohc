@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 // A reader that misses a capture's deadline has likely hung. Later captures on
 // the actor skip it for this long instead of each waiting out a deadline, and
-// their notes take the fallback the missed note took (#2585).
+// their notes take the fallback the missed note took.
 const HUNG_READER_COOLDOWN: Duration = Duration::from_secs(30);
 
 fn hung_until(actor: &ActorHandle) -> std::sync::MutexGuard<'_, Option<Instant>> {

@@ -47,7 +47,7 @@ fn released_without_carried() -> Fixture {
     f
 }
 
-/// Sol's 4b2b-1 ruling, branch selection. A proven base structurally the
+/// Branch selection: a proven base structurally the
 /// whole Y.Doc folds as ever. The same Markdown over another structure, and
 /// a Y.Doc holding the chain's Carried deliveries, refuse. The bytes capture
 /// last recorded keep the Y.Doc, Carried deliveries and all. Outside the
@@ -163,7 +163,7 @@ fn proof_bytes(f: &Fixture) -> usize {
     RELEASED_CAPTURE_PROOF_BYTES - budget.remaining
 }
 
-/// Sol's 4b2b-1 ruling, the released-window variants: content the file at B
+/// In a released window, content the file at B
 /// never showed refuses a disk edit, whether the chain Carried it, a seed
 /// accepted and never applied holds it, the owner typed it after the
 /// release, or ordinary sync caught it up and a moment records it.
@@ -197,7 +197,7 @@ fn a_released_window_refuses_a_disk_edit_over_content_its_file_never_showed() {
     assert!(diverged(disk_capture(&f, &edited_on_disk(&f), &local_doc(&f))), "caught-up content a moment holds");
 }
 
-/// Sol's 4b2i-3 ruling: the namespaces of a document lineage come from
+/// The namespaces of a document lineage come from
 /// `live_owner_activations_document`, never a scan, across a history of
 /// several namespaces and documents with many released activations, with and
 /// without statistics.
@@ -246,7 +246,7 @@ fn diverged(decided: Result<ReleasedCapture, ApplicationError>) -> bool {
     matches!(decided, Err(ApplicationError::Conflict))
 }
 
-/// Sol's 4b2b-1 ruling, the shared budget: a successor's capture reads
+/// The shared budget: a successor's capture reads
 /// accepted state at B and replays the Carried updates onto it within one
 /// budget. Each fits it alone; together they refuse.
 #[test]

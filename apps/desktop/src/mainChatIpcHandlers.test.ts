@@ -165,8 +165,8 @@ describe("readRelayChatShareLanes", () => {
   });
 
   // The row cap is the one door row-level validation does not cover. Every row
-  // below is structurally valid, so the guard used to answer "answered" and
-  // hand the contract parse a lane it cannot represent: the parse throws, the
+  // below is structurally valid. A guard that answered "answered" would hand
+  // the contract parse a lane it cannot represent: the parse throws, the
   // IPC call rejects, the renderer's .catch(() => null) commits a null
   // listing, and every cached invitation and grant disappears.
   function relayRowsOverCap(lane: "granted" | "received") {
@@ -231,9 +231,8 @@ describe("readRelayChatShareLanes", () => {
             MAX_CHAT_CHANNEL_SHARE_ROWS + 1
           } rows; the cap is ${MAX_CHAT_CHANNEL_SHARE_ROWS} rows per lane. Reporting the listing over-limit, so cached rows survive and the surface can name the constraint.`,
         );
-        // The composition is the defect: the guard's answer must survive the
-        // contract parse the IPC handler runs immediately after it. This is
-        // the parse that used to throw.
+        // The guard's answer must survive the contract parse the IPC handler
+        // runs immediately after it.
         expect(() =>
           ListChatChannelSharesResult.parse({
             joined: [],
@@ -304,7 +303,7 @@ describe("readRelayChatShareLanes", () => {
   // irreversible everywhere except A, where the only offered action is to
   // rejoin. The caller builds the set; this pins what the guard does with it.
 
-  // The acceptance case for #618: another workspace's received lane being
+  // Another workspace's received lane being
   // unreadable must not blank a workspace that has shares of its own. The
   // scoping runs before the cap, so the rows homed elsewhere never count
   // against this workspace's lane.
@@ -420,7 +419,7 @@ describe("handleRelayUnauthorized", () => {
     expect(steps).toEqual([]);
   });
 
-  // #742 P1 SECURITY, round 5: a current-session 401 IS an account-session
+  // Security: a current-session 401 is an account-session
   // end — main.ts's clearCachedCredentials() (called here as
   // clearCachedCredentials, exactly as main.ts wires it) also clears the DM
   // request-lanes cache, so a new account's first failed poll can never be

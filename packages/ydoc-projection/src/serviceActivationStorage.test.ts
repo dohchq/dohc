@@ -2076,7 +2076,6 @@ it("reports why an activation keeps failing once two failures in a row have last
 
 // The slot check follows the catch-up pull, so a slot taken while the pull runs leaves nothing captured.
 
-// Issue #1967: a capture that found validation busy was tried again only by the next periodic pass.
 // Proves: the driver waits once for the slot, however many passes find it busy, and wakes one pass once it may
 // be free. A slot taken between the check and validation waits the same way after its capture.
 

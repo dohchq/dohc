@@ -4,8 +4,8 @@ import type { ShareViewSelector } from "./shareViewInfo";
 import { shareViewIdentityIsIntact, shareViewIsPresent } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 
-// The two lanes of #646 PR3a, and the rule that keeps a workspace in exactly
-// one of them.
+// The two lanes of share proposals, and the rule that keeps a workspace in
+// exactly one of them.
 //
 // GRANTER lane — read the changes recipients sent, then accept or decline
 // them. It acts on a workspace this machine owns.

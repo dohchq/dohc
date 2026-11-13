@@ -801,8 +801,8 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
         // passes its own false, and a pending undo raises
         // `applyingPendingUndoRef`. What reaches here after those is the user's
         // own edit, so it is reported. There is deliberately no window in which
-        // updates are ignored — one used to exist, keyed on an animation frame,
-        // and it dropped keystrokes that arrived first.
+        // updates are ignored. A window keyed on an animation frame would drop
+        // keystrokes that arrive first.
         onUpdate({ editor, transaction }) {
           if (collabActive) return;
           if (applyingPendingUndoRef.current) return;

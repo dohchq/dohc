@@ -481,14 +481,14 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     assert_eq!(deferred_rows, 0, "successful projection clears the marker");
 }
 
-/// Sol's first and Opus's third findings: a queued update whose bytes a
-/// drain applies and whose path its document no longer has is refused, and
-/// the refusal deleted its row at once, with the record facts its apply
-/// parked there. A drain that then stops before its cleanup, as one that
-/// waits for validation does, lost those facts. The row now leaves only
-/// with the cleanup, so after a stopped drain that its caller abandons, as
-/// a cancelled one, and again after a restart, the drain that removes it
-/// reports its facts and its refusal once, and history holds one row.
+/// A queued update whose bytes a drain applies and whose path its document
+/// no longer has is refused. Its row holds the record facts its apply parked
+/// there, so the row leaves only with the cleanup: a refusal that deleted it
+/// at once would lose those facts when the drain stops before its cleanup,
+/// as one that waits for validation does. After a stopped drain that its
+/// caller abandons, as a cancelled one, and again after a restart, the drain
+/// that removes the row reports its facts and its refusal once, and history
+/// holds one row.
 #[test]
 fn an_applied_then_refused_update_reports_its_facts_once_after_its_drain_stopped() {
     for restart in [false, true] {
@@ -733,13 +733,13 @@ fn queued_title_change(
     (scratch, store_path, engine, key, claim_id)
 }
 
-/// Sol's first ruling, window (a): what the end-of-pass drain removes stays
-/// owed to its pass when a later step, the settlement drain, waits and the
-/// request never resumes. The transaction that removes the row writes its
-/// drain report, so an abandoned request, or a restart, leaves it for the
-/// next request to claim, with its file change. A request reports it until a
-/// cursor commit acknowledges it under the token it was claimed with; a
-/// commit under an abandoned request's token acknowledges nothing.
+/// What the end-of-pass drain removes stays owed to its pass when a later
+/// step, the settlement drain, waits and the request never resumes. The
+/// transaction that removes the row writes its drain report, so an abandoned
+/// request, or a restart, leaves it for the next request to claim, with its
+/// file change. A request reports it until a cursor commit acknowledges it
+/// under the token it was claimed with; a commit under an abandoned
+/// request's token acknowledges nothing.
 #[test]
 fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it() {
     const RECORD_ID: &str = "rec_jjjjjjjjjjjjjjjjjjjjjjjjjj";
@@ -857,14 +857,13 @@ fn a_released_drains_report_outlives_its_request_until_a_commit_acknowledges_it(
     }
 }
 
-/// Sol's first and Opus's third findings on f939d61f1: a drain applied a
-/// queued field change and stopped before its cleanup, as one that then
-/// waits does; a device binding then appeared, so the next drain finds the
-/// row a live edit no session admitted. That refusal, its blob and its hold
-/// now wait for the cleanup like any other, so a drain that stops again
-/// keeps the row and the facts parked on it. Whether the request is then
-/// abandoned or the store restarts, the drain that completes reports the
-/// facts and the refusal once.
+/// A drain applies a queued field change and stops before its cleanup, as
+/// one that then waits does; a device binding then appears, so the next
+/// drain finds the row a live edit no session admitted. That refusal, its
+/// blob and its hold wait for the cleanup like any other, so a drain that
+/// stops again keeps the row and the facts parked on it. Whether the request
+/// is then abandoned or the store restarts, the drain that completes reports
+/// the facts and the refusal once.
 #[test]
 fn a_live_refusal_keeps_its_rows_facts_until_its_cleanup() {
     for restart in [false, true] {
@@ -1872,9 +1871,9 @@ fn assert_parked_inactive_refusal(collision: bool, waiting: u8) {
         )
         .unwrap();
         assert_eq!(inactive.refusals.len(), 1, "{:?}", inactive.refusals);
-        // Opus's third finding on 6ded1a22a: the drain took the archived
-        // lineage's last queued row and left its document no hold, so a hold
-        // the pass reported for that lineage is cleared in the same pass.
+        // The drain took the archived lineage's last queued row and left its
+        // document no hold, so a hold the pass reported for that lineage is
+        // cleared in the same pass.
         let freed = std::collections::BTreeSet::from([old_sha.clone()]);
         assert_eq!(inactive.cleared.get("inactive-refusal"), Some(&freed));
         assert_eq!(inactive.cleared.len(), 1);
@@ -1897,9 +1896,9 @@ fn ydoc_drain_waiting_nonempty_queue_leaves_inactive_update_queued() {
     assert_parked_inactive_refusal(true, 2);
 }
 
-/// Opus's seventh finding on 3409694c7: a drain report this build cannot
-/// read fails the claim that meets it once, and is gone after it; the
-/// reports beside it stay owed and the next claim reports them.
+/// A drain report this build cannot read fails the claim that meets it once,
+/// and is gone after it; the reports beside it stay owed and the next claim
+/// reports them.
 #[test]
 fn an_unreadable_drain_report_fails_one_claim_and_the_rest_stay_owed() {
     let (_scratch, _path, mut engine) = open_store();
@@ -1935,12 +1934,12 @@ fn refusals_of(refusals: &[crate::ReplicationRefusal], origin: &str) -> Vec<(i64
         .collect()
 }
 
-/// Sol's first and Opus's second findings on 3409694c7: a queued row whose
-/// content kind the head refuses applies its bytes first, and a later row of
-/// the same lineage projects the head, so the cleanup clears the lineage's
-/// notices, the refusal it just persisted among them. Its drain report keeps
-/// that refusal, so a request abandoned at a later wait, or a restart, still
-/// reports it, once, until a commit acknowledges it.
+/// A queued row whose content kind the head refuses applies its bytes first,
+/// and a later row of the same lineage projects the head, so the cleanup
+/// clears the lineage's notices, the refusal it just persisted among them.
+/// Its drain report keeps that refusal, so a request abandoned at a later
+/// wait, or a restart, still reports it, once, until a commit acknowledges
+/// it.
 #[test]
 fn a_refusal_its_projection_clears_stays_in_the_drain_report() {
     const RECORD_ID: &str = "rec_kkkkkkkkkkkkkkkkkkkkkkkkkk";

@@ -2,8 +2,8 @@ import type { LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import { runningThread } from "@dohc/automation-executor/automation-chat";
 import type { JoinedSharedChannel } from "./registryStore";
 
-// WS-MU-C3 — desktop DM orchestration, kept out of main.ts so it is unit
-// testable. A DM is a `kind:"dm"` channel plus one MU-C4 chat grant
+// Desktop DM orchestration, kept out of main.ts so it is unit
+// testable. A DM is a `kind:"dm"` channel plus one shared-channel chat grant
 // per participant, riding the shared-channel lane (`syncSharedChannel.ts` /
 // `shared_channel_*`) unchanged:
 //   - the OWNER minted the channel locally (its wire id IS its channel id);
@@ -67,7 +67,7 @@ export async function requireShareableChatChannel(input: {
 // The local DM list (no network): every dm-kind channel with its running
 // thread, role, joined-share label, and display label. Most recent activity
 // first. Participant metadata (peerLabel, connected, shareId) is sourced from
-// the MU-C4 JoinedSharedChannel registry (keyed by channelWireId), which the
+// the JoinedSharedChannel registry (keyed by channelWireId), which the
 // main-process workspace entry owns — a DM channel is joined exactly like any
 // shared channel.
 export async function listDmRecords(input: {

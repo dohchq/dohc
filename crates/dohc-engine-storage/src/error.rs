@@ -12,8 +12,7 @@
 pub enum StorageError {
     /// The database was stamped with a schema fingerprint this build does not
     /// recognize (the v1-vs-v2 fence). Never auto-migrated, never
-    /// initialized over — the caller must export/reset (`plan §Day-one Rust
-    /// schema`).
+    /// initialized over — the caller must export/reset.
     #[error("engine database schema version {found} is not supported (expected {expected})")]
     UnsupportedFingerprint { found: i64, expected: i64 },
 
@@ -80,14 +79,13 @@ pub enum StorageError {
 
     /// A destructive/space-consuming operation was refused because the target
     /// volume lacks the preflighted free space. Fails closed before touching the
-    /// only valid source (`plan §Backups`: never delete the only valid source on
-    /// disk-full).
+    /// only valid source, which is never deleted on disk-full.
     #[error("insufficient free space: need {needed} bytes, {available} available")]
     DiskFull { needed: u64, available: u64 },
 
     /// A filesystem operation was denied by permissions. Distinguished from
     /// corruption and transient locks so recovery does not misclassify an ACL
-    /// problem as a corrupt store (`plan §Corruption behavior`).
+    /// problem as a corrupt store.
     #[error("permission denied")]
     PermissionDenied {
         #[source]
@@ -103,7 +101,7 @@ pub enum StorageError {
 
     /// A content-addressed blob failed its integrity check on read: the stored
     /// bytes do not hash to the key they were filed under. Fails closed; never
-    /// returns corrupt bytes as if valid (`plan §blobs`, integrity on read).
+    /// returns corrupt bytes as if valid (integrity on read).
     #[error("blob integrity check failed for {sha256}")]
     BlobIntegrity { sha256: String },
 
@@ -172,7 +170,7 @@ impl StorageError {
     }
 
     /// Classify a raw [`std::io::Error`] from a filesystem step into the
-    /// recovery taxonomy (`plan §Corruption behavior`: distinguish permission,
+    /// recovery taxonomy (distinguish permission,
     /// disk-full, transient lock from corruption). Anything unrecognized becomes
     /// `backup-failed`/caller-mapped rather than silently swallowed.
     pub(crate) fn classify_io(err: std::io::Error) -> Self {
@@ -199,9 +197,9 @@ impl StorageError {
     ///
     /// Recognized here because this is the last boundary that still holds the
     /// typed `rusqlite::Error`. Above it the error is a boxed source and the
-    /// result code is unreadable, which is why every busy database used to
-    /// reach callers as `persist-failed` or `state-corrupt` — both terminal,
-    /// both wrong about a condition that clears by waiting.
+    /// result code is unreadable, so a busy database would reach callers as
+    /// `persist-failed` or `state-corrupt`: both terminal, both wrong about a
+    /// condition that clears by waiting.
     /// The same question for a caller holding a raw `rusqlite::Error`.
     ///
     /// `SearchError::Storage` keeps the rusqlite failure rather than wrapping

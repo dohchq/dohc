@@ -28,13 +28,13 @@ import {
 
 // On a self-hosted server, an owner shares notes by Edit link. Two notes are
 // made with New page, so their files did not exist before their editors
-// opened (#3790): one is closed before it is shared and one stays open. The
+// opened: one is closed before it is shared and one stays open. The
 // third, the control, is a file the app wrote and captured before its editor
 // opened. Each must go live once its tab is closed. For the notes shared with
 // their tabs closed, a link holder types into each in a browser, and the
 // edit must reach the owner's file. A note shared with its tab open has no
-// file on the server until the tab closes (#3785), so a link holder's edit
-// while it is open belongs to that issue's own test.
+// file on the server until the tab closes, so this spec does not test a link
+// holder's edit while it is open.
 
 test.skip(
   !process.env.POSTGRES_URL && process.env.DOHC_REQUIRE_POSTGRES !== "1",
@@ -286,7 +286,7 @@ test("@new-page-edit-link a note made with New page goes live through an Edit li
     await shareAndEdit("New page, closed before it is shared", closed, closedBody, true);
 
     // --- New page, shared with its tab open, then closed: it goes live -------
-    // Its file reaches the server only when the tab closes (#3785).
+    // Its file reaches the server only when the tab closes.
     const openBody = "Typed with the tab open.";
     const open = await typeNewPage(page, "Open page", openBody);
     await shareAndEdit(

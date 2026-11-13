@@ -3420,10 +3420,10 @@ async fn stop_keeps_each_pending_entrys_declared_credit() {
     supervisor.close_all().unwrap();
 }
 
-/// The retirement form of settlement (Sol's plan §3): once Phase A ended
-/// the activation's registration, the host settles what it applied through
-/// its durable binding alone, materializes it, answers a replay with the
-/// same settlement, and refuses a terminal past F.
+/// The retirement form of settlement: once Phase A ended the activation's
+/// registration, the host settles what it applied through its durable
+/// binding alone, materializes it, answers a replay with the same
+/// settlement, and refuses a terminal past F.
 #[tokio::test]
 async fn a_retiring_activation_settles_through_its_durable_binding() {
     let f = Fixture::new();
@@ -5441,10 +5441,10 @@ fn rebound(w: &mut RetainedWindow) -> Box<ReleasedLineageBinding> {
     binding
 }
 
-/// Plan r3, Round 2: work only an outbox holds merges into scratch state,
-/// is named in `mergedContributionIds`, and appears in the preserved text
-/// and native state, while the canonical head stays byte for byte without
-/// it. A binding derived before that work existed no longer stands.
+/// Work only an outbox holds merges into scratch state, is named in
+/// `mergedContributionIds`, and appears in the preserved text and native
+/// state, while the canonical head stays byte for byte without it. A binding
+/// derived before that work existed no longer stands.
 #[tokio::test]
 async fn an_outbox_only_contribution_is_preserved_without_changing_the_head() {
     let (mut w, desktop, _client) = held_for_a_queued_fold().await;
@@ -5775,12 +5775,12 @@ fn owed_title_reported_once(
     assert_eq!(remote_titles(&next.record_facts), 0, "{after:?}: {next:?}");
 }
 
-/// Sol's ruling 1, window (b): the pass's inactive drain applies the
-/// record's queued title change, which an earlier drain applied to the head
-/// before its lineage was archived, to that archive and removes its row; the
-/// window's drain then waits for validation. Whether the request resumes,
-/// is abandoned, or the store restarts, the change reaches the next
-/// reporting boundary once through the drain report its removal wrote.
+/// The pass's inactive drain applies the record's queued title change, which
+/// an earlier drain applied to the head before its lineage was archived, to
+/// that archive and removes its row; the window's drain then waits for
+/// validation. Whether the request resumes, is abandoned, or the store
+/// restarts, the change reaches the next reporting boundary once through the
+/// drain report its removal wrote.
 #[tokio::test]
 async fn an_inactive_drains_facts_survive_a_later_wait() {
     for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
@@ -5912,13 +5912,12 @@ enum AfterWait {
     Restart,
 }
 
-/// Sol's first finding, across documents: the end-of-pass drain finished the
-/// record's drain, removing its queued update, before the window's drain
-/// waited for validation, so the record's facts lived only in the request's
-/// continuation. Each drain's rows now stay queued until no drain waits, so
-/// whether the request resumes, is abandoned or the store restarts, the
-/// record's facts reach the next reporting boundary once, with one
-/// field-history effect.
+/// Across documents: the end-of-pass drain reaches the record before the
+/// window's drain waits for validation. Each drain's rows stay queued until
+/// no drain waits, because a queued update removed sooner would leave the
+/// record's facts only in the request's continuation. Whether the request
+/// resumes, is abandoned or the store restarts, the record's facts reach the
+/// next reporting boundary once, with one field-history effect.
 #[tokio::test]
 async fn a_completed_documents_facts_survive_a_later_documents_wait() {
     for after in [AfterWait::Resume, AfterWait::Abandon, AfterWait::Restart] {
@@ -5974,7 +5973,7 @@ async fn a_completed_documents_facts_survive_a_later_documents_wait() {
             .count();
         assert_eq!(reported, 1, "{after:?}: {pass:?}");
         assert_eq!(field_history(&w.store), 1, "{after:?}");
-        // Sol's fifth ruling: draining the record again duplicates nothing.
+        // Draining the record again duplicates nothing.
         assert_eq!(
             record_moments_and_conflicts(&w.store),
             committed,
@@ -6133,12 +6132,12 @@ fn holds_archived(
         )
 }
 
-/// Sol's fifth test, the drain a document's own operations run: its queued
-/// updates of an archived lineage released tails protect stay queued with
-/// their blobs and feeds, the archive keeps its state, and the drain reports
-/// and stores the document's hold of that lineage. After a restart the drain
-/// holds again with nothing written. Once nothing protects the lineage, the
-/// drain applies the updates to the archive and leaves no hold.
+/// The drain a document's own operations run: its queued updates of an
+/// archived lineage released tails protect stay queued with their blobs and
+/// feeds, the archive keeps its state, and the drain reports and stores the
+/// document's hold of that lineage. After a restart the drain holds again
+/// with nothing written. Once nothing protects the lineage, the drain
+/// applies the updates to the archive and leaves no hold.
 #[tokio::test]
 async fn a_documents_drain_holds_its_protected_archived_lineage() {
     let (mut w, desktop, _client, queued, archive) = archived_window(2).await;
@@ -6684,10 +6683,9 @@ fn settlement_queue(store: &EngineStore) -> Vec<(String, bool, bool, Option<Stri
         .unwrap()
 }
 
-/// Sol's worker ruling 4: a validation that fails fails its commit once,
-/// committing nothing; nothing retries it on its own. A commit cancelled
-/// while it waits for validation committed nothing either, and its retry
-/// commits.
+/// A validation that fails fails its commit once, committing nothing;
+/// nothing retries it on its own. A commit cancelled while it waits for
+/// validation committed nothing either, and its retry commits.
 #[tokio::test]
 async fn a_waiting_commit_fails_or_cancels_without_committing() {
     let (w, desktop, _client, pass) = held_pass().await;
@@ -6794,16 +6792,15 @@ fn notes(root: &ScratchDir) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-/// Opus's review of round 4b2i-1a-2, finding 1, with the rename and binary
-/// write beside it: in the released window the owner deletes, renames or
-/// writes binary bytes over the document on the desktop, so no `ydoc.update`
-/// comes first. The host's hosted pull holds the row before it retires or
-/// rebinds the lineage, and a neighbour in the same pass applies. Native
-/// state, retained records, attribution, the snapshot, settlement evidence
-/// and the files stay as they were, nothing is acknowledged, and successor
-/// capture finds the document not ready. The delete holds over the owner's
-/// own pending work too, and a row with no relay position is refused rather
-/// than held at an invented one.
+/// In the released window the owner deletes, renames or writes binary bytes
+/// over the document on the desktop, so no `ydoc.update` comes first. The
+/// host's hosted pull holds the row before it retires or rebinds the
+/// lineage, and a neighbour in the same pass applies. Native state, retained
+/// records, attribution, the snapshot, settlement evidence and the files
+/// stay as they were, nothing is acknowledged, and successor capture finds
+/// the document not ready. The delete holds over the owner's own pending
+/// work too, and a row with no relay position is refused rather than held at
+/// an invented one.
 #[tokio::test]
 async fn a_desktop_delete_rename_or_binary_write_never_retires_what_a_released_chain_retains() {
     for (change, retained) in [

@@ -54,7 +54,7 @@ export const PRIVACY_DENIED_WORDS =
  */
 /**
  * The engine's refusal to save a note too dense for its Markdown reader to
- * check (#3575). A live note keeps the blocks its edits deleted, so the
+ * check. A live note keeps the blocks its edits deleted, so the
  * note's weight never goes down: only new notes clear it.
  */
 export const DOCUMENT_TOO_DENSE_WORDS =

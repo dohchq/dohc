@@ -1,4 +1,4 @@
-//! An outside save folds only what changed into a live note (#3741).
+//! An outside save folds only what changed into a live note.
 
 use super::*;
 
@@ -91,7 +91,7 @@ fn a_hundred_block_note_saved_often_grows_by_what_changed() {
             .expect(&markdown);
     }
     let grown = clock(&doc) - fresh;
-    // Replacing the body grew the note by all of it on every save (#3741).
+    // Replacing the whole body would grow the note by all of it on every save.
     assert!(grown < fresh / 5, "fresh {fresh}, 20 saves added {grown}");
 }
 
@@ -234,8 +234,8 @@ fn folding_over_another_note_reads_as_a_fresh_fold() {
     }
 }
 
-/// #3746 compared blocks as JSON. It stays here as the oracle the direct
-/// comparison must agree with, or else treat the block as changed.
+/// Compares blocks as JSON. It is the oracle the direct comparison must agree
+/// with, or else treat the block as changed.
 fn json_same<A: ReadTxn, B: ReadTxn>(old_txn: &A, old: &XmlOut, new_txn: &B, new: &XmlOut) -> bool {
     fn plain<T: ReadTxn>(txn: &T, node: &XmlOut) -> bool {
         match node {

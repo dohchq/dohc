@@ -267,7 +267,7 @@ describe("ChatsView panel navigator unread badges", () => {
     // Nothing is cached, so nothing on screen is stale — saying so would be
     // false.
     expect(notice.textContent).not.toContain("out of date");
-    // The section itself must survive: hiding it was the defect.
+    // The section itself must survive.
     expect(screen.getByTestId("chats-shared-with-you")).toBeTruthy();
 
     // The Next has to work on this surface: the retry asks again.
@@ -345,10 +345,9 @@ describe("ChatsView panel navigator unread badges", () => {
   });
 
   // An over-limit listing is not an outage: the same request
-  // answers the same way forever. Reporting it as unreachable gave the
+  // answers the same way forever. Reporting it as unreachable would give the
   // surface a Try again that could never work and no way to say what was
-  // wrong — the defect #618 exists to fix, for the one condition dohc's own
-  // cap creates.
+  // wrong, for the one condition dohc's own cap creates.
 
   // The failure is account-scoped, and unlike a stale row
   // it is a PERSISTENT claim: an over-limit answer names the previous

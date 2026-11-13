@@ -161,7 +161,7 @@ export function createWorkspaceReplicationRoutes(
       const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
       if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
       if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
-      // MU-C0 verified authorship — the trust boundary. Every chat op that
+      // Verified authorship, the trust boundary. Every chat op that
       // names an author must claim the authenticated pusher. The relay refuses
       // authorless messages and unknown chat ops. This check runs before
       // parseLogOp and appendLogBatch, so the relay rejects the full batch

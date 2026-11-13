@@ -170,12 +170,11 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
     // own flow ends here with nothing to report.
     if (result.cancelled) return null;
     // Main's boundary re-check refuses the install when a reopen set an edit
-    // aside after this renderer's own check. That refusal
-    // is a recovery decision, not an install failure, and the direct branch
-    // used to report it as one — the user's Restart click became a generic
-    // error and the drafts were never mentioned. The
-    // dialog path already re-prompts; both paths reach the same state, so
-    // both must say the same thing.
+    // aside after this renderer's own check. That refusal is a recovery
+    // decision, not an install failure. Reported as a failure, the user's
+    // Restart click would become a generic error that never mentions the
+    // drafts. The dialog path already re-prompts; both paths reach the same
+    // state, so both must say the same thing.
     if (!result.accepted && atRiskOrphanedDraftIds().length > 0 && openRecoveryWarning !== null) {
       openRecoveryWarning({ kind: "update", resume: resumeInstall });
       return null;
@@ -360,8 +359,7 @@ const BYPASS_REARM_MS = 10_000;
 // irreversible, so it must be announced before it runs (product invariant).
 // Electron cancels a close silently on preventDefault, so the dialog below is
 // the announcement, and it carries the at-risk drafts with their own
-// Copy/Dismiss: the warning must offer the very actions it demands (#579
-// review, r5).
+// Copy/Dismiss: the warning must offer the very actions it demands.
 //
 // This mounts above AppErrorBoundary (see main.tsx): a crash unmounts the
 // shell, and the crash screen's "Reload dohc" must not destroy the drafts

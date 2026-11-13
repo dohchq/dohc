@@ -157,9 +157,8 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, AppErro
         <button
           type="button"
           data-testid="app-crash-reload"
-          // Through the guard, so a blocked reload resumes as a reload — the
-          // set-aside-draft warning must not turn it into an exit (#579
-          // review, r7).
+          // Through the guard, so a blocked reload resumes as a reload. The
+          // set-aside-draft warning must not turn it into an exit.
           onClick={requestGuardedReload}
           className="mt-1 cursor-pointer rounded border border-line px-3 py-1 text-xs font-semibold text-muted hover:bg-hover hover:text-ink"
         >

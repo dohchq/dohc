@@ -109,9 +109,9 @@ fn a_replica_is_hosted_only_by_its_row() {
     );
 }
 
-/// The durability review: a local-only workspace with work in it became a
-/// hosted replica, which then refuses every write to that work. Neither has
-/// a sync identity, so only the work refuses it.
+/// A hosted replica refuses every write to work it already holds, so a
+/// local-only workspace with work in it must not become one. Neither has a
+/// sync identity, so only the work refuses it.
 #[test]
 fn only_a_workspace_without_work_becomes_a_hosted_replica() {
     let with_file: fn(&mut EngineStore) = |store| {
@@ -415,9 +415,9 @@ fn hosted_outbound_sequences_survive_purged_journal_rows_and_reopen() {
     assert_eq!(last_outbound_seq(&store), 3);
 }
 
-/// The slice-1 review's reproduction: chat on a hosted replica allocated from
-/// the journal's maximum while the sync journal allocated from the counter, so
-/// the next sync append collided with a chat coordinate.
+/// Chat on a hosted replica would allocate from the journal's maximum while
+/// the sync journal allocates from the counter, so the next sync append
+/// would collide with a chat coordinate.
 #[test]
 fn a_hosted_replica_writes_no_chat_and_its_journal_keeps_one_counter() {
     let (_scratch, path, mut store) = hosted_store();
@@ -1799,15 +1799,14 @@ fn fill_retained(store: &mut EngineStore, object_id: &str, from: i64, count: i64
         .unwrap();
 }
 
-/// Sol's review of the release above: the cap was full of a ready
-/// document's retained work, ending at a conflict child whose parent the
-/// feed withholds. Its editor closed while another document's moment waited
-/// behind that document's open editor. Replay applied the first document's
-/// moment and stopped at the child, but retaining the other's moment passed
-/// the cap, so the pass failed before the commit that releases the first
-/// document's work, and so did every later pass. The other document is held
-/// at its moment instead, retaining nothing, and the pass commits. Once its
-/// editor closes, the moment applies and it is ready.
+/// The cap is full of a ready document's retained work, ending at a conflict
+/// child whose parent the feed withholds. Its editor closes while another
+/// document's moment waits behind that document's open editor. Replay
+/// applies the first document's moment and stops at the child. Retaining the
+/// other's moment would pass the cap and fail this pass, and every later
+/// one, before the commit that releases the first document's work. So the
+/// other document is held at its moment, retaining nothing, and the pass
+/// commits. Once its editor closes, the moment applies and it is ready.
 #[test]
 fn a_full_retention_limit_holds_a_document_instead_of_failing_the_pass() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -2420,10 +2419,10 @@ fn heads(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The slice-3 re-review's first finding: clearing `a.md` for `doc-a` dropped
-/// the head `doc-b`'s unsettled work still needed. `doc-a`'s moments now
-/// wait, in order, until `doc-b` parks, and then apply as a create and its
-/// edit. `doc-b` keeps its history and bytes, and holds no path.
+/// Clearing `a.md` for `doc-a` would drop the head `doc-b`'s unsettled work
+/// still needs. `doc-a`'s moments wait, in order, until `doc-b` parks, and
+/// then apply as a create and its edit. `doc-b` keeps its history and bytes,
+/// and holds no path.
 #[test]
 fn a_replacement_waits_for_the_departed_document_holding_its_path() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -2619,12 +2618,12 @@ fn pending_outbox(store: &mut EngineStore, object_id: &str) {
         .unwrap();
 }
 
-/// Part 5's retirement deadlock: a departed document with a deferred update
-/// waited for rows the feed no longer serves. It parks with the update, which
-/// its return skips as redelivered, so the update and its bytes stay queued:
-/// dropping them would lose the edit. Work the relay served that was never
-/// journaled is released, and the return fetches it again. Parking still
-/// waits for the host's own undelivered outbox bytes.
+/// A departed document with a deferred update would wait for rows the feed
+/// no longer serves. It parks with the update, which its return skips as
+/// redelivered, so the update and its bytes stay queued: dropping them would
+/// lose the edit. Work the relay served that was never journaled is
+/// released, and the return fetches it again. Parking still waits for the
+/// host's own undelivered outbox bytes.
 #[test]
 fn parking_keeps_journaled_deferred_updates_and_waits_for_accepted_work() {
     let (_scratch, _path, mut store, client) = departing_b();
@@ -2765,10 +2764,10 @@ fn a_retired_file_holds_its_path_until_it_is_forgotten() {
     assert_eq!(retained(&store), 0);
 }
 
-/// Sol's retirement review: retiring a document deleted every conflict that
-/// named it, including one another hosted document still needs. `doc-b`'s
-/// rename left a conflict against `doc-a` at `b.md`. A parked document keeps
-/// its conflicts, with the bytes of both sides, after both documents park.
+/// Retiring a document must not delete a conflict another hosted document
+/// still needs. `doc-b`'s rename leaves a conflict against `doc-a` at
+/// `b.md`. A parked document keeps its conflicts, with the bytes of both
+/// sides, after both documents park.
 #[test]
 fn parking_keeps_a_conflict_and_the_bytes_of_its_sides() {
     let (_scratch, _path, mut store) = hosted_store();
@@ -2844,8 +2843,8 @@ fn hold(store: &EngineStore, object_id: &str) -> Option<HostedHold> {
 }
 
 /// Two shared documents whose paths differ only in case, or where one path is
-/// a folder of the other, cannot both be files on a disk that ignores case
-/// (#2036). The later one is held, naming the document that holds its path,
+/// a folder of the other, cannot both be files on a disk that ignores case.
+/// The later one is held, naming the document that holds its path,
 /// while the first and the main cursor go on. Once the first moves, the later
 /// one applies.
 #[test]
@@ -2918,11 +2917,11 @@ fn a_document_at_another_spelling_of_a_held_path_is_held_until_the_path_frees() 
     }
 }
 
-/// #2421 across a crash: the trade stops at any one apply, before that apply
-/// commits, and the host restarts. It still ends with both documents ready
-/// at their new paths, their text intact and each change applied once, and
-/// no document is ready at a spelling of another's head at any commit or
-/// after the restart.
+/// A trade of spellings stops at any one apply, before that apply commits,
+/// and the host restarts. It still ends with both documents ready at their
+/// new paths, their text intact and each change applied once, and no
+/// document is ready at a spelling of another's head at any commit or after
+/// the restart.
 #[test]
 fn a_trade_of_spellings_stopped_at_any_apply_resumes_after_a_restart() {
     let mut crashes = 0;
@@ -3302,7 +3301,7 @@ fn a_return_interrupted_at_its_unparking_finishes_once_after_a_restart() {
     }
 }
 
-/// Parking (G4): a parked document is no longer hosted. The replica refuses
+/// Parking: a parked document is no longer hosted. The replica refuses
 /// to write for it before it takes a sequence.
 #[test]
 fn a_write_for_a_parked_document_is_refused() {
@@ -3332,11 +3331,10 @@ fn a_write_for_a_parked_document_is_refused() {
     assert_eq!(last_outbound_seq(&store), before);
 }
 
-/// Round 3b's deferred input, through the whole retirement: a Y.Doc update
-/// for `doc-b` arrives before its base and waits. `doc-b` leaves and parks
-/// with it, and its adopted activation then releases and keeps it. Once
-/// `doc-b` returns, the base its return fetches drains the update, and
-/// nothing applies twice.
+/// Deferred input through the whole retirement: a Y.Doc update for `doc-b`
+/// arrives before its base and waits. `doc-b` leaves and parks with it, and
+/// its adopted activation then releases and keeps it. Once `doc-b` returns,
+/// the base its return fetches drains the update, and nothing applies twice.
 #[test]
 fn deferred_input_survives_parking_and_release_and_drains_after_the_return() {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
@@ -4018,10 +4016,10 @@ fn copy_store(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// #2088's reproduction: a store restored from a copy older than its last
-/// push. The feed serves the host's own rows back, so one pull imports them
-/// and the journal's maximum climbs to the relay's, which hides the loss
-/// from a push. The counter still says what this store numbered.
+/// A store is restored from a copy older than its last push. The feed serves
+/// the host's own rows back, so one pull imports them and the journal's
+/// maximum climbs to the relay's, which hides the loss from a push. The
+/// counter still says what this store numbered.
 #[test]
 fn the_origin_probe_finds_commits_a_restored_store_lost_after_a_pull() {
     let (_scratch, path, store, client) = departing_b_at("doc-b.md");

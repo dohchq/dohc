@@ -6168,8 +6168,8 @@ fn reject_button_field_references(
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
 ///
-/// The filter, sort, and cursor run in SQL over the indexed values (#986,
-/// #991): a registered collation reproduces the cross-type `compare_json`
+/// The filter, sort, and cursor run in SQL over the indexed values:
+/// a registered collation reproduces the cross-type `compare_json`
 /// order over stored `value_json`, so a page reads and hydrates only the
 /// records it returns instead of materializing the collection.
 pub fn query_collection_records(

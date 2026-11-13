@@ -1,4 +1,4 @@
-// Notes as people type them, seeded into a relay as it stores them, for tests of activation over long histories (#3763).
+// Notes as people type them, seeded into a relay as it stores them, for tests of activation over long histories.
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

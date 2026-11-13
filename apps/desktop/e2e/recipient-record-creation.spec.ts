@@ -75,8 +75,8 @@ async function openCollection(page: Page) {
  * is named for its record, which this Collection names by its file, so the helper waits for the new record's panel
  * before it presses Open as page. Pressed sooner, it opens the page of the record before.
  *
- * It ends with the record's page showing in its tab, which is where New record used to leave these specs. The panel
- * is not on screen then: it belongs to the Collection's tab, and shows again when a spec goes back to the Collection.
+ * It ends with the record's page showing in its tab. The panel is not on screen then: it belongs to the Collection's
+ * tab, and shows again when a spec goes back to the Collection.
  */
 async function newRecordPage(page: Page, file = "Untitled") {
   await page.getByTestId("collection-new-record").click();

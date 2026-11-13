@@ -120,10 +120,10 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(text.length - preview.text.length);
   });
 
-  // Every shape, including the one that used to stall: a short complete line
-  // followed by a line far wider than the window. Requiring a line boundary
-  // kept the cut on that first newline, so 58 of the first 59 presses of
-  // "Show more" changed nothing.
+  // Every shape, including a short complete line followed by a line far wider
+  // than the window. A cut that required a line boundary would stay on that
+  // first newline, so 58 of the first 59 presses of "Show more" would change
+  // nothing.
   const shapes: [string, string][] = [
     ["many short lines", lines(CONFLICT_PREVIEW_MAX_LINES * 5, 10)],
     ["one 1 MiB line", "y".repeat(1024 * 1024)],

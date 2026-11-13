@@ -173,8 +173,8 @@ describe("compareVersionFilesPage", () => {
 
   it("drops a continuation with nothing differing behind it", async () => {
     // An exactly-full window's cursor with only identical paths behind it
-    // used to reach the surface, which then said "more than N" over a Show
-    // more that appended nothing.
+    // must not reach the surface, which would say "more than N" over a Show
+    // more that appends nothing.
     const pages = new Map<
       string | undefined,
       {

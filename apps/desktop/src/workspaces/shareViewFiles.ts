@@ -169,7 +169,7 @@ export type ShareViewProjectionStatus =
     };
 
 // A recorded collision that waits on a person, not on repair: a local file in
-// its way, or another shared spelling that owns its file on this disk (#2416).
+// its way, or another shared spelling that owns its file on this disk.
 export type HeldSharePath = UnjournalablePath & {
   reason: "local-collision" | "spelling-collision";
 };

@@ -320,7 +320,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const message = 'dohc could not save an edit to "notes/a.md". Copy it from recovery.';
     h.capturedOpen()?.onEditRefused?.("request-1", message);
     expect(h.onLiveEditsPaused).not.toHaveBeenCalled();
-    // #2719: a refusal because the file's live editing is paused names it for the workspace notice.
+    // A refusal because the file's live editing is paused names it for the workspace notice.
     h.capturedOpen()?.onEditRefused?.("request-2", message, true);
     expect(h.onLiveEditsPaused).toHaveBeenCalledExactlyOnceWith("workspace-1", "notes/a.md");
     expect(sender.sent).toContainEqual({
@@ -2929,7 +2929,7 @@ describe("engine Y.Doc IPC adapter", () => {
       expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("After.");
     });
 
-    // #2719: the editor says live editing is paused, so an agent must hear the same.
+    // The editor says live editing is paused, so an agent must hear the same.
     it("says live editing is paused when the file takes no more edits", async () => {
       const session = editableSession();
       vi.mocked(session.applyDecidedLocalUpdate).mockRejectedValueOnce(
@@ -3186,7 +3186,7 @@ describe("engine Y.Doc IPC adapter", () => {
       await h.ipc.shutdown();
     });
 
-    // #2705: a shared note's file waits for the server, so an agent that reads
+    // A shared note's file waits for the server, so an agent that reads
     // it after an edit kept on this device must see the edit, not the file.
     it("reads a shared note no editor holds from its draft, edits still on their way included", async () => {
       const draft = Y.encodeStateAsUpdate(markdownToYDoc("# Plan\n\nBefore.\n\nKept here."));

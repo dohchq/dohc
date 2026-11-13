@@ -1,9 +1,8 @@
 //! The path floor: which workspace-relative paths a scan excludes.
 //!
-//! This ports the win32-safe classification *lessons* from the retired
-//! reference accelerator (its documented output survives as
-//! `tests/fixtures/workspace-kernel/`) and the shared TypeScript path floor
-//! (`packages/security-contract/src/enginePathFloor.ts`): a path is
+//! This ports the win32-safe classification of the shared TypeScript path
+//! floor (`packages/security-contract/src/enginePathFloor.ts`). The reference
+//! output is `tests/fixtures/workspace-kernel/`. A path is
 //! excluded if any segment is reserved (`.dohc`, `.git`, `node_modules`), a
 //! segment carries an ignored write-temp prefix (`.dohc-write-`), a segment is
 //! metadata the OS writes beside user files (`.DS_Store`, `._*`, `Thumbs.db`),

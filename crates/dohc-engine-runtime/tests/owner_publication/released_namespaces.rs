@@ -1,5 +1,5 @@
-//! Sol's any-namespace ruling: a capture released without adopting in one
-//! relay namespace, beside the document's activation in another.
+//! A capture released without adopting in one relay namespace, beside the
+//! document's activation in another.
 
 use super::*;
 
@@ -174,14 +174,13 @@ fn over_head(
     op
 }
 
-/// Sol's any-namespace ruling, while A is current: B, a capture in another
-/// namespace, released without adopting, and A then adopted in "relay". A
-/// rewrite of the host's head and a delete from the
-/// owner's desktop, from its own head or over the host's, fed from B's
-/// namespace find no protecting window. Each leaves A's native state and the
-/// document's snapshot as they were, with nothing to materialize: over the
-/// host's head the current activation's guard refuses it, and from the
-/// desktop's own head it opens a conflict.
+/// While A is current: B, a capture in another namespace, released without
+/// adopting, and A then adopted in "relay". A rewrite of the host's head and
+/// a delete from the owner's desktop, from its own head or over the host's,
+/// fed from B's namespace find no protecting window. Each leaves A's native
+/// state and the document's snapshot as they were, with nothing to
+/// materialize: over the host's head the current activation's guard refuses
+/// it, and from the desktop's own head it opens a conflict.
 #[tokio::test]
 async fn input_fed_from_a_released_namespace_never_replaces_a_current_activations_state() {
     let mut cases = vec![("a rewrite".to_owned(), None, true)];
@@ -255,10 +254,10 @@ async fn input_fed_from_a_released_namespace_never_replaces_a_current_activation
     }
 }
 
-/// Sol's any-namespace ruling, once A releases: tails validated while only
-/// B's release stood, and a validation in flight then, never answer for A's
-/// release. The next decision on each validates again, and A's Carried
-/// deliveries protect the lineage under A's tail alone.
+/// Once A releases: tails validated while only B's release stood, and a
+/// validation in flight then, never answer for A's release. The next
+/// decision on each validates again, and A's Carried deliveries protect the
+/// lineage under A's tail alone.
 #[tokio::test]
 async fn protection_resumes_for_a_released_activations_work_beside_another_namespace() {
     let mut host = window_host().await;

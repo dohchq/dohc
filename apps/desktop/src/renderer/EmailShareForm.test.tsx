@@ -218,7 +218,7 @@ describe("EmailShareForm", () => {
     const code = await screen.findByTestId("share-code");
     expect(code.textContent).toBe(SHARE_CODE);
     expect(screen.queryByTestId("share-browser-invitation-copy")).toBeNull();
-    // #2886: shares end from the Sharing view.
+    // Shares end from the Sharing view.
     expect(screen.getByText("You can end this share anytime from Sharing.")).toBeTruthy();
 
     await user.click(screen.getByTestId("share-code-copy"));

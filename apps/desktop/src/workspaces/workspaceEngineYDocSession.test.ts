@@ -1145,9 +1145,9 @@ it("keeps the close loud when the file still holds this document's bytes", async
 // out — against a daemon slow enough for the update queue to back up behind
 // the settle debounce, which is what a loaded machine produces.
 //
-// Before the fix, main counted an edit when the IPC arrived rather than when
-// the session handed it to the settle, so a settle carrying 3 of 12 edits
-// reported all 12 and the editor read "Saved" over a third of the document.
+// Main must count an edit when the session hands it to the settle, not when
+// the IPC arrives. Otherwise a settle carrying 3 of 12 edits reports all 12
+// and the editor reads "Saved" over a third of the document.
 it("never reports a save seq the settled file does not back", async () => {
   // Short enough that the queue cannot drain between settles; the delay below
   // makes every journal RPC outlast it.
@@ -1436,8 +1436,8 @@ it("writes a retained edit when its document reopens, and says Saving… before 
 });
 
 // Only the open is under test here. Startup capture reaching the empty file
-// first, and folding it over the draft, is the capture-fold loss owned by
-// #1232; nothing below covers it.
+// first, and folding it over the draft, is a separate capture-fold loss;
+// nothing below covers it.
 describe("a crash-kept draft of a file capture never recorded", () => {
   const DRAFT = "notes/draft.md";
   beforeEach(async () => {
@@ -1491,7 +1491,7 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
     scheduleSettle: () => () => undefined,
   });
   // A head-absent open seeds nothing (there is no captured snapshot to seed
-  // from — #721/#728), so the crash's own typed content has to arrive as a
+  // from), so the crash's own typed content has to arrive as a
   // real local edit, exactly as it would from a live editor.
   const crashEditor = new Y.Doc();
   Y.applyUpdate(crashEditor, crashed.initialUpdate);

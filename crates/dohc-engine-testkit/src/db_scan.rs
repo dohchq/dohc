@@ -7,7 +7,7 @@
 //! would leak it into `engine.db`, its `-wal`, or its `-shm`. The only proof is
 //! to read those files as bytes and look.
 //!
-//! Two rules make the scan a proof instead of a ritual:
+//! These rules make the scan a proof instead of a ritual:
 //!
 //! 1. **A scan that read nothing passes every absence assertion.** [`EngineDbScan::read`]
 //!    fails when the main database is missing or empty, and every absence

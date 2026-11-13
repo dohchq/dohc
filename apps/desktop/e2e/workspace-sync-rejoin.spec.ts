@@ -35,7 +35,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// 0P-C — the multi-machine sync product proof. One real Electron app is
+// The multi-machine sync product proof. One real Electron app is
 // "this machine". A test-only protocol peer seeds the remote machine's state
 // because the serial harness cannot run two Electron instances. The relay is
 // the real service, spawned as a child process with its SQLite on tmpfs.
@@ -585,11 +585,11 @@ test("protected join preserves a failed folder, then restores exact secret and b
   }
 });
 
-// Enable-sync product proof (G2-C-3 gate fix): turning sync ON for a
-// LOCAL-ONLY workspace must claim the bucket on the RELAY alone. workspace-api
-// is now auth-only and 404s every non-auth route, so the retired
-// `POST ${serverUrl}/workspaces` preclaim would fail the whole flow with
-// "Enabling sync failed (404)" before the relay claim ever ran. This drives
+// Enable-sync product proof: turning sync on for a local-only workspace must
+// claim the bucket on the relay alone. workspace-api is auth-only and 404s
+// every non-auth route, so a `POST ${serverUrl}/workspaces` preclaim would
+// fail the whole flow with "Enabling sync failed (404)" before the relay
+// claim ever ran. This drives
 // the real cloudEnableSync IPC against a real relay (no workspace-api at all)
 // and proves the workspace claims, binds, and pushes its content end to end.
 test("enabling sync claims the workspace on the relay alone (no workspace-api preclaim)", async () => {
@@ -628,9 +628,8 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Drive the real enable-sync IPC. Before the fix this rejects with
-    // "Enabling sync failed (404)"; after it, the relay claim is authoritative
-    // and it resolves with a live sync status.
+    // Drive the real enable-sync IPC. The relay claim is authoritative, so it
+    // resolves with a live sync status and not "Enabling sync failed (404)".
     const enableResult = await page.evaluate(async (id) => {
       const api = (
         window as unknown as {

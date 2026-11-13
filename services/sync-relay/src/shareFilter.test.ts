@@ -625,7 +625,7 @@ describe("share op filter", () => {
   });
 });
 
-// MU-C4 shared channels: the chat selector + the chat branch of the
+// Shared channels: the chat selector + the chat branch of the
 // fail-closed filter.
 describe("chat share selector", () => {
   it("validates channelWireId and access separately", () => {
@@ -697,7 +697,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     expect(presenceTopicAllowedForShare(pathShare, "secrets/b.md")).toBe(false);
   });
 
-  // MU-C6 thread presence: a chat grant also admits `chat:thread:<tid>`
+  // Thread presence: a chat grant also admits `chat:thread:<tid>`
   // — but only for a thread that binds to the granted channel via the same
   // forge-resistant earliest-binding resolver the durable chat filter uses.
   it("admits a thread topic bound to the granted channel", () => {

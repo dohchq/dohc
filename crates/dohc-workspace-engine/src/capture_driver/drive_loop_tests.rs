@@ -301,9 +301,9 @@ async fn a_failing_start_is_retried_on_the_escalating_backoff() {
 
 #[tokio::test(start_paused = true)]
 async fn a_watch_that_dies_every_tick_rebuilds_on_the_backoff_not_hot() {
-    // The regression this shard exists for. The layer starts fine every
-    // time and then loses its watch, so a naive loop rebuilds — full
-    // actor + watcher + baseline scan — every drive interval forever.
+    // The layer starts fine every time and then loses its watch, so a naive
+    // loop rebuilds — full actor + watcher + baseline scan — every drive
+    // interval forever.
     let (journal, status) =
         drive_for(vec![Script::WatchLost], std::time::Duration::from_secs(20)).await;
     assert!(

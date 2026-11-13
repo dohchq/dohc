@@ -5,23 +5,21 @@ import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 
 // Escape hatches for container blocks that otherwise trap the caret.
 //
-// The engine-mode (collab) editor has NO trailing-node extension — auto-
-// appending a paragraph would write to the shared Y.Doc on mere open — so a
-// document that ends in a callout, table, or fenced block has no paragraph to
-// escape into. And a folded callout ("toggle") hides its body with CSS, so the
-// default join/caret behavior around it moves text into (or the caret onto)
-// content the user cannot see.
+// The engine-mode (collab) editor has no trailing-node extension, because
+// auto-appending a paragraph would write to the shared Y.Doc on mere open. A
+// document that ends in a callout, table, or fenced block then has no
+// paragraph to escape into. A folded callout ("toggle") hides its body with
+// CSS, so the default join and caret behavior around it moves text into, or
+// the caret onto, content the user cannot see.
 //
-// This plugin adds intent-driven exits instead of background doc mutation:
+// This plugin adds exits on a key press instead of changing the doc unasked:
 //   - Mod-Enter anywhere nested (callout, table cell, list, …) or on a block
 //     NodeSelection places the caret in a paragraph after the top-level block.
 //     Without this, HardBreak's Mod-Enter swallows the key inside callouts.
-//   - ArrowDown at the very end of the document, when the caret is trapped
-//     inside a top-level callout/table or a code-style block, creates the
-//     paragraph below. This covers codeBlock, callout, and table node types.
-//   - Arrow/Backspace/Delete next to a folded callout select the callout node
-//     instead of joining into / moving the caret onto its hidden body. A
-//     second Backspace/Delete then removes it — making toggles deletable.
+//   - ArrowDown at the very end of the document, with the caret inside a
+//     top-level callout, table, or code block, creates the paragraph below.
+//   - Arrow, Backspace, and Delete next to a folded callout select the
+//     callout node. A second Backspace or Delete then removes it.
 //
 // Registration order matters: this plugin must sit after the slash-command
 // plugin (so menu navigation keeps ArrowDown while the menu is open), before

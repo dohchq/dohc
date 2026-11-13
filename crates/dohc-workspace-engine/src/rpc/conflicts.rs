@@ -761,12 +761,11 @@ impl EngineService {
         let metadata_origin = validated_origin(Some(&local.metadata_origin))?;
         // The answer is built after the mutation commits. Withholding (below)
         // takes out every body, never the strings beside them, so an answer
-        // whose withheld form still passes the frame cannot be sent at all —
-        // and by then the resolution has happened, which turns a transport
-        // limit into a lost acknowledgement. So the answer is bounded before
-        // anything is written: reserve what this request's own fields will
-        // spend, and the resolve transaction refuses inside itself, without
-        // writing, if the conflict cannot fit in what remains.
+        // whose withheld form still passes the frame cannot be sent, and a
+        // transport limit becomes a lost acknowledgement. So the answer is
+        // bounded before anything is written: reserve what this request's own
+        // fields will spend, and the resolve transaction refuses inside
+        // itself, without writing, if the conflict cannot fit in what remains.
         //
         // The reservation is an upper bound, not an estimate. Every string a
         // withheld answer serves is one of three things:
@@ -776,22 +775,14 @@ impl EngineService {
         //      place the answer repeats them;
         //   3. scaffolding, fixed-width fields, and the removed head's
         //      metadata pair — `RESOLVE_ANSWER_STRUCTURAL_BYTES`.
-        // Nothing else can appear. The write and delete blocks describe the
-        // live head, and `live_state_matches_conflict_current` admits a
-        // resolution only when that head matches the recorded current side on
-        // path, object and latest moment — so those identifiers are the
-        // conflict row's, already counted in (1).
+        // The write and delete blocks describe the live head, which
+        // `live_state_matches_conflict_current` requires to match the recorded
+        // current side on path, object and latest moment, so (1) already
+        // counts those identifiers.
         //
-        // Healthy work cannot reach it, measured rather than assumed. Three
-        // UUID identifiers served twelve times cost under 600 bytes, and the
-        // sibling write paths cap a metadata field at
-        // `MAX_METADATA_FIELD_BYTES`. `a_worst_legitimate_resolve_is_admitted`
-        // runs the heaviest legitimate resolve there is — every free-form
-        // field at that cap, in its escaping-heaviest form, on the conflict
-        // and on the request — and its conflict measures 655,980 encoded
-        // bytes against a budget of about 8.13 MB, twelve times inside it.
-        // The only conflicts this can refuse carry metadata within a quarter
-        // megabyte of an entire control frame.
+        // Healthy work cannot reach the limit. The heaviest legitimate
+        // resolve, in `a_worst_legitimate_resolve_is_admitted`, measures
+        // 655,980 encoded bytes against a budget of about 8.13 MB.
         let conflict_answer_budget_bytes = RESPONSE_FRAME_BYTES
             .saturating_sub(resolve_answer_beside_conflict_bytes(&local))
             .saturating_sub(RESOLVE_ANSWER_STRUCTURAL_BYTES);

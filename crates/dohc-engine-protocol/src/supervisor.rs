@@ -1,5 +1,4 @@
-//! Bounded request supervisor skeleton (tokio), replacing the workspace
-//! kernel spike's one-OS-thread-per-request dispatch.
+//! Bounded request supervisor skeleton (tokio).
 //!
 //! Properties (each covered by a test):
 //!
@@ -31,8 +30,8 @@
 //! guarantee — concurrent requests are unordered, only events are ordered.
 //!
 //! Skeleton scope: single session, no event stream, no blob scheduling, no
-//! per-workspace actors — those live in `dohc-engine-runtime` later. This
-//! exists to prove the dispatch shape and its bounds.
+//! per-workspace actors. Those live in `dohc-engine-runtime`. This exists to
+//! prove the dispatch shape and its bounds.
 
 use crate::cancel::CancelSignal;
 use crate::error::{ErrorCode, WireError};

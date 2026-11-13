@@ -93,9 +93,9 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-// codex r14. The empty-cache guard was one instance of the rule, not the rule.
-// A live engine document is CANONICAL (AGENTS.md product invariant) and
-// `props.body` is the markdown cache beside it — it lags every edit the Y.Doc
+// The empty-cache guard is one instance of the rule, not the rule.
+// A live engine document is canonical (AGENTS.md product invariant) and
+// `props.body` is the markdown cache beside it. It lags every edit the Y.Doc
 // has taken since the read, and it is empty on the failed-read recovery path.
 // Exporting it while the only serializer of the canonical doc is
 // unmounted writes a file that is not the user's document, and says it saved.
@@ -141,8 +141,8 @@ describe("engine-mode export with no mounted serializer", () => {
     },
   );
 
-  // codex r19: the same rule, one state over. A timed-out open leaves the
-  // LOCAL branch on screen — the plain editor, read-only, over the file — while
+  // The same rule, one state over. A timed-out open leaves the
+  // local branch on screen (the plain editor, read-only, over the file) while
   // the daemon may still hold a session whose Y.Doc took replicated updates the
   // file has never seen. Exporting the disk body there reports a document that
   // is not the document, which is what the engine branch already refuses to do.
@@ -194,10 +194,10 @@ describe("engine-mode export with no mounted serializer", () => {
     );
   });
 
-  // codex r21: the same rule for the wait, not just for the wait giving up.
-  // While the open is unresolved the disk may not be the document — a session
+  // The same rule for the wait, not just for the wait giving up.
+  // While the open is unresolved the disk may not be the document: a session
   // that binds a moment later can hold replicated updates the file has never
-  // seen — and that window is long now that a refused release can hold it.
+  // seen. That window is long, because a refused release can hold it.
   it("refuses the export while the engine open is still unresolved", async () => {
     const user = userEvent.setup();
     const bridge = engineBridge(DOC_MARKDOWN);

@@ -184,7 +184,7 @@ async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promi
 }
 
 // The engine capture path these tests exercise relies on Linux descriptor-
-// relative fs (the same platform gate the retired durable history used).
+// relative fs.
 const itDurableHistory = process.platform === "linux" ? it : it.skip;
 
 // The traversal vectors every path-taking tool must refuse: parent escape,
@@ -761,8 +761,7 @@ describe("mcp tools operate on allowed paths", () => {
   it("mutating tools work on platforms without durable legacy history", async () => {
     await withWorkspace(async (ctx) => {
       await withProcessPlatform("darwin", async () => {
-        // The retired legacy recorder used to fail closed here; the engine
-        // capture path has no such platform gate, so mutations proceed.
+        // The engine capture path has no platform gate, so mutations proceed.
         await expect(
           writeWorkspaceFile(ctx, { path: "notes/nested/plan.txt", content: "draft\n" }),
         ).resolves.toMatchObject({ ok: true });
@@ -947,7 +946,7 @@ describe("mcp tools operate on allowed paths", () => {
         JSON.stringify({ id: "relic-1", summary: "Pre-flip edit" }),
       );
 
-      // A new MCP write records nothing legacy (Phase C).
+      // A new MCP write records nothing legacy.
       await expect(
         writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
       ).resolves.toMatchObject({ ok: true });
@@ -2479,10 +2478,10 @@ describe("a symlink cannot alias a reserved area", () => {
   });
 });
 
-// #638 on the surfaces next door. safeResolve hands every tool both spellings
-// of a path; a guard that decides authority has to read the resolved one. Each
-// case here passes its guard on the name the agent asked for, and the guard is
-// the last thing standing between the alias and the bytes behind it.
+// safeResolve hands every tool both spellings of a path; a guard that decides
+// authority has to read the resolved one. Each case here passes its guard on
+// the name the agent asked for, and the guard is the last thing standing
+// between the alias and the bytes behind it.
 describe("a guard that decides authority reads the resolved path", () => {
   const marker = "MCP_ALIAS_LEAK_31";
 

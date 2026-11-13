@@ -3493,7 +3493,7 @@ mod tests {
         service.workspace_close(Some(workspace)).await.unwrap();
     }
 
-    /// N8: an unload queued for a predecessor before its successor took the
+    /// An unload queued for a predecessor before its successor took the
     /// document reads the activation only once it holds the session lock,
     /// and cannot end the successor.
     #[tokio::test]

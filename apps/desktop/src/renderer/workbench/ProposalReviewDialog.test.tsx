@@ -87,8 +87,8 @@ describe("ProposalReviewDialog", () => {
     );
   });
 
-  // The whole review is one read. It used to be a listing plus one read per
-  // file, and each of those re-read the entire listing from the relay.
+  // The whole review is one read. A listing plus one read per file would
+  // re-read the entire listing from the relay for each file.
   it("reads the whole review once, however many files it holds", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({

@@ -204,7 +204,7 @@ fn seeds(f: &Fixture) -> Vec<(String, i64)> {
         .unwrap()
 }
 
-/// Sol's plan §5: the prefix is the evidence's tenth element, only when
+/// The prefix is the evidence's tenth element, only when
 /// present, identically in Rust and TypeScript.
 #[test]
 fn owner_adoption_evidence_matches_the_shared_vectors() {
@@ -268,7 +268,7 @@ fn a_prefix_cut_is_its_prefix_alone() {
     assert!(validate_cut(&f.cut, &f.binding, 1_000_000, 10).is_err(), "no predecessor");
 }
 
-/// Sol's plan §5, adoption: the successor of the exact released tail adopts
+/// The successor of the exact released tail adopts
 /// its prefix. It inserts its own activation under the lineage's origin,
 /// names the binding, and leaves the root adoption and the accepted history
 /// as they were. Unchanged state queues no seed; an offline edit queues one
@@ -436,7 +436,7 @@ fn each_succession_requirement_refuses_without_writes() {
     }
 }
 
-/// Sol's any-namespace ruling, through adoption: once a lineage adopted in
+/// Once a lineage adopted in
 /// one namespace, a capture in another neither adopts it first nor succeeds
 /// the released tail; each refuses with no writes.
 #[test]
@@ -603,7 +603,7 @@ fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
     }
 }
 
-/// Opus, round 3b delta, and Sol's round 4a ruling: two never-adopted
+/// Two never-adopted
 /// captures. While the first one's retirement settles the document, the
 /// second can't adopt. Once the first releases, the second is stale: it
 /// follows nothing while the first is the tail, so neither its registration
@@ -825,7 +825,7 @@ fn release_and_return(f: &mut Fixture) {
     file_matches_local(f, "returned");
 }
 
-/// Sol's round 4a ruling: a refusal belongs to its delivery, never to the
+/// A refusal belongs to its delivery, never to the
 /// document's lineage. A native update and the owner write that built on it,
 /// refused through the host's refusal path; an adoption seed refused the same
 /// way; and an update enrollment recovery ended: each releases, and a
@@ -1039,7 +1039,7 @@ type SeedDamage = (&'static str, bool, fn(&mut Fixture));
 const SEED_CAPTURE: &str = "FROM ydoc_owner_activation_sources WHERE activation_id=(SELECT
     json_extract(native_source_json,'$.adoptionId') FROM owner_ydoc_outbox_entries WHERE sequence=1)";
 
-/// Sol's round 4a ruling: a refused seed has no journal row, so the capture
+/// A refused seed has no journal row, so the capture
 /// of the activation it names is its proof. That activation adopted the
 /// lineage, and its capture is present and holds the seed's native sequence
 /// and full state. Each damage leaves the seed a valid entry under a
@@ -1111,7 +1111,7 @@ fn quarantined_seed_released() -> (Fixture, String) {
     (f, root)
 }
 
-/// Sol's B1: the successor reopens the outbox its predecessor's refused seed
+/// The successor reopens the outbox its predecessor's refused seed
 /// quarantined, in its adoption: active again, with its entries and sequence
 /// kept and the successor's seed next. A failure before commit rolls the
 /// reopening back with the adoption, and a replay after a lost reply writes
@@ -1385,7 +1385,7 @@ fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
     }
 }
 
-/// Sol's merge-review finding 2: the successor of a lineage whose baseline
+/// The successor of a lineage whose baseline
 /// the reader built adopts its released prefix, its accepted state at B
 /// replayed from that baseline by the reader's rule.
 #[test]
@@ -1408,7 +1408,7 @@ fn a_reader_built_lineage_adopts_its_successor() {
     assert!(current);
 }
 
-/// Sol's merge-review finding 2: a lineage whose baseline the reader built
+/// A lineage whose baseline the reader built
 /// writes its checkpoint at the native cadence, and its accepted state
 /// replays from that checkpoint.
 #[test]

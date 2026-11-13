@@ -211,7 +211,7 @@ export interface DmRequestLanes {
   declined: DmRequestRow[];
 }
 
-// #742 P1 (rounds 3–4): the last successfully classified request lanes, per
+// The last successfully classified request lanes, per
 // workspace. Staleness contract: last-known-until-next-success OR
 // session-transition. set() is called only after a successful classify —
 // never on failure, which is what makes "last known" mean something. clear()
@@ -246,7 +246,7 @@ export type LastKnownDmRequestLanesCache = ReturnType<typeof createLastKnownDmRe
 // own awaits — a session transition (account switch) can land while an old
 // account's classify is still in flight. Without a guard, that stale result
 // would repopulate the cache right after the transition just cleared it,
-// silently reopening the round-4/5 cross-account leak. credentialGeneration
+// and leak one account's rows to the next. credentialGeneration
 // is main.ts's own credentialCacheGeneration — the same stale-work guard
 // this codebase already uses elsewhere (e.g. remoteForWorkspace): captured
 // before classify() starts, compared again after it resolves. A mismatch

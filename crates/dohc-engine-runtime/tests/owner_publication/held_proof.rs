@@ -1,8 +1,7 @@
-//! Sol's r2c rulings, items B4, B5 and B6 and ruling 2: a held document's
-//! proof runs off the actor, and the actor releases its answer only while
-//! what it read still stands, comparing that with bounded reads. Callers
-//! that ask the same share one proof; the last to leave stops it, and so
-//! does closing the store, which waits for its reader.
+//! A held document's proof runs off the actor, and the actor releases its
+//! answer only while what it read still stands, comparing that with bounded
+//! reads. Callers that ask the same share one proof; the last to leave stops
+//! it, and so does closing the store, which waits for its reader.
 
 use super::*;
 use dohc_engine_runtime::RuntimeError;
@@ -83,8 +82,8 @@ async fn reached(what: &str, reached: impl std::future::Future<Output = ()>) {
         .unwrap_or_else(|_| panic!("{what}"));
 }
 
-/// Ruling B, item 4: while a proof holds at its snapshot, the actor answers
-/// other reads, and the held read answers once the proof goes on.
+/// While a proof holds at its snapshot, the actor answers other reads, and
+/// the held read answers once the proof goes on.
 #[tokio::test]
 async fn the_actor_answers_other_work_while_a_held_proof_runs() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -138,24 +137,22 @@ fn generation(w: &RetainedWindow) -> i64 {
 const LATEST_SNAPSHOT: &str = "object_id='object' AND up_to_seq=
     (SELECT max(up_to_seq) FROM ydoc_snapshots WHERE object_id='object')";
 
-/// Ruling B, item 5, ruling 2, and Sol's r2c-3c-1 findings 1 and 3: once
-/// anything the proof read moves after its snapshot, through another writer
-/// connection, the answer is stale and carries no preservation, projection
-/// or artifact, and nothing proves again. Each case changes one input alone,
-/// and moves the document's released tail generation only when that is the
-/// input: authorship a draft declares, a native update's author, a seed's
-/// capture, the bytes a contribution names, the store's identity, the hold's
-/// binding, path, continuation and stale flag, the document's path, the
-/// restore generation or fence, the head's kind, last row and compaction,
-/// the head's snapshot row or its bytes, a journal row past the head or
-/// inside what it loads, or that row's bytes. Sol's r2c-3c-3 finding 2 and
-/// Opus's finding 1: so does state that changes and changes back, a newer
-/// snapshot folding the inner row before both go, the latest snapshot
-/// rebound around damage to its bytes, or reseeded as it was; and so do the
-/// workspace's main version or the workspace itself, either coordinate of
-/// the feed, and the scope generation of the replica and its documents
-/// together. Moving the hold's reason, or the replica's scope alone, leaves
-/// nothing held.
+/// Once anything the proof read moves after its snapshot, through another
+/// writer connection, the answer is stale and carries no preservation,
+/// projection or artifact, and nothing proves again. Each case changes one
+/// input alone, and moves the document's released tail generation only when
+/// that is the input: authorship a draft declares, a native update's author,
+/// a seed's capture, the bytes a contribution names, the store's identity,
+/// the hold's binding, path, continuation and stale flag, the document's
+/// path, the restore generation or fence, the head's kind, last row and
+/// compaction, the head's snapshot row or its bytes, a journal row past the
+/// head or inside what it loads, or that row's bytes. So does state that
+/// changes and changes back, a newer snapshot folding the inner row before
+/// both go, the latest snapshot rebound around damage to its bytes, or
+/// reseeded as it was; and so do the workspace's main version or the
+/// workspace itself, either coordinate of the feed, and the scope generation
+/// of the replica and its documents together. Moving the hold's reason, or
+/// the replica's scope alone, leaves nothing held.
 mod changed_proof {
     use super::*;
 
@@ -305,11 +302,10 @@ mod changed_proof {
     );
 }
 
-/// Opus's r2c-3c-7 finding 2: a proof reads the state of the document its
-/// binding names, so a binding stored on another document's row proves
-/// nothing of that row. The window's hold copied, binding and digest as they
-/// were, onto a second document answers stale there, while the window's own
-/// still answers current.
+/// A proof reads the state of the document its binding names, so a binding
+/// stored on another document's row proves nothing of that row. The window's
+/// hold copied, binding and digest as they were, onto a second document
+/// answers stale there, while the window's own still answers current.
 #[tokio::test]
 async fn a_binding_naming_another_document_is_stale() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -337,9 +333,9 @@ async fn a_binding_naming_another_document_is_stale() {
     w.close().await;
 }
 
-/// Ruling B, item 6: callers that ask the same of the same state share one
-/// proof, which runs once and answers each of them alike. One that leaves
-/// early takes only its own wait with it.
+/// Callers that ask the same of the same state share one proof, which runs
+/// once and answers each of them alike. One that leaves early takes only its
+/// own wait with it.
 #[tokio::test]
 async fn identical_callers_share_one_proof_and_one_leaving_stops_only_its_wait() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -370,9 +366,9 @@ async fn identical_callers_share_one_proof_and_one_leaving_stops_only_its_wait()
     w.close().await;
 }
 
-/// Ruling B, item 6: a proof stops inside a statement once its last caller
-/// leaves: the reader's progress handler interrupts a statement no proof
-/// could finish, and the reader closes before the caller answers.
+/// A proof stops inside a statement once its last caller leaves: the
+/// reader's progress handler interrupts a statement no proof could finish,
+/// and the reader closes before the caller answers.
 #[tokio::test]
 async fn a_proof_stops_inside_a_statement_once_its_caller_leaves() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;
@@ -451,12 +447,11 @@ async fn a_dead_actors_reader_keeps_its_store_fenced() {
     desktop.close().await;
 }
 
-/// Sol's and Opus's merge-review finding 1: a proof's reader still opening
-/// past the close bound keeps its store's location once close failed, its
-/// caller was answered, and the actor and every handle went. On Linux the
-/// reader opens by this process's descriptor for the store's folder, so
-/// while a second workspace opens, that path still names the first store,
-/// and the reader opens it once it goes on.
+/// A proof's reader still opening past the close bound keeps its store's
+/// location once close failed, its caller was answered, and the actor and
+/// every handle went. On Linux the reader opens by this process's descriptor
+/// for the store's folder, so while a second workspace opens, that path
+/// still names the first store, and the reader opens it once it goes on.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_reader_opening_past_the_close_bound_keeps_its_store() {
@@ -522,12 +517,12 @@ async fn a_reader_opening_past_the_close_bound_keeps_its_store() {
     desktop.close().await;
 }
 
-/// Sol's r2c-3c-2 finding 4 and Opus's "old finding 2": a proof held at its
-/// merge gives way when actor writes press the WAL. Callers retry only storage
-/// FileLocked after checkpoint completion, within the client's busy budget.
-/// A new proof is busy while the WAL presses; the held proof answers busy and
-/// closes its reader. Further writes succeed with the same bounded retries
-/// past the length the store refuses writes at while a reader holds the WAL.
+/// A proof held at its merge gives way when actor writes press the WAL.
+/// Callers retry only storage FileLocked after checkpoint completion, within
+/// the client's busy budget. A new proof is busy while the WAL presses; the
+/// held proof answers busy and closes its reader. Further writes succeed
+/// with the same bounded retries past the length the store refuses writes at
+/// while a reader holds the WAL.
 #[tokio::test]
 async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
     async fn write_with_checkpoint_retry(w: &RetainedWindow, sql: &'static str, budget: Duration) {
@@ -597,11 +592,11 @@ async fn a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding() {
     w.close().await;
 }
 
-/// Opus's r2c-3c-6 finding 1: a hold whose contribution artifact passes its
-/// cap still answers current, with the preservation, Markdown included, it
-/// answers within the cap, and names no artifact, which it says is too
-/// large. Only the artifact is refused. Opus's r2c-3c-8 finding 4: its merged
-/// list's commitment is the one the artifact within the cap names.
+/// A hold whose contribution artifact passes its cap still answers current,
+/// with the preservation, Markdown included, it answers within the cap, and
+/// names no artifact, which it says is too large. Only the artifact is
+/// refused. Its merged list's commitment is the one the artifact within the
+/// cap names.
 #[tokio::test]
 async fn an_artifact_past_its_cap_leaves_the_preservation_answering() {
     let (w, desktop, _client) = held_for_a_queued_fold().await;

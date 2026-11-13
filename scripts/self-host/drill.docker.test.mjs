@@ -12,6 +12,9 @@ import { runMove } from "./move.mjs";
 
 // Not in the root test list: it needs a Linux Docker host and the image named by DOHC_RECOVERY_TEST_IMAGE.
 // Build the image from this checkout. See "Move to a new host" in docs/how-to/self-host-recovery.md.
+// Run it with: DOHC_RECOVERY_TEST_IMAGE=<image> node --test scripts/self-host/drill.docker.test.mjs
+// It carries the accounts volume over by name, so it does not prove the accounts volume copy commands.
+// A killed container does not lose the host's write cache, so it does not prove survival of a power loss.
 const skip = !process.env.DOHC_RECOVERY_TEST_IMAGE
   ? "Set DOHC_RECOVERY_TEST_IMAGE to a built self-host image."
   : process.platform !== "linux"

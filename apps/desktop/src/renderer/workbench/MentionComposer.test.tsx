@@ -382,8 +382,8 @@ describe("MentionComposer autocomplete", () => {
   it("keeps the collapsed prompt on one line inside its pill", async () => {
     render(<Harness surface="post" />);
     const pill = screen.getByTestId("chats-open");
-    // A narrow channel column used to wrap this prompt past the pill's fixed
-    // height; it now shortens inside the border and the tooltip carries it.
+    // A narrow channel column must not wrap this prompt past the pill's fixed
+    // height. It shortens inside the border and the tooltip carries it.
     expect(within(pill).getByText("Write a message…").className).toContain("truncate");
     expect(pill.getAttribute("title")).toBe("Write a message…");
     // Shortening the text costs the pill neither its name nor its job.

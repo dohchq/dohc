@@ -160,7 +160,7 @@ async fn secret_merge_replay(
     }
     std::fs::write(root.join("foo.env"), "TOKEN=base").unwrap();
     if !delete_first {
-        // The desktop's merge places deletes before writes (#2240).
+        // The desktop's merge places deletes before writes.
         std::fs::remove_file(root.join("foo.env")).unwrap();
         std::fs::write(root.join(placed), "TOKEN=target").unwrap();
     }
@@ -468,7 +468,7 @@ async fn text_case_only_merge_survives_reopen_replay() {
 
 /// The merge's delete of `from` fails for a moment, as a busy file makes it,
 /// and stays pending. The merge then writes `to`. With `edit`, the person
-/// changes the file before that write (#2369).
+/// changes the file before that write.
 async fn text_case_only_merge_after_failed_delete(
     rename: CaseRename<'_>,
     text: &str,
@@ -638,8 +638,7 @@ async fn text_case_only_merge_with_equal_bytes_keeps_the_new_spelling() {
 }
 
 /// A switch's delete of `path` that couldn't finish replays after the person
-/// renamed `from` to `to` on disk and capture recorded the file at `renamed`
-/// (#2299).
+/// renamed `from` to `to` on disk and capture recorded the file at `renamed`.
 async fn pending_switch_delete_after_rename(path: &str, from: &str, to: &str, renamed: &str) {
     let root = ScratchDir::new().unwrap();
     if !ignores_case(&root) {

@@ -1,5 +1,5 @@
-//! RPC-C acceptance: daemon-owned Y.Doc sessions over the in-process
-//! transport, with real domain writes, materialization, capture, and leases.
+//! Daemon-owned Y.Doc sessions over the in-process transport, with real
+//! domain writes, materialization, capture, and leases.
 
 use crate::common;
 
@@ -1096,10 +1096,8 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     let rich_session = rich["sessionId"].as_str().expect("rich session");
-    // Richdoc settles since the full-fidelity projection landed (R15-3): the
-    // body fragment projects to markdown, and the settle materializes the .md
-    // like plaintext does. (The C1-era refusal was a stale guard — the desktop
-    // editor could journal rich edits that never reached the file.)
+    // Richdoc settles: the body fragment projects to markdown, and the
+    // settle materializes the .md like plaintext does.
     let rich_update = {
         let doc = Ydoc::wire();
         base64::engine::general_purpose::STANDARD
@@ -2361,7 +2359,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     assert!(scratch.path().join("old.bin").exists());
 
     // Delete the renamed destination while its write job is still pending —
-    // the cancellation this PR adds fires here.
+    // the cancellation fires here.
     call_keyed(
         &transport,
         &handle,
@@ -2451,8 +2449,8 @@ async fn wait_for_captured_head(
     panic!("capture never ingested {path} as {text:?}; last head: {head}");
 }
 
-/// #665, part B: a session that can neither settle nor prune evicts, and the
-/// reopen resurrects its edits.
+/// A session that can neither settle nor prune evicts, and the reopen
+/// resurrects its edits.
 ///
 /// The desktop reaches this on two populations `captureOnePath` never captures
 /// — a policy-excluded path, and a file between the 128 KiB capture limit and

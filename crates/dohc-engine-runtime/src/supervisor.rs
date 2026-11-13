@@ -891,7 +891,7 @@ mod tests {
     use dohc_macos_files::NotPrivateReason;
 
     /// A workspace folder whose ACL passes read and search to everyone must
-    /// not pass them to the engine's folder or its store (#2207).
+    /// not pass them to the engine's folder or its store.
     #[cfg(target_vendor = "apple")]
     #[test]
     fn a_new_store_takes_none_of_its_workspace_folders_acl() {
@@ -933,7 +933,7 @@ mod tests {
 
     /// A folder put at `.dohc/engine` after the engine checked the real one
     /// gets neither the store nor its journals. They open in the checked
-    /// folder, wherever it has moved (#2375).
+    /// folder, wherever it has moved.
     #[cfg(any(target_vendor = "apple", target_os = "linux"))]
     #[test]
     fn a_store_opens_in_the_folder_the_engine_checked() {

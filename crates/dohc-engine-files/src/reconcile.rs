@@ -1,8 +1,8 @@
 //! Reconcile: turn a scan diff into a **capture plan** (which files to ingest,
 //! which to retire), and own the watcher **dirty-generation** state machine.
 //!
-//! The plan is the CAL-3 deliverable; actual materialization/capture into the
-//! domain is a thin downstream call. Two invariants live here:
+//! This module produces the plan; actual materialization/capture into the
+//! domain is a thin downstream call. These invariants live here:
 //!
 //! - **Prepare, apply, then acknowledge.** A reconcile only prepares a bounded
 //!   plan. [`crate::capture`] applies its operations one at a time, then calls
@@ -13,7 +13,7 @@
 //! - **Dirty coalesces but never drops a change.** A watcher overflow (or any
 //!   uncertainty) sets the single dirty flag; many events coalesce to one
 //!   pending rescan, but the flag is cleared only by a completed apply/ack, so
-//!   evidence of a change is never lost (`plan §Workspace actor model`).
+//!   evidence of a change is never lost.
 
 use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans, gone_untracked};
 use crate::error::FilesError;
@@ -98,7 +98,7 @@ pub struct ReconcilePlan {
     /// A distinct, no-op disposition: not an `Ingest` (not re-hashed),
     /// never a `Retire` (the file exists). The engine keeps them tracked at
     /// their last-known-good content. Surfaced for
-    /// R07 materialization so it can leave these files untouched.
+    /// materialization so it can leave these files untouched.
     pub retained_unread: Vec<String>,
     /// Missing paths retained because a scan failure or final lstat result did
     /// not prove absence. Their prior manifest entries remain last-known-good.
@@ -484,7 +484,7 @@ fn stored_name_among(
 
 /// Owns the reconcile state: the last committed manifest, the current scan
 /// generation, and the dirty flag. This is the actor-native home of the
-/// watcher/reconcile generation (`plan §Workspace actor model`).
+/// watcher/reconcile generation.
 #[derive(Debug)]
 pub struct ReconcileController {
     manifest: ScanManifest,
@@ -528,7 +528,7 @@ impl ReconcileController {
     }
 
     /// A controller seeded with a manifest recovered from a process restart
-    /// (R14 robustness: manifest rehydration), rather than the empty
+    /// (manifest rehydration), rather than the empty
     /// baseline [`ReconcileController::new`] starts from. Without this, every
     /// restart treats every already-tracked, unchanged file as freshly
     /// `Added` — safe (capture is a content-equality no-op downstream) but

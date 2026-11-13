@@ -1,6 +1,6 @@
-//! Merging a path a second time compares against what was last merged there
-//! (#3211), not the fork point: a change already in Main is never asked about
-//! again, and a change the version reverts reaches Main.
+//! Merging a path a second time compares against what was last merged there,
+//! not the fork point: a change already in Main is never asked about again,
+//! and a change the version reverts reaches Main.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

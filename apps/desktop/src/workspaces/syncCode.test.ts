@@ -41,7 +41,7 @@ describe("syncCode", () => {
     expect(parseSyncCode("dohc-sync:ws:not-a-url")).toBeNull();
   });
 
-  // Security gate (0P-C gate fix): a pasted code is untrusted input and the
+  // Security gate: a pasted code is untrusted input and the
   // built code is copyable/screenshot-readable. Credentials, query strings,
   // and fragments must never ride a relay URL — in, out, or in comparison.
   it("rejects relay URLs carrying credentials, query strings, or fragments", () => {

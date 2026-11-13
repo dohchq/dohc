@@ -375,7 +375,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
   mkdirSync(join(ownerRoot, "docs"));
   writeFileSync(join(ownerRoot, "docs/a.md"), "Hello\n");
   const schema = `service_activation_${randomUUID().replaceAll("-", "")}`;
-  // The full gate once timed out a 2 s connect to a healthy Postgres (#1217).
+  // A 2 s connect to a healthy Postgres can time out under the full gate.
   const admin = new Client({ connectionString, connectionTimeoutMillis: 30_000 });
   const pool = new Pool({
     connectionString,
@@ -3929,7 +3929,7 @@ it(
   180000,
 );
 
-// Until the session host starts a document's Y.Doc itself (#2069), a file only
+// Until the session host starts a document's Y.Doc itself, a file only
 // written as text has nothing to activate, so it blocks instead of retrying.
 // Its owner only opens it, as the Notice tells them, and the lineage that
 // reaches the relay gives it one more attempt, which activates it.
@@ -4070,10 +4070,10 @@ it(
   120000,
 );
 
-// #3804: a store written before the fix holds a hosted note's queued writes. Opening it replayed every
-// one, and each write of a past version left a conflict file. Such a store also holds writes an earlier
-// replay already conflicted, each with its conflict file. The engine refuses this note's capture, as in
-// the case below, so nothing else ends its writes before the restart.
+// A store may hold a hosted note's queued writes. Replaying every one on open would leave a conflict
+// file for each write of a past version. Such a store also holds writes an earlier replay already
+// conflicted, each with its conflict file. The engine refuses this note's capture, as in the case
+// below, so nothing else ends its writes before the restart.
 it(
   "writes no conflict file for a hosted note's queued writes when the engine restarts",
   () =>
@@ -4205,7 +4205,7 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
           expect.objectContaining({ path, status: "preparing" }),
         );
         // The host pulls four later edits of the owner's, one at a time. Each pull queues a write of the note's file
-        // in its replica and writes the file itself. The pull ends the write it queued (#3804), so none waits when
+        // in its replica and writes the file itself. The pull ends the write it queued, so none waits when
         // live editing ends.
         for (const edit of ["second", "third", "fourth", "fifth"]) {
           await note.edit((doc) => doc.getMap("frontmatter").set(edit, "pulled"));
@@ -4257,7 +4257,7 @@ for (const ending of ["its owner stops live editing", "its last link ends"] as c
   );
 }
 
-// #2088: the operator puts back an older copy of the session host's store,
+// The operator puts back an older copy of the session host's store,
 // which lost live edits the host already pushed. The next attach finds that
 // before anyone edits: the workspace detaches, no capture runs, and the relay
 // keeps exactly what the host pushed.

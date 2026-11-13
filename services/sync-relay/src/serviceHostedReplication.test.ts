@@ -340,8 +340,8 @@ it("keeps each departed document the engine still holds until a reply that read 
   expect(f.driver.departedNone).toBe(true);
 });
 
-// Sol's review: departed documents the engine cannot park filled every
-// answer's departed list from the first, so one after them was never named.
+// Departed documents the engine cannot park must not fill every answer's
+// departed list from the first, or one after them is never named.
 // Proves: each pass asks for the departed documents after where the last
 // list stopped, its commit's list starts where the pass's did, and a page
 // says nothing past its window. A list that reached the last starts the

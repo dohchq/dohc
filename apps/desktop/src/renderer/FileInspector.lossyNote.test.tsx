@@ -26,7 +26,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-// The four forms the editor can't hold, from #2458.
+// The four forms the editor can't hold.
 const LOSSY = [
   "# Readme",
   "",

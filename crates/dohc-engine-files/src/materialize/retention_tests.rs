@@ -277,7 +277,7 @@ fn swap_engine_folder(root: &Path) -> PathBuf {
 /// names it. The engine folder then moves and another takes its name. After
 /// a restart, recovery still finds the version in the folder the store opens
 /// through and puts it back, and the retained-file check finds a retained
-/// version there by the name main stores (#2468).
+/// version there by the name main stores.
 #[cfg(all(
     any(target_vendor = "apple", target_os = "linux"),
     feature = "fault-injection"

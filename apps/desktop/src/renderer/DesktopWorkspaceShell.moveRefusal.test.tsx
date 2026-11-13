@@ -6,7 +6,7 @@ import { expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { WORKSPACE, makeBridge, renderShell } from "./DesktopWorkspaceShell.testHarness";
 
-// #3089: what main sends when the engine refuses a person's move of a shared
+// What main sends when the engine refuses a person's move of a shared
 // live page whose accepted edit isn't in the file yet, as the two-daemon test
 // meets it.
 const LIVE_MOVE_REFUSAL = new Error(

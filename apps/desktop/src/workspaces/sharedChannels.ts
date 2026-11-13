@@ -14,13 +14,13 @@ import {
 import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
-// MU-C4 shared channels — the desktop's refresh pass over a bounded window of
+// Shared channels: the desktop's refresh pass over a bounded window of
 // the shared channels a workspace has joined: push the member's locally-authored
 // channel ops through the share's member-append route, then pull everyone else's.
 // Best-effort by design: one failing share never blocks the others (or the
 // workspace's own sync pass), and a revoked share is reported as ended so the
 // caller can mark it in the registry — the local copy stays readable, it just
-// stops updating (PR-18's honest end-of-share).
+// stops updating.
 
 export const RELAY_FETCH_TIMEOUT_MS = 15_000;
 
@@ -112,18 +112,16 @@ export function scopeJoinedChannels(
   });
 }
 
-// Registry merge for the join flow (CodeRabbit Data Integrity): a re-join of
-// the same channel under a new share id (revoked + re-granted) must replace
-// the stale row, not sit beside it — matching on shareId alone left the
-// channel listed and synced twice.
+// Registry merge for the join flow: a re-join of the same channel under a new
+// share id (revoked + re-granted) must replace the stale row, not sit beside
+// it. Matching on shareId alone would leave the channel listed and synced
+// twice.
 //
-// It refuses nothing. The join gate this used to carry existed to bound the
-// joined-lane response, and the scoped read bounds that now. A desktop
-// that refused a join could not stop the relay granting one either — it could
-// only make the user's own channel unreachable, which is how the same cap
-// produced three permanent-refusal defects in one review cycle.
+// It refuses nothing. The scoped read bounds the joined-lane response. A
+// desktop that refused a join could not stop the relay granting one. It could
+// only make the user's own channel unreachable.
 //
-// The replacement happens IN PLACE. A re-granted channel is the same channel,
+// The replacement happens in place. A re-granted channel is the same channel,
 // and the sync rotation reads its position from this array — appending it would
 // move it to the end, which strands every row the rotation had not reached yet.
 // Only a channel this workspace has never joined is appended.
@@ -161,8 +159,8 @@ export function endJoinedChannel(
   );
 }
 
-// MU-C4 write gate (CodeRabbit security; product invariant "agent writes must
-// respect sharing boundaries"): a READ-ONLY or ended shared-channel grant must
+// Write gate (product invariant "agent writes must
+// respect sharing boundaries"): a read-only or ended shared-channel grant must
 // reject chat writes before any durable local mutation. The renderer disabling
 // its composers is honesty, not authorization — main is the boundary; without
 // this gate a crafted IPC call would mint durable local messages/reactions

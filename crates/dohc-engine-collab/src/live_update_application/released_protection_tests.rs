@@ -145,7 +145,7 @@ fn native_agent() -> RetainedAuthors {
     .unwrap()
 }
 
-/// Sol's 4b2i-1 ruling, the seam: a released tail protects its lineage while
+/// A released tail protects its lineage while
 /// retained work lacks proof of application. Its binding names the scope,
 /// the incoming coordinate, the head and the tail's coverage. An acknowledged
 /// seed the host never applied is Carried work too. Nothing retained, a
@@ -220,7 +220,7 @@ fn inspected(f: &Fixture, binding: &ReleasedLineageBinding) -> Preservation {
     }
 }
 
-/// Sol's r2c Ruling A: evidence is validated before work is committed to.
+/// Evidence is validated before work is committed to.
 /// A native update's journal row, its declarations, a draft's declarations,
 /// a pending entry's receipt and application, and a Carried delivery's
 /// journal row that contradict the rest each leave the whole tail invalid,
@@ -394,12 +394,11 @@ fn tail_generation_of(f: &Fixture) -> Option<i64> {
         .unwrap()
 }
 
-/// Sol's tails-cache ruling: the actor keeps a lineage's validated tails
-/// while the document's generation stands. Later decisions share the same
-/// tails, with no copy of their lists, and each reads its own path. A changed
-/// tail input, here both Carried deliveries applied, validates again. Sol's
-/// binding-cost ruling: the worker commits to the unproven work as it
-/// validates, and no decision commits to it again.
+/// The actor keeps a lineage's validated tails while the document's
+/// generation stands. Later decisions share the same tails, with no copy of
+/// their lists, and each reads its own path. A changed tail input, here both
+/// Carried deliveries applied, validates again. The worker commits to the
+/// unproven work as it validates, and no decision commits to it again.
 #[test]
 fn validated_tails_stand_until_their_generation_moves() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -440,7 +439,7 @@ fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 
     Ok(())
 }
 
-/// Sol's worker ruling: a write transaction that changed the tails never
+/// A write transaction that changed the tails never
 /// decides on them. Its decision waits, and the worker, which reads only
 /// committed state, refuses the generation that transaction read rather
 /// than validate anything else for it. Back at committed state after its
@@ -503,12 +502,11 @@ fn same_generation(first: &mut Fixture, second: &mut Fixture) {
     }
 }
 
-/// Sol's tails-cache ruling: kept tails belong to one open store. Tails
-/// bound to another store forget them, even where the document and its
-/// generation coincide, and so does a reopen of the same file, whose
-/// generations stand. Sol's worker ruling: a document never activated has no
-/// generation and is unprotected without a scan, and an activated one
-/// without its generation is corrupt, never unprotected.
+/// Kept tails belong to one open store. Tails bound to another store forget
+/// them, even where the document and its generation coincide, and so does a
+/// reopen of the same file, whose generations stand. A document never
+/// activated has no generation and is unprotected without a scan, and an
+/// activated one without its generation is corrupt, never unprotected.
 #[test]
 fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     let (mut first, _, _, _) = released_at_b();
@@ -543,7 +541,7 @@ fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     assert_eq!((tails.validation_requests(), tails.validations()), (0, 0));
 }
 
-/// Opus's 1a-2d finding 1: a kept verdict answers only the store it was
+/// A kept verdict answers only the store it was
 /// validated on. Tails bound to one store, asked through another store's
 /// connection at the same document and generation, miss, and the bound
 /// store's worker refuses to validate another store's decision.
@@ -567,7 +565,7 @@ fn kept_tails_answer_only_the_store_they_were_validated_on() {
     assert_eq!(tails.validations(), 1);
 }
 
-/// Sol's worker ruling: identical requests share one validation, and one
+/// Identical requests share one validation, and one
 /// whose result is already kept completes without asking the worker. A
 /// waiter that first looks after the validation completed still sees it.
 #[test]
@@ -590,7 +588,7 @@ fn identical_requests_share_one_validation_and_no_completion_is_lost() {
     assert!(protected(&f).is_some());
 }
 
-/// Sol's worker ruling: a generation that moves while the worker validates
+/// A generation that moves while the worker validates
 /// an older snapshot leaves that result answering nothing current. The next
 /// decision asks again, and the current state is what it decides on.
 #[test]
@@ -611,7 +609,7 @@ fn a_generation_moved_during_validation_validates_current_state() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// Sol's worker ruling: closing the tails cancels the validation running,
+/// Closing the tails cancels the validation running,
 /// wakes its waiters, and returns only once the worker ended. Nothing
 /// validates after.
 #[test]
@@ -637,7 +635,7 @@ fn bump_generation(f: &mut Fixture) {
         UPDATE live_owner_activations SET source_byte_length=source_byte_length");
 }
 
-/// Sol's 1a-2g finding 1: a queued validation nobody waits for leaves the
+/// A queued validation nobody waits for leaves the
 /// queue, however many requests a cancelled caller abandons while the worker
 /// is busy, and one a live waiter still shares stays and completes for it.
 #[test]
@@ -672,7 +670,7 @@ fn completed(validation: Validation) -> Result<(), ValidationError> {
     received.recv_timeout(std::time::Duration::from_secs(60)).expect("the validation completed")
 }
 
-/// Opus's 1a-2g finding 1: a validation that panics fails its waiters, and
+/// A validation that panics fails its waiters, and
 /// the worker goes on to the next.
 #[test]
 fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
@@ -687,7 +685,7 @@ fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
     assert_eq!((tails.validation_requests(), tails.validations()), (2, 1));
 }
 
-/// Sol's 4b2i-1 ruling 5: the binding lists every protected namespace's
+/// The binding lists every protected namespace's
 /// tail, in namespace order, never only the first.
 #[test]
 fn a_binding_lists_every_protected_namespace() {
@@ -801,7 +799,7 @@ fn an_update_moves_off_a_tail_at_another_path_or_restore() {
     assert!(unbound.moved("owner.md"), "a release that does not read");
 }
 
-/// Opus's 1a-2 finding 3: evidence of the window itself that does not read,
+/// Evidence of the window itself that does not read,
 /// two tails in one namespace or a current activation never adopted,
 /// protects the lineage as invalid, and no update can show it stays on it.
 /// Storage failures stay errors.
@@ -897,16 +895,15 @@ fn window_of(conn: &rusqlite::Connection, f: &Fixture, stop: Stop<'_>) -> Result
     released_protection::window_work(conn, &f.key, &f.binding.lineage_claim_id, stop, &mut stop.working())
 }
 
-/// Sol's r2c-3c-8 finding 1: a held proof reserves what reading the
-/// released window holds, and each tail's activation and its validation,
-/// from stored lengths before it reads them. With room for less than the
-/// window it reads no window and no activation; with room for the window
-/// alone, no activation; with room for the window and the tail's
-/// activation, that activation and nothing its validation reads, an
-/// activation of its chain among them, and it passes no validation check.
-/// Each refusal is too large. These counts are the evidence. Opus's
-/// r2c-3c-10 finding 4: the tail's work is kept before its validation is
-/// given back, so room for all of it holds both at once.
+/// A held proof reserves what reading the released window holds, and each
+/// tail's activation and its validation, from stored lengths before it reads
+/// them. With room for less than the window it reads no window and no
+/// activation; with room for the window alone, no activation; with room for
+/// the window and the tail's activation, that activation and nothing its
+/// validation reads, an activation of its chain among them, and it passes no
+/// validation check. Each refusal is too large. These counts are the
+/// evidence. The tail's work is kept before its validation is given back, so
+/// room for all of it holds both at once.
 #[test]
 fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
     let (f, _, _, _) = released_at_b();
@@ -1001,7 +998,7 @@ fn released_with_pending_entries(count: usize) -> (Fixture, ReleasedLineageBindi
     (f, binding, entries)
 }
 
-/// Sol's r2c-3c-10 finding 1: each contradiction validation keeps, its
+/// Each contradiction validation keeps, its
 /// namespace among it, is reserved before it is made. A tail in a namespace
 /// of 1,000 bytes, whose 1,000 pending entries each declare an agent that
 /// does not validate, reserves at its peak, beside the window, the other

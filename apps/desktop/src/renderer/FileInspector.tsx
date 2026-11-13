@@ -136,7 +136,7 @@ function useTextContent(
   const [error, setError] = useState(false);
   // Bumped once per answered read. The dispatcher uses it to tell "the reread
   // a version switch triggered has landed" from "the pre-switch body is still
-  // on screen" — the window the plain-text autosave used to write into.
+  // on screen", a window the plain-text autosave must not write into.
   const [readSeq, setReadSeq] = useState(0);
   const mounted = useRef(true);
   useEffect(() => {
@@ -316,7 +316,7 @@ type FileInspectorProps = {
   // Capture holds this file's outside edit, and Try again asks it to retry.
   captureHeld?: boolean;
   onRetryHeldCapture?: (path: string) => void;
-  // G2-C-3: a monotonic token that changes when the ACTIVE VERSION of this
+  // A monotonic token that changes when the active version of this
   // workspace changes while the same file stays open (the shell's versionEpoch).
   // Threaded to the engine editor so a version switch re-binds it to the new
   // version's Y.Doc lineage. Distinct from refreshKey, which also bumps on
@@ -437,19 +437,19 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     readSeq,
     text,
   ]);
-  // THE ENGINE OPEN LIVES HERE, above every branch that swaps the body out.
-  // It used to live in MarkdownView, which the loading/error branch below
-  // unmounts — and a version switch that removes the file bumps refreshKey and
-  // engineVersionKey together, so the reread ENOENTs before the queued open
-  // answers. The child went with the branch, the refusal landed on nobody, and
-  // the user was told "dohc could not read this file": true of the read,
-  // silent about the version.
+  // The engine open sits here, above every branch that swaps the body out.
+  // The loading/error branch below unmounts MarkdownView, and a version switch
+  // that removes the file bumps refreshKey and engineVersionKey together, so
+  // the reread fails with ENOENT before the queued open answers. An open
+  // inside that child would unmount with the branch, its refusal would land
+  // on nobody, and the user would read "dohc could not read this file": true
+  // of the read, silent about the version.
   //
-  // `enabled` waits for the read to answer, so this opens no earlier than it
-  // used to. A scene can open after a truncated read because the engine owns
-  // the full artifact. It deliberately does not go false
-  // when that answer is a failure: a failed reread is exactly when the refusal
-  // is on its way, and dropping `enabled` would cancel the open that carries it.
+  // `enabled` waits for the read to answer. A scene can open after a
+  // truncated read because the engine owns the full artifact. It deliberately
+  // does not go false when that answer is a failure: a failed reread is
+  // exactly when the refusal is on its way, and dropping `enabled` would
+  // cancel the open that carries it.
   const readAnswered = text !== null || error;
   const liveDocumentKind = liveDocumentKindForPath(props.path);
   // "Try again" after an open that hit its retry deadline: part of the
@@ -639,10 +639,10 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
     reportError: props.onButtonError,
     retry: retryEngineOpen,
   });
-  // Derived, never stored. #565 keys the hook's outcome to the request that
+  // Derived, never stored. The hook keys its outcome to the request that
   // asked for it, so a refusal for the version the user just left cannot repaint
-  // the one they just entered — which is what a sticky flag here used to risk.
-  // DISCLOSED: a file that reappears in the same version (an agent recreates it)
+  // the one they just entered. A sticky flag here would risk that.
+  // Known limit: a file that reappears in the same version (an agent recreates it)
   // leaves this notice up until the request changes. Reopening a daemon session
   // on every activity tick would churn the capture chain for no gain.
   const notInVersion = engine.notInVersion;
@@ -952,7 +952,7 @@ export const FileInspector = memo(function FileInspector(props: FileInspectorPro
             lossyNote={lossyNote}
             changeHeld={changeHeld}
             // A shared view's session drops Edit anyway's consent, so a
-            // received share doesn't offer it (#2991).
+            // received share doesn't offer it.
             onEditAnyway={
               props.receivedShare
                 ? undefined

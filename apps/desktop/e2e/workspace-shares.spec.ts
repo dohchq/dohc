@@ -36,7 +36,7 @@ import {
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
 //   Settings → Sync and sharing, and ends it — after which the recipient's relay
-//   access returns 404 with the removed-recipient explanation (#1438).
+//   access returns 404 with the removed-recipient explanation.
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
 //   revoke → refresh surfaces "this share was ended" honestly.
@@ -260,7 +260,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
-    // owner-removed explanation (#1438).
+    // owner-removed explanation.
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -596,7 +596,7 @@ confidentialTest.describe("View link lifecycle", () => {
           neverValidCredential,
           "/sync/link/share",
         );
-        // #1422 normalizes unverified link refusals to the same opaque 404.
+        // The relay normalizes unverified link refusals to the same opaque 404.
         expect(neverValidRead.status).toBe(404);
         expect(JSON.parse(neverValidRead.body)).toEqual({
           ok: false,
@@ -688,7 +688,7 @@ confidentialTest.describe("View link lifecycle", () => {
           error: "not found",
           code: "not_found",
         });
-        // #1438 explains removal to former recipients while strangers stay opaque.
+        // The relay explains removal to former recipients while strangers stay opaque.
         expect(namedAfterEnd.status).toBe(404);
         expect(JSON.parse(namedAfterEnd.body)).toEqual({
           ok: false,
@@ -866,7 +866,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
-      // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is writable, so opening
+      // A live engine Y.Doc session is writable, so opening
       // one in a read-only shared view must be refused at the IPC boundary (same
       // class as the write bypass above). applyEngineYDocUpdate on the refused
       // session must be an inert no-op — it must never throw and never write.

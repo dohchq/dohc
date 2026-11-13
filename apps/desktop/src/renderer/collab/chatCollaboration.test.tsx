@@ -8,8 +8,8 @@ import { buildChatCollaboration } from "./chatCollaboration";
 import { PresenceFaces } from "./PresenceIndicators";
 import { usePresence } from "./usePresence";
 
-// MU-C5 — the collaboration construction + the workspace-switch no-repaint
-// invariant, exercised through the REAL IPC presence transport (mocked bridge).
+// The collaboration construction and the workspace-switch no-repaint
+// invariant, exercised through the real IPC presence transport (mocked bridge).
 
 async function flush(): Promise<void> {
   await act(async () => {

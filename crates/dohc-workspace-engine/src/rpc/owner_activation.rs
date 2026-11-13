@@ -379,9 +379,9 @@ mod tests {
     };
     use dohc_engine_protocol::transport::RequestContext;
 
-    /// Opus's round 1 note: a capture's answer carries its activation, and
-    /// once a retirement tears that activation down the answer is withheld.
-    /// An answer for another activation stays current.
+    /// A capture's answer carries its activation, and once a retirement
+    /// tears that activation down the answer is withheld. An answer for
+    /// another activation stays current.
     #[test]
     fn a_capture_answer_for_a_retired_activation_is_withheld() {
         let mut owner =
@@ -415,10 +415,9 @@ mod tests {
         assert!(other.is_current());
     }
 
-    /// Sol's round 3a race: a capture write passes its check and pauses,
-    /// then Phase A starts. The paused write holds the fence Phase A takes,
-    /// so Phase A ends only after it, and no later write for the activation
-    /// runs.
+    /// A capture write passes its check and pauses, then Phase A starts. The
+    /// paused write holds the fence Phase A takes, so Phase A ends only after
+    /// it, and no later write for the activation runs.
     #[test]
     fn phase_a_waits_for_a_capture_write_that_passed_its_check() {
         use std::sync::atomic::{AtomicBool, Ordering};

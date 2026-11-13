@@ -85,8 +85,8 @@ fn assert_typed_parse<T>(result: Result<Vec<T>, Vec<String>>) {
 
 proptest! {
     // `ProptestConfig::default()` is 256 cases and honors the standard
-    // `PROPTEST_CASES` env var; `with_cases(256)` pinned it and silently
-    // ignored the env var, so evidence runs asking for a large corpus got 256.
+    // `PROPTEST_CASES` env var. `with_cases(256)` would pin the count and
+    // ignore the env var.
     #![proptest_config(ProptestConfig::default())]
 
     /// Arbitrary Unicode/control-heavy text either parses completely or

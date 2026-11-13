@@ -112,7 +112,7 @@ export async function listDaemonPathMoments(
   return page.moments.filter((moment) => moment.path === path);
 }
 
-// dohchq/dohc#337 item 5, driven by its own mechanism: another app holds the
+// Another app holds the
 // `.md` open without FILE_SHARE_DELETE, so every attempt to replace it fails
 // with a sharing violation. An ACL cannot model this — the workspace folder
 // grants FILE_DELETE_CHILD, which lets the replace through a deny-write ACE on
@@ -146,7 +146,7 @@ export async function holdWithoutShareDelete(absolute: string): Promise<() => Pr
 export const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 
 // A capture on its own real engine, with the reads desktop main bases two
-// workspace notices on (dohc#2342). `health` first has the engine scan the
+// workspace notices on. `health` first has the engine scan the
 // folder, so it counts a change whether or not the watcher has reported it.
 // Then it reads the newest moment as the shell does, which waits for capture
 // to settle and answers "still updating" while History is still updating.
@@ -269,7 +269,7 @@ export async function openNote(
 
 export const RECOVERED_COPY = /^note \(recovered [0-9a-f]{8} [0-9a-f]{64}\)\.md$/;
 
-// dohc#2308. An open document whose file was deleted outside dohc. The engine
+// An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until
 // the person chooses Save it again. `shape` is a file capture recorded and
 // saved over, or one New File left empty and deleted before its first save.

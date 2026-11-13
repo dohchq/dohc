@@ -829,9 +829,9 @@ describe("owner-mediated mount removal", () => {
   });
 });
 
-// One mount's permanent failure must stay ONE mount's failure. A damaged pin
-// used to throw out of the refresh loop, so a single damaged record stopped
-// every healthy share after it from refreshing at all.
+// One mount's permanent failure must stay one mount's failure. A damaged pin
+// that threw out of the refresh loop would stop every healthy share after it
+// from refreshing at all.
 describe("share mount refresh failures", () => {
   it("contains a damaged pin to its own row and keeps the loop going", () => {
     expect(
@@ -876,11 +876,10 @@ describe("refresh result wire shape", () => {
   });
 });
 
-// Identity damage is contained per ROW, like grant damage. The loop used to
-// push raw registry values and parse the whole array at the end, so one
-// record with a 65-character label threw after every pull had run: no row
-// survived, and the user was told the refresh failed while the healthy
-// mounts had in fact refreshed.
+// Identity damage is contained per row, like grant damage. One record with a
+// 65-character label must not cost every row: the pulls have already run, and
+// the user would be told the refresh failed while the healthy mounts had in
+// fact refreshed.
 describe("share mount result rows", () => {
   // A count the schema cannot carry must not cost the mount its STATUS. The
   // schema parse alone would drop the whole row, so the count is clamped

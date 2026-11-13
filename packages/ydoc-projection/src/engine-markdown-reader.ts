@@ -119,7 +119,7 @@ function compareReadings(actual: Y.Doc, imported: Y.Doc): void {
     "reading-mismatch",
   );
 }
-/** Checked before the heaviest work, so the refusal comes before the reader's heap fills (#3575). */
+/** Checked before the heaviest work, so the refusal comes before the reader's heap fills. */
 function checkCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): void {
   requireReading(withinLiveNoteCapacity(doc, policy), "capacity-refused");
 }

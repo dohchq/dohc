@@ -231,7 +231,7 @@ const MAX_TRANSIENT_RETRIES: u8 = 6;
 /// Reader crashes that end a proof's retries. A note that fills the reader's
 /// heap crashes it on every request, and each crash restarts the reader for
 /// every other note too, so the second crash for one proof stops it instead of
-/// the six retries a timeout gets (#3575). The save stays owed. Like a terminal
+/// the six retries a timeout gets. The save stays owed. Like a terminal
 /// failure, the crash answers every later lookup of this exact proof without
 /// asking the reader, so recovery cannot crash it again. A later action gets a
 /// fresh count: a new save is a new proof, and the engine starting empties the

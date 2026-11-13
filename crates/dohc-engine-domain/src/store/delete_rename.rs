@@ -264,7 +264,7 @@ where
 }
 
 /// Validate a delete and return the input with its path normalized through the
-/// R07 addressable-plaintext floor (only an ignored path is rejected — an
+/// addressable-plaintext floor (only an ignored path is rejected — an
 /// existing tracked or secret-shadowed file is still deletable).
 fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, DomainError> {
     validate_identifier(&input.workspace_id, "workspace_id")?;

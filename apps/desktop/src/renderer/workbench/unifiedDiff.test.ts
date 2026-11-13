@@ -35,8 +35,8 @@ describe("buildUnifiedDiffLines", () => {
     ]);
   });
 
-  // Regression: "a" vs "a\n" split into identical line
-  // arrays, so these exact-text changes used to render as "No text changes".
+  // "a" vs "a\n" split into identical line arrays, so without the note these
+  // exact-text changes would render as "No text changes".
   it("names final-newline-only changes instead of claiming no changes", () => {
     expect(unified("a", "a\n")).toEqual([
       {
@@ -339,8 +339,8 @@ describe("diff work bound", () => {
 
   it("builds no more diff lines than the display shows, and still counts them all", () => {
     // A newline-heavy 10 MiB body: 250,000 lines a side is far past the cell
-    // ceiling, so it degrades — and the degraded diff used to build one object
-    // per line of the whole body before the 800-line display bound applied.
+    // ceiling, so it degrades. The degraded diff must not build one object
+    // per line of the whole body before the 800-line display bound applies.
     const before = longLines(250_000, 40);
     const after = before.replace(/x/g, "y");
     expect(before.length).toBeGreaterThan(10_000_000);

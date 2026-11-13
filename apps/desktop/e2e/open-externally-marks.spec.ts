@@ -575,7 +575,7 @@ test("a file from another person opens as a marked, read-only copy during a live
     await expect(page.getByTestId("markdown-editor")).toContainText("The first draft.");
     expect(await liveStatus()).toBe("ready");
 
-    // A quiet live session can go retrying by itself (#2685), so the baseline
+    // A quiet live session can go retrying by itself, so the baseline
     // waits for active, and each time it leaves active is recorded.
     await ownerPage.evaluate((workspaceId) => {
       const api = (window as unknown as { dohcDesktop: Bridge }).dohcDesktop;

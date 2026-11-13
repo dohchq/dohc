@@ -37,14 +37,13 @@ const NO_FILE_CHAT: ShareFileChatResolver = {
   objectIdAtPath: () => undefined,
 };
 
-// WS-MU-C3 — DM / chat grants over the relay, riding MU-C4's
-// bidirectional shared-channel lane. A DM is a `kind:"dm"` channel + one
-// email-addressed chat grant per participant, so a DM op is a strict
-// subset of the already-merged shared-channel route: it serves byte-identically
-// to a regular channel op, binds by thread (never a self-claimed
-// channelWireId on the message payload), and every unauthorized probe is
-// indistinguishable from a share that never existed. These tests are the
-// blocking adversarial isolation gate for that claim.
+// DM / chat grants over the relay, on the bidirectional shared-channel lane.
+// A DM is a `kind:"dm"` channel + one email-addressed chat grant per
+// participant, so a DM op is a strict subset of the shared-channel route: it
+// serves byte-identically to a regular channel op, binds by thread (never a
+// self-claimed channelWireId on the message payload), and every unauthorized
+// probe is indistinguishable from a share that never existed. These tests are
+// the adversarial isolation gate for that claim.
 
 afterEach(closeTestStorages);
 
@@ -67,7 +66,7 @@ async function createWorkspace(h: SyncRelayHandler): Promise<void> {
 const chatOp = logOp;
 
 // A DM channel.create carries `kind:"dm"` — the only thing distinguishing it
-// from a regular MU-C4 channel op. Everything downstream is identical.
+// from a regular channel op. Everything downstream is identical.
 function dmChannelCreate(wireId = DM_WIRE): ReturnType<typeof chatOp> {
   return chatOp(
     "chat.channel.create",
@@ -83,7 +82,7 @@ function dmThreadCreate(wireId = DM_WIRE, threadId = "thread-dm-1"): ReturnType<
 }
 
 // A message binds only by threadId — it never carries a channelWireId, exactly
-// like a solo/MU-C4 message. The relay derives scope from the thread's create.
+// like a solo or shared-channel message. The relay derives scope from the thread's create.
 function dmMessage(
   body: string,
   overrides: Record<string, unknown> = {},
@@ -119,7 +118,7 @@ async function createDmGrant(
 }
 
 // A member-append op: the client supplies its own originSeq (client-sequenced,
-// unlike MU-C3's server-owned space). The relay namespaces the origin id.
+// not a server-owned space). The relay namespaces the origin id.
 function memberMessage(
   originSeq: number,
   overrides: Record<string, unknown> = {},
@@ -366,7 +365,7 @@ describe("DM grants over the relay", () => {
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
 
-    // Invalid selectors fail closed with the MU-C4 codes.
+    // Invalid selectors fail closed with the shared-channel codes.
     const invalid = await h(
       request(
         OWNER,
@@ -501,7 +500,7 @@ describe("DM grants over the relay", () => {
       "chat.message.append",
     ]);
     // The served message payload carries NO channelWireId — the exact same
-    // allowlisted shape a solo/MU-C4 message serves. Scope came from the thread.
+    // allowlisted shape a solo or shared-channel message serves. Scope came from the thread.
     const served = ops.find((op) => op.opKind === "chat.message.append")!;
     expect(served.payload).toEqual({
       messageId: (served.payload as Record<string, unknown>).messageId,

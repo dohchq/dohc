@@ -1,11 +1,11 @@
-//! Differential harness (CAL-2 calibration signal).
+//! Differential harness.
 //!
 //! Runs a fixed operation trace against the Rust versioning engine and asserts
 //! the NORMALIZED logical state — version graph, moment order, active version,
 //! and snapshot blob hashes — matches a golden fixture encoding the
 //! TS-documented behavior for the restore + history behaviors
 //! (`versions-create-named-version`, `versions-set-active-version`,
-//! `versions-list-moments`; `TEST_ORACLE.md` §2 normalizers N2/N4–N8).
+//! `versions-list-moments`).
 //!
 //! Ids that carry identity are pinned in the trace, so the capture is fully
 //! deterministic and compared to a golden STRING with no ID substitution. A
@@ -172,7 +172,7 @@ fn run_trace(db: &std::path::Path) -> String {
 
 /// The golden normalized state. Blob prefixes are the first 12 hex of the
 /// sha256 of the exact text bytes — the same content-by-hash the TS engine
-/// records (N8). Interpolated from the domain's own hashing so the fixture is
+/// records. Interpolated from the domain's own hashing so the fixture is
 /// self-describing and stays correct if the trace's texts change.
 fn golden() -> String {
     let hello = text_blob_sha256("hello");

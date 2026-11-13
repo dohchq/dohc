@@ -1,60 +1,25 @@
-// What a held proof's memory peaks at, measured beside what it reserved, to
+// Measures what a held proof's memory peaks at beside what it reserved, to
 // calibrate the factors `preservation.rs` reserves by.
 //
-// Each case loads a lineage and merges it with the work a hold covers, as
-// inspection does, then encodes the contribution artifact, inside one proof
-// whose limit never refuses. The tail's work is built before the profiler
-// starts and reserved as the window keeps it. dhat, the unit tests' global
-// allocator under the `held-proof-memory` feature, measures the heap's peak
-// over the proof; the proof's limit records the most it reserved.
+// Each case loads a lineage, merges it with the work a hold covers as
+// inspection does, and encodes the contribution artifact inside one proof
+// whose limit never refuses. dhat, the unit tests' global allocator under the
+// `held-proof-memory` feature, measures the heap's peak over the proof. The
+// proof's limit records the most it reserved. Three figures are measured on
+// their own: the merged state kept per stored byte (the factor 22), the
+// deleted-range index against `Deletes::growth` (256 B per client, 64 B per
+// range), and the rise of one application against 35·b + 2·M plus the index's
+// growth. That last profiler starts after the load. If the heap it reports at
+// the end is well above the contributions' growth and the index, a
+// reallocation of loaded state was counted whole and the rises read high.
 //
-// Before that, what the merged state keeps is measured on its own, kept as
-// the proof keeps it: the lineage loaded from its store as the proof loads
-// it, its snapshot and then each journal row after it one by one, and then
-// every contribution applied. With S the stored bytes loading reads and Σb
-// the contributions', it reports the kept state per stored byte over S + Σb,
-// what the factor 22 reserves for, and what the contributions added per
-// byte of Σb on its own. The rest of the peak is reported as the
-// projection's. A measurement counts only once its preservation is complete,
-// with the Markdown the case expects and every contribution merged, or, for
-// work the lineage already holds, none.
-//
-// Two stages the projection's peak hides are measured on their own as well.
-// The index of the ranges the merged state deleted is built from empty on
-// that state, under a profiler that sees only it, and what it holds once
-// built and the most it held while it grew are reported against what
-// `Deletes::growth` reserves: the deleting cases, the 2,000-client ones
-// above all, calibrate the 256 B per client and 64 B per range. And the
-// lineage is loaded again and each contribution applied as the merge
-// applies it, the index grown with it: the most the heap held over the
-// loaded state is reported against what the merge reserves beside it then,
-// and the largest rise of one application over the heap before it against
-// 35·b + 2·M and the index's growth, what it reserves to apply and to keep.
-// That profiler starts after the load, so what the heap still held at the
-// end is reported too: well above the contributions' growth and the index,
-// a reallocation of loaded state was counted whole and the rises read high.
-//
-// Calibrate against the measured peak, not the reserved one: at the
-// projection's peak the proof reserves the state it kept, 17·M for the
-// projection and `retained_bytes()` for the preservation, and the
-// projection's 17·M already counts the merged full state and Markdown the
-// preservation keeps, so about M and the Markdown are reserved twice.
-//
-// The cases: plaintext and rich documents of 1, 5 and 10 MiB of content;
-// documents of 1 and 3 MiB rewritten from exact Markdown source the
-// projection writes otherwise, whose preservation rebuilds and reprojects
-// that source; documents of 1 and 3 MiB from exact source given only a
-// source-preserving frontmatter edit, merged fresh and already contained,
-// where rebuilding the source is most of the proof; one typed a keystroke
-// at a time by interleaved clients, with backspaces, merged with an edit and
-// a removal of what they typed; two whose
-// deletions span 2,000 clients, over 64 KiB and over 4 KiB of content, where
-// the clients outweigh the content, merged with an edit and a removal; one with
-// heavy history; a snapshot with many journal rows after it; holds of 10,000
-// and 50,000 small contributions; and a real released hold of 50,000 stored
-// entries, measured through the whole inspection. Only that last case reads a
-// window and validates, and SQLite's own copies of what it reads never reach
-// the heap profile, so validation's factors stay estimates.
+// Calibrate against the measured peak, not the reserved one. At the
+// projection's peak the proof reserves 17·M for the projection and
+// `retained_bytes()` for the preservation. The 17·M already counts the merged
+// full state and Markdown the preservation keeps, so about M and the Markdown
+// are reserved twice. Only the real released hold of 50,000 stored entries
+// reads a window and validates, and SQLite's own copies of what it reads
+// never reach the heap profile, so validation's factors stay estimates.
 //
 // Run it through the Rust gate with `cargo test -p dohc-engine-collab
 // --release --lib --features held-proof-memory held_proof_memory --

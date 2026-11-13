@@ -2347,9 +2347,7 @@ describe("shared view refresh", () => {
     });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
 
-    // Provable migration: the pull really went through the daemon share RPC.
-    // (That no legacy store was built is structural here — this file has no
-    // reference to the legacy TypeScript engine at all.)
+    // The pull really went through the daemon share RPC.
     expect(harness.transport.requests.map((request) => request.method)).toContain(
       "share.view.pull",
     );
