@@ -390,7 +390,10 @@ export async function startServiceLiveHost(options: {
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
   let registered = false, closing: Promise<void> | undefined;
   // Engine requests the host numbered so far, requests sent through its client, and how many of those were ones an idle pass sends.
-  let requestId = 0, sentRequests = 0, idleRequests = 0;
+  // And the requests of recovery probes that brought nothing. They are credited once the probe ends, after they were
+  // sent, so only a pass, which holds its whole probe, counts them as idle. A delivery never does: the credit of a probe
+  // that ended while it ran would stand for requests sent before it began, and could hide as many of its own.
+  let requestId = 0, sentRequests = 0, idleRequests = 0, probeCredits = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
     return ++requestId;
@@ -597,10 +600,10 @@ export async function startServiceLiveHost(options: {
       attached.last = result.hasMore ? "more" : "done";
       if (!result.hasMore) {attached.seen = state; attached.overlapped = attached.check; attached.probeAt = now() + HOSTED_RECOVERY_PROBE_MS;}
       // A recovery probe that brought nothing found the relay as the host knew it, so its pass can still be idle:
-      // the three requests of each of its pages count with the ones an idle pass sends.
+      // the three requests of each of its pages count, for that pass, with the ones an idle pass sends.
       if (reason === "probe" && !result.hasMore && result.pages.every(page => page.committed && page.fetched === 0 && page.applied === 0 &&
         page.refused === 0 && page.skipped === 0 && page.conflictsOpened === 0 && page.changedPaths.length === 0 && page.held.length === 0 &&
-        page.newlyHeld.listed.length === 0 && page.departed.listed.length === 0)) idleRequests += 3 * result.pages.length;
+        page.newlyHeld.listed.length === 0 && page.departed.listed.length === 0)) probeCredits += 3 * result.pages.length;
       // A departure is confirmed only by a pull whose departed list reaches it, so while one has not, the next pull
       // moves the list on toward it. Its workspace drains only at a pull that reads that list from its start and
       // finds nothing departed, so a list that ended empty partway through is read once more from its start. Both
@@ -1767,12 +1770,13 @@ export async function startServiceLiveHost(options: {
           // Native passes retain ownership until their actual work settles.
           // A sweep runs only once an idle deadline is due. Its timer, armed after each pass, wakes the pass that runs it.
           yield* Effect.uninterruptible(Effect.promise(() => exclusive(async () => {
-            const numbered = requestId, sent = sentRequests, counted = idleRequests;
+            const numbered = requestId, sent = sentRequests, counted = idleRequests + probeCredits;
             const failed = await pass();
             const due = nextIdleDue(), sweeping = due !== undefined && due <= idleClock.nowMs();
             if (sweeping) await sweep();
             armIdle(); checkProgress();
-            idle = judge(!failed && !sweeping && requestId - numbered === idleRequests - counted && sentRequests - sent === idleRequests - counted);
+            const idled = idleRequests + probeCredits - counted;
+            idle = judge(!failed && !sweeping && requestId - numbered === idled && sentRequests - sent === idled);
           })));
           options.onPass?.(idle);
           yield* pause;

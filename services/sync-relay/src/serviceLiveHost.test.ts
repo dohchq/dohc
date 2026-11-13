@@ -8119,6 +8119,45 @@ it("runs no pass for a reclaim sweep that finds nothing, and lets the pause keep
   expect(o.host.isDocumentReady(o.document)).toBe(true);
 });
 
+// A recovery probe's three requests are credited as idle once the probe ends, after they were sent. A delivery that
+// began between the two saw the credit and not the requests, so the credit hid three requests of its own and the
+// delivery asked for no pass, though it had settled something. The settlement here is a stand-in that sends three
+// settle requests, the number one probe page is credited with.
+// Proves: a delivery that settles while a probe is in flight still asks for a pass. It ends in an idle pause, and
+// that pause is cut to one poll interval.
+it("asks for a pass after a settlement that ran while a recovery probe ended, on an idle host", async () => {
+  const paced = pacedPasses(), o = await enrolledServiceHost({paced, frameChanges: true});
+  const native = await o.host.captureNative(o.binding);
+  await paced.until(o.f, () => paced.resting() === paced.ceiling);
+  expect(paced.resting()).toBe(paced.ceiling);
+  // How long the pause the host waits in has left, once it waits in one.
+  const resting = () => vi.waitFor(() => {const left = paced.resting(); expect(left).toBeDefined(); return left!;}, {interval: 1, timeout: 5_000});
+  // Passes run until one holds its probe's commit, with the probe's three requests sent and no credit yet.
+  const probes = o.host.hostedPulls("workspace").reasons.probe ?? 0, commit = o.park("sync.commitCursor");
+  for (;;) {
+    const left = await resting(), ended = afterPasses(o.f, 0);
+    paced.clock.advance(paced.clock.nowMs() + left);
+    if (await Promise.race([ended.then(() => false), commit.entered.promise.then(() => true)])) break;
+  }
+  expect(o.host.hostedPulls("workspace").reasons.probe).toBe(probes + 1);
+  const during = paced.clock.nowMs(), tip = o.tip();
+  vi.spyOn(OwnerCommittedDelivery.prototype, "settle").mockImplementationOnce(async (_document, signal) => {
+    // The delivery has begun. The probe now ends, its pass is judged idle, and the host waits out its idle interval.
+    const passed = afterPasses(o.f, 0);
+    commit.release.resolve();
+    await passed;
+    await vi.waitFor(() => expect(paced.resting()).toBe(paced.ceiling), {interval: 1, timeout: 5_000});
+    for (let request = 0; request < 3; request++) {
+      await native.client.sendRequest({id: native.nextRequestId(), workspace: native.workspace, deadlineMs: native.deadlineMs,
+        method: "liveApplication.settle", params: {registrationId: native.registrationId, terminalReceipt: tip}}, signal);
+    }
+    return undefined as never;
+  });
+  await o.host.settle(o.document);
+  expect(paced.resting()).toBe(paced.poll);
+  expect(paced.clock.nowMs()).toBe(during);
+});
+
 // A dormant note's open first pulls what the relay received. The relay was written by another process, so no write
 // notice came, and the pull stopped at its page budget: the open is refused, and the note stays dormant with its
 // workspace's catch-up unfinished. No connection change asks for a pass any more.
