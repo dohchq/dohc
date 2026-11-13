@@ -352,3 +352,31 @@ it("holds readiness only while the waiting editor is visible and ignores late an
     view.unmount();
   }
 });
+
+it.each([
+  ["a failed open that waits for the host", { state: "failed", message: "dohc could not open this file for editing." }],
+  ["an open the server refused to host", { state: "host-refused", message: "dohc could not open this page for editing." }],
+])("settles %s instead of opening again on each workspace change", async (_name, waiting) => {
+  const f = deferredBridge();
+  const listeners = new Set<(event: { workspaceId?: string; paths?: string[] }) => void>();
+  let answer!: (value: unknown) => void;
+  const api = { ...f.api, onWorkspaceActivity: (listener: (event: { workspaceId?: string; paths?: string[] }) => void) => {
+    listeners.add(listener); return () => listeners.delete(listener);
+  }, waitForEngineYDocAdmission: vi.fn(() => new Promise<boolean>(() => undefined)),
+  openEngineYDocSession: vi.fn(() => new Promise(resolve => { answer = resolve; })) };
+  vi.stubGlobal("dohcDesktop", api);
+  const activity = (event: { workspaceId?: string; paths?: string[] }) =>
+    act(() => { for (const listener of listeners) listener(event); });
+  render(<Harness path="notes/plan.md" />);
+  await waitFor(() => expect(api.openEngineYDocSession).toHaveBeenCalledOnce());
+  // A share pull lands while the open waits for the relay.
+  activity({ workspaceId: "ws-1" });
+  await act(async () => answer({ available: false, sharedWaiting: waiting }));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
+  expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true");
+  activity({ workspaceId: "ws-1" });
+  activity({ workspaceId: "ws-1", paths: ["notes/plan.md"] });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
+});

@@ -289,7 +289,11 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
       stop();
     };
   }, [admissionWaiting, input.workspaceId, input.path, requestKey]);
-  waiting.current = outcome?.kind === "shared-waiting" || outcome?.kind === "live-host-unavailable";
+  // A change in the workspace can deliver what a waiting open needs, such as a
+  // new record. It cannot make the host take a document: a failed open waits
+  // for the relay's readiness answer, and a refused one for Try again.
+  waiting.current = outcome?.kind === "live-host-unavailable" ||
+    (outcome?.kind === "shared-waiting" && outcome.waiting.state !== "failed" && outcome.waiting.state !== "host-refused");
   useEffect(() => {
     if (waiting.current && activityRevision.current > openingRevision.current)
       setDeliveryRetry((value) => value + 1);
