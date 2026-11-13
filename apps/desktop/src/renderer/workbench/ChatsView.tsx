@@ -119,11 +119,7 @@ import {
 } from "./chatMessages";
 import { isPersonalAgentId, personalRosterHolds } from "./chosenColors";
 import { MentionComposer, type MentionComposerHandle } from "./MentionComposer";
-import {
-  channelFileCandidates,
-  type ChannelFileSharing,
-  DM_FILE_CANDIDATES,
-} from "./chatFileMentionScope";
+import { channelFileCandidates, DM_FILE_CANDIDATES } from "./chatFileMentionScope";
 import { openPollChoices, pollChoicesToSend, type ComposerPollDraft } from "./chatPoll";
 import { NEW_CONVERSATION, useAgentOffer } from "./AgentOffer";
 import { AddAgentForm } from "./AddAgentForm";
@@ -3429,28 +3425,18 @@ export function ChatsView(props: {
   // and a workspace switch could briefly publish under the previous workspace's
   // scope. Gating on (channelShares loaded for this workspaceId) closes both.
   const scopeResolved = sharesWorkspaceId === workspaceId;
-  // The files the open Group's composers offer. Its sharing counts only once
-  // this workspace's share listing has answered.
+  // The files the open Group's composers offer. Until this workspace's share
+  // listing answers, whether the Group is joined is unknown, so it offers every
+  // file.
   const shareMounts = props.shareMounts ?? EMPTY_SHARE_MOUNTS;
   const channelFiles = useMemo(() => {
+    if (!scopeResolved) return fileMentionCandidates;
     const wireId = activeChannel?.wireId ?? null;
-    const joined = wireId === null ? null : (joinedByWire.get(wireId) ?? null);
-    let sharing: ChannelFileSharing = { kind: "unshared" };
-    if (scopeResolved && joined) {
-      const mounts = shareMounts.filter((mount) => mount.shareId === joined.shareId);
-      sharing = { kind: "joined", mountLabel: mounts.length === 1 ? mounts[0]!.label : null };
-    } else if (scopeResolved && wireId !== null && (grantedByWire.get(wireId)?.length ?? 0) > 0) {
-      sharing = { kind: "owned" };
-    }
-    return channelFileCandidates(fileMentionCandidates, activeChannel, sharing);
-  }, [
-    activeChannel,
-    fileMentionCandidates,
-    grantedByWire,
-    joinedByWire,
-    scopeResolved,
-    shareMounts,
-  ]);
+    const share = wireId === null ? null : (joinedByWire.get(wireId) ?? null);
+    const mounts = share ? shareMounts.filter((mount) => mount.shareId === share.shareId) : [];
+    const joined = share ? { mountLabel: mounts.length === 1 ? mounts[0]!.label : null } : null;
+    return channelFileCandidates(fileMentionCandidates, activeChannel, joined);
+  }, [activeChannel, fileMentionCandidates, joinedByWire, scopeResolved, shareMounts]);
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
     transport: presenceTransport,
