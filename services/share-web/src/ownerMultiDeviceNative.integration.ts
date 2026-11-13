@@ -126,14 +126,9 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     closes.push(() => new Promise<void>(done => relayHttp.close(() => done())));
     const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
     let heldFeed: {digest: string; release: Promise<void>} | undefined;
-    let heldCapture: {remaining: number; arrived(): void; release: Promise<void>} | undefined;
+    // Holds the next owner pass just after its enrollment commits, before it submits any row.
+    let heldEnrollment: {arrived(): void; release: Promise<void>} | undefined;
     const captureNative = async (...args: Parameters<NonNullable<typeof active>["captureNative"]>): Promise<NamedFrameNativeHost> => {
-      const barrier = heldCapture;
-      if (barrier && --barrier.remaining === 0) {
-        barrier.arrived();
-        await barrier.release;
-        heldCapture = undefined;
-      }
       const native = await active!.captureNative(...args);
       return {...native, client: {
         openLiveAppliedSync: native.client.openLiveAppliedSync.bind(native.client),
@@ -208,7 +203,14 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         const delivery = startDesktopOwnerDelivery({config: deliveryConfig,
           async runPass(document, signal) {
             const result = await runNativeOwnerDeliveryPass({client, workspaceHandle, document, config: deliveryConfig, refusals,
-              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: signedIn.user.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);}});
+              signal: AbortSignal.any([lifetime, signal]), bearer, accountId: signedIn.user.id, assertCurrent() {expect(storage.unavailable.aborted).toBe(false);},
+              async onEnrolled() {
+                const barrier = heldEnrollment;
+                if (!barrier) return;
+                heldEnrollment = undefined;
+                barrier.arrived();
+                await barrier.release;
+              }});
             if (result !== "retry") completed(result);
             return result;
           },
@@ -290,11 +292,12 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       document: target, config: deliveryConfig, refusals: new OwnerKnownRefusals(), signal: AbortSignal.timeout(30000), bearer: wrongAccount.token, accountId: wrongAccount.user.id, assertCurrent() {}});
     expect(refused).toBe("retry");
     expect(await first.client.ownerYDocPrepareEnrollment(first.request(), target)).toEqual(firstDraft);
-    // Hold the second authenticated capture: enrollment committed, submission has not started.
+    // Hold the pass once its enrollment commits, before it submits a row. The pass then submits over the
+    // connection that enrolled it, so no second capture marks this point.
     let releaseCapture!: () => void, captureArrived!: () => void;
     const release = new Promise<void>(done => {releaseCapture = done;});
     const arrived = new Promise<void>(done => {captureArrived = done;});
-    heldCapture = {remaining: 2, arrived: captureArrived, release};
+    heldEnrollment = {arrived: captureArrived, release};
     results.stage = "enroll divergent owner B and hold submission";
     const enrollmentPass = recovered.pass();
     let heldEvidence: {retainedDigest: string; draftDigest: string; push: Record<string, any>} | undefined;
