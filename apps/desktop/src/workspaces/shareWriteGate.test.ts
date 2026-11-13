@@ -3,6 +3,8 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
   shareViewTakesLocalWrites,
+  shareViewWriteScopeOf,
+  workspaceCreateOffers,
   workspaceWriteRefusal,
 } from "./shareWriteGate";
 
@@ -82,5 +84,34 @@ describe("workspaceWriteRefusal", () => {
     expect(workspaceWriteRefusal({ ...marker("edit"), granterEmail: null })).toBe(
       "This is a shared view — ask the person who shared it for changes.",
     );
+  });
+});
+
+// What a joined workspace offers. A page needs Edit; a folder starts with its
+// first page and only an admin starts one, as the relay decides.
+describe("workspaceCreateOffers in a joined workspace", () => {
+  const member = (access: ShareAccess, role?: "admin" | "member") =>
+    workspaceCreateOffers({ access, ended: false, membership: true }, role);
+
+  it("offers a new page at Edit only", () => {
+    expect((["view", "comment", "edit"] as const).filter((access) => member(access, "member").write)).toEqual(["edit"]);
+  });
+
+  it("offers a new folder and a new Collection to an admin at Edit, and to nobody else", () => {
+    expect(member("edit", "admin")).toEqual({ write: true, folder: true, collection: true });
+    expect(member("edit", "member")).toEqual({ write: true, folder: false, collection: false });
+    expect(member("edit")).toEqual({ write: true, folder: false, collection: false });
+    expect(member("comment", "admin")).toEqual({ write: false, folder: false, collection: false });
+    expect(workspaceCreateOffers({ access: "edit", ended: true, membership: true }, "admin").folder).toBe(false);
+  });
+
+  it("keeps a path share at Edit to files and Collections, with no folder", () => {
+    expect(workspaceCreateOffers({ access: "edit", ended: false }, "admin")).toEqual({ write: true, folder: false, collection: true });
+  });
+
+  it("reads a membership from the pinned grant", () => {
+    const pinned = { ...marker("edit"), grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true } };
+    expect(shareViewWriteScopeOf(pinned)).toMatchObject({ membership: true });
+    expect(shareViewWriteScopeOf(marker("edit"))).toMatchObject({ membership: false });
   });
 });

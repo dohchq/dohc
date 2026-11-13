@@ -6,6 +6,8 @@ import { APP_VIEW_ID_PREFIX, appViewId, type AppViewId } from "../workbench/work
 export interface CommandContext {
   // The share view this workspace is, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
+  // A joined workspace's role, as the relay last named it.
+  memberRole?: "admin" | "member";
   activeDocumentKind: string | null;
   activeDocumentShareable: boolean;
   pinnedApps: readonly { root: string; label: string }[];
@@ -14,10 +16,12 @@ export interface CommandContext {
 
 export const COMMAND_AVAILABILITY = {
   always: (_context: CommandContext) => true,
-  workspaceWritable: (context: CommandContext) => workspaceCreateOffers(context.shareView).write,
-  folderCreatable: (context: CommandContext) => workspaceCreateOffers(context.shareView).folder,
+  workspaceWritable: (context: CommandContext) =>
+    workspaceCreateOffers(context.shareView, context.memberRole).write,
+  folderCreatable: (context: CommandContext) =>
+    workspaceCreateOffers(context.shareView, context.memberRole).folder,
   collectionCreatable: (context: CommandContext) =>
-    workspaceCreateOffers(context.shareView).collection,
+    workspaceCreateOffers(context.shareView, context.memberRole).collection,
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
   activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,

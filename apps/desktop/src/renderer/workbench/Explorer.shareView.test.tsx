@@ -134,3 +134,38 @@ describe("the delete confirmation states where the file goes", () => {
     expect(text).toContain("The person who shared it still has it");
   });
 });
+
+describe("creating in a joined workspace", () => {
+  const joined = { granterEmail: GRANTER };
+  const header = () => within(screen.getByTestId("explorer-files-header"));
+
+  it("offers a new page at Edit and hides page and folder creation below it", () => {
+    render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: false, folders: false } })} />);
+    expect(header().queryByRole("button", { name: "New file" })).toBeNull();
+    expect(header().queryByRole("button", { name: "New folder" })).toBeNull();
+    cleanup();
+
+    const onNewPage = vi.fn();
+    render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: true, folders: false }, onNewPage })} />);
+    fireEvent.click(header().getByRole("button", { name: "New file" }));
+    expect(onNewPage).toHaveBeenCalledWith("");
+    expect(header().queryByRole("button", { name: "New folder" })).toBeNull();
+  });
+
+  it("lets an admin name a new folder and opens its first page there, with no empty folder", async () => {
+    const createWorkspaceFolder = vi.fn();
+    window.dohcDesktop = { createWorkspaceFolder } as unknown as typeof window.dohcDesktop;
+    const onNewPage = vi.fn();
+    try {
+      render(<Explorer {...explorerProps({ shareView: joined, creates: { pages: true, folders: true }, onNewPage })} />);
+      fireEvent.click(header().getByRole("button", { name: "New folder" }));
+      const name = await screen.findByRole("textbox", { name: "New folder name" });
+      fireEvent.change(name, { target: { value: "Plans" } });
+      fireEvent.keyDown(name, { key: "Enter" });
+      expect(onNewPage).toHaveBeenCalledWith("Plans");
+      expect(createWorkspaceFolder).not.toHaveBeenCalled();
+    } finally {
+      delete window.dohcDesktop;
+    }
+  });
+});

@@ -6,6 +6,7 @@ import {
   shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./shareViewMarker";
+import { recordedShareSelector } from "./shareViewRecords";
 
 // The LOCAL-WRITE gate for a share view, as one rule in one place.
 //
@@ -31,6 +32,8 @@ export interface ShareViewWriteScope {
   // or the marker lost its identity.
   access: ShareAccess | null;
   ended: boolean;
+  // The pinned grant is the whole workspace: a joined workspace.
+  membership?: boolean;
 }
 
 export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
@@ -58,7 +61,7 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * is, or null for an ordinary workspace. The Explorer menu and the command
  * rows both ask this, so neither offers an action its handler refuses.
  */
-export function workspaceCreateOffers(shareView: ShareViewWriteScope | null): {
+export function workspaceCreateOffers(shareView: ShareViewWriteScope | null, role?: "admin" | "member"): {
   write: boolean;
   folder: boolean;
   collection: boolean;
@@ -66,16 +69,20 @@ export function workspaceCreateOffers(shareView: ShareViewWriteScope | null): {
   // Create, rename, delete and import: everywhere in an ordinary workspace,
   // and in a share view only at the level `shareViewTakesLocalWrites` names.
   const write = shareView === null || shareViewTakesLocalWrites(shareView);
+  // In a joined workspace only an admin starts a folder; the relay reads the
+  // role again. `role` is the relay's last answer, or unknown.
+  const startsFolders = shareView?.membership === true && role === "admin";
   return {
     write,
-    // Nowhere in a share view, at any level: the engine has no folder object,
-    // so an empty folder is nothing the recipient could send.
-    // `ShareViewFiles` therefore exposes no empty-folder operation.
-    folder: shareView === null,
+    // The engine has no folder object, so an empty folder is nothing a share
+    // view could send. `ShareViewFiles` therefore exposes no empty-folder
+    // operation. An admin's new folder starts with its first page instead.
+    folder: shareView === null || (write && startsFolders),
     // A document Collection is a folder with a schema file. A share view that
     // takes writes can make one: the schema file is the Collection's first
-    // file, and the folder comes with it (ADR 0013).
-    collection: write,
+    // file, and the folder comes with it (ADR 0013). In a joined workspace
+    // that folder is new, so only an admin makes one.
+    collection: write && (shareView?.membership !== true || startsFolders),
   };
 }
 
@@ -96,6 +103,7 @@ export function shareViewWriteScopeOf(
     granterEmail: shareViewGranterEmail(marker),
     access: shareViewIdentityIsIntact(marker) ? readableShareLevel(marker.grantedSelector) : null,
     ended: marker.ended === true,
+    membership: recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true,
   };
 }
 

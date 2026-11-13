@@ -224,6 +224,10 @@ export interface ExplorerProps {
   // path to. The granter's copy is what the change can still be taken back
   // from, which is why the granter is named here rather than described.
   shareView: { granterEmail: string | null } | null;
+  // What a joined workspace lets this person create, from their level and
+  // role. Absent elsewhere. A folder there starts with its first page,
+  // because a shared folder exists only while it holds a file.
+  creates?: { pages: boolean; folders: boolean };
   onRefreshShareMounts: () => void;
   onUnmountShare: (path: string) => void;
   // "Share…": offered by the main-owned context menu on synced,
@@ -1549,19 +1553,24 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     [announce, askedNotVersioned, rowFor, runChanges, workspaceId],
   );
 
+  const startsWithPage = props.creates !== undefined;
   const commitCreateFolder = useCallback(
     (parentPath: string, value: string) => {
       const path = resolveTypedPath(value, parentPath);
       setEditing(null);
       if (!path) return;
-      const change: PendingTreeChange = { id: nextChangeId(), kind: "create-folder", path };
       for (const ancestor of ancestorsOf(path)) onSetFolderExpanded(ancestor, true);
       onSetFolderExpanded(path, true);
+      const change: PendingTreeChange = { id: nextChangeId(), kind: "create-folder", path };
+      if (startsWithPage) {
+        props.onNewPage(path);
+        return;
+      }
       void runChanges([change], async () => {
         await bridge().createWorkspaceFolder({ workspaceId, relativePath: path });
       });
     },
-    [runChanges, workspaceId, onSetFolderExpanded],
+    [runChanges, workspaceId, onSetFolderExpanded, startsWithPage, props.onNewPage],
   );
 
   const performDeletes = useCallback(
@@ -2781,18 +2790,22 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 />
               </button>
               <div className="flex shrink-0 items-center gap-0.5">
-                <SectionActionButton
-                  label="New file"
-                  onClick={() => props.onNewPage(creationParentPath())}
-                >
-                  <FilePlus2 size={13} aria-hidden />
-                </SectionActionButton>
-                <SectionActionButton
-                  label="New folder"
-                  onClick={() => beginCreateFolder(creationParentPath())}
-                >
-                  <FolderPlus size={13} aria-hidden />
-                </SectionActionButton>
+                {props.creates?.pages !== false ? (
+                  <SectionActionButton
+                    label="New file"
+                    onClick={() => props.onNewPage(creationParentPath())}
+                  >
+                    <FilePlus2 size={13} aria-hidden />
+                  </SectionActionButton>
+                ) : null}
+                {props.creates?.folders !== false ? (
+                  <SectionActionButton
+                    label="New folder"
+                    onClick={() => beginCreateFolder(creationParentPath())}
+                  >
+                    <FolderPlus size={13} aria-hidden />
+                  </SectionActionButton>
+                ) : null}
                 <SectionActionButton label="Refresh explorer" onClick={props.onRefresh}>
                   <RefreshCw size={13} aria-hidden />
                 </SectionActionButton>

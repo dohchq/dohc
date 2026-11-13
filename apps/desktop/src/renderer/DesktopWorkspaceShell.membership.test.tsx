@@ -79,6 +79,18 @@ describe("a joined workspace", () => {
     expect(await screen.findByTestId("chats-new-channel")).toBeTruthy();
   });
 
+  it.each([
+    ["comment", "member", false, false],
+    ["edit", "member", true, false],
+    ["edit", "admin", true, true],
+  ] as const)("at %s, a %s gets New file %s and New folder %s in the Explorer", async (access, role, page, folder) => {
+    const bridge = withGroup(access, { status: "current", access, role });
+    await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());
+    const header = within(await screen.findByTestId("explorer-files-header"));
+    await waitFor(() => expect(header.queryByRole("button", { name: "New folder" }) !== null).toBe(folder));
+    expect(header.queryByRole("button", { name: "New file" }) !== null).toBe(page);
+  });
+
   it("applies a level change at once, with a toast and a Notices row", async () => {
     const bridge = withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true });
     const toast = await screen.findByTestId("workspace-shell-notice");

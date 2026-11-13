@@ -268,14 +268,15 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     });
   }
   if (pinned.length > 0) sections.push({ id: "pinned", label: "Pinned", rows: pinned });
-  if (pages.length > 0 || !explorer.shareView) {
+  const addsPages = explorer.creates?.pages ?? true;
+  if (pages.length > 0 || !explorer.shareView || explorer.creates?.pages) {
     sections.push({
       id: "pages",
       label: "Pages",
       count: kinds.pages.length,
       countLabel: (count) => plural(count, "page", "pages"),
       rows: pages,
-      add: { label: "New page", onClick: () => explorer.onNewPage("") },
+      ...(addsPages ? { add: { label: "New page", onClick: () => explorer.onNewPage("") } } : {}),
       ...(pages.length === 0 ? { empty: "No pages yet." } : {}),
     });
   }

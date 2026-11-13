@@ -168,6 +168,7 @@ import {
 import { importSkipLines } from "./shell/importSkips";
 import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
+import { workspaceCreateOffers } from "../workspaces/shareWriteGate";
 import { CopyButton } from "./ui/CopyButton";
 import {
   TitlebarUpdateButton,
@@ -6332,8 +6333,13 @@ export function DesktopWorkspaceShell(props: {
       // These are the renderer's latest access facts, so until the registry the
       // Explorer menu reads catches up, the two menus can differ either way.
       shareView: isShareView
-        ? { access: shareViewDamaged ? null : (shareAccess ?? null), ended: shareViewEnded }
+        ? {
+            access: shareViewDamaged ? null : (shareAccess ?? null),
+            ended: shareViewEnded,
+            membership: membershipView,
+          }
         : null,
+      ...(membershipRole ? { memberRole: membershipRole } : {}),
       activeDocumentKind: activeDocumentPath
         ? fileKindForPath(activeDocumentPath).displayKind
         : null,
@@ -6346,6 +6352,8 @@ export function DesktopWorkspaceShell(props: {
       shareViewDamaged,
       shareAccess,
       shareViewEnded,
+      membershipView,
+      membershipRole,
       activeDocumentPath,
       activeSharePath,
       pinnedApps,
@@ -6908,6 +6916,7 @@ export function DesktopWorkspaceShell(props: {
   useShareDirectWrites({
     workspaceId,
     sharedView: !!shareView,
+    membership: membershipView,
     enabled: shareViewWritable,
     ready: workspaceIsReady,
     ownerName: shareGranterName,
@@ -7272,6 +7281,16 @@ export function DesktopWorkspaceShell(props: {
   const versionsHistoryKey = `${historyRefreshCounter}\n${newestHistoryFile?.kind === "file" ? newestHistoryFile.moment.id : ""}`;
   const graphKey = shareView ? graphRefreshKey : `${graphRefreshKey}\0${latestMomentOrder}`;
 
+  const joinedWorkspaceOffers = commandContext.shareView
+    ? workspaceCreateOffers(commandContext.shareView, membershipRole)
+    : null;
+  const joinedWorkspaceCreates = useMemo(
+    () => ({
+      pages: joinedWorkspaceOffers?.write ?? false,
+      folders: joinedWorkspaceOffers?.folder ?? false,
+    }),
+    [joinedWorkspaceOffers?.write, joinedWorkspaceOffers?.folder],
+  );
   const explorerView = (
     <PendingShareMarks.Provider value={pendingShareMarks}>
       <NotVersionedMarks.Provider value={notVersionedMarks}>
@@ -7333,6 +7352,7 @@ export function DesktopWorkspaceShell(props: {
           onPathsChanged={onExplorerPathsChanged}
           onImportFiles={importFromExplorer}
           shareView={shareView}
+          {...(membershipView ? { creates: joinedWorkspaceCreates } : {})}
           onRefreshShareMounts={onExplorerRefreshShareMounts}
           onUnmountShare={unmountShare}
           onShare={onSharePath}
