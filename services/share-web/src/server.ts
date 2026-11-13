@@ -65,8 +65,9 @@ import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } fro
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 
-// A file directly in the viewer build's assets/ whose name ends in the build's
-// 8-character hash. Anything else there, put in by hand, is never kept.
+// A file directly in the viewer build's assets/ whose name ends in an
+// 8-character hash. The build names every file there `[name]-[hash]`; this
+// keeps out names without that ending, such as the fonts' subfolder.
 const HASHED_VIEWER_FILE = /^assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
 const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
