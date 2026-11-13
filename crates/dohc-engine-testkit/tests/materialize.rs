@@ -8,8 +8,8 @@
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, KeptCopySave, MaterializeOptions, NoBackoff,
     Placement, ReplaceBackoff, StdReplacer, materialize_one, materialize_secret_one,
-    recover_displacements, recover_path_displacements, run_pending_jobs,
-    save_kept_displacement, workspace_lacks_atomic_placement,
+    recover_displacements, recover_path_displacements, run_pending_jobs, save_kept_displacement,
+    workspace_lacks_atomic_placement,
 };
 use dohc_engine_storage::{
     DisplacementSpec, DisplacementState, EngineStore, FaultInjector, FaultPoint, JobStatus,

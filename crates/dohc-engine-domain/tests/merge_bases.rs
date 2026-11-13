@@ -5,10 +5,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dohc_engine_domain::{
-    CompareTextFileVersions, ComparisonStatus, CreateNamedVersion, DomainError,
-    MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, NoFaults,
-    ResolveConflictKind, ResolveTextConflict, VersionedTextStore, WriteBinaryFile, WriteText,
-    write_binary_file_in_tx,
+    CreateNamedVersion, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
+    MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, VersionedTextStore,
+    WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
 use dohc_engine_storage::{EngineStore, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -193,18 +192,6 @@ fn main_binary(store: &EngineStore, path: &str) -> Option<String> {
             )
         })
         .expect("read main bytes")
-}
-
-fn status(store: &mut EngineStore, path: &str) -> ComparisonStatus {
-    VersionedTextStore::new(store)
-        .compare_text_file_versions(&CompareTextFileVersions {
-            workspace_id: WS.to_owned(),
-            target_version_id: "main".to_owned(),
-            source_version_id: "feat".to_owned(),
-            path: path.to_owned(),
-        })
-        .expect("compare")
-        .status
 }
 
 fn open_conflicts(store: &mut EngineStore) -> usize {

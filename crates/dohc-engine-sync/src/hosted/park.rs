@@ -582,7 +582,6 @@ const OCCUPANTS_SQL: &str = "SELECT o.object_id,o.path,EXISTS(SELECT 1 FROM host
        UNION ALL SELECT object_id,path FROM path_aliases \
          WHERE workspace_id=?1 AND version_id=?2) o";
 
-
 /// Who holds a path: a document of the scope, or only a departed document,
 /// or a retired file (`None`), which holds it against every document.
 #[derive(Clone)]

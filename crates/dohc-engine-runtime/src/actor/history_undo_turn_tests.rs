@@ -306,26 +306,6 @@ where
     }
 }
 
-type DiskObserver = Arc<dyn Fn() + Send + Sync>;
-fn disk_observers() -> &'static Mutex<std::collections::HashMap<PathBuf, DiskObserver>> {
-    static OBSERVERS: OnceLock<Mutex<std::collections::HashMap<PathBuf, DiskObserver>>> =
-        OnceLock::new();
-    OBSERVERS.get_or_init(Mutex::default)
-}
-pub(in crate::actor) fn set_disk_observer(root: PathBuf, observer: Option<DiskObserver>) {
-    let mut observers = disk_observers().lock().unwrap();
-    if let Some(observer) = observer {
-        observers.insert(root, observer);
-    } else {
-        observers.remove(&root);
-    }
-}
-pub(super) fn observe_disk_probe(root: &Path) {
-    let observer = disk_observers().lock().unwrap().get(root).cloned();
-    if let Some(observer) = observer {
-        observer();
-    }
-}
 struct CrashAfter(AtomicUsize);
 impl FaultInjector for CrashAfter {
     fn poll(&self, point: FaultPoint) -> FaultAction {
@@ -1267,113 +1247,12 @@ async fn many_members_bound_store_work_and_ydoc_wait() {
     assert_eq!(inverses, 64, "the probe must observe every inverse row");
 }
 
-pub(in crate::actor) fn enable_work_probe(store: &mut EngineStore) {
-    store
-        .read_with(|conn| conn.execute_batch(INVERSE_PROBE))
-        .unwrap();
-    store
-        .hooks_with(|conn| {
-            conn.trace_v2(
-                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT
-                    | rusqlite::trace::TraceEventCodes::SQLITE_TRACE_ROW,
-                Some(trace_store_work),
-            )
-        })
-        .unwrap();
-}
 pub(in crate::actor) fn turn_count(request: &str) -> usize {
     probes()
         .lock()
         .unwrap()
         .get(request)
         .map_or(0, |p| p.phases.iter().filter(|p| p.actor).count())
-}
-pub(in crate::actor) fn proof(request: &str, members: usize, forward: bool) -> serde_json::Value {
-    let phases = probes().lock().unwrap()[request].phases.clone();
-    let mut inverses = 0;
-    let mut times = Vec::new();
-    for p in phases.iter().filter(|p| p.actor) {
-        let w = p.store_work.unwrap();
-        assert!(w.sources <= 16);
-        // A write inverse replaces an existing search entry, including its FTS
-        // shadow rows. The delete-inverse proof above keeps its smaller bounds.
-        assert!(
-            w.reads
-                <= if forward {
-                    4 + 64 * w.sources
-                } else {
-                    16 + 112 * w.inverses.max(1)
-                }
-                && w.writes
-                    <= if forward {
-                        (if matches!(p.phase.as_str(), "admission" | "reply") {
-                            3
-                        } else {
-                            2
-                        }) + 112 * w.sources
-                    } else {
-                        16 + 496 * w.inverses.max(1)
-                    }
-                && w.rows
-                    <= if forward {
-                        (match p.phase.as_str() {
-                            "admission" => 16,
-                            // Receipt reservation and reply return no phase rows.
-                            "reserve" | "reply" => 0,
-                            _ => 8,
-                        }) + 96 * w.sources
-                    } else {
-                        32 + 480 * w.inverses.max(1)
-                    },
-            "{}: reads={} writes={} rows={}",
-            p.phase,
-            w.reads,
-            w.writes,
-            w.rows
-        );
-        assert!(w.inverses <= if forward { 0 } else { 16 });
-        assert!(
-            w.commits
-                <= if forward {
-                    w.sources.max(1)
-                } else if p.phase == "rename-placement" {
-                    3
-                } else {
-                    1
-                }
-        );
-        inverses += w.inverses;
-        times.push(p.elapsed_ns);
-    }
-    if !forward {
-        assert_eq!(inverses, members);
-    }
-    times.sort();
-    serde_json::json!({"turns":phases,"p95Ns":times[(times.len()*95).div_ceil(100)-1],
-        "maxNs":times.last(),"inverseRows":inverses})
-}
-
-pub(in crate::actor) fn notify_inverse(request: &str, notify: Arc<tokio::sync::Notify>) {
-    probes()
-        .lock()
-        .unwrap()
-        .entry(request.into())
-        .or_default()
-        .notify = Some(notify);
-}
-
-pub(in crate::actor) fn pause_inverse(
-    request: &str,
-) -> (std::sync::mpsc::Receiver<()>, Arc<Barrier>) {
-    let (send, receive) = std::sync::mpsc::channel();
-    let barrier = Arc::new(Barrier::new(2));
-    probes()
-        .lock()
-        .unwrap()
-        .entry(request.into())
-        .or_default()
-        .hook = Some((send, barrier.clone()));
-    (receive, barrier)
 }
 
 pub(in crate::actor) fn pause_checkpoint(request: &str) -> [Arc<tokio::sync::Notify>; 2] {

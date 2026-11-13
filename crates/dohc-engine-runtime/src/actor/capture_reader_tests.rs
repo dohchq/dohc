@@ -8,7 +8,6 @@ use std::sync::{Mutex, OnceLock};
 
 enum Change {
     Remote(DocKey),
-    File(String),
 }
 type Hooks = Mutex<HashMap<PathBuf, VecDeque<Change>>>;
 fn hooks() -> &'static Hooks {
@@ -39,7 +38,6 @@ pub(super) async fn after_prepare(
                 })
                 .await?
         }
-        Some(Change::File(text)) => std::fs::write(root.join("note.md"), text).unwrap(),
         None => {}
     }
     Ok(())
