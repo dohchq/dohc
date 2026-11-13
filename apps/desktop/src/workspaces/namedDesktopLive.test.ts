@@ -211,7 +211,11 @@ it("reports a failed connection without blaming the owner after acceptance", asy
       onRemoteUpdate: vi.fn(),
     }),
   ).rejects.toMatchObject({
-    waiting: { state: "failed", message: "dohc could not connect. Check your connection." },
+    waiting: {
+      state: "failed",
+      message: "dohc could not connect. Check your connection.",
+      reason: "dohc could not connect to the server. Check your connection.",
+    },
   });
   expect(transport.factory).not.toHaveBeenCalled();
 });
@@ -542,6 +546,29 @@ it.each([
   expect(transport.factory).not.toHaveBeenCalled();
 });
 
+// A page its owner never opened in dohc has no live-editing history yet. The
+// owner's desktop starts one by itself, so the open waits for the host to be
+// ready instead of for Try again.
+it("waits for the owner's desktop when the host says the page has no live history yet", async () => {
+  const f = fixture();
+  f.request.mockResolvedValueOnce(
+    Response.json({ ok: false, code: "live-document-without-lineage" }, { status: 409 }),
+  );
+  await expect(
+    f.capture.openYDocSession({
+      path: "docs/a.md",
+      contentKind: "richdoc",
+      onRemoteUpdate: vi.fn(),
+    }),
+  ).rejects.toMatchObject({
+    waiting: {
+      state: "host-refused",
+      reason: "Editing starts once the owner's dohc is online.",
+      awaitsHost: true,
+    },
+  });
+});
+
 it("does not guess why when the host gives a refusal dohc does not know", async () => {
   const f = fixture();
   f.request.mockResolvedValueOnce(
@@ -568,7 +595,11 @@ it("keeps waiting for the host after a refusal without a host answer", async () 
       onRemoteUpdate: vi.fn(),
     }),
   ).rejects.toMatchObject({
-    waiting: { state: "failed", message: "dohc could not open this file for editing." },
+    waiting: {
+      state: "failed",
+      message: "dohc could not open this file for editing.",
+      reason: "The server did not start live editing for this page.",
+    },
   });
 });
 
@@ -585,7 +616,7 @@ it.each(Object.entries(LIVE_CONNECTION_LIMIT_MESSAGES))(
         contentKind: "richdoc",
         onRemoteUpdate: vi.fn(),
       }),
-    ).rejects.toMatchObject({ waiting: { state: "failed", message } });
+    ).rejects.toMatchObject({ waiting: { state: "failed", message, reason: message } });
     expect(f.closed).toHaveBeenCalled();
   },
 );

@@ -380,3 +380,39 @@ it.each([
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
   expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
 });
+
+// The owner's desktop starts a page's live history by itself, so a member's
+// page that waits for it opens live once the relay says the host is ready,
+// with no Try again. A refusal nothing will change waits for Try again.
+it("opens a page that waits for the owner's desktop live once the host is ready", async () => {
+  const f = deferredBridge();
+  const doc = new Y.Doc();
+  let ready!: (value: boolean) => void;
+  const waitForEngineYDocAdmission = vi.fn(() => new Promise<boolean>(resolve => { ready = resolve; }));
+  const api = { ...f.api, waitForEngineYDocAdmission, openEngineYDocSession: vi.fn()
+    .mockResolvedValueOnce({ available: false, sharedWaiting: { state: "host-refused", message: "dohc could not open this page for editing.",
+      reason: "Editing starts once the owner's dohc is online.", awaitsHost: true } })
+    .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 }) };
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  vi.stubGlobal("dohcDesktop", api);
+  try {
+    render(<Harness path="notes/fresh.md" />);
+    await waitFor(() => expect(waitForEngineYDocAdmission).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true");
+    await act(async () => ready(true));
+    await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
+    expect(api.openEngineYDocSession).toHaveBeenCalledTimes(2);
+  } finally { visibility.mockRestore(); doc.destroy(); }
+});
+
+it("waits for Try again, not the host, after a refusal nothing will change", async () => {
+  const f = deferredBridge();
+  const waitForEngineYDocAdmission = vi.fn(() => new Promise<boolean>(() => undefined));
+  const api = { ...f.api, waitForEngineYDocAdmission, openEngineYDocSession: vi.fn().mockResolvedValue({ available: false,
+    sharedWaiting: { state: "host-refused", message: "dohc could not open this page for editing.", reason: "The server is editing too many pages right now." } }) };
+  vi.stubGlobal("dohcDesktop", api);
+  render(<Harness path="notes/later.md" />);
+  await waitFor(() => expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true"));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(waitForEngineYDocAdmission).not.toHaveBeenCalled();
+});

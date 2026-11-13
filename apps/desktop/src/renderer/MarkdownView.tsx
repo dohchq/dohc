@@ -109,6 +109,7 @@ import {
   exceedsUtf8Bytes,
 } from "../workspaces/workspaceTextLimits";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
+import { sharedWaitingLine } from "../ipc/sharedDocumentOpenState";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -2590,7 +2591,7 @@ export function MarkdownView(props: {
         <EngineMayHoldDocumentNotice
           onRetry={props.onRetryEngineOpen}
           contentShown
-          message={engine.openRefusal ?? engine.sharedWaiting?.message}
+          message={engine.openRefusal ?? sharedWaitingLine(engine.sharedWaiting)}
         />
       ) : null}
       {engine.removalInProgress ? (

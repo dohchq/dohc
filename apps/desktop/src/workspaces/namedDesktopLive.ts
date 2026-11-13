@@ -33,9 +33,14 @@ const HOST_REFUSAL_REASONS: Readonly<Record<string, string>> = {
   live_host_full: "The server is editing too many pages right now.",
   live_paused_by_owner: "The owner paused live editing for this page.",
   "document-unavailable": "The page moved or was deleted.",
+  // The owner's desktop starts the page's live history by itself once it is online.
+  "live-document-without-lineage": "Editing starts once the owner's dohc is online.",
 };
 
-/** The host's answer ends the open read-only, instead of waiting for the host again. */
+/**
+ * The host's answer ends the open read-only. Only a page waiting for its
+ * owner's desktop waits for the host again; any other waits for Try again.
+ */
 function hostRefused(code: string): SharedDocumentWaitingError {
   const reason = Object.hasOwn(HOST_REFUSAL_REASONS, code) ? HOST_REFUSAL_REASONS[code] : undefined;
   return new SharedDocumentWaitingError({
@@ -44,6 +49,7 @@ function hostRefused(code: string): SharedDocumentWaitingError {
       ? `dohc could not open this page for editing. ${reason}`
       : "dohc could not open this page for editing.",
     ...(reason ? { reason } : {}),
+    ...(code === "live-document-without-lineage" ? { awaitsHost: true as const } : {}),
   });
 }
 
@@ -192,12 +198,15 @@ export function createNamedDesktopLiveCapture(options: {
         first = await admit(input.path, opening);
       } catch (error) {
         if (error instanceof SharedDocumentWaitingError) throw error;
+        const offline = error instanceof TypeError;
         throw new SharedDocumentWaitingError({
           state: "failed",
-          message:
-            error instanceof TypeError
-              ? "dohc could not connect. Check your connection."
-              : "dohc could not open this file for editing.",
+          message: offline
+            ? "dohc could not connect. Check your connection."
+            : "dohc could not open this file for editing.",
+          reason: offline
+            ? "dohc could not connect to the server. Check your connection."
+            : "The server did not start live editing for this page.",
         });
       }
       let initial: typeof first | undefined = first;
@@ -241,15 +250,16 @@ export function createNamedDesktopLiveCapture(options: {
         announce = () => {
           const state = session.state();
           if (state.status === "live") resolve();
-          else if (!["authorizing", "connecting", "syncing"].includes(state.status))
+          else if (!["authorizing", "connecting", "syncing"].includes(state.status)) {
+            const limit = liveConnectionLimitMessage(state.reason);
             reject(
               new SharedDocumentWaitingError({
                 state: "failed",
-                message:
-                  liveConnectionLimitMessage(state.reason) ??
-                  "Live editing is paused. Open the file again to retry.",
+                message: limit ?? "Live editing is paused. Open the file again to retry.",
+                reason: limit ?? "The live connection to the server closed.",
               }),
             );
+          }
         };
       });
       void ready.catch(() => {});

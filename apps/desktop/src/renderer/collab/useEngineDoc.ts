@@ -250,8 +250,12 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   // one editable frame while a version, path, gate, or retry request changes.
   const settled = leaseState?.requestKey === requestKey ? leaseState.snapshot : null;
   const outcome = settled?.outcome ?? null;
+  // A failed open, or one that waits for its owner's desktop to start the
+  // page's live history, opens again once the relay says the host is ready.
   const admissionWaiting =
-    input.enabled && outcome?.kind === "shared-waiting" && outcome.waiting.state === "failed";
+    input.enabled &&
+    outcome?.kind === "shared-waiting" &&
+    (outcome.waiting.state === "failed" || outcome.waiting.awaitsHost === true);
   useEffect(() => {
     if (!admissionWaiting) return;
     let active: { cancel: AbortController; sessionId: string } | undefined;
@@ -292,8 +296,11 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   // A change in the workspace can deliver what a waiting open needs, such as a
   // new record. It cannot make the host take a document: a failed open waits
   // for the relay's readiness answer, and a refused one for Try again.
-  waiting.current = outcome?.kind === "live-host-unavailable" ||
-    (outcome?.kind === "shared-waiting" && outcome.waiting.state !== "failed" && outcome.waiting.state !== "host-refused");
+  waiting.current =
+    outcome?.kind === "live-host-unavailable" ||
+    (outcome?.kind === "shared-waiting" &&
+      outcome.waiting.state !== "failed" &&
+      outcome.waiting.state !== "host-refused");
   useEffect(() => {
     if (waiting.current && activityRevision.current > openingRevision.current)
       setDeliveryRetry((value) => value + 1);

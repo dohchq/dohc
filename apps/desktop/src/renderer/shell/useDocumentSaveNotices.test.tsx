@@ -1084,4 +1084,32 @@ describe("document save notices", () => {
     expect(retry).toHaveBeenCalledOnce();
     expect(open).toHaveBeenCalledWith("notes/plan.md");
   });
+
+  it("raises a failed open with its reason once per open", async () => {
+    const failed = (): SharedDocumentOpenState => ({ state: "failed", message: "dohc could not open this file for editing.",
+      reason: "The server did not start live editing for this page." });
+    function Page(props: { refusal: SharedDocumentOpenState | null }) {
+      useLiveHostRefusalNotice({ workspaceId: "ws-1", path: "notes/plan.md", refusal: props.refusal, available: false, retry: vi.fn() });
+      return null;
+    }
+    const view = render(<Shell />);
+    view.rerender(<Shell><Page refusal={failed()} /></Shell>);
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain('dohc could not open "plan.md" for editing');
+    expect(toast.textContent).toContain("The server did not start live editing for this page. You can still read it.");
+    await userEvent.setup().click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
+    view.rerender(<Shell><Page refusal={failed()} /></Shell>);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("files nothing for a page that waits on something it shows itself", () => {
+    function Page() {
+      useLiveHostRefusalNotice({ workspaceId: "ws-1", path: "notes/plan.md", available: false, retry: vi.fn(),
+        refusal: { state: "pending", message: "Record saved on this device. Waiting to send." } });
+      return null;
+    }
+    const view = render(<Shell />);
+    view.rerender(<Shell><Page /></Shell>);
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
 });

@@ -280,4 +280,50 @@ describe("FileInspector renders markdown through the shared component map", () =
       }
     },
   );
+  // The toast and its Notices row say why a shared page could not open for
+  // editing. The page's own line says only what the person can do with it.
+  it.each([
+    [
+      "host-refused",
+      {
+        state: "host-refused",
+        message:
+          "dohc could not open this page for editing. The server is editing too many pages right now.",
+        reason: "The server is editing too many pages right now.",
+      },
+      "You can read this page.",
+    ],
+    [
+      "failed",
+      {
+        state: "failed",
+        message: "dohc could not open this file for editing.",
+        reason: "The server did not start live editing for this page.",
+      },
+      "You can read this page.",
+    ],
+    [
+      "pending",
+      { state: "pending", message: "Record saved on this device. Waiting to send." },
+      "Record saved on this device. Waiting to send.",
+    ],
+  ] as const)(
+    "states a %s shared page on the page and leaves its reason to the toast",
+    async (_name, waiting, line) => {
+      const read = bridgeMock.readWorkspaceText.getMockImplementation();
+      bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+        text: "# Plan",
+        truncated: false,
+      }));
+      Object.assign(engineDocState, { liveHostUnavailable: true, sharedWaiting: waiting });
+      try {
+        render(<FileInspector workspaceId="ws-1" path="a.md" />);
+        const notice = await screen.findByTestId("engine-may-hold-document-notice");
+        expect(notice.textContent).toBe(`${line}Try again`);
+      } finally {
+        Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
+        if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+      }
+    },
+  );
 });
