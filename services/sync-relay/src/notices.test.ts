@@ -1110,6 +1110,41 @@ describe("pulling changes", () => {
       ),
     );
     expect(await response.json()).toEqual({ ok: true, dismissed: [] });
+
+    // A phone's restore and unread leave the schedule's floor, so no later dismissal is first.
+    const floors = () =>
+      context.db
+        .prepare(
+          "SELECT schedule_key, reclaimed_through_ms FROM sync_relay_notice_dismissal_floors WHERE recipient_user_id = ?",
+        )
+        .all("owner");
+    const floor = floors();
+    expect(floor).toHaveLength(1);
+    for (const installId of [undefined, "laptop"]) {
+      storage.markNotices({
+        recipientUserId: "owner",
+        marks: [
+          { noticeId: report, mark: "restore" },
+          { noticeId: report, mark: "unread" },
+        ],
+        nowMs: clock,
+      });
+      expect(
+        (await pull(h, "owner")).notices.find((row) => row.noticeId === report)?.dismissedAtMs,
+      ).toBeNull();
+      const again = await h(
+        request(
+          "owner",
+          "/sync/notices/marks",
+          jsonBody({
+            marks: [{ noticeId: report, mark: "dismissed" }],
+            ...(installId === undefined ? {} : { installId }),
+          }),
+        ),
+      );
+      expect(await again.json(), installId).toEqual({ ok: true, dismissed: [] });
+      expect(floors()).toEqual(floor);
+    }
   });
 
   it("keeps a notice stamped a little ahead of the clock from being first again after reclaim", async () => {

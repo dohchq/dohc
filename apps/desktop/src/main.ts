@@ -5172,9 +5172,11 @@ async function continueRunNow(intent: RunNowIntent): Promise<string | null> {
     // and the next start or window focus asks again.
     if (dismissal === "unanswered")
       return "dohc could not reach your server. It runs this once it does.";
+    // Not first: another computer's Run now claimed it, or someone marked it Done, perhaps
+    // before a phone restored it. Which one isn't known here, so the words claim neither.
     if (dismissal === "not-first") {
       await runNowIntents.remove(intent.notice);
-      return "This already ran from another computer.";
+      return "This Notice was already handled, so Run now won't start it.";
     }
     if (!(await automations.runNow(intent.automationId, intent.notice.noticeId))) {
       return "dohc could not start the automation. Its engine did not answer.";

@@ -47,7 +47,7 @@ const MAX_USER_ID_CHARS = 256;
 const MAX_INSTALL_ID_CHARS = 256;
 const DEFAULT_NOTICE_PAGE = 100;
 // A marks body arrives within this, or the request ends.
-const NOTICE_MARKS_RECEIPT_MS = 10_000;
+export const NOTICE_MARKS_RECEIPT_MS = 10_000;
 
 /** The Notice reads one sign-in may hold waiting at once. */
 export const NOTICE_WAITS_PER_SESSION = 2;
@@ -401,18 +401,24 @@ const COMPUTER_MARKS: MarkSender = {
   fields: ["noticeId", "mark", "withdraw"],
 };
 
+// A body that stops arriving ends at the deadline, which cancels its stream. The deadline is a
+// timer the request clears, so nothing outlives the read.
 async function readMarksBody(request: Request): Promise<Record<string, unknown>> {
   let body: unknown;
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), NOTICE_MARKS_RECEIPT_MS);
   try {
     body = await readBoundedJson(
       request,
       NOTICE_MARKS_MAX_BODY_BYTES,
-      AbortSignal.any([request.signal, AbortSignal.timeout(NOTICE_MARKS_RECEIPT_MS)]),
+      AbortSignal.any([request.signal, deadline.signal]),
     );
   } catch (error) {
     throw error instanceof RangeError
       ? relayError("payload_too_large")
       : badRequest("request body must be valid JSON");
+  } finally {
+    clearTimeout(timer);
   }
   const object = asRecord(body);
   if (object === null) throw badRequest("request body must be a JSON object");

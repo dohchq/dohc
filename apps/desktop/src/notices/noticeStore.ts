@@ -291,8 +291,9 @@ const OutboxMark = z.object({
 });
 type OutboxMark = z.infer<typeof OutboxMark>;
 
-// Version 2 keeps each row's expiry from the relay. An older file reads as
-// damaged: it is moved aside and the list refills from the relay.
+// Version 2 keeps each row's expiry from the relay. A version 1 file is read
+// once for its waiting marks; its rows, cursor, and unsent posts go, and the
+// list refills from the relay.
 const AccountFile = z.object({
   version: z.literal(2),
   cursor: z.string().max(64).nullable(),
@@ -320,6 +321,10 @@ const AccountFile = z.object({
   marks: z.array(OutboxMark),
 });
 type AccountFile = z.infer<typeof AccountFile>;
+
+// What a version 1 account file still gives: the marks this computer had not sent, withdrawals
+// included. Other fields are left unread.
+const AccountFileVersion1 = z.object({ version: z.literal(1), marks: z.array(OutboxMark) });
 
 const RelayPage = z.object({
   ok: z.literal(true),
@@ -394,7 +399,13 @@ export function createNoticeStore(deps: {
   const accountFileName = (account: NoticeAccount) =>
     `account-${createHash("sha256").update(account.key).digest("hex").slice(0, 32)}.json`;
 
-  async function load<T>(name: string, schema: z.ZodType<T>, empty: T): Promise<T> {
+  // `upgrade` reads a file in an older shape, or answers null to treat it as damaged.
+  async function load<T>(
+    name: string,
+    schema: z.ZodType<T>,
+    empty: T,
+    upgrade?: (json: unknown) => T | null,
+  ): Promise<T> {
     const path = join(deps.directory, name);
     let raw: string;
     try {
@@ -411,6 +422,8 @@ export function createNoticeStore(deps: {
     }
     const parsed = schema.safeParse(json);
     if (parsed.success) return parsed.data;
+    const upgraded = upgrade?.(json) ?? null;
+    if (upgraded !== null) return upgraded;
     // Keep a damaged file for inspection and start again. An account list
     // refills from the relay because its cursor starts over.
     console.error(`[notices] ${name} is damaged; it was moved aside`, parsed.error);
@@ -458,16 +471,23 @@ export function createNoticeStore(deps: {
     const name = accountFileName(account);
     let file = accountFiles.get(name);
     if (!file) {
-      file = await load(name, AccountFile, {
+      const empty = (marks: OutboxMark[]): AccountFile => ({
         version: 2,
         cursor: null,
         routesMissing: false,
         rows: [],
         posts: [],
-        marks: [],
+        marks,
+      });
+      const read = { upgraded: false };
+      file = await load(name, AccountFile, empty([]), (json) => {
+        const old = AccountFileVersion1.safeParse(json);
+        if (!old.success) return null;
+        read.upgraded = true;
+        return empty(old.data.marks);
       });
       accountFiles.set(name, file);
-      if (pruneAccount(file)) await saveAccount(account, file);
+      if (pruneAccount(file) || read.upgraded) await saveAccount(account, file);
     }
     return file;
   }
@@ -1311,6 +1331,14 @@ export function createNoticeStore(deps: {
     if (!session?.isCurrent() || session.account.key !== account) return "unanswered";
     // The notice's own post goes first, or the relay would not hold it yet.
     await sync();
+    // The row as it was when the dismissal left. A pull while the answer is on its way may bring a
+    // newer row, such as one the phone restored, which the answer must not dismiss again.
+    const sentAtSeq = await locked(
+      async () =>
+        (await loadAccount(session.account)).rows.find(
+          (candidate) => candidate.noticeId === ref.noticeId,
+        )?.changeSeq ?? null,
+    );
     let dismissed: unknown;
     try {
       const response = await relay(session, "/sync/notices/marks", {
@@ -1338,7 +1366,7 @@ export function createNoticeStore(deps: {
     await locked(async () => {
       const file = await loadAccount(session.account);
       const row = file.rows.find((candidate) => candidate.noticeId === ref.noticeId);
-      if (row) row.dismissedAtMs ??= nowMs();
+      if (row && row.changeSeq === sentAtSeq) row.dismissedAtMs ??= nowMs();
       file.marks = file.marks.filter((waiting) => waiting.noticeId !== ref.noticeId);
       await saveAccount(session.account, file);
     });

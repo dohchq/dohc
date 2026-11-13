@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   UnauthorizedError,
@@ -12,6 +12,7 @@ import {
   NOTICE_UNREAD_RETENTION_MS,
   type AutomationWake,
 } from "@dohc/workspace-contracts/relay";
+import { NOTICE_MARKS_RECEIPT_MS } from "./noticeRoutes";
 import type { SyncRelayStorage } from "./storage";
 import type { PostNoticeInput } from "./storage/notices";
 import {
@@ -27,7 +28,10 @@ import {
 
 // The owner's phone marks its Notices with `POST /sync/notices/marks?scope=phone`; a computer marks them without scope.
 
-afterEach(closeTestStorages);
+afterEach(async () => {
+  vi.useRealTimers();
+  await closeTestStorages();
+});
 
 const NOW = 50_000_000;
 const DAY = 24 * 60 * 60 * 1000;
@@ -453,4 +457,43 @@ it("changes nothing when the sign-in changed while the body arrived", async () =
   held.release();
   expect((await marking).status).toBe(404);
   expect(f.row("n-1")?.dismissedAtMs).toBeNull();
+});
+
+it("refuses a body that stops arriving at its deadline, cancels its stream, and changes nothing", async () => {
+  const f = await relay();
+  f.post("n-1");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  let cancelled = false;
+  let reached!: () => void;
+  const stalled = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"marks":[{"noticeId":"n-1","mark":"dis'));
+    },
+    // The route read the prefix and asks for more, which never comes.
+    pull() {
+      reached();
+      return new Promise<void>(() => undefined);
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const answer = f.h(
+    new Request("http://relay.test/sync/notices/marks?scope=phone", {
+      method: "POST",
+      headers: { authorization: "Bearer session:ana:phone", "content-type": "application/json" },
+      duplex: "half",
+      body,
+    } as RequestInit & { duplex: "half" }),
+  );
+  await stalled;
+  vi.advanceTimersByTime(NOTICE_MARKS_RECEIPT_MS - 1);
+  expect(cancelled).toBe(false);
+  vi.advanceTimersByTime(1);
+  expect((await answer).status).toBe(400);
+  expect(cancelled).toBe(true);
+  expect(f.row("n-1")).toMatchObject({ dismissedAtMs: null });
 });

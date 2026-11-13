@@ -153,6 +153,8 @@ interface Relay {
   failPulls: boolean;
   // Runs, and is awaited, as each request leaves.
   onRequest?: (request: Request) => void | Promise<void>;
+  // Runs, and is awaited, after the relay answers and before the answer reaches the store.
+  onAnswer?: (request: Request) => void | Promise<void>;
 }
 
 async function relay(overrides: HandlerOverrides = {}): Promise<Relay> {
@@ -196,6 +198,7 @@ function account(server: Relay, userId: string): NoticeAccount {
           );
         }
         const answer = await server.handler(request);
+        await server.onAnswer?.(request);
         if (server.losePostReplies && request.method === "POST" && path === "/sync/notices")
           throw new TypeError("fetch failed");
         return answer;
@@ -563,6 +566,88 @@ describe("notices on one person's computers", () => {
     expect(await titles(restarted)).toEqual(["account:Your agent finished"]);
     clock = 10_000 + 351 * DAY;
     expect(await titles(restarted)).toEqual([]);
+  });
+
+  it("keeps a row the phone restored while a Run now dismissal's answer was on its way", async () => {
+    const server = await relay();
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    let reached!: () => void;
+    let release!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The relay takes the dismissal, and its answer waits.
+    server.onAnswer = async (request) => {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices/marks")
+        return;
+      server.onAnswer = undefined;
+      reached();
+      await held;
+    };
+    const dismissing = laptop.store.dismissFirst(
+      { store: "account", noticeId: "agent-run:1" },
+      laptop.signedIn?.key ?? null,
+    );
+    await applied;
+    clock = 11_000;
+    server.storage.markNotices({
+      recipientUserId: "ana",
+      marks: [{ noticeId: "agent-run:1", mark: "restore" }],
+      nowMs: clock,
+    });
+    await laptop.store.sync();
+    expect(await titles(laptop)).toEqual(["account:Your agent finished"]);
+    release();
+    expect(await dismissing).toBe("first");
+    await laptop.store.sync();
+    expect(await titles(laptop)).toEqual(["account:Your agent finished"]);
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual(["account:Your agent finished"]);
+  });
+
+  it("carries a version-1 file's waiting marks, withdrawals included, and refills the rest", async () => {
+    const server = await relay();
+    server.online = false;
+    const laptop = await computer(account(server, "ana"));
+    await laptop.store.postNotice(notice());
+    await laptop.store.sync();
+    const name = (await readdir(laptop.directory)).find(
+      (entry) => entry.startsWith("account-") && entry.endsWith(".json"),
+    )!;
+    const marks = [
+      { noticeId: "schedule-skipped:x", mark: "dismissed", withdraw: true, atMs: 9_000 },
+      { noticeId: "agent-run:1", mark: "read", atMs: 9_500 },
+    ];
+    // A version 1 file: its rows carry no relay expiry, and its unsent post goes.
+    await writeFile(
+      join(laptop.directory, name),
+      JSON.stringify({
+        version: 1,
+        cursor: "7",
+        routesMissing: false,
+        rows: [{ noticeId: "old", changeSeq: 3 }],
+        posts: [{ request: { noticeId: "unsent" }, sent: false }],
+        marks,
+      }),
+    );
+    const restarted = await computer(laptop.signedIn, { directory: laptop.directory });
+    expect(await titles(restarted)).toEqual([]);
+    expect(await file(restarted, "account")).toEqual({
+      version: 2,
+      cursor: null,
+      routesMissing: false,
+      rows: [],
+      posts: [],
+      marks,
+    });
+    expect((await readdir(laptop.directory)).some((entry) => entry.endsWith(".damaged"))).toBe(
+      false,
+    );
   });
 
   it("marks nothing in the account signed in now for a list shown for another", async () => {
