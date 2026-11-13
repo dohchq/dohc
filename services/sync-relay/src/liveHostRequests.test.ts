@@ -169,6 +169,20 @@ it("retires an ambiguous native deadline before starting another queued request"
   expect(f.invoke).toHaveBeenCalledTimes(1);
 });
 
+it("fails only a request whose deadline passed before it was sent, then starts the next", async () => {
+  const f = fixture();
+  f.invoke.mockRejectedValueOnce(
+    new EngineRequestDeadlineError(1, "liveApplication.appliedRead", 1000, true),
+  );
+  await expect(f.client.readNextLiveApplied(request(1), position, 100)).rejects.toMatchObject({
+    unsent: true,
+  });
+  await expect(f.client.sendRequest(request(2))).resolves.toEqual({ result: {} });
+  expect(f.retire).not.toHaveBeenCalled();
+  expect(f.invoke).toHaveBeenCalledTimes(2);
+  f.lifetime.abort();
+});
+
 it("does not enqueue the internal RPC of an already queued client method", async () => {
   const f = fixture(1);
   await f.client.readLiveApplicationAck(request(1), {

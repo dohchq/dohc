@@ -714,24 +714,28 @@ export function isLiveDocumentWithoutLineage(error: unknown): boolean {
  * callers that recover by rebinding; this class lets them distinguish their
  * own deadline from a socket failure without matching message text.
  *
- * The outcome is unknown: the daemon may still finish the work. Only the
- * daemon's own `DEADLINE_EXCEEDED` or `CANCELLED` means the work did not happen.
+ * Unless `unsent` is true, the outcome is unknown: the daemon may still finish
+ * the work. Only the daemon's own `DEADLINE_EXCEEDED` or `CANCELLED` means the
+ * work did not happen.
  */
 export class EngineRequestDeadlineError extends EngineClientError {
   readonly requestId: number;
   readonly method: string;
   readonly deadlineMs: number;
+  /** The deadline passed before the request was written, so the daemon never received it and did no work. */
+  readonly unsent: boolean;
 
-  constructor(requestId: number, method: string, deadlineMs: number) {
+  constructor(requestId: number, method: string, deadlineMs: number, unsent = false) {
     super(
       "transport-error",
       `engine-request-deadline-exceeded: request ${requestId} (${method}) carries ` +
-        `a deadline of ${deadlineMs} ms and the daemon did not answer inside it.`,
+        `a deadline of ${deadlineMs} ms and ${unsent ? "was not sent" : "the daemon did not answer"} inside it.`,
     );
     this.name = "EngineRequestDeadlineError";
     this.requestId = requestId;
     this.method = method;
     this.deadlineMs = deadlineMs;
+    this.unsent = unsent;
   }
 }
 
@@ -2013,8 +2017,11 @@ export class EngineClient implements EngineTransport {
       if (cancel && transmitted)
         void this.writeEnvelope({ type: "cancel", id: wireId }).catch(() => undefined);
     };
-    const expire = (): void =>
-      abandon(new EngineRequestDeadlineError(wireId, request.method, deadlineMs!), false);
+    const expire = (neverSent: boolean): void =>
+      abandon(
+        new EngineRequestDeadlineError(wireId, request.method, deadlineMs!, neverSent),
+        false,
+      );
     const abort = (): void => {
       // Finish reserved input before cancelling so other requests retain valid framing.
       if ((writeInput && !inputComplete) || cancellationSent) return;
@@ -2036,7 +2043,8 @@ export class EngineClient implements EngineTransport {
                 setImmediate(() => {
                   const pending = this.pending.get(wireId);
                   if (!pending) return;
-                  expire();
+                  // A request still queued is withdrawn here, so the daemon never sees it.
+                  expire(!transmitted && unsent !== undefined);
                 });
               },
               Math.max(0, expiresAt! - performance.now()),
@@ -2079,8 +2087,8 @@ export class EngineClient implements EngineTransport {
         if (ordinary && expiresAt !== null) {
           const remaining = Math.ceil(expiresAt - performance.now());
           if (remaining <= 0) {
-            expire();
-            throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
+            expire(true);
+            throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!, true);
           }
           const captured = JSON.parse(serializedEnvelope) as Request;
           captured.deadlineMs = Math.min(deadlineMs!, remaining);
@@ -2093,8 +2101,8 @@ export class EngineClient implements EngineTransport {
           this.maxFrameBytes,
         );
         if (ordinary && expiresAt !== null && performance.now() >= expiresAt) {
-          expire();
-          throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!);
+          expire(true);
+          throw new EngineRequestDeadlineError(wireId, request.method, deadlineMs!, true);
         }
         transmitted = true;
         return frame;

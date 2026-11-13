@@ -151,7 +151,9 @@ export function queueLiveHostRequests(
               caller?.throwIfAborted();
               resolve(value);
             } catch (error) {
-              if (error instanceof EngineRequestDeadlineError) options.retire(error);
+              // A request that expired before it was written never reached the engine, so only it fails.
+              if (error instanceof EngineRequestDeadlineError && !error.unsent)
+                options.retire(error);
               reject(error);
             } finally {
               releaseInput();
