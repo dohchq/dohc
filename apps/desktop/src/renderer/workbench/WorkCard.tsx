@@ -16,7 +16,6 @@ const STATUS_WORD: Record<ChatWorkStatus, string> = {
 
 function StatusMark(props: { status: ChatWorkStatus }) {
   switch (props.status) {
-    // A running agent's dot.
     case "working":
       return <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-agent" />;
     case "waiting":

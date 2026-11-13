@@ -20,7 +20,6 @@ export type FlatRow = {
   fullPath: string;
   /** True for folder rows (no `page`); false for leaf rows. */
   isFolder: boolean;
-  /** Folder-only: is this folder currently expanded? */
   isExpanded: boolean;
   /** Depth (root rows are 0). Used for aria-level (= depth+1). */
   depth: number;

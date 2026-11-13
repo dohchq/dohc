@@ -38,12 +38,10 @@ export type ShareRemovalFailure = {
 
 export type DisconnectedLinkAgent = { workspaceId: string; grantId: string; connectionId: string };
 
-// One agent's Disconnect, as the shell names its failure.
 export function agentDisconnectIdentity(grantId: string, connectionId: string): string {
   return `share-link-agent-disconnect:${grantId}:${connectionId}`;
 }
 
-// An agent's key in the shell's set of disconnected agents.
 export function disconnectedAgentKey(agent: DisconnectedLinkAgent): string {
   return `${agent.workspaceId}\n${agentDisconnectIdentity(agent.grantId, agent.connectionId)}`;
 }

@@ -25,7 +25,6 @@ import { basenameOf, dirnameOf } from "../path";
 // surface from the backend mutation, and the caller alerts.
 
 export type DragSource = {
-  /** The full path of the dragged row. */
   path: string;
   /** 'file' OR 'folder' — discriminates which mutation to call. */
   kind: "file" | "folder";

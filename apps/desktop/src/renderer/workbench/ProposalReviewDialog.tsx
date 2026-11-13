@@ -16,7 +16,6 @@ export function proposerName(sent: { proposedByEmail: string | null } | null): s
   return sent?.proposedByEmail ?? "another dohc user";
 }
 
-// The words the version compare page already uses for the same two facts.
 function operationLabel(operation: ShareProposalOperation): string {
   return operation === "delete" ? "Removed" : "Changed";
 }
@@ -34,7 +33,6 @@ function ProposalFileDiff(props: { currentText: string | null; incomingText: str
   return <UnifiedDiffLines lines={lines} testId="proposal-review-diff-lines" />;
 }
 
-// What one row says before anyone pays to open it.
 function sizeLabel(bytes: number | null): string | null {
   if (bytes === null) return null;
   if (bytes < 1024) return `${bytes} B`;

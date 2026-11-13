@@ -42,7 +42,6 @@ type TextDiff = {
   /// The bodies were too big to compare line by line, so `lines` is the
   /// contiguous approximation: one removed block, then one added block.
   degraded: boolean;
-  /// The most diff lines the display will show.
   displayLimit: number;
 };
 

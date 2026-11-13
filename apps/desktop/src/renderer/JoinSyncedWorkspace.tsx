@@ -179,7 +179,6 @@ export function JoinSyncedWorkspace(
   }
 
   const signedIn = gate.kind === "signed-in";
-  // Both fields stay visible and editable after sign-in.
   const fieldState = signedIn ? "current" : "pending";
 
   return (

@@ -35,7 +35,6 @@ export type ChatRowMenuActions = {
   leave: () => void;
   openAgentSettings?: () => void;
   setAgentEnabled: (enabled: boolean) => void;
-  // Each asks first in a dialog.
   removeAgent: () => void;
   hideChat: () => void;
 };

@@ -22,7 +22,6 @@ export function QuickOpenPalette(props: {
     [props.files],
   );
   const ranking = useMemo(() => {
-    // Match the previous Map behavior if a listing contains duplicate paths.
     const commandsByPath = new Map(commands.map((command) => [command.id, command]));
     return {
       commandsByPath,

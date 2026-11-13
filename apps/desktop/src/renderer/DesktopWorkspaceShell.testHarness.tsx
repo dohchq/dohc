@@ -205,7 +205,6 @@ const FRESH_FILES_STATE: WorkspaceUiState = serializeUiState({
 // A workspace with no saved state but its Explorer on Home, as a new one opens.
 export const HOME_STATE: WorkspaceUiState = serializeUiState(defaultWorkbenchState());
 
-// The stored state with the chat list showing in the left side panel.
 export const STORED_CHATS_STATE: WorkspaceUiState = { ...STORED_STATE, activeView: "chats" };
 
 export function storedStateWithTabs(
@@ -803,14 +802,12 @@ function makeBaseBridge(
       };
     }),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
-    // Folder app offers: no folder is an app unless a test says so.
     getFolderApp: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["getFolderApp"]>(
       async ({ workspaceId, folder }) => ({ workspaceId, folder, isApp: false, run: null }),
     ),
     onFolderAppChanged: vi.fn<
       import("../ipc/bridgeContract").DohcDesktopBridge["onFolderAppChanged"]
     >(() => () => undefined),
-    // The Explorer's Apps section: no apps unless a test says so.
     listSites: vi.fn<import("../ipc/bridgeContract").DohcDesktopBridge["listSites"]>(async () => ({
       sites: [],
     })),

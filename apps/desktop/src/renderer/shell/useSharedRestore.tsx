@@ -19,7 +19,6 @@ type Target = { workspaceId: string; path: string; from: From; attempt: number }
 
 // One Notices row per file: a refused start, or a restore not yet finished.
 export const sharedRestoreIdentity = (path: string) => `shared-restore:${path}`;
-// One Notices row for a listing that failed or could not read every restore.
 export const sharedRestoreListingIdentity = "shared-restore-listing";
 // The pages of unfinished restores one listing reads, 50 each.
 const UNFINISHED_PAGES = 20;

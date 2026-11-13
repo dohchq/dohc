@@ -160,7 +160,6 @@ export function WorkspaceSyncStatus({
   failedSaves,
 }: {
   syncStatus: SyncStatusResult | null;
-  // Files in this workspace whose save failed.
   failedSaves: number;
 }) {
   const state = syncStatus?.state;

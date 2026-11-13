@@ -246,7 +246,6 @@ export function Menu(props: {
   at?: { x: number; y: number };
   /** A menu the keyboard opened away from its trigger, such as a context menu, marks the row it opens on at once. A trigger's own keys mark it themselves. */
   fromKeyboard?: boolean;
-  /** The default trigger's test id. */
   testId?: string;
   /** The default trigger stays in its place but cannot open the list. */
   disabled?: boolean;

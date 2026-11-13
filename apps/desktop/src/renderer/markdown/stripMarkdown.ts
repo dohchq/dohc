@@ -344,7 +344,6 @@ export function stripMarkdown(
         return false;
       }
     }
-    // Thematic breaks, setext underlines and table delimiter rows.
     if (
       ((first === DASH || first === STAR || first === UNDERSCORE) &&
         onlyOf(at, end, () => false, first, 3)) ||
@@ -717,7 +716,6 @@ export function stripMarkdown(
           found.next++;
           let from = after;
           let to = closer;
-          // One space comes off each side, unless the span is only spaces.
           if (
             to - from >= 2 &&
             source.charCodeAt(from) === SPACE &&

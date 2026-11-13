@@ -9,7 +9,6 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 export const wikilinkPluginKey = new PluginKey<WikilinkState>("dohc-wikilink");
 
 export type WikilinkFile = {
-  /** The vault path (e.g. `playground/a.md`). */
   path: string;
   /** Display title — derived by api.atoms.list from frontmatter
    *  name/title or the body's first H1. May be null; fallbacks to
@@ -50,7 +49,6 @@ export type AutocompleteState =
        *  or `\[\[`). The completion transaction replaces from
        *  this position through the current cursor. */
       from: number;
-      /** The query string (text between `[[` and the cursor). */
       query: string;
     };
 
@@ -141,7 +139,6 @@ export function detectAutocomplete(
   };
 }
 
-/** Build the pill widget DOM for a wikilink range. */
 function makePillElement(target: string, display: string, resolved: boolean): HTMLElement {
   const span = document.createElement("span");
   span.className = "dohc-wikilink-pill" + (resolved ? "" : " dohc-wikilink-pill--broken");
@@ -153,7 +150,6 @@ function makePillElement(target: string, display: string, resolved: boolean): HT
   const icon = document.createElement("span");
   icon.className = "dohc-wikilink-pill__icon";
   icon.setAttribute("aria-hidden", "true");
-  // lucide arrow-up-right
   icon.innerHTML =
     '<svg viewBox="0 0 24 24" width="11" height="11" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>';
   span.appendChild(icon);
@@ -175,7 +171,6 @@ function displayFor(
   if (file) {
     const t = (file.title ?? "").trim();
     if (t) return { display: t, resolved: true };
-    // No title — fall back to leaf of the path.
     const leaf =
       file.path
         .replace(/\.(md|markdown)$/i, "")
@@ -208,7 +203,6 @@ function buildWikilinkDecorations(
       );
       continue;
     }
-    // Preview mode — widget + hide.
     decorations.push(
       Decoration.widget(
         r.from,

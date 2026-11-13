@@ -152,7 +152,6 @@ interface FailedFile {
   writers: Map<Writer, WriterFailure>;
 }
 
-// The reason a file's row gives.
 const shownReason = (failed: FailedFile): SaveFailureReason =>
   REASON_ORDER.find((reason) =>
     [...failed.writers.values()].some((failure) => failure.reason === reason),
@@ -185,7 +184,6 @@ export function useDocumentSaveNotices(input: {
   useEffect(() => {
     const owner = workspaceId;
     const current = () => latest.current.workspaceId === owner;
-    // By path.
     const files = new Map<string, FailedFile>();
     const counted = () => setFailedSaves({ workspaceId: owner, count: files.size });
     const identity = (path: string) => `document-save:${owner}:${path}`;

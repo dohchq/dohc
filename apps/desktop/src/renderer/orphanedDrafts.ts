@@ -457,7 +457,6 @@ export function atRiskOrphanedDraftIds(): readonly number[] {
   return ids;
 }
 
-// Whether a restart brings this draft back.
 export function isOrphanedDraftStored(id: number): boolean {
   return storedIds.has(id) && isStoredDraftCurrent(id);
 }

@@ -57,7 +57,6 @@ export function useTabTitles(workspaceId: string) {
       setTabTitle(momentDiffTabPath(momentId), filePath, true),
     [setTabTitle],
   );
-  // An app's page answered with the app's title.
   const resolveAppTitle = useCallback(
     (siteRoot: string, title: string) => setTabTitle(siteTabPath(siteRoot), title, true),
     [setTabTitle],

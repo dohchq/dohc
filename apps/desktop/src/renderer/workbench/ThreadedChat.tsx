@@ -98,11 +98,9 @@ export function ThreadedChat(props: {
 }) {
   const { testIdPrefix: prefix, listRef } = props;
   const [openRootId, setOpenRootId] = useState<string | null>(null);
-  // The question the open thread's next reply answers.
   const [answering, setAnswering] = useState<{ rootId: string; messageId: string } | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<string, string>>(new Map());
   const [replying, setReplying] = useState(false);
-  // The message whose run details show under it.
   const [detailsId, setDetailsId] = useState<string | null>(null);
   const [narrow, setNarrow] = useState(false);
   const [atEnd, setAtEnd] = useState(true);
@@ -331,7 +329,6 @@ export function ThreadedChat(props: {
     ),
     [answer, renderMessageFooter, runDetails],
   );
-  // Under a stream message: its poll, its thread, and the agent answering in it.
   const renderStreamFooter = useCallback(
     (message: ChatMessageRecord) => {
       const replies = threads.replies.get(message.id);

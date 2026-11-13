@@ -64,12 +64,10 @@ export function useSchemaRun(apply: SchemaApply) {
 
 export function FieldsDialog(props: {
   schema: CollectionSchema;
-  /** Collection folder paths a relation field can target. */
   relationTargets: readonly string[];
   apply: SchemaApply;
   /** What each Button field does now, by field name; null while it loads. */
   buttonStates?: ReadonlyMap<string, AutomationButtonState> | null;
-  /** Opens the automation builder with the trigger set to this button. */
   onChooseButtonAutomation?: (field: string) => void;
   /** The type a new field starts with. The dialog then opens on its name. */
   addType?: CollectionFieldType;

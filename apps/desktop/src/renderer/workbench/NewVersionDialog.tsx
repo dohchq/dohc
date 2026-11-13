@@ -69,7 +69,6 @@ function Fact(props: {
 export function NewVersionCard(
   props: CardProps & {
     idBase: string;
-    // When the start version last changed, once dohc has read it.
     lastChange: VersionLastChange | null;
     inputRef?: Ref<HTMLInputElement>;
   },

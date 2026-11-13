@@ -12,7 +12,6 @@ const OPTIONS = [
   { value: "same-folder", label: "Beside the document" },
 ] as const satisfies ReadonlyArray<{ value: AttachmentLocation; label: string }>;
 
-// The document each choice's example path is pasted into.
 const EXAMPLE_DOCUMENT = "Trips/Lisbon/itinerary.md";
 
 /**

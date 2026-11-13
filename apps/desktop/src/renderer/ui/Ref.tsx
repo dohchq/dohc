@@ -19,7 +19,6 @@ export function Ref(props: {
   // The object the file stands for, such as the Collection a change file
   // changes. Its glyph replaces the file kind's.
   objectKind?: ObjectKind;
-  // A heading inside the file, shown after the name.
   heading?: string;
   folder?: boolean;
   missing?: boolean;

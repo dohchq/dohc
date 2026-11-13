@@ -16,7 +16,6 @@ export interface ComposerPollDraft {
   open: boolean;
 }
 
-// The choices of an open poll, the ones Send asks; null when it is closed.
 export function openPollChoices(poll: ComposerPollDraft | null | undefined): PollDraft | null {
   return poll?.open ? poll.choices : null;
 }
@@ -27,7 +26,6 @@ export function trimChoice(choice: string): string {
   return choice.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 }
 
-// The indexes of choices that repeat an earlier one once trimmed.
 export function repeatedPollChoices(choices: PollDraft): ReadonlySet<number> {
   const seen = new Set<string>();
   const repeated = new Set<number>();

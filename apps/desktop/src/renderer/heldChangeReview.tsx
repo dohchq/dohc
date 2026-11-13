@@ -81,7 +81,6 @@ export function HeldChangeCard(props: {
   const sides = change && "held" in change ? change : null;
   // dohc refuses a preview it can't make equal to what saving writes.
   const unavailable = change && "unavailable" in change ? change.unavailable : null;
-  // The file's text is the base; what saving writes is the candidate.
   const diff = useMemo(
     () => (sides ? computeTextDiff(sides.file ?? undefined, sides.held, 800) : null),
     [sides],

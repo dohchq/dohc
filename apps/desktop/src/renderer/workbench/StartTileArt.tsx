@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 // registry id.
 export type StartKind = "markdown" | "collection" | "drawing";
 
-// A table's cells, row by row: a header row, then text and tag cells.
 const CELLS = [
   "head",
   "head",

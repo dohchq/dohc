@@ -69,7 +69,6 @@ function firstGrapheme(word: string): string | undefined {
     : Array.from(word)[0];
 }
 
-// The first letter of a name.
 function initial(name: string): string {
   return firstGrapheme(name.trim())?.toUpperCase() ?? "?";
 }

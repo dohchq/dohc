@@ -154,7 +154,6 @@ export interface WorkspaceErrorNotice {
   read?: boolean;
   // The row has no Dismiss: it stays until its action runs.
   noDismiss?: boolean;
-  // Where a press on the row goes: the thing it is about.
   target?: NoticeTarget;
 }
 
@@ -217,10 +216,8 @@ const failureDetails = (notice: NoticeRow): string =>
     ["Time", new Date(notice.createdAtMs).toISOString()],
   ]);
 
-// Sent rows show this many at a time.
 export const SENT_NOTICE_PAGE = 50;
 
-// How long a toast for something finished or sent stays before it fades.
 const FADING_TOAST_MS = 6000;
 
 // The sender's shape: round for a person, a rounded square for an agent,
@@ -2274,7 +2271,6 @@ export function NoticeCenter(props: {
         .sort((a, b) => b.atMs - a.atMs)[0] ?? null,
     [props.workspaceErrors],
   );
-  // Open Notices hides the toasts.
   const shownErrorToastId = open ? null : (errorToast?.id ?? null);
   const { onWorkspaceErrorShown } = props;
   useEffect(() => {
@@ -2337,7 +2333,6 @@ export function NoticeCenter(props: {
     action.onClick();
     setOpen(false);
   };
-  // Opening a row reads it, as reaching it does.
   const openLocal = (notice: Notice) => {
     const { target } = notice;
     const { onOpenTarget } = props;

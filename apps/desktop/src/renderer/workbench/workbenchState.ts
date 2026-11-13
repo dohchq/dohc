@@ -482,7 +482,6 @@ export interface WorkbenchState {
   // Data record's key. A tab with no entry shows no panel. Closing the tab
   // drops its entry.
   openRecords: Record<string, string>;
-  // The record panel's width, for every Collection tab in the workspace.
   recordPanelWidth: number;
 }
 
@@ -793,7 +792,6 @@ export function openMomentDiff(
   const group = state.editorGroups.find((candidate) => candidate.id === targetGroupId);
   if (!group || group.tabs.some((tab) => tab.path === path))
     return openTab(state, path, targetGroupId);
-  // The active tab when it is a diff, else the group's first diff tab.
   const reused = [group.activeTab, ...group.tabs.map((tab) => tab.path)].find(
     (tabPath) => tabPath !== null && parseTab(tabPath).kind === "momentDiff",
   );
@@ -838,7 +836,6 @@ export function activateTab(state: WorkbenchState, groupId: string, path: string
   return next.activeEditorGroup === groupId ? next : { ...next, activeEditorGroup: groupId };
 }
 
-// The tab after or before the group's active tab, wrapping at the ends.
 export function adjacentTabPath(group: EditorGroup, step: 1 | -1): string | null {
   const { tabs } = group;
   const index = tabs.findIndex((tab) => tab.path === group.activeTab);
@@ -855,7 +852,6 @@ export function closeTab(state: WorkbenchState, groupId: string, path: string): 
   );
 }
 
-// A tab's open record goes with the tab, once no group shows it.
 function dropClosedTabRecords(state: WorkbenchState): WorkbenchState {
   const closed = Object.keys(state.openRecords).filter(
     (path) => !state.editorGroups.some((group) => group.tabs.some((tab) => tab.path === path)),
@@ -866,7 +862,6 @@ function dropClosedTabRecords(state: WorkbenchState): WorkbenchState {
   return { ...state, openRecords };
 }
 
-// Reorder one group's tabs. The target index clamps into that group.
 export function moveTab(
   state: WorkbenchState,
   groupId: string,

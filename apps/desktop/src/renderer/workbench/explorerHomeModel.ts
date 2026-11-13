@@ -16,14 +16,12 @@ import {
 
 export type HomeSectionId = "pinned" | "pages" | "sketches" | "collections" | "apps" | "other";
 
-// What a row draws before its name: a tab's mark, or a folder.
 export type HomeGlyph = TabMark | { glyph: "folder"; open: boolean };
 
 export type HomeRowModel = {
   // Unique across Home. The same page can be pinned and in Pages.
   key: string;
   section: HomeSectionId;
-  // The parent row's key: the section's, or the folder's in Pages.
   parentKey: string;
   // 1 directly under the section heading.
   depth: number;
@@ -75,7 +73,6 @@ function ownedBy(path: string, owners: ReadonlySet<string>): boolean {
 
 export const FILES_SHOWN = 20;
 
-// The first FILES_SHOWN files by name, and how many there are in all.
 export type FirstFiles = { shown: WorkspaceFileEntry[]; count: number };
 
 export type HomeKinds = { pages: WorkspaceFileEntry[]; sketches: FirstFiles; others: FirstFiles };
@@ -210,7 +207,6 @@ export function fileRows(
   }));
 }
 
-// What Home knows about each thing a pin can name.
 export type HomeLookup = {
   files: ReadonlyMap<string, WorkspaceFileEntry>;
   folders: ReadonlySet<string>;

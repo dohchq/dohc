@@ -75,7 +75,6 @@ export function CloudLogin(
     // The host already titles the step (a step title, a section header): drop
     // this panel's own heading so the name is not said twice.
     untitled?: boolean;
-    // A dialog host passes its close for the X beside the heading.
     onClose?: () => void;
     // onConnectionError decides where a failed connect, poll, status check, or
     // disconnect goes. A host that takes it owns the toast and the Notices row,

@@ -101,7 +101,6 @@ const RECORD_NOT_READ = "dohc could not read this record. Close it, then open it
 
 /** Where a record is in the Collection's own order: the cursor that reads from it on. Undefined for the first record. */
 type RecordPlace = CollectionQueryCursor | undefined;
-/** What a search for the open record found: the record and its place, or why there is none. */
 type FoundRecord =
   | { record: CollectionRecord; place: RecordPlace }
   | { record: null; problem: string };
@@ -228,11 +227,8 @@ export interface CollectionPageProps extends RecordPanelHost {
   // tab does: before the record leaves the panel, and before its file opens
   // in a tab. A save that fails keeps the record open, and `then` never runs.
   settleRecordBody?: (then: () => void) => void;
-  // Opens a record's History. Absent where a record has none.
   onOpenRecordHistory?: (record: RecordHistoryTarget) => void;
-  // Opens any workspace file in a tab, such as automations.yaml.
   onOpenFile: (path: string) => void;
-  // Opens the setting where the owner chooses which computer runs schedules.
   onOpenScheduleSettings: () => void;
   // The shell's error hook and success notices: a toast, then a row in
   // Notices. A success notice can carry an Undo.
@@ -244,7 +240,6 @@ export interface CollectionPageProps extends RecordPanelHost {
   onAutomationFocused: () => void;
 }
 
-// A url cell's link opens the way a link in a chat or a document does.
 const openCellLink = (url: string) => void openLink(url);
 
 export function CollectionPage({
@@ -442,7 +437,6 @@ export function CollectionPage({
   const openRecordId = recordPanel.openKey;
   // What takes the open record's body off the page waits until what the body holds is saved.
   const afterBodySaved = recordPanel.afterSettled;
-  // The ⚡ panel takes the record panel's place.
   const showAutomations = () => afterBodySaved(() => setAutomationsOpen(true));
   useEffect(() => {
     if (!automationFocus) return;
@@ -615,7 +609,6 @@ export function CollectionPage({
       pageOpen.current = false;
     };
   }, []);
-  // The table's side of its new row, while a table shows.
   const tableSide = useRef<Parameters<NonNullable<TableNewRecord["bind"]>>[0] | null>(null);
   // The creations the table's new rows handed over that have not ended, and the records they made that no notice
   // has counted. Once the last creation ends the view reads its records, and `rowsDue` waits for that read.
@@ -669,7 +662,6 @@ export function CollectionPage({
     },
     [onNewRecord, collectionPath, enqueueCellChange, store],
   );
-  // In a table the button starts the new row. Beside a board or a calendar it makes a record with no value filled in.
   const newRecord = useCallback(
     () => (tableSide.current ? tableSide.current.start() : makeRecord()),
     [makeRecord],
@@ -856,7 +848,6 @@ export function CollectionPage({
     openInPanel.current(recordId);
   };
 
-  // The open record, as the page holds it: among the view's records, or as a search by its id found it.
   const [sought, setSought] = useState<({ id: string } & FoundRecord) | null>(null);
   const heldRecord =
     openRecordId === null
@@ -937,7 +928,6 @@ export function CollectionPage({
   const draftActions = useRequestSequence([workspaceId, collectionPath, readOnly]);
   const draftAccess = useRef({ readOnly, accessEnded, writeRefusal });
   draftAccess.current = { readOnly, accessEnded, writeRefusal };
-  /** Why this page may not write now, or null where it may. */
   const accessRefusal = () =>
     !draftAccess.current.readOnly && !draftAccess.current.accessEnded
       ? null
@@ -1134,7 +1124,6 @@ export function CollectionPage({
     },
     [applySchemaChange, onError],
   );
-  // A board colors the options of the field it groups by.
   const changeGroupColor = useCallback(
     (option: string, color: OptionColor) => {
       if (groupBy) changeOptionColor(groupBy, option, color);
@@ -1265,7 +1254,6 @@ export function CollectionPage({
   const schema = details.schema;
   const name = schema.name ?? collectionPath.split("/").at(-1) ?? collectionPath;
 
-  // The ⚡ panel docks at the right of whatever the page shows.
   const automationsPanel = automationsOpen ? (
     <AutomationsPanel
       readOnly={readOnly}
@@ -1326,11 +1314,9 @@ export function CollectionPage({
     kind === "calendar" &&
     (dateFields.find((field) => field.name === activeView?.dateField) ?? dateFields[0])?.name;
 
-  // A calendar day's New record: the record starts with the day in the calendar's date field.
   const newRecordOnDay = (day: string) => makeRecord(calendarReady || undefined, day);
   const toggleAutomations = () =>
     automationsOpen ? setCloseAsk((ask) => ask + 1) : showAutomations();
-  // Every record the page holds, in rows or in a board's columns. More can load while a cursor remains.
   const loaded = new Set(
     [...state.records, ...(state.groups?.flatMap((group) => group.records) ?? [])].map(
       (record) => record.path,
@@ -1489,7 +1475,6 @@ export function CollectionPage({
           </span>
         ) : null
       }
-      // A Collection with no saved view shows its default table as the one tab.
       tabs={
         views.length > 0
           ? views.map((view) => ({ id: view.name, name: view.name, kind: view.kind, saved: true }))

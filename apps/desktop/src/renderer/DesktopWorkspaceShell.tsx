@@ -439,7 +439,6 @@ function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
 }
 
-// A move that failed, and whether its destination was already taken.
 type FailedMove = { move: PendingTreeMove; destinationTaken: boolean };
 
 const isTreeMove = (change: PendingTreeChange): change is PendingTreeMove =>
@@ -467,7 +466,6 @@ function failedMoveNow(
   };
 }
 
-// Whether a listing shows any failed move made, or its destination's state changed.
 function failedMovesChanged(
   notices: Iterable<readonly FailedMove[]>,
   files: Parameters<typeof listedMoveEnds>[1],
@@ -813,7 +811,6 @@ export function DesktopWorkspaceShell(props: {
     setLiveDocumentsReveal(reveal);
     setLiveDocumentsWorkspaceId(id);
   }, []);
-  // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShare, setOpenShare] = useState<NoticeShare | "blank" | null>(null);
   const openSharePath =
@@ -2049,15 +2046,12 @@ export function DesktopWorkspaceShell(props: {
   const pinnedApps = usePinnedApps(workspaceId, pinnedRoots);
   const selectedAppRoot = parseAppViewId(wb.activeView);
   const selectedApp = pinnedApps.find((app) => app.root === selectedAppRoot) ?? null;
-  // The panel's header names dohc's own view or the pinned app.
   const sidePanelTitle = isViewId(shownView)
     ? SIDE_PANEL_VIEWS[shownView].label
     : shownView === SHARING_VIEW_ID
       ? "Sharing"
       : (selectedApp?.label ?? "App");
 
-  // Every view on the rail, in its order: dohc's own, pinned apps, then
-  // Sharing at the rail's foot.
   const railOrder = useMemo<readonly ActivityViewId[]>(
     () => [...railViews, ...pinnedRoots.map(appViewId), SHARING_VIEW_ID],
     [pinnedRoots, railViews],
@@ -7331,8 +7325,6 @@ export function DesktopWorkspaceShell(props: {
     ? (filedBeforeStopRef.current ?? new Set(shellErrors.map((error) => error.id)))
     : null;
   const filedBeforeStop = filedBeforeStopRef.current;
-  // Errors as the notice center shows them: the message, whether it can be
-  // asked again, and what it lets a person copy.
   const workspaceErrors = useMemo(
     () =>
       shellErrors.map((error) => ({
@@ -8385,7 +8377,6 @@ export function DesktopWorkspaceShell(props: {
                                             {...(wb.editorGroups.length > 1
                                               ? { onCloseGroup: closeGroupAfterFlush }
                                               : {})}
-                                            // Where the group's file view draws Share file.
                                             {...(tabPath &&
                                             !TAB_KINDS[groupTab?.kind ?? "removed"].virtual &&
                                             !shareView &&
@@ -8563,46 +8554,43 @@ export function DesktopWorkspaceShell(props: {
                                                 case "whatsNew":
                                                   return <WhatsNewPage appVersion={appVersion} />;
                                                 case "versions":
-                                                  return (
-                                                    // The same capability gate and lines as a compare tab.
-                                                    !captureAvailable ? (
-                                                      shareView ? (
-                                                        <div
-                                                          data-testid="versions-share-view"
-                                                          className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                                                        >
-                                                          A shared view has no versions. Close this
-                                                          tab to go back to the shared files.
-                                                        </div>
-                                                      ) : !captureDecided ? (
-                                                        <SkeletonRows
-                                                          layout="panel"
-                                                          label="Loading versions..."
-                                                        />
-                                                      ) : (
-                                                        <div
-                                                          data-testid="versions-off"
-                                                          className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                                                        >
-                                                          {versionCompareOffCopy(syncStatus)}
-                                                        </div>
-                                                      )
-                                                    ) : (
-                                                      <VersionsPage
-                                                        workspaceId={workspaceId}
-                                                        versions={workspaceVersions}
-                                                        disabled={
-                                                          !workspaceIsReady || workspaceStopped
-                                                        }
-                                                        historyKey={versionsHistoryKey}
-                                                        versionKey={versionEpoch}
-                                                        onOpenCompare={openVersionCompareTab}
-                                                        onReviewConflicts={() =>
-                                                          setConflictReviewOpen(true)
-                                                        }
-                                                        notices={noticeOwner}
+                                                  return !captureAvailable ? (
+                                                    shareView ? (
+                                                      <div
+                                                        data-testid="versions-share-view"
+                                                        className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                                                      >
+                                                        A shared view has no versions. Close this
+                                                        tab to go back to the shared files.
+                                                      </div>
+                                                    ) : !captureDecided ? (
+                                                      <SkeletonRows
+                                                        layout="panel"
+                                                        label="Loading versions..."
                                                       />
+                                                    ) : (
+                                                      <div
+                                                        data-testid="versions-off"
+                                                        className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+                                                      >
+                                                        {versionCompareOffCopy(syncStatus)}
+                                                      </div>
                                                     )
+                                                  ) : (
+                                                    <VersionsPage
+                                                      workspaceId={workspaceId}
+                                                      versions={workspaceVersions}
+                                                      disabled={
+                                                        !workspaceIsReady || workspaceStopped
+                                                      }
+                                                      historyKey={versionsHistoryKey}
+                                                      versionKey={versionEpoch}
+                                                      onOpenCompare={openVersionCompareTab}
+                                                      onReviewConflicts={() =>
+                                                        setConflictReviewOpen(true)
+                                                      }
+                                                      notices={noticeOwner}
+                                                    />
                                                   );
                                                 case "chat":
                                                   return (
@@ -8690,17 +8678,14 @@ export function DesktopWorkspaceShell(props: {
                                                     </SkeletonSlot>
                                                   );
                                                 case "site":
-                                                  return (
-                                                    // The group's kept app tabs, below, show a valid app.
-                                                    groupSiteRoot ? null : (
-                                                      <InvalidSitePathFallback
-                                                        activeTab={tabPath}
-                                                        onClose={() => {
-                                                          if (tabPath)
-                                                            closeFileTab(editorGroup.id, tabPath);
-                                                        }}
-                                                      />
-                                                    )
+                                                  return groupSiteRoot ? null : (
+                                                    <InvalidSitePathFallback
+                                                      activeTab={tabPath}
+                                                      onClose={() => {
+                                                        if (tabPath)
+                                                          closeFileTab(editorGroup.id, tabPath);
+                                                      }}
+                                                    />
                                                   );
                                                 case "transactionalCollection":
                                                   return (
@@ -9017,7 +9002,6 @@ export function DesktopWorkspaceShell(props: {
                                               return unhandled;
                                             })()}
                                           </ErrorBoundary>
-                                          {/* The app this group shows lies over this slot. */}
                                           {groupSiteRoot ? (
                                             <div
                                               data-testid="app-slot"
@@ -9167,7 +9151,6 @@ export function DesktopWorkspaceShell(props: {
                                 </div>
                               </div>
                               <div className="flex items-center gap-2">
-                                {/* One button for every step: Check, Update, then Restart to update. */}
                                 {desktopUpdate.step ? (
                                   <PrimaryButton
                                     autoFocus

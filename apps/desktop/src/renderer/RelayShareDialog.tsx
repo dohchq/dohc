@@ -123,7 +123,6 @@ export function RelayShareDialog(props: {
   disconnectedAgents?: ReadonlySet<string>;
   // What About's Access reads, so Share names the same cause.
   accessContext: AccessContext;
-  // The server this workspace syncs with, when it syncs.
   server: string | null;
   // Opens a share in the Sharing view, where it ends. The dialog closes first.
   onOpenSharing?: (target: SharingFocus) => void;

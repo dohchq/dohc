@@ -124,7 +124,6 @@ export function fitsMainThread(body: string): boolean {
     let pipes = 0;
     let dashes = 0;
     let other = false;
-    // Containers: indentation, quote markers and list markers.
     for (; at < lineEnd; at++) {
       const char = body[at];
       if (char === " ") depth += 0.5;
@@ -324,7 +323,6 @@ export function parseChatMarkdown(body: string, chips: readonly Chip[]): ParsedC
 export const chatMarkdownWeight = (parsed: ParsedChatMarkdown): number =>
   parsed.chars + parsed.nodes * 64;
 
-// Whether a parsed tree is small enough to draw.
 export function withinChatMarkdownLimits(parsed: ParsedChatMarkdown): boolean {
   return (
     parsed.nodes <= CHAT_MARKDOWN_MAX_NODES &&

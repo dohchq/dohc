@@ -142,7 +142,6 @@ export interface WriteQueuePage {
     recordKey: string,
     shown: number,
   ): { values: Record<string, AppBackendJson>; version: number };
-  /** The page shows the records a read returned. */
   readShown(token: number, rows: readonly TransactionalRow[]): void;
 }
 
