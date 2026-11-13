@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { type ComponentProps, useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withErrorWords } from "../../ipc/errorWords";
 import { useShellError } from "../shell/useShellError";
-import { READS_FAILED, VersionsPage, orderVersions } from "./VersionsPage";
+import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
+import { VersionsPage, orderVersions } from "./VersionsPage";
 import { useWorkspaceVersions } from "./WorkspaceVersions";
 
 const bridgeMock = {
@@ -56,7 +57,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-type OnError = ComponentProps<typeof VersionsPage>["onError"];
+const READS_FAILED = "dohc could not finish loading Versions.";
+
+// The page's notices reach these as the shell's Notices: `onError` files or
+// changes a row, and `onSettled` takes one back.
+type OnError = NoticeSink["report"];
 
 function Page(props: {
   workspaceId?: string;
@@ -85,6 +90,13 @@ function Page(props: {
     onMergeNotice: () => {},
     onConflictError: () => {},
   });
+  // One owner for each workspace, as the shell keeps one.
+  const sink = useRef<NoticeSink>({ report: () => {}, clear: () => {} });
+  sink.current = { report: props.onError ?? (() => {}), clear: props.onSettled ?? (() => {}) };
+  const notices = useMemo(() => new NoticeOwner(workspaceId, {
+    report: (...notice) => sink.current.report(...notice),
+    clear: (identity) => sink.current.clear(identity),
+  }), [workspaceId]);
   return (
     <>
       <VersionsPage
@@ -94,8 +106,7 @@ function Page(props: {
         versionKey={props.versionKey ?? 0}
         onOpenCompare={props.onOpenCompare ?? (() => {})}
         onReviewConflicts={props.onReviewConflicts ?? (() => {})}
-        onError={props.onError ?? (() => {})}
-        onSettled={props.onSettled ?? (() => {})}
+        notices={notices}
       />
       {versions.dialogs}
     </>

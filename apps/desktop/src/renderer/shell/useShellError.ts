@@ -5,6 +5,7 @@ import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation"
 import { cutText } from "@dohc/workspace-contracts/names";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import { isLiveEditingRefusal, isPrivacyDenied, isStoppedWorkspaceCall, isStoppedWorkspaceRead, KEEPABLE_COLLECTIONS_REFUSALS, readCollectionsRefusal, readError, refusalCode, UNKNOWN_ERROR_WORDS, USE_THIS_COMPUTER, waitedForCollectionMove, VOLUME_SHARES_NEW_FILES_WORDS, withErrorWords } from "../../ipc/errorWords";
+import { NoticeOwner, type NoticeSink } from "../../notices/noticeOwner";
 import type { NoticeTarget } from "../../notices/noticeTarget";
 import { bridge } from "../bridge";
 import { SETTLEMENT_ATTRIBUTION_REFUSED, SETTLEMENT_BINDING_CHANGED } from "../../notices/settlementRefusal";
@@ -1092,10 +1093,19 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       : current.filter(error => error !== target));
   }, []);
 
+  // The workspace's notice owner, which files its rows here.
+  const noticeSink = useRef<NoticeSink>({ report: reportButtonError, clear: clearIdentity });
+  noticeSink.current = { report: reportButtonError, clear: clearIdentity };
+  const noticeOwner = useMemo(() => new NoticeOwner(workspaceId, {
+    report: (...notice) => noticeSink.current.report(...notice),
+    clear: (identity) => noticeSink.current.clear(identity),
+  }), [workspaceId]);
+
   return {
     shellErrors,
     clearKind,
     clearIdentity,
+    noticeOwner,
     reportShellError,
     reportButtonError,
     reportShellFailure,
