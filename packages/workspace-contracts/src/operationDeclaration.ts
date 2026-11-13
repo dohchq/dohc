@@ -20,10 +20,11 @@ export type EnvelopeField = (typeof ENVELOPE_FIELDS)[number];
 export interface OperationDeclaration {
   readonly capabilityId: string;
   // Only reads are declared. The CLI socket gives a declared verb no write
-  // admission and its reader no actor.
+  // admission and its reader no actor. The type refuses another access, and
+  // allDeclarations.ts refuses one hidden by a cast when it loads.
   readonly access: "read";
   // What every caller sends. The IPC row adds the workspace. The type refuses a
-  // shape that names an envelope field, and capabilities.ts refuses one at load.
+  // shape that names an envelope field, and allDeclarations.ts refuses one at load.
   readonly input: z.ZodObject<Readonly<Record<string, z.core.$ZodType>> & { readonly [Field in EnvelopeField]?: never }>;
   readonly result: z.ZodType;
   readonly ipc: {
