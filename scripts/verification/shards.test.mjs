@@ -947,6 +947,38 @@ test("Boat build differences fail the aggregate with comparison evidence; identi
   }
 });
 
+test("Boat build comparison survives unsuccessful or incomplete receipts", async t => {
+  const root = mkdtempSync(join(tmpdir(), "boat-failed-build-identity-")), outputDirectory = join(root, "aggregate");
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  t.mock.method(console, "log", () => {});
+  const commit = "head", env = {GITHUB_EVENT_NAME: "workflow_dispatch", DOHC_CLOUD_SHAPE: "boat", GITHUB_SHA: commit};
+  writeTimingReceipts(root, "js", commit, CLOUD_SHAPES.boat);
+  const differentPath = join(root, "worker-1/result.json"), different = JSON.parse(readFileSync(differentPath, "utf8"));
+  for (const kind of ["engine", "desktop"]) different.build[kind].artifact = "c".repeat(64);
+  writeFileSync(differentPath, JSON.stringify(different));
+  for (const [part, mutate, error] of [
+    ["prepare-0", record => { record.verdict = "FAIL"; }, /preparation receipt/u],
+    ["worker-0", record => { record.completed = []; }, /Incomplete JavaScript shard/u],
+    ["worker-0", record => { delete record.selfHostNative; }, /native delivery and restart proof/u],
+  ]) {
+    const path = join(root, part, "result.json"), original = readFileSync(path, "utf8"), record = JSON.parse(original);
+    mutate(record);
+    writeFileSync(path, JSON.stringify(record));
+    await assert.rejects(aggregateCloud("js", root.replaceAll("\\", "/"), {env, outputDirectory,
+      readJobs: async () => assert.fail("receipt validation must fail before reading jobs")}), error);
+    const report = JSON.parse(readFileSync(join(outputDirectory, "js-result.json"), "utf8"));
+    assert.equal(report.verdict, "FAIL");
+    assert.equal(report.buildIdentity?.matched, false, "failed receipts must retain the build comparison");
+    assert.deepEqual(report.buildIdentity.differingOutputs, ["engine", "desktop"]);
+    for (const kind of ["engine", "desktop"]) {
+      assert.equal(report.buildIdentity.outputs[kind].length, CLOUD_SHAPES.boat.js + 1);
+      for (const row of report.buildIdentity.outputs[kind]) assert.equal(row.sha256,
+        row.part === "worker-1" ? "c".repeat(64) : buildReceipt()[kind].artifact);
+    }
+    writeFileSync(path, original);
+  }
+});
+
 for (const [shapeName, shape] of Object.entries(CLOUD_SHAPES)) {
 test(`${shapeName} skipped matrix placeholders cannot hide missing, repeated, or skipped work`, async t => {
   t.mock.method(console, "log", () => {});
@@ -1135,7 +1167,8 @@ test(`${shapeName} Rust-only scheduling ignores skipped needs but requires evide
   const placeholderName = node.skippedName;
   for (const mode of ["placeholder", "missing", "partial", "wrong head", "wrong prefix", "named skips", "one named skip"]) {
     const original = withoutWaits(shape), workers = original.filter(job => names.includes(job.name));
-    const jobs = original.filter(job => !names.includes(job.name) && job.name !== placeholderName);
+    // A standard run retains the inactive Boat matrix's skipped row.
+    const jobs = original.filter(job => !names.includes(job.name) && (shapeName === "standard" || job.name !== placeholderName));
     const ready = Date.parse(jobs.find(job => job.name === (shapeName === "boat" ? "what changed" : "Rust build once")).completed_at);
     if (mode === "named skips" || mode === "one named skip") jobs.push(...workers.map((job, index) => mode === "named skips" || index === workers.length - 1
       ? { ...job, conclusion: "skipped", started_at: null, completed_at: null } : job));
