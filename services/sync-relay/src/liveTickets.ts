@@ -1,4 +1,5 @@
 import { randomUUID, type BinaryLike } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveTicketAudience,
   parseLiveTicketToken,
@@ -81,21 +82,23 @@ export function createLiveTickets(options: LiveTicketOptions) {
       try {
         signal?.throwIfAborted();
         const before = storage.resolveLiveObjectHostBinding(scope, objectId);
+        // A live host that changed or went away while this ran, as when it reconnects, is a
+        // failure to ask again after, not a refusal. The link route answers the same before minting.
+        const refused = (report: TicketHostReport | null) => {
+          if (before.kind !== "current") return null;
+          const now = storage.resolveLiveObjectHostBinding(scope, objectId);
+          const changed =
+            now.kind === "current"
+              ? report === null ||
+                !isDeepStrictEqual({ ...now.binding }, { ...report.binding }) ||
+                !isDeepStrictEqual({ ...now.host }, { ...report.connection })
+              : now.reason === "host-unavailable" || now.reason === "stale-document";
+          if (changed) throw new Error("The live host changed.");
+          return null;
+        };
         const candidate = await currentBinding({ ...scope }, objectId, signal);
         signal?.throwIfAborted();
-        if (candidate === null) {
-          // A live host that changed or went away while this ran, as when it reconnects, is a
-          // failure to ask again after, not a refusal. The link route answers the same before minting.
-          const now = storage.resolveLiveObjectHostBinding(scope, objectId);
-          if (
-            before.kind === "current" &&
-            (now.kind === "current" ||
-              now.reason === "host-unavailable" ||
-              now.reason === "stale-document")
-          )
-            throw new Error("The live host changed.");
-          return null;
-        }
+        if (candidate === null) return refused(null);
         let report: TicketHostReport;
         try {
           report = snapshotTicketHostReport(candidate);
@@ -112,7 +115,7 @@ export function createLiveTickets(options: LiveTicketOptions) {
           ticketId: newTicketId(),
           tokenHash,
         });
-        return minted === null ? null : { token, ...minted };
+        return minted === null ? refused(report) : { token, ...minted };
       } catch {
         throw new Error("Live-ticket operation failed.");
       }
