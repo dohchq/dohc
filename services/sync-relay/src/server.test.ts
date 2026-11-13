@@ -3316,6 +3316,53 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(1);
   });
 
+  it("admits the owner-private marker only on a registered kind naming the authenticated pusher", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const marked = (base: { originSeq: number; opKind: string; payload: Record<string, unknown>; recordedAtMs: number },
+      marker: unknown) => ({ ...base, payload: { ...base.payload, ownerPrivateAccountId: marker } });
+    const feedRead = (originSeq: number) => ({
+      originSeq,
+      opKind: "chat.feed.read.set",
+      payload: { ownerUserId: "a", lastSeenCreatedAtMs: 1000, lastSeenMessageId: "m-1", atMs: 1000 + originSeq },
+      recordedAtMs: 1000 + originSeq,
+    });
+    const admitted = await h(
+      request("a", "/sync/workspace-a/log", jsonBody({
+        originId: "origin-a",
+        ops: [marked(threadReadOp(0, "a"), "a"), marked(feedRead(1), "a")],
+      })),
+    );
+    expect(admitted.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(2);
+
+    // A registered kind whose marker names anyone but the pusher.
+    for (const marker of ["victim", "", 7, null]) {
+      const refused = await h(
+        request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [marked(threadReadOp(2, "a"), marker)] })),
+      );
+      expect(refused.status).toBe(403);
+      expect(await json(refused)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+    }
+    // An unregistered kind can't opt itself in: an authored chat kind, a
+    // structural one, a kind no policy names, and an opaque non-chat op.
+    for (const unregistered of [
+      messageOp(2, "a"),
+      { originSeq: 2, opKind: "chat.decision.set", payload: { threadId: "t-1", messageId: "m-1", state: "open", atMs: 1 }, recordedAtMs: 1002 },
+      { originSeq: 2, opKind: "chat.future.private.set", payload: { accountUserId: "a" }, recordedAtMs: 1002 },
+      { originSeq: 2, opKind: "chat.follow.set", payload: { ownerUserId: "a", targetKind: "thread", targetId: "t-1", state: "following", atMs: 1 }, recordedAtMs: 1002 },
+      op(2),
+    ]) {
+      const refused = await h(
+        request("a", "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [marked(unregistered, "a")] })),
+      );
+      expect(refused.status).toBe(400);
+      expect(await json(refused)).toMatchObject({ ok: false, code: "bad_request" });
+    }
+    expect(await logOps(h)).toHaveLength(2);
+  });
+
   it("rejects a batch mixing one valid and one forged op atomically (nothing admitted)", async () => {
     const storage = await testStorage();
     const h = handler(storage);

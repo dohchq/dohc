@@ -113,6 +113,7 @@ export class PhoneWriteEngine implements EngineTransport {
       this.markRows.push({ originSeq: ++this.originSeq, kind: "chat.thread.read.set", pushed: false, payload: {
         accountUserId: params.replicationOwnerUserId, threadId: message.threadId,
         lastReadCreatedAtMs: message.createdAtMs, lastReadMessageId: message.id, atMs: message.createdAtMs,
+        ownerPrivateAccountId: params.replicationOwnerUserId,
       } });
     }
     return response;
@@ -167,6 +168,7 @@ export class PhoneWriteEngine implements EngineTransport {
       rows.push(row("chat.thread.read.set", {
         accountUserId: message.authorUserId, threadId: message.threadId,
         lastReadCreatedAtMs: message.createdAtMs, lastReadMessageId: message.id, atMs: message.createdAtMs,
+        ownerPrivateAccountId: message.authorUserId,
       }));
     }
     // The open question, with its choices as the engine stores them.

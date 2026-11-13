@@ -2415,6 +2415,18 @@ fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
         .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 31), &NO_FAULTS)
         .expect("owner mark");
     assert_eq!(thread_read_ops(&store), 1);
+    // The record declares itself owner-private for the account it names.
+    let marker: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_extract(payload_json, '$.ownerPrivateAccountId') FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.thread.read.set'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("owner-private marker");
+    assert_eq!(marker, ACCOUNT);
     LinkedChatStore::new(&mut store)
         .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 32), &NO_FAULTS)
         .expect("owner retry");
@@ -4439,6 +4451,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             "lastSeenCreatedAtMs": 100,
             "lastSeenMessageId": "m0",
             "atMs": 200,
+            "ownerPrivateAccountId": "owner",
         })
     );
     assert_eq!(
@@ -4448,6 +4461,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             "lastSeenCreatedAtMs": 100,
             "lastSeenMessageId": "m0",
             "atMs": 201,
+            "ownerPrivateAccountId": "owner",
         })
     );
 }

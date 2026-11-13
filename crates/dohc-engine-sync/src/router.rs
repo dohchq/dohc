@@ -108,6 +108,27 @@ pub(crate) fn is_owned_op_kind(kind: &str) -> bool {
     OWNED_OP_ROUTES.iter().any(|(owned, _)| *owned == kind)
 }
 
+/// Whether the chat applier reads this kind. A quietly retained owner-private
+/// record replays through it once this build knows the kind.
+pub(crate) fn is_chat_op_kind(kind: &str) -> bool {
+    OWNED_OP_ROUTES
+        .iter()
+        .any(|(owned, route)| *owned == kind && matches!(route, OwnedRoute::Chat))
+}
+
+/// The chat kinds this build reads, sorted and joined. A build that learns a
+/// kind has a new fingerprint, so its first open replays what earlier builds
+/// kept quietly.
+pub(crate) fn chat_op_kinds_fingerprint() -> String {
+    let mut kinds: Vec<&str> = OWNED_OP_ROUTES
+        .iter()
+        .filter(|(_, route)| matches!(route, OwnedRoute::Chat))
+        .map(|(kind, _)| *kind)
+        .collect();
+    kinds.sort_unstable();
+    kinds.join(",")
+}
+
 pub fn apply_replication_envelope(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -203,12 +224,20 @@ pub(crate) fn apply_replication_envelope_in_batch(
     else {
         // Forward compatibility: an older client cannot interpret a newer
         // peer's operation, but permanently wedging that origin prevents it
-        // from receiving every later operation it *does* understand.
-        return plain(crate::apply_envelope_with(
+        // from receiving every later operation it *does* understand. The
+        // owner's own private state is kept without a Notice and applies once
+        // this build knows its kind; anything else is refused visibly.
+        return plain(crate::apply::apply_envelope_with_mutation_outcome(
             store,
             envelope,
             faults,
-            |_tx, _op| Err(SyncError::UnsupportedOperation),
+            |tx, op| {
+                if crate::owner_private::retains_quietly(tx, op)? {
+                    Ok(crate::apply::MutationOutcome::<()>::RetainedQuietly)
+                } else {
+                    Err(SyncError::UnsupportedOperation)
+                }
+            },
         ));
     };
     if !matches!(

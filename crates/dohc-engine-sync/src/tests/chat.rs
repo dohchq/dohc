@@ -7967,3 +7967,696 @@ fn a_parked_agent_connection_stays_on_a_link_message_and_a_bad_one_is_refused() 
         assert_eq!(stored(&engine), 0, "{bad:?}");
     }
 }
+
+// Owner-private records this build can't read yet.
+
+/// A kind no build knows yet. A later build in these tests reads it as a
+/// thread read mark.
+const FUTURE_PRIVATE_KIND: &str = "chat.future.private.set";
+
+fn seed_owner_account(engine: &mut EngineStore, account: &str) {
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_account_read_seeds \
+                 (workspace_id, account_user_id, seeded_local, completed_at_ms) \
+                 VALUES ('ws', ?1, 0, 1)",
+                [account],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("owner account");
+}
+
+fn future_private_op(
+    origin: &str,
+    seq: i64,
+    marker: Option<serde_json::Value>,
+) -> ReplicationEnvelope {
+    let mut payload = json!({
+        "accountUserId": "owner",
+        "threadId": "thread-imported",
+        "lastReadCreatedAtMs": 20,
+        "lastReadMessageId": "message-imported",
+        "atMs": 100 + seq
+    });
+    if let Some(marker) = marker {
+        payload["ownerPrivateAccountId"] = marker;
+    }
+    envelope(origin, seq, FUTURE_PRIVATE_KIND, payload)
+}
+
+/// One log row: kind, payload, recorded time, and disposition.
+fn log_row(engine: &EngineStore, origin: &str, seq: i64) -> Option<(String, String, i64, String)> {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT op_kind, payload_json, recorded_at_ms, apply_disposition \
+                 FROM replication_log WHERE workspace_id='ws' AND origin_id=?1 AND origin_seq=?2",
+                params![origin, seq],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("log row")
+}
+
+fn pending_refusal_count(engine: &EngineStore) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_pending_refusals WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("pending refusals")
+}
+
+/// The fingerprint of the later build these tests stand in for.
+const LATER_BUILD: &str = "later-build";
+
+fn stored_fingerprint(engine: &EngineStore) -> Option<String> {
+    engine
+        .read_with(crate::owner_private::stored_fingerprint)
+        .expect("fingerprint")
+}
+
+/// Replays as a later build that knows the future kind, counting each time
+/// its applier runs.
+fn replay_as_later_build(
+    engine: &mut EngineStore,
+    faults: &dyn FaultInjector,
+    applies: &std::cell::Cell<usize>,
+) -> Result<usize, SyncError> {
+    crate::owner_private::replay_known(
+        engine,
+        faults,
+        LATER_BUILD,
+        |kind| kind == FUTURE_PRIVATE_KIND,
+        |tx, op| {
+            applies.set(applies.get() + 1);
+            let mut known = op.clone();
+            known.op_kind = "chat.thread.read.set".to_owned();
+            crate::apply::apply_chat_lww_projection_tx(tx, &known)
+        },
+    )
+}
+
+fn assert_refused_as_unsupported(engine: &mut EngineStore, op: &ReplicationEnvelope) {
+    let outcome = apply_replication_envelope(
+        engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply");
+    assert!(
+        matches!(
+            &outcome.primary,
+            ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { reason },
+                ..
+            }) if reason == "operation kind is not supported by this client"
+        ),
+        "{}: {outcome:?}",
+        op.origin_id
+    );
+}
+
+#[test]
+fn a_marked_private_record_this_build_cannot_read_is_kept_quietly_then_replayed_once() {
+    let (_scratch, path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    let future = future_private_op("phone", 0, Some(json!("owner")));
+    let known = envelope(
+        "phone",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "message-late",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Later",
+            "createdAtMs": 40
+        }),
+    );
+    let client = RelaySyncClient::new(FakeRelay {
+        pull: Mutex::new(Some(PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            ops: vec![future.clone(), known],
+            next_cursor: 2,
+            has_more: false,
+        })),
+        ..Default::default()
+    });
+    let outcome = client
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+        )
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        refused,
+        skipped,
+        refusals,
+        pending_cursor: Some(pending_cursor),
+        ..
+    } = outcome
+    else {
+        panic!("pull must complete with a cursor: {outcome:?}");
+    };
+    // Only the known record counts as applied, and nothing is reported.
+    assert_eq!((applied, refused, skipped), (1, 0, 1));
+    assert!(refusals.is_empty());
+    assert_eq!(pending_cursor.cursor, 2);
+    client
+        .commit_pull_cursor(
+            &mut engine,
+            "ws",
+            &pending_cursor,
+            &NoFaults,
+            &crate::NoLiveLeases,
+            3_000,
+        )
+        .expect("commit cursor");
+    assert_eq!(
+        read_relay_cursor(&engine, "ws")
+            .expect("cursor")
+            .map(|cursor| cursor.cursor),
+        Some(2)
+    );
+
+    // The exact record stays in the log, refused, with its origin acknowledged
+    // and no Notice.
+    let (kind, payload, recorded_at_ms, disposition) =
+        log_row(&engine, "phone", 0).expect("the record is kept");
+    assert_eq!(kind, FUTURE_PRIVATE_KIND);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload).expect("payload"),
+        future.payload
+    );
+    assert_eq!(recorded_at_ms, future.recorded_at_ms);
+    assert_eq!(disposition, "refused");
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        1
+    );
+    assert_eq!(pending_refusal_count(&engine), 0);
+    assert!(
+        list_refusal_notices(&engine, "ws")
+            .expect("notices")
+            .is_empty()
+    );
+    let later_message: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id='message-late'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("later message");
+    assert_eq!(later_message, 1, "the next record from the origin applied");
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+
+    // Delivered again, it stays quiet.
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("redelivery"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    assert_eq!(pending_refusal_count(&engine), 0);
+
+    // After a reopen, this build still can't read the kind and leaves it.
+    drop(engine);
+    let mut reopened = EngineStore::open(&path, 3_001).expect("reopen");
+    assert_eq!(
+        replay_retained_owner_private(&mut reopened, &NoFaults).expect("replay"),
+        0
+    );
+    assert_eq!(log_row(&reopened, "phone", 0).expect("kept").3, "refused");
+
+    // A later build applies it from the log, once, with no new delivery.
+    let applies = std::cell::Cell::new(0);
+    assert_eq!(
+        replay_as_later_build(&mut reopened, &NoFaults, &applies).expect("later build"),
+        1
+    );
+    assert_eq!(applies.get(), 1);
+    assert_eq!(
+        account_thread_mark(&reopened, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+    assert_eq!(log_row(&reopened, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(pending_refusal_count(&reopened), 0);
+    assert_eq!(
+        replay_as_later_build(&mut reopened, &NoFaults, &applies).expect("again"),
+        0
+    );
+    assert_eq!(applies.get(), 1, "it never applies twice");
+}
+
+#[test]
+fn a_crash_keeps_neither_a_quiet_record_nor_its_replay() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    let future = future_private_op("phone", 0, Some(json!("owner")));
+    let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            faults.as_ref(),
+            &NoLiveLeases,
+        )
+        .expect("crash outcome"),
+        ApplyOutcome::new(ApplyDisposition::Crashed { committed: false })
+    );
+    assert_eq!(log_row(&engine, "phone", 0), None);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        -1
+    );
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("retry"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        0
+    );
+
+    let applies = std::cell::Cell::new(0);
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    assert!(matches!(
+        replay_as_later_build(&mut engine, crash.as_ref(), &applies),
+        Err(SyncError::FaultCrash)
+    ));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "refused");
+    // The fingerprint commits with the last record, so the next open scans
+    // again.
+    assert_eq!(stored_fingerprint(&engine), None);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("replay"),
+        1
+    );
+    assert_eq!(stored_fingerprint(&engine).as_deref(), Some(LATER_BUILD));
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+}
+
+#[test]
+fn a_changed_quiet_record_at_its_coordinate_diverges() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_owner_account(&mut engine, "owner");
+    let future = future_private_op("phone", 0, Some(json!("owner")));
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    let mut changed = future.clone();
+    changed.payload["atMs"] = json!(999);
+    assert!(matches!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &changed,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "phone").expect("ack"),
+        0
+    );
+    let (_, payload, _, disposition) = log_row(&engine, "phone", 0).expect("kept");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&payload).expect("payload"),
+        future.payload
+    );
+    assert_eq!(disposition, "refused");
+    assert_eq!(pending_refusal_count(&engine), 0);
+}
+
+#[test]
+fn an_unknown_record_without_the_owners_marker_is_refused_visibly() {
+    let (_scratch, _path, mut engine) = open_store();
+    // A copy that hasn't recorded its owner keeps no record quietly.
+    assert_refused_as_unsupported(
+        &mut engine,
+        &future_private_op("no-owner-yet", 0, Some(json!("owner"))),
+    );
+    seed_owner_account(&mut engine, "owner");
+    let cases = [
+        future_private_op("another-account", 0, Some(json!("someone-else"))),
+        future_private_op("absent", 0, None),
+        future_private_op("number", 0, Some(json!(7))),
+        future_private_op("empty", 0, Some(json!(""))),
+        future_private_op("null", 0, Some(serde_json::Value::Null)),
+        future_private_op("padded", 0, Some(json!(" owner"))),
+        // A kind outside chat, and lanes another account or the relay writes.
+        envelope(
+            "non-chat",
+            0,
+            "version.rename",
+            json!({"ownerPrivateAccountId": "owner"}),
+        ),
+        future_private_op("relay:share-member:member", 0, Some(json!("owner"))),
+        future_private_op("shared:share-1:peer", 0, Some(json!("owner"))),
+        future_private_op("service-host:host", 0, Some(json!("owner"))),
+    ];
+    for op in &cases {
+        let before = pending_refusal_count(&engine);
+        assert_refused_as_unsupported(&mut engine, op);
+        assert_eq!(
+            pending_refusal_count(&engine),
+            before + 1,
+            "{}",
+            op.origin_id
+        );
+    }
+    assert_eq!(
+        list_refusal_notices(&engine, "ws").expect("notices").len(),
+        cases.len() + 1
+    );
+}
+
+#[test]
+fn a_marker_never_quiets_a_known_record() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    // Content records carrying a forged marker are still checked, and their
+    // refusals are visible.
+    for op in [
+        envelope(
+            "forged-chat",
+            0,
+            "chat.message.append",
+            json!({"messageId": 7, "ownerPrivateAccountId": "owner"}),
+        ),
+        envelope(
+            "forged-file",
+            0,
+            "ydoc.update",
+            json!({"ownerPrivateAccountId": "owner"}),
+        ),
+    ] {
+        let before = pending_refusal_count(&engine);
+        let outcome = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply");
+        assert!(
+            matches!(outcome.primary, ApplyDisposition::Refused(_)),
+            "{}: {outcome:?}",
+            op.op_kind
+        );
+        assert_eq!(pending_refusal_count(&engine), before + 1, "{}", op.op_kind);
+    }
+
+    // A known private kind's marker must name its own account.
+    let mut mismatched = thread_read_op("marked", 0, "thread-imported", 20, "message-imported");
+    mismatched.payload["ownerPrivateAccountId"] = json!("someone-else");
+    assert_invalid_refusal!(apply_chat_envelope(&mut engine, &mismatched, &NoFaults));
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+    let mut marked = thread_read_op("marked", 1, "thread-imported", 20, "message-imported");
+    marked.payload["ownerPrivateAccountId"] = json!("owner");
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &marked, &NoFaults).expect("marked mark"),
+        ApplyOutcome::new(ApplyDisposition::Applied(Vec::new()))
+    );
+    assert_eq!(
+        account_thread_mark(&engine, "thread-imported"),
+        Some((20, "message-imported".to_owned()))
+    );
+}
+
+#[test]
+fn a_share_lane_never_takes_a_marked_record() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_owner_account(&mut engine, "owner");
+    let channel = ShareBoundary {
+        share_id: "share-channel".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        granted: None,
+    };
+    let view = ShareBoundary {
+        share_id: "share-view".to_owned(),
+        surface: ShareSurface::ShareView,
+        channel_wire_id: None,
+        granted: Some(ShareGrant {
+            paths: vec!["shared".to_owned()],
+            version_id: None,
+            access: ShareAccess::View,
+        }),
+    };
+    let future = future_private_op("peer", 0, Some(json!("owner")));
+    let mut known = thread_read_op("peer", 1, "thread-imported", 20, "message-imported");
+    known.payload["ownerPrivateAccountId"] = json!("owner");
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &channel, &future, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &channel, &known, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &view, &future, &NoFaults),
+        Err(SyncError::UnsupportedOperation)
+    ));
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &view, &known, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    let shared_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE origin_id LIKE 'shared:%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("shared rows");
+    assert_eq!(shared_rows, 0);
+}
+
+#[test]
+fn replay_leaves_visible_refusals_and_a_refused_replay_alone() {
+    let (_scratch, _path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    seed_owner_account(&mut engine, "owner");
+    // An older build's refusal carries no marker; another account's keeps
+    // naming that account after its Notice is dismissed.
+    assert_refused_as_unsupported(&mut engine, &future_private_op("older-build", 0, None));
+    assert_refused_as_unsupported(
+        &mut engine,
+        &future_private_op("other-account", 0, Some(json!("someone-else"))),
+    );
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM replication_pending_refusals \
+                 WHERE workspace_id='ws' AND origin_id='other-account'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("dismiss");
+    // A quiet record its later applier refuses: the right message at the
+    // wrong time.
+    let mut wrong_time = future_private_op("phone", 0, Some(json!("owner")));
+    wrong_time.payload["lastReadCreatedAtMs"] = json!(21);
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &wrong_time,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+
+    let applies = std::cell::Cell::new(0);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("replay"),
+        0
+    );
+    assert_eq!(
+        applies.get(),
+        1,
+        "only the quiet record reaches the applier"
+    );
+    assert_eq!(pending_refusal_count(&engine), 1);
+    for origin in ["older-build", "other-account", "phone"] {
+        assert_eq!(
+            log_row(&engine, origin, 0).expect("kept").3,
+            "refused",
+            "{origin}"
+        );
+    }
+    assert_eq!(account_thread_mark(&engine, "thread-imported"), None);
+}
+
+/// Counts each statement that reads `replication_log` from now on.
+fn watch_log_reads(engine: &mut EngineStore) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = reads.clone();
+    engine
+        .hooks_with(|conn| {
+            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+                if matches!(
+                    ctx.action,
+                    AuthAction::Read {
+                        table_name: "replication_log",
+                        ..
+                    }
+                ) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Authorization::Allow
+            }))
+        })
+        .expect("watch log reads");
+    reads
+}
+
+fn log_reads(reads: &std::sync::atomic::AtomicUsize) -> usize {
+    reads.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[test]
+fn replay_reads_the_log_only_when_the_builds_kinds_change() {
+    let (_scratch, path, mut engine) = open_store();
+    imported_chat_fixture(&mut engine, "read-fixture");
+    // A copy that hasn't recorded its owner keeps nothing quietly, so it
+    // never scans and stores nothing.
+    let reads = watch_log_reads(&mut engine);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("unseeded"),
+        0
+    );
+    assert_eq!(log_reads(&reads), 0);
+    assert_eq!(stored_fingerprint(&engine), None);
+
+    seed_owner_account(&mut engine, "owner");
+    assert_eq!(
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &future_private_op("phone", 0, Some(json!("owner"))),
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("kept"),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+
+    // This build's first open scans once and stores its fingerprint.
+    let reads = watch_log_reads(&mut engine);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("first open"),
+        0
+    );
+    assert!(log_reads(&reads) > 0);
+    let this_build = stored_fingerprint(&engine).expect("stored");
+    assert!(this_build.contains("chat.thread.read.set"));
+
+    // Reopened by the same build, it reads only the fingerprint.
+    drop(engine);
+    let mut engine = EngineStore::open(&path, 3_001).expect("reopen");
+    let reads = watch_log_reads(&mut engine);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("same build"),
+        0
+    );
+    assert_eq!(log_reads(&reads), 0);
+
+    // A later build scans once, applies the record, and stores its own.
+    let applies = std::cell::Cell::new(0);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("later build"),
+        1
+    );
+    assert!(log_reads(&reads) > 0);
+    assert_eq!(stored_fingerprint(&engine).as_deref(), Some(LATER_BUILD));
+    let before = log_reads(&reads);
+    assert_eq!(
+        replay_as_later_build(&mut engine, &NoFaults, &applies).expect("later build again"),
+        0
+    );
+    assert_eq!(log_reads(&reads), before);
+    assert_eq!(applies.get(), 1);
+
+    // A crash before the fingerprint commits leaves the next open to scan
+    // again, which finds nothing left to apply.
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    assert!(matches!(
+        replay_retained_owner_private(&mut engine, crash.as_ref()),
+        Err(SyncError::FaultCrash)
+    ));
+    assert_eq!(stored_fingerprint(&engine).as_deref(), Some(LATER_BUILD));
+    let before = log_reads(&reads);
+    assert_eq!(
+        replay_retained_owner_private(&mut engine, &NoFaults).expect("rescan"),
+        0
+    );
+    assert!(log_reads(&reads) > before);
+    assert_eq!(stored_fingerprint(&engine), Some(this_build));
+    assert_eq!(log_row(&engine, "phone", 0).expect("kept").3, "applied");
+    assert_eq!(applies.get(), 1);
+}

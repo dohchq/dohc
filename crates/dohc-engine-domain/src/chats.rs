@@ -120,6 +120,13 @@ pub const PERSONAL_THREAD_ID_PREFIX: &str = "personal-thread:";
 /// Every personal agent's id starts with this. A settings file can't use it,
 /// so only the agent's relay origin names one as an author.
 pub const PERSONAL_AGENT_ID_PREFIX: &str = "p-";
+/// The payload field that declares a record owner-private: it changes only
+/// the named account's own state, and a copy can leave it out without changing
+/// shared content, permissions, history, or any other record's meaning. A
+/// reader that doesn't know such a record's kind keeps it quietly and applies
+/// it once it does. The relay admits the field only on the kinds it registers
+/// as owner-private, and only naming the account that pushed the record.
+pub const OWNER_PRIVATE_MARKER: &str = "ownerPrivateAccountId";
 /// Thread title char cap (`normalizeThreadTitle`).
 const MAX_THREAD_TITLE_CHARS: usize = 200;
 /// Channel name char cap (`normalizeChannelName`).
@@ -5959,18 +5966,20 @@ impl<'a> LinkedChatStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             if replication_owner_user_id.is_some() {
+                let mut payload = serde_json::json!({
+                    "ownerUserId": owner,
+                    "lastSeenCreatedAtMs": last_seen_created_at_ms,
+                    "lastSeenMessageId": msg,
+                    "atMs": at_ms,
+                });
+                payload[OWNER_PRIVATE_MARKER] = serde_json::Value::from(owner.as_str());
                 insert_local_replication_op(
                     tx,
                     &ws,
                     &origin_id,
                     origin_seq,
                     "chat.feed.read.set",
-                    &serde_json::json!({
-                        "ownerUserId": owner,
-                        "lastSeenCreatedAtMs": last_seen_created_at_ms,
-                        "lastSeenMessageId": msg,
-                        "atMs": at_ms,
-                    }),
+                    &payload,
                     at_ms,
                 )?;
             }
@@ -8310,19 +8319,21 @@ fn advance_account_thread_read(
         )?;
     }
     if let Some((published_at_ms, published_id)) = publish {
+        let mut payload = serde_json::json!({
+            "accountUserId": account_user_id,
+            "threadId": thread_id,
+            "lastReadCreatedAtMs": published_at_ms,
+            "lastReadMessageId": published_id,
+            "atMs": at_ms,
+        });
+        payload[OWNER_PRIVATE_MARKER] = serde_json::Value::from(account_user_id);
         insert_local_replication_op(
             tx,
             workspace_id,
             &origin_id,
             origin_seq,
             "chat.thread.read.set",
-            &serde_json::json!({
-                "accountUserId": account_user_id,
-                "threadId": thread_id,
-                "lastReadCreatedAtMs": published_at_ms,
-                "lastReadMessageId": published_id,
-                "atMs": at_ms,
-            }),
+            &payload,
             at_ms,
         )?;
     }

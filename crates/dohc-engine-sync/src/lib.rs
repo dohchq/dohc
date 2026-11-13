@@ -26,6 +26,8 @@ mod live_audit;
 mod model;
 mod moment_apply;
 mod outbound;
+mod owner_private;
+pub use owner_private::replay_retained_owner_private;
 mod owner_publication;
 mod settlement_publication;
 pub use owner_publication::{
