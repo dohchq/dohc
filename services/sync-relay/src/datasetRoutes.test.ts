@@ -349,6 +349,40 @@ it("retains the first participant attempt across lost replies and clears only it
   expect((await request({action: "get"})).status).toBe(404);
 });
 
+it("requires an owner and a current, acknowledged deletion review", async () => {
+  const f = await httpFixture(); await f.activate();
+  const publicationId=f.publish(); await f.http(`${f.path}/binding`,{publicationId,enabled:true});
+  expect(await (await f.http(`${f.path}/deletion-status`)).json()).toEqual({deleted:false});
+  const response=await f.http(`${f.path}/delete-preview?limit=1`); expect(response.status).toBe(200);
+  const preview=await response.json(); expect(preview).toMatchObject({name:"Requests",irreversible:true,apps:[{appId:publicationId}]});
+  const request={expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true};
+  for(const user of ["helper","stranger"]){
+    expect((await f.http(`${f.path}/deletion-status`,undefined,{authorization:`Bearer ${user}`})).status).toBe(404);
+    expect((await f.http(`${f.path}/delete-preview`,undefined,{authorization:`Bearer ${user}`})).status).toBe(404);
+    expect((await f.http(`${f.path}/delete`,request,{authorization:`Bearer ${user}`})).status).toBe(404);
+  }
+  expect((await f.http(`${f.path}/delete-preview?limit=101`)).status).toBe(400);
+  expect((await f.http(`${f.path}/delete-preview?limit=1&limit=2`)).status).toBe(400);
+  for(const invalid of [{...request,acknowledge:false},{...request,acknowledge:undefined},{...request,reviewToken:undefined},
+    {...request,expected:{...preview.cursor,datasetId:id(9)}},{...request,force:true}]) expect((await f.http(`${f.path}/delete`,invalid)).status).toBe(400);
+  await f.http(`${f.path}/invoke`,{revision:1,revisionSha256:revision.revisionSha256,operationId:id(5),input:{name:"Latest"},idempotencyKey:"latest"});
+  const stale=await f.http(`${f.path}/delete`,request);
+  expect(stale.status).toBe(409);
+  expect(await stale.json()).toEqual({ok:false,code:"conflict",error:"conflict"});
+  const live=await (await f.http(`${f.path}/delete-preview`)).json();
+  const refused=await f.http(`${f.path}/delete`,{expected:live.cursor,reviewToken:live.reviewToken,acknowledge:true});
+  expect(refused.status).toBe(409);
+  expect(await refused.json()).toMatchObject({code:"conflict",error:"This Collection isn't archived. Archive it before you delete it permanently."});
+  expect((await f.http(`${f.path}/archive`,{})).status).toBe(200);
+  const current=await (await f.http(`${f.path}/delete-preview`)).json();
+  expect(await (await f.http(`${f.path}/delete`,{expected:current.cursor,reviewToken:current.reviewToken,acknowledge:true})).json()).toEqual({deleted:true,datasetId:id(1)});
+  expect(await (await f.http(`${f.path}/deletion-status`)).json()).toEqual({deleted:true});
+  expect((await f.http(`${f.path}/deletion-status?after=x`)).status).toBe(400);
+  expect((await f.invoke()).status).not.toBe(200);
+  expect((await f.activate()).status).not.toBe(200);
+});
+
+
 it("exposes immutable approved rule history only through the owner route", async () => {
   const f = await httpFixture(); expect((await f.activate()).status).toBe(200);
   const path = `${f.path}/history-revision?revisionSha256=${revision.revisionSha256}`;

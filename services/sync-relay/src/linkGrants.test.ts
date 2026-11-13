@@ -47,6 +47,32 @@ describe("recoverable owner link URLs", () => {
     expect(unsealLinkBearer(sealed, "another-key", "credential", "grant")).toBeNull();
   });
 
+  it("returns null for legacy, retired, corrupted, and transplanted seals", async () => {
+    const storage = await newStorage(), h = handler(storage);
+    await seedFileShare(h);
+    const first = await createLink(h), second = await createLink(h);
+    const firstId = String(first.grantId), secondId = String(second.grantId);
+    const credential = storage.getCurrentLinkCredential(firstId)!;
+    expect(credential.secretSealed).toEqual(expect.any(String));
+    expect(credential.secretSealed).not.toContain(linkSecret(first.url));
+    const db = inspectDatabase(storagePath(storage));
+    try {
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = ? WHERE grant_id = ?").run(credential.secretSealed, secondId);
+      expect((await ownerLinkInventoryRow(h, secondId)).url).toBeNull();
+      const parts = credential.secretSealed!.split(".");
+      const encrypted = Buffer.from(parts[2]!, "base64url");
+      encrypted[0] = encrypted[0]! ^ 1;
+      parts[2] = encrypted.toString("base64url");
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = ? WHERE grant_id = ?").run(parts.join("."), firstId);
+      expect((await ownerLinkInventoryRow(h, firstId)).url).toBeNull();
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = NULL WHERE grant_id = ?").run(firstId);
+      expect((await ownerLinkInventoryRow(h, firstId)).url).toBeNull();
+      db.prepare("UPDATE sync_relay_link_credentials SET secret_sealed = ?, retired_at_ms = 3000 WHERE grant_id = ?").run(credential.secretSealed, firstId);
+      expect((await ownerLinkInventoryRow(h, firstId)).url).toBeNull();
+    } finally { db.close(); }
+  });
+
+
   it("denies URLs to recipients, anonymous callers, and link capability holders", async () => {
     const storage = await newStorage(), h = handler(storage);
     await seedFileShare(h);
@@ -398,6 +424,36 @@ describe("atomic View and Comment link mint", () => {
 });
 
 describe("owner link contract", () => {
+
+  it.each([
+    ["view", "comment", true], ["view", "edit", true], ["comment", "edit", true],
+    ["comment", "view", false], ["edit", "comment", false], ["edit", "view", false],
+  ] as const)("storage %s to %s rotates credentials only when widening", async (from, access, widening) => {
+    const storage = await newStorage();
+    await seedFileShare(handler(storage));
+    const grantId = "rank-transition";
+    const original = {credentialId: "rank-original", grantId, secretSealed: null, secretHash: hmac("o".repeat(43)), generation: 1,
+      mintedAtMs: 2000, retiredAtMs: null};
+    expect(storage.createLinkGrant({
+      grant: {grantId, shareId: "share-existing", principalKind: "link", principalUserId: null,
+        principalEmail: null, access: from, generation: 1, status: "active", createdAtMs: 2000,
+        revokedAtMs: null, parentGrantId: null}, credential: original,
+    })).toBe(true);
+    const mintCredential = vi.fn(() => ({credentialId: "rank-replacement", secretSealed: null, secretHash: hmac("n".repeat(43))}));
+    const input = {shareId: "share-existing", grantId, access, changedAtMs: 3000,
+      expectedDependentGrantIds: [], guard: () => undefined};
+    expect(storage.retuneShareGrant({...input, ...(widening ? {} : {mintCredential})})).toEqual({ok: false});
+    expect(mintCredential).not.toHaveBeenCalled();
+    expect(storage.getShareGrant(grantId)).toMatchObject({access: from, generation: 1});
+    expect(storage.getCurrentLinkCredential(grantId)).toEqual(original);
+    expect(storage.retuneShareGrant({...input, ...(widening ? {mintCredential} : {})})).toMatchObject({ok: true});
+    expect(storage.getShareGrant(grantId)).toMatchObject({access, generation: widening ? 2 : 1});
+    expect(mintCredential).toHaveBeenCalledTimes(widening ? 1 : 0);
+    expect(storage.getCurrentLinkCredential(grantId)).toMatchObject(widening
+      ? {credentialId: "rank-replacement", generation: 2}
+      : original);
+  });
+
 
   it("does not expose a minted URL or fragment through errors or diagnostics", async () => {
     const storage = await newStorage();
@@ -1702,6 +1758,109 @@ describe("relay link grants", () => {
     expect(compare).toHaveBeenCalledOnce();
   });
 
+  it("refuses an in-grace refresh after rotation changes the generation", async () => {
+    const storage = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let now = 2_000;
+    const h = handler(storage, { relayExchangeKey, nowMs: () => now });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: linkSecret(created.url) }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+    now += LINK_SESSION_TTL_MS + 60 * 60 * 1_000;
+    expect(
+      (
+        await h(
+          request(
+            OWNER,
+            `/sync/shares/share-existing/links/${String(created.grantId)}/rotate`,
+            jsonBody({ workspaceId: WORKSPACE, expectedDependentGrantIds: [] }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(storage.getShareGrant(String(created.grantId))).toMatchObject({
+      status: "active",
+      generation: 2,
+    });
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).toBe(
+      '{"ok":false,"error":"not found"}',
+    );
+  });
+
+  it("refuses refresh when revocation wins before session replacement", async () => {
+    const target = await newStorage();
+    const relayExchangeKey = "share-web-relay-refresh-exchange-key";
+    let grantId = "";
+    let armed = false;
+    let replaceLinkSessionInterceptions = 0;
+    const raced = interceptStorage(target, {
+      replaceLinkSession: (storage, input) => {
+        replaceLinkSessionInterceptions += 1;
+        if (armed) {
+          armed = false;
+          storage.revokeShareGrant({ shareId: "share-existing", grantId, revokedAtMs: 2_001 });
+        }
+        return storage.replaceLinkSession(input);
+      },
+    });
+    const h = handler(raced, { relayExchangeKey });
+    await seedFileShare(h);
+    const created = await createLink(h);
+    grantId = String(created.grantId);
+    const exchangeResponse = await h(
+      request(null, "/sync/link-exchange", {
+        ...jsonBody({ secret: linkSecret(created.url) }),
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+    expect(exchangeResponse.status).toBe(200);
+    const exchanged = await json(exchangeResponse);
+    armed = true;
+
+    const refused = await h(
+      request(null, "/sync/link-refresh", {
+        method: "POST",
+        headers: {
+          authorization: `LinkCapability ${String(exchanged.capabilityToken)}`,
+          "x-dohc-relay-exchange-key": relayExchangeKey,
+        },
+      }),
+    );
+
+    expect(replaceLinkSessionInterceptions).toBe(1);
+    expect(refused.status).toBe(404);
+    expect(await refused.text()).toBe(
+      '{"ok":false,"error":"not found"}',
+    );
+  });
+
+
+
   it("accepts the renewal grace boundary and refuses beyond it", async () => {
     expect(LINK_SESSION_RENEWAL_GRACE_MS).toBe(7 * 24 * 60 * 60 * 1_000);
     const storage = await newStorage();
@@ -2145,6 +2304,25 @@ it("retries an agent link creation across restart without minting another creden
   expect(legacyResult).toMatchObject({ shareId: first.shareId, grantId: first.grantId, urlUnavailable: true });
   expect(legacyResult).not.toHaveProperty("url");
 });
+
+it("gives no URL to a creation retry after the link's access changed", async () => {
+  const storage = await newStorage(), h = handler(storage);
+  await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
+  const body = { paths: ["docs"], access: "view", operationId: "00000000-0000-4000-8000-000000000102" };
+  const first = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body))));
+  const path = `/sync/shares/${String(first.shareId)}/links/${String(first.grantId)}/retune`;
+  const transition = { workspaceId: WORKSPACE, expectedDependentGrantIds: [] };
+  const widened = await h(request(OWNER, path, jsonBody({ ...transition, access: "comment" })));
+  expect(widened.status, await widened.clone().text()).toBe(200);
+  const retry = await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body))));
+  expect(retry).toMatchObject({ grantId: first.grantId, access: "view", urlUnavailable: true });
+  expect(retry).not.toHaveProperty("url");
+  // Narrowed back, the link has the access asked for again, at the address it has now.
+  expect((await h(request(OWNER, path, jsonBody({ ...transition, access: "view" })))).status).toBe(200);
+  const current = (await ownerLinkInventory(h))[0]!.url;
+  expect(await json(await h(request(OWNER, `/sync/${WORKSPACE}/shares/links`, jsonBody(body))))).toMatchObject({ url: current });
+});
+
 
 it.each([[[]],[[".env"]],[["docs/.env"]],[[".dohc/secret"]]])("refuses agent link secret paths and empty selectors %j",async paths=>{
   const storage=await newStorage(),h=handler(storage);

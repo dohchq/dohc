@@ -235,6 +235,20 @@ it("atomically activates a migrated checkpoint and preserves prior retries and r
   expect(f.journal.events({scope:f.scope,after:next,authorize:f.authorize}).events).toEqual([]);
 });
 
+it("refuses changed claim artifacts, authority, capacity, cursor and reused epochs",()=>{
+  const f=fixture(),input={...f.initialization,expected:f.initial,hostEpoch:"host-2"};
+  expect(()=>f.journal.claimInactiveCheckpoint(input)).toThrow("already open on this host");
+  f.journal.fence({expected:f.initial,authorize:f.authorize});
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,hostEpoch:"host-1"})).toThrow("needs a new host session");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,approvedRevisionHash:digest("new")})).toThrow("approved rules");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,source:"changed"})).toThrow("cannot change its approved rules");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,capacityBytes:4096})).toThrow("space reserved for its records");
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,expected:{...f.initial,digest:digest("stale")}})).toThrow("The Collection changed. Try again.");
+  const claimed=f.journal.claimInactiveCheckpoint(input);f.journal.fence({expected:claimed,authorize:f.authorize});
+  expect(()=>f.journal.claimInactiveCheckpoint({...input,expected:claimed,hostEpoch:"host-1"})).toThrow("needs a new host session");
+});
+
+
 it("rolls back a failed claim and recovers lost claim acknowledgment without repeat accounting",()=>{
   const f=fixture(),input={...f.initialization,expected:f.initial,hostEpoch:"host-2",account(allocation:{bytes:number}){f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);}};
   f.journal.fence({expected:f.initial,authorize:f.authorize});

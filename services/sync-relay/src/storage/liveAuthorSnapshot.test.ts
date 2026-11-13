@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import type { ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import { openSyncRelayStorage } from "../storage";

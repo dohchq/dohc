@@ -1119,6 +1119,23 @@ it("keeps a frozen seed's stopped document until its owner copies the accepted s
 // closes after the last copy. Since the engine opens one per workspace, a read
 // of another earlier store closes the open handle first, and a read its
 // caller abandons closes its handle too.
+async function rotatedServiceHost() {
+  const o = await enrolledServiceHost(), k = keptEdits(o);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  await o.host.close();
+  o.stop();
+  expect(o.f.storage.rotateWorkspaceIdentity({workspaceId: "workspace", ownerUserId: "owner", replicationEpoch: "epoch-2", streamIdentity: "stream-2", rotatedAtMs: 10})).toBe("rotated");
+  (o.f.config as unknown as {activation: {pollIntervalMs: number}}).activation.pollIntervalMs = 60_000;
+  await o.f.save();
+  const restarted = await startServiceLiveHost({...o.f, frameChanges: createNamedFrameChanges(16)});
+  cleanup.push(() => restarted.close());
+  const earlier = k.row()!, root = join(o.f.root, "earlier-store");
+  const closes = () => k.engine("liveApplication.closeRecoveryStore").map(request => request.workspace);
+  return {...o, k, restarted, earlier, root, closes,
+    /** The header page of a kept queue, read from the store at `store`. */
+    read: (kept = earlier, store = root) => restarted.readKeptEditsPage(kept, undefined, store)};
+}
+
 it("opens no earlier store for a read whose refusal changed while it waited", async () => {
   const r = await rotatedServiceHost();
   await expect(r.read({...r.earlier, generation: r.earlier.generation + 1_000})).resolves.toEqual({kind: "readChanged"});

@@ -923,6 +923,49 @@ describe("the recipient's blob route", () => {
   // A per-op route is a new surface on the granter's workspace, so it owes the
   // same gate the listing owes and the same generic 404 — one answer for every
   // way a lookup can fail, so nothing on it can be used to probe what exists.
+
+  it("gates the single-proposal route exactly as the listing is gated", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await claimWorkspace(h);
+    const granter = new Granter(h);
+    await granter.write("object-in", "docs/in.md", "granter one");
+    const shareId = await createShare(h, "edit");
+    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
+    const sent = await submit(h, shareId, [change()]);
+    const proposalId = (await json(sent)).proposalId as string;
+    const one = (id: string, as: string) =>
+      h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
+
+    // The owner reads it, and it carries the file rows the listing does not.
+    const mine = await one(proposalId, GRANTER);
+    expect(mine.status, await mine.clone().text()).toBe(200);
+    const proposal = (await json(mine)).proposal as Record<string, unknown>;
+    expect((proposal.ops as unknown[]).length).toBe(1);
+    expect(proposal.proposalId).toBe(proposalId);
+
+    const denied = await Promise.all([
+      one(proposalId, RECIPIENT),
+      one(proposalId, OTHER),
+      one("proposal-absent", GRANTER),
+    ]).then((responses) => Promise.all(responses.map(denialBytes)));
+    expect(
+      new Set(denied).size,
+      "a per-failure answer turns this route into a probe for what a workspace holds",
+    ).toBe(1);
+    expect(
+      await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
+      "a per-proposal route denying differently from the listing leaks which proposals exist",
+    ).toBe(denied[0]);
+
+    // Settled is history on this route, exactly as on the op route.
+    expect((await settle(h, proposalId, "decline")).status).toBe(200);
+    expect(
+      await denialBytes(await one(proposalId, GRANTER)),
+      "serving a settled proposal keeps a closed review readable",
+    ).toBe(denied[0]);
+  });
+
   it("gates the single-op route exactly as the listing is gated", async () => {
     const storage = await testStorage();
     const h = handler(storage);

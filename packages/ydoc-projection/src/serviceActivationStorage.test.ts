@@ -856,6 +856,31 @@ const adoptionReservations=(f:ReturnType<typeof fixture>)=>f.raw.prepare('SELECT
 // Proves: Resume makes the successor's quota decision. Refused, it leaves the
 // retired tail and its accounting as they were; once space is freed it
 // prepares the successor with its adoption reservation.
+
+it("refuses to complete a successor whose prefix differs, or whose journal holds another row or a second one after F",async()=>{
+  const f=fixture();try{
+    const {edit,boundary}=await retirePredecessor(f)
+    const adopted=await adoptSuccessor(f,boundary)
+    adopted.apply()
+    const predecessor=(set:string)=>f.raw.prepare(`UPDATE sync_relay_service_activations SET ${set} WHERE activation_id=?`).run(f.capture.activationId)
+    predecessor(`retired_boundary_json='${JSON.stringify({...boundary,eventCount:boundary.eventCount+1})}'`)
+    expect(()=>adopted.complete()).toThrow('differs from activation')
+    predecessor(`retired_boundary_json='${JSON.stringify(boundary)}'`)
+    // With F one row earlier, the predecessor's edit is a suffix beyond it.
+    predecessor(`retire_accepted_cursor=${edit.journalCursor-1}`)
+    expect(()=>adopted.complete()).toThrow('another update after its predecessor')
+    predecessor(`retire_accepted_cursor=${edit.journalCursor}`)
+    expect(admitSeed(f,adopted.access,'successor-seed').result.kind).toBe('accepted')
+    adopted.apply()
+    predecessor(`retire_accepted_cursor=${edit.journalCursor-1}`)
+    expect(()=>adopted.complete()).toThrow('another update after its predecessor')
+    expect(completed(f)).toBe(0)
+    predecessor(`retire_accepted_cursor=${edit.journalCursor}`)
+    adopted.complete()
+    expect(completed(f)).toBe(1)
+  }finally{f.close()}
+})
+
 it('refuses a successor at quota retryably, then prepares it with its adoption reservation once space is freed',async()=>{
   // One client ID gives both fixtures the same bytes, so `sized` measures f.
   const sized=fixture('Original',false,1),f=fixture('Original',false,1);try{

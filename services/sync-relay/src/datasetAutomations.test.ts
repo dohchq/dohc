@@ -108,6 +108,23 @@ it("uses registered callers, scopes authority, and preserves chain depth and rec
   await expect(Promise.resolve().then(() => f.ledger.invoke(context, input))).rejects.toThrow();
 });
 
+it("admits owner and named editor presses only inside a checked request and rejects revoked grants", async () => {
+  const f = await fixture(); f.addEditor(); await f.create();
+  expect(() => f.ledger.press(DATASET, f.press)).toThrow();
+  expect(await f.host.automations.press(owner, DATASET, f.lifetime.signal, async () => f.ledger.press(DATASET, f.press)))
+    .toMatchObject({ kind: "claimed", claim: { actor: { kind: "owner", userId: "owner" } } });
+  const started = f.ledger.next()!; f.ledger.settle(started, { state: "done" });
+  const named = { ...f.press, pressId: "editor-press", pressedBy: "editor" };
+  expect(await f.host.automations.press(editor, DATASET, f.lifetime.signal, async () => f.ledger.press(DATASET, named)))
+    .toMatchObject({ kind: "claimed", claim: { actor: { kind: "named", userId: "editor" } } });
+  await expect(f.host.automations.press(editor, DATASET, f.lifetime.signal, async () => {
+    f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=2 WHERE grant_id=?").run(editor.grantId));
+    return f.ledger.press(DATASET, { ...named, pressId: "revoked" });
+  })).rejects.toThrow();
+  expect(f.ledger.pressed("revoked")).toBeNull();
+});
+
+
 it.each(["view", "wrong-folder", "derived", "no-data"])("refuses a %s presser", async kind => {
   const f = await fixture(); f.addEditor(kind === "view" ? "view" : "edit", kind === "wrong-folder" ? ["Elsewhere"] : ["People"]);
   if (kind === "derived") f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET parent_grant_id='g' WHERE grant_id=?").run(editor.grantId));
