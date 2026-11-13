@@ -1,5 +1,7 @@
 import { getEventListeners } from "node:events";
-import { describe, expect, it } from "vitest";
+import { ClientClosedRequest } from "@dohc/service-http";
+import { describe, expect, it, vi } from "vitest";
+import { errorResponse } from "./errors";
 import { guardRelayResponses } from "./relayResponseStanding";
 
 describe("relay response cancellation lifetime", () => {
@@ -70,4 +72,50 @@ describe("relay response cancellation lifetime", () => {
       expect(getEventListeners(request.signal, "abort")).toHaveLength(0);
     },
   );
+
+  it("answers a request its own client closed quietly, however the route ends, and logs every other abort", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const storage = {
+        unavailable: new AbortController().signal,
+        captureStanding: () => () => {},
+      };
+      const send = async (route: (request: Request) => Promise<Response>, reason?: unknown) => {
+        const caller = new AbortController();
+        if (reason !== null) caller.abort(reason);
+        const handler = guardRelayResponses(storage, route);
+        return handler(
+          new Request("https://relay.test/sync/w/live-host", { signal: caller.signal }),
+        );
+      };
+      const throws = async (request: Request) => {
+        request.signal.throwIfAborted();
+        return new Response("never");
+      };
+      const answers = async (request: Request) => {
+        try {
+          return await throws(request);
+        } catch (error) {
+          return errorResponse(error);
+        }
+      };
+      // The route lets the close through, or answers it itself.
+      expect((await send(throws, new ClientClosedRequest())).status).toBe(499);
+      expect((await send(answers, new ClientClosedRequest())).status).toBe(499);
+      expect(errors).not.toHaveBeenCalled();
+      // A connection the server closed itself, as at shutdown, is not a client leaving.
+      expect((await send(answers)).status).toBe(500);
+      expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "AbortError");
+      errors.mockClear();
+      // Another request's close, reaching a request whose client still waits, is a fault.
+      const foreign = async () => errorResponse(new ClientClosedRequest());
+      expect((await send(foreign, null)).status).toBe(500);
+      expect(errors).toHaveBeenCalledWith(
+        "[sync-relay] unhandled error",
+        "ClientClosedRequest of another request",
+      );
+    } finally {
+      errors.mockRestore();
+    }
+  });
 });

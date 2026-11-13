@@ -1,4 +1,6 @@
 import { DiscussionActivityHub } from "./discussionActivity";
+import { ClientClosedRequest } from "@dohc/service-http";
+import { guardRelayResponses } from "./relayResponseStanding";
 import { createHash } from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import {
@@ -191,6 +193,27 @@ async function fixture() {
     },
   };
 }
+
+it("answers a live documents list its client closed quietly, and still logs any other failure", async () => {
+  const f = await fixture();
+  const handle = guardRelayResponses(f.storage, f.handle);
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  const closed = (reason: unknown) => {
+    const caller = new AbortController();
+    caller.abort(reason);
+    return new Request(f.request(), { signal: caller.signal });
+  };
+  expect((await handle(closed(new ClientClosedRequest()))).status).toBe(499);
+  expect(errors).not.toHaveBeenCalled();
+  // A connection the server closed itself, as at shutdown, is not a client leaving.
+  expect((await handle(closed(undefined))).status).toBe(500);
+  expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "AbortError");
+  errors.mockClear();
+  // Only the close itself is quiet: another failure after the client left still logs.
+  f.resolveActor.mockRejectedValueOnce(new Error("actor lookup failed"));
+  expect((await handle(closed(new ClientClosedRequest()))).status).toBe(500);
+  expect(errors).toHaveBeenCalledWith("[sync-relay] unhandled error", "Error");
+});
 
 it("requires bearer owner authority, rejects ambient credentials and rejects unknown parameters", async () => {
   const f = await fixture();
