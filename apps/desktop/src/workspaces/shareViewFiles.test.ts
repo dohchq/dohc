@@ -641,6 +641,74 @@ describe("ShareViewFiles", () => {
     },
   );
 
+  // A member's unsent page waits in the journal and goes when Edit returns,
+  // so a lower level is no reason to copy it away. Leaving still is.
+  it.each([
+    ["narrow", []],
+    ["end", ["notes/Budget.md"]],
+  ] as const)(
+    "lists a membership's unsent page as a change to copy after %s: %j",
+    async (restriction, listed) => {
+      const rootPath = await workspaceRoot();
+      const page = "notes/Budget.md";
+      const registered = {
+        ...target(rootPath),
+        unsavedPaths: undefined as string[] | null | undefined,
+        unconfirmedChanges: undefined as
+          | { paths: string[]; unchecked: boolean; checked: number }
+          | undefined,
+        grantedSelector: {
+          paths: [] as string[],
+          versionId: null,
+          access: "edit" as "edit" | "comment",
+          wholeWorkspace: true,
+        },
+      };
+      const initial = [{ path: page, text: "---\ntitle: Budget\n---\n", pending: true }];
+      const store = mutableTextStore({ initial });
+      await mkdir(join(rootPath, "notes"), { recursive: true });
+      await writeFile(join(rootPath, page), initial[0]!.text);
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        updateUnsavedPaths: async (_target: ResolvedShareViewFilesTarget, paths: string[]) => {
+          registered.unsavedPaths = paths;
+        },
+        markEnded: async (
+          _target: ResolvedShareViewFilesTarget,
+          paths?: string[] | null,
+          snapshot?: { paths: string[]; unchecked: boolean; checked: number },
+        ) => {
+          registered.ended = true;
+          registered.unsavedPaths = paths;
+          registered.unconfirmedChanges = snapshot;
+        },
+      });
+      const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+      await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else
+          await files.narrow(
+            lease,
+            requested,
+            () => undefined,
+            async (paths, snapshot) => {
+              registered.grantedSelector.access = "comment";
+              registered.unsavedPaths = paths;
+              registered.unconfirmedChanges = snapshot;
+            },
+          );
+      });
+      expect(registered.unsavedPaths).toEqual([]);
+      expect(registered.unconfirmedChanges).toEqual({
+        paths: listed,
+        unchecked: false,
+        checked: 0,
+      });
+    },
+  );
+
   it.each(["end", "narrow"] as const)(
     "keeps capture protection unchanged when status fails during %s",
     async (restriction) => {
@@ -2984,11 +3052,26 @@ describe("ShareViewFiles", () => {
     const store = mutableTextStore({ initial: [] });
     const joined = {
       ...target(rootPath),
-      grantedSelector: { paths: [], versionId: null, access: "edit" as const, wholeWorkspace: true as const },
+      grantedSelector: {
+        paths: [],
+        versionId: null,
+        access: "edit" as const,
+        wholeWorkspace: true as const,
+      },
     };
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => joined, openStore: () => store });
-    const create = (path: string) => withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-      files.change(lease, { kind: "standalone", workspaceId: "workspace-a" }, { kind: "create", path, initialText: "Idea\n" }));
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => joined,
+      openStore: () => store,
+    });
+    const create = (path: string) =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "create", path, initialText: "Idea\n" },
+        ),
+      );
 
     await expect(create("ideas/new.md")).resolves.toMatchObject({ status: "committed" });
     await expect(readFile(join(rootPath, "ideas/new.md"), "utf8")).resolves.toBe("Idea\n");

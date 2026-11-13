@@ -1086,13 +1086,17 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     }
   }
 
+  // `waits`: the journal keeps the unsent changes and sends them when Edit
+  // returns, as a membership's do when its level drops. Only what the journal
+  // could not take is then at risk.
   async function captureBeforeRestriction(
     lease: WorkspaceOperationLease,
     target: ActiveShareViewFilesTarget,
+    waits = false,
   ) {
     const unsavedPaths = await captureUnsavedPaths(lease, target);
     let snapshot: ShareUnconfirmedChanges = { paths: [], unchecked: false, checked: 0 };
-    if (target.kind === "standalone") {
+    if (target.kind === "standalone" && !waits) {
       try {
         snapshot = await unconfirmedChanges(target);
       } catch {
@@ -1134,7 +1138,11 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
         assertLease(lease, target);
         assertActiveTarget(target);
         assertCurrent();
-        const captured = await captureBeforeRestriction(lease, target);
+        const captured = await captureBeforeRestriction(
+          lease,
+          target,
+          recordedShareSelector(target.grantedSelector)?.wholeWorkspace === true,
+        );
         assertCurrent();
         await commit(captured.unsavedPaths, captured.unconfirmedChanges);
       });
