@@ -380,41 +380,37 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
       const found = (await chats.store.listChannels({ workspaceId })).find((each) => each.id === channelId);
       return found?.kind === "agent" ? found.agentId ?? null : null;
     },
-    // The newest message `pick` keeps in the channel's newest threads of both lanes, replies included, within a fixed
-    // budget. Each thread is read from its end, a page at a time, with the thread's message count giving where its
-    // last page starts, since a thread's message orders count from zero. `complete` is false when the budget, or the
-    // threads one listing returns, ran out before every message that could be newer was read.
+    // The newest message `pick` keeps in the channel's threads of both lanes, replies included, by `(createdAtMs, id)`,
+    // when a fixed budget reads all of them. Message order is arrival order, and a synced message keeps its sender's
+    // time, so no page or thread proves the newest until every message is read. Each thread is read from its end, a
+    // page at a time; its message count gives where its last page starts, since its message orders count from zero.
+    // A listing with more threads than it returned, or a budget that runs out, answers incomplete, with no message.
     async latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<DmSource> {
+      // The raw listing skips the secret-file filter safely: that filter hides only threads on a file, and every thread
+      // on a file is skipped here. A channel's threads are never on one.
       const lanes = await Promise.all((["posts", "chat"] as const)
         .map((lane) => adapter.request(CHATS_METHOD.threadsListForChannel, { channelId, lane, pageLimit: DM_THREADS_PER_LANE })));
-      const complete = lanes.every((page) => (page.nextCursor ?? null) === null);
-      // A channel's threads are never on a file, so the secret-file filter has nothing to drop; one on a file is skipped.
-      const threads = lanes.flatMap((page) => page.threads).filter((summary) => summary.thread.linkedFile === undefined)
-        .sort((left, right) => right.thread.updatedAtMs - left.thread.updatedAtMs);
+      if (lanes.some((page) => (page.nextCursor ?? null) !== null)) return { complete: false };
       let newest: ChatMessage | null = null;
       let pages = 0, read = 0;
-      for (const { thread, messageCount } of threads) {
-        // A thread last updated before the newest source found holds nothing newer.
-        if (newest !== null && thread.updatedAtMs < newest.createdAtMs) break;
+      for (const { thread, messageCount } of lanes.flatMap((page) => page.threads)) {
+        if (thread.linkedFile !== undefined) continue;
         for (let end = messageCount; end > 0;) {
-          if (pages === DM_MESSAGE_PAGES || read === DM_MESSAGES) return { message: newest, complete: false };
+          if (pages === DM_MESSAGE_PAGES || read === DM_MESSAGES) return { complete: false };
           const start = Math.max(0, end - MESSAGE_PAGE, end - (DM_MESSAGES - read));
           const page = await adapter.listMessagesPage({
             workspaceId, threadId: thread.id, limit: end - start, ...(start === 0 ? {} : { afterMessageOrder: start - 1 }),
           });
           pages += 1;
           read += end - start;
-          const found = page.messages.filter(pick).reduce<ChatMessage | null>(
-            (latest, message) => latest === null || message.createdAtMs >= latest.createdAtMs ? message : latest, null);
-          // This thread's earlier pages hold only earlier messages.
-          if (found !== null) {
-            if (newest === null || found.createdAtMs > newest.createdAtMs) newest = found;
-            break;
+          for (const message of page.messages) {
+            if (pick(message) && (newest === null || message.createdAtMs > newest.createdAtMs ||
+              (message.createdAtMs === newest.createdAtMs && message.id > newest.id))) newest = message;
           }
           end = start;
         }
       }
-      return { message: newest, complete };
+      return { complete: true, message: newest };
     },
     // IDs a write would create. One a hidden row already holds answers as missing, so no engine conflict reveals it.
     async unclaimed(ids: { threadId?: string; messageId: string }): Promise<void> {

@@ -51,8 +51,8 @@ export interface WakeSources {
   latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<DmSource>;
 }
 
-/** A DM's newest source, and whether the bounded read could rule out a newer one. */
-export type DmSource = { message: ChatMessage | null; complete: boolean };
+/** A DM's newest source, when the bounded read covered every message; otherwise no source at all. */
+export type DmSource = { complete: true; message: ChatMessage | null } | { complete: false };
 
 type AgentMessage = ChatMessage & { authorAgentId: string };
 
@@ -62,7 +62,7 @@ const accountAgent = (accountId: string) => (message: ChatMessage | null | undef
 
 // The agent messages a write answers: its DM's agent, the parent it replies under or else the post or file thread's
 // opening, and the question it answers. A Group's running conversation has no opening that answers. `unread`: the
-// DM's bounded read ran out before it found its agent's message.
+// DM's bounded read couldn't cover every message, so its agent is unknown, even if one of its messages was seen.
 async function answeredMessages(sources: WakeSources, accountId: string, write: Exclude<WriteCommand, { kind: "react" }>):
   Promise<{ messages: AgentMessage[]; unread: boolean }> {
   const ours = accountAgent(accountId);
@@ -72,8 +72,8 @@ async function answeredMessages(sources: WakeSources, accountId: string, write: 
     const agentId = await sources.dmAgent(channelId);
     if (agentId === null) return;
     const source = await sources.latest(channelId, (message) => ours(message) && message.authorAgentId === agentId);
-    found.push(source.message);
-    if (source.message === null && !source.complete) unread = true;
+    if (source.complete) found.push(source.message);
+    else unread = true;
   };
   if (write.kind === "start") {
     if (write.lane === "chat") await dm(write.channelId);
@@ -100,8 +100,8 @@ const agentKey = (agentId: string, displayName: string) => JSON.stringify([agent
  * have is one target, with every computer whose agent has it as a candidate.
  * An agent the write answers is a target only when exactly one enabled agent
  * matches its ID and name; one already in a mention target, or a repeat, adds
- * nothing. A DM whose agent's message the bounded read didn't reach freezes no
- * implicit target and is unmatched. A reaction, or an account with no
+ * nothing. A DM the bounded read couldn't cover freezes no implicit target and
+ * is unmatched. A reaction, or an account with no
  * enabled agents, wakes nothing.
  * Throws TooManyWakeCandidates past MAX_WAKE_CANDIDATES, rather than wake some.
  */
@@ -118,8 +118,8 @@ export async function resolveWakeTargets(sources: WakeSources, accountId: string
   const mentioned = new Set(mentions.flatMap((target) => target.candidates.map(pair)));
   const implicit = new Map<string, ChatWakeTarget>();
   const answered = await answeredMessages(sources, accountId, write);
-  // A long DM whose agent the bounded read didn't reach wakes no one, and isn't refused: the phone offers the mention
-  // hint, as for an agent that matched no computer.
+  // A DM too long for the bounded read wakes no implicit agent, even one it saw, and the message is still sent: the
+  // phone offers the mention hint, as for an agent that matched no computer. Refusing would make long DMs unusable.
   let unmatched = answered.unread;
   for (const message of answered.messages) {
     const name = shownName(message.author.displayName);

@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import type { WriteCommand } from "./accountChatWrites";
-import { MAX_WAKE_CANDIDATES, resolveWakeTargets, TooManyWakeCandidates, type WakeSources } from "./chatWakes";
+import { MAX_WAKE_CANDIDATES, resolveWakeTargets, TooManyWakeCandidates, type DmSource, type WakeSources } from "./chatWakes";
 import type { ChatRunner } from "./storage/chatWakes";
 
 // Resolution over fixed sources: a post in a Group, and the account's own agent messages by ID.
@@ -13,7 +13,7 @@ const agentMessage = (id: string, displayName: string): ChatMessage => ({
   body: "Done.", createdAtMs: 1, attachments: [],
 });
 const sources = (runners: ChatRunner[], messages: ChatMessage[] = [], dm: Pick<WakeSources, "dmAgent" | "latest"> = {
-  dmAgent: async () => null, latest: async () => ({ message: null, complete: true }),
+  dmAgent: async () => null, latest: async () => ({ complete: true, message: null }),
 }): WakeSources => ({
   runners,
   message: async (messageId) => messages.find((message) => message.id === messageId) ?? null,
@@ -51,7 +51,9 @@ it("keeps every target up to its candidate limit, and refuses a message past it"
 it("wakes no one in a DM whose agent the bounded read didn't reach, without refusing, and keeps the hint", async () => {
   const runners = [runner("mac", "default", "Claude", "claude")];
   const send: WriteCommand = { kind: "start", lane: "chat", channelId: "dm", threadId: "thread-dm", messageId: "message-1", body: "Still there?" };
-  const dm = (complete: boolean): Pick<WakeSources, "dmAgent" | "latest"> => ({ dmAgent: async () => "default", latest: async () => ({ message: null, complete }) });
-  expect(await resolveWakeTargets(sources(runners, [], dm(false)), "ana", send)).toEqual({ targets: [], unmatched: true });
-  expect(await resolveWakeTargets(sources(runners, [], dm(true)), "ana", send)).toEqual({ targets: [], unmatched: false });
+  const dm = (source: DmSource): Pick<WakeSources, "dmAgent" | "latest"> => ({ dmAgent: async () => "default", latest: async () => source });
+  expect(await resolveWakeTargets(sources(runners, [], dm({ complete: false })), "ana", send)).toEqual({ targets: [], unmatched: true });
+  expect(await resolveWakeTargets(sources(runners, [], dm({ complete: true, message: null })), "ana", send)).toEqual({ targets: [], unmatched: false });
+  expect(await resolveWakeTargets(sources(runners, [], dm({ complete: true, message: agentMessage("message-claude", "Claude") })), "ana", send))
+    .toMatchObject({ targets: [{ target: "implicit:mac:default" }], unmatched: false });
 });

@@ -4,6 +4,7 @@ import { UnauthorizedError, type AccountSession, type ResolveAccountSession } fr
 import { CHATS_METHOD, ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
+import { asRecord } from "@dohc/workspace-core";
 import { ChatsLoopbackEngine, VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { cleanupLiveDeliveryFixtures, registered } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport";
 import { phoneWriteIds, runPhoneWrite, type PhoneWrite } from "./accountChatWrites";
@@ -1369,26 +1370,78 @@ describe("an account's chat writes through the server's copy", () => {
     expect(frozenTargets(f, "op-claude").map((target) => target.target)).toEqual(["implicit:mac:default"]);
   });
 
-  it("stops reading a long DM at its budget, then wakes no one and still sends, with the mention hint", async () => {
-    const f = await writeRelay();
+  // A DM with `posts` threads of their own after its conversation, each opened by Ana unless `agentIn` names it.
+  async function dmWithThreads(f: WriteRelay, posts: number, agentIn: number) {
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
     await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
     const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
     const human = { author: { kind: "human" as const, displayName: "Ana" }, authorUserId: "ana", authorActorKey: null };
-    // The agent's message is in the oldest thread; five newer threads of Ana's come after it, one page each.
-    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-claude", lane: "chat",
-      ...agentAuthor("Claude"), body: "Here." });
-    for (let index = 0; index < 5; index += 1) {
+    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
+      ...human, body: "Hello" });
+    for (let index = 0; index < posts; index += 1) {
       await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: `thread-own-${index}`, messageId: `own-${index}`,
-        lane: "posts", ownThread: true, ...human, body: `Note ${index}` });
+        lane: "posts", ownThread: true, ...(index === agentIn ? agentAuthor("Claude") : human), body: `Note ${index}` });
     }
+    return dm.channelId;
+  }
+  // Sends to the DM, and answers the frozen wakes and how many thread listings and message pages the send read.
+  async function sendCounting(f: WriteRelay, operationId: string, streamId: string) {
     const asked = f.engine.asked.length;
-    expect(await answer(await f.write("send", { operationId: "op-long", streamId: dm.channelId, body: "Still there?" })))
-      .toMatchObject({ ok: true, state: "saved" });
+    expect(await answer(await f.write("send", { operationId, streamId, body: "Still there?" }))).toMatchObject({ ok: true, state: "saved" });
     const reads = f.engine.asked.slice(asked);
-    expect([reads.filter((method) => method === CHATS_METHOD.threadsListForChannel).length, reads.filter((method) => method === CHATS_METHOD.messagesList).length])
-      .toEqual([2, 4]);
-    expect(wakesOf(f, "op-long")).toEqual({ targets: [], unmatched: true });
+    const counted = (method: string) => reads.filter((each) => each === method).length;
+    return { wakes: wakesOf(f, operationId), reads: [counted(CHATS_METHOD.threadsListForChannel), counted(CHATS_METHOD.messagesList)] };
+  }
+
+  it("wakes no one from a DM its budget can't cover, though it saw the agent's message, and still sends with the hint", async () => {
+    const f = await writeRelay();
+    // Six threads of one page each: the newest, read first, is the agent's; the budget ends after four.
+    const streamId = await dmWithThreads(f, 5, 4);
+    expect(await sendCounting(f, "op-long", streamId)).toEqual({ wakes: { targets: [], unmatched: true }, reads: [2, 4] });
+  });
+
+  it("wakes no one from a DM with more threads than one listing returns, without reading their messages", async () => {
+    const f = await writeRelay();
+    const streamId = await dmWithThreads(f, 9, 8);
+    expect(await sendCounting(f, "op-wide", streamId)).toEqual({ wakes: { targets: [], unmatched: true }, reads: [2, 0] });
+  });
+
+  it("takes a DM's agent by its message's time, not by when the message arrived", async () => {
+    const f = await writeRelay();
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
+    await declare(f, "laptop", [{ agentId: "default", displayName: "Nova" }]);
+    const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId: "default", name: "Claude" });
+    const human = { author: { kind: "human" as const, displayName: "Ana" }, authorUserId: "ana", authorActorKey: null };
+    await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId: "thread-dm", messageId: "dm-hello", lane: "chat",
+      ...human, body: "Hello" });
+    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-claude", ...agentAuthor("Claude"), body: "Here." });
+    for (let index = 0; index < 500; index += 1) {
+      await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: `dm-${index}`, ...human, body: `Note ${index}` });
+    }
+    await chats.sendMessage({ workspaceId: "trip", threadId: "thread-dm", messageId: "dm-import", ...agentAuthor("Nova"), body: "Earlier." });
+    // As a copy that synced Nova's message late holds it: last by arrival, on the first page read, with its sender's earlier time.
+    const original = f.engine.chats.sendRequest.bind(f.engine.chats);
+    vi.spyOn(f.engine.chats, "sendRequest").mockImplementation(async (request) => {
+      const params = asRecord(request.params);
+      if (request.method !== CHATS_METHOD.messagesList || params === null || params.threadId !== "thread-dm") return await original(request);
+      const all: Array<Record<string, JsonValue>> = [];
+      let after: number | null = null;
+      do {
+        const page = (await original({ ...request, params: { threadId: "thread-dm", limit: 500, ...(after === null ? {} : { afterMessageOrder: after }) } }))
+          .result as unknown as { messages: Array<Record<string, JsonValue>>; nextAfterMessageOrder: number | null };
+        all.push(...page.messages);
+        after = page.nextAfterMessageOrder;
+      } while (after !== null);
+      const arrived = [...all.filter((message) => message.id !== "dm-import"), ...all.filter((message) => message.id === "dm-import")
+        .map((message) => ({ ...message, createdAtMs: 0 }))];
+      const start = (typeof params.afterMessageOrder === "number" ? params.afterMessageOrder : -1) + 1;
+      const rows = arrived.slice(start, start + Number(params.limit));
+      return { id: request.id, result: { messages: rows, nextAfterMessageOrder: start + rows.length < arrived.length ? start + rows.length - 1 : null } };
+    });
+    const sent = await sendCounting(f, "op-time", dm.channelId);
+    expect(sent.reads).toEqual([2, 2]);
+    expect(frozenTargets(f, "op-time").map((target) => target.target)).toEqual(["implicit:mac:default"]);
   });
 
   it("finds the agent of a DM from its newest messages, past a full page of them and in a reply", async () => {
