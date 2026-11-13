@@ -696,7 +696,11 @@ fn probe_projection_target_in(
     if !existing_ancestor_is_contained(canonical_root, &target) {
         return ProjectionTargetState::UntrackedContent;
     }
+    // The caps capture owns content under: text up to the text cap, anything
+    // else up to the binary cap. No head is larger, so a larger file holds none.
+    let text_media = is_text_media_type(media_type_for_path(rel), rel);
     let cap = match kind {
+        ProjectionTargetKind::Plaintext if text_media => MAX_CAPTURE_TEXT_BYTES,
         ProjectionTargetKind::Plaintext => MAX_CAPTURE_BINARY_BYTES,
         ProjectionTargetKind::Secret => MAX_CAPTURE_TEXT_BYTES,
     };
@@ -724,19 +728,14 @@ fn probe_projection_target_in(
             Ok(_) => ProjectionTargetState::Text { sha256 },
             Err(_) => ProjectionTargetState::UntrackedContent,
         },
-        ProjectionTargetKind::Plaintext => {
-            let media_type = media_type_for_path(rel);
-            if !is_text_media_type(media_type, rel) {
-                return ProjectionTargetState::Binary { sha256 };
+        ProjectionTargetKind::Plaintext if !text_media => ProjectionTargetState::Binary { sha256 },
+        ProjectionTargetKind::Plaintext => match String::from_utf8(bytes) {
+            Ok(_) => ProjectionTargetState::Text { sha256 },
+            Err(error) if error.as_bytes().len() as u64 <= MAX_CAPTURE_BINARY_BYTES => {
+                ProjectionTargetState::Binary { sha256 }
             }
-            match String::from_utf8(bytes) {
-                Ok(text) if text.len() as u64 <= MAX_CAPTURE_TEXT_BYTES => {
-                    ProjectionTargetState::Text { sha256 }
-                }
-                Ok(_) => ProjectionTargetState::UntrackedContent,
-                Err(_) => ProjectionTargetState::Binary { sha256 },
-            }
-        }
+            Err(_) => ProjectionTargetState::UntrackedContent,
+        },
     }
 }
 
