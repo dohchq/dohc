@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../server/workspaceReads";
-import { markShown } from "./readMarks";
+import { markShown, markShownPosts } from "./readMarks";
 
-// A screen marks the newest message of each thread it shows, in the engine's order, only while the person can see it.
+// A screen marks the newest message of each thread it shows, in the engine's order, and each unread post it shows up to
+// the post's own message, only while the person can see it.
 
 const message = (id: string, threadId: string, createdAtMs: number): ChatMessage => ({
   id, threadId, authorKind: "human", authorName: "Maya Chen", body: "", createdAtMs, parentMessageId: null, attachments: [],
@@ -48,6 +49,24 @@ describe("a screen's read marks", () => {
     const { marks, data } = recorder();
     markShown(null, [message("message-1", "thread-a", 1)], true);
     markShown(data, null, true);
+    expect(marks).toEqual([]);
+  });
+});
+
+describe("a stream's posts", () => {
+  it("mark an unread post up to its own message, even with no replies to open, and leave read posts alone", () => {
+    const { marks, data } = recorder();
+    // The post in thread-a has no replies; the chat list counts it unread. The post in thread-b is read.
+    const posts = [message("message-a", "thread-a", 1), message("message-b", "thread-b", 2)];
+    markShownPosts(data, posts, new Set(["thread-a"]), true);
+    expect(marks).toEqual([["thread-a", "message-a"]]);
+  });
+
+  it("mark nothing while covered, or before the chat list's counts are read", () => {
+    const { marks, data } = recorder();
+    const posts = [message("message-a", "thread-a", 1)];
+    markShownPosts(data, posts, new Set(["thread-a"]), false);
+    markShownPosts(data, posts, null, true);
     expect(marks).toEqual([]);
   });
 });

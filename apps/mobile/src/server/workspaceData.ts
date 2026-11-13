@@ -291,8 +291,9 @@ export interface WorkspaceData {
   /** Ends everything this store started. */
   stop(): void;
   /**
-   * Marks the account's place in a thread at a message a screen shows. Each thread's mark at a message is sent once;
-   * one that fails says nothing, and the next showing sends it again.
+   * Marks the account's place in a thread at a message a screen shows. A mark the server took, or one on its way, is
+   * not sent again; one that failed, including the server's "Couldn't send", says nothing, and the next showing sends
+   * it again.
    */
   markRead(threadId: string, messageId: string): void;
 }
@@ -381,7 +382,8 @@ export function createWorkspaceData(options: {
   }
 
   const live = () => !stopped && signIn.isCurrent();
-  // The message each thread's mark was last sent at.
+  // The message each thread's mark is on its way at, and the one the server last took.
+  const sending = new Map<string, string>();
   const marked = new Map<string, string>();
   const isGone = (error: unknown) => error instanceof ServerError && error.problem === "not-found";
   let hasGone = false;
@@ -580,10 +582,13 @@ export function createWorkspaceData(options: {
       everything.abort();
     },
     markRead(threadId, messageId) {
-      if (!live() || marked.get(threadId) === messageId) return;
-      marked.set(threadId, messageId);
-      void markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).catch(() => {
-        if (marked.get(threadId) === messageId) marked.delete(threadId);
+      if (!live() || sending.get(threadId) === messageId || marked.get(threadId) === messageId) return;
+      sending.set(threadId, messageId);
+      void markThreadRead(signIn.client, workspaceId, threadId, messageId, everything.signal).then(
+        () => { marked.set(threadId, messageId); },
+        () => undefined,
+      ).finally(() => {
+        if (sending.get(threadId) === messageId) sending.delete(threadId);
       });
     },
   };

@@ -17,7 +17,7 @@ import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, notFound, RelayError } from "./errors";
 import {
-  COULD_NOT_SEND, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
+  COULD_NOT_SEND, PUBLICATION_DEADLINE_MS, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
   type ExpectedRecord, type PublicationAnswer, type PublicationStage, type RefusalReason,
 } from "./operationPublication";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
@@ -920,11 +920,13 @@ type MarkReadAnswer = { ok: true } | MissingResult | { ok: false; reason: string
  * and the message resolve through the reads' filter, so a hidden or missing
  * one, or a message in another thread, answers as reads answer a missing one,
  * before any mark. The copy's engine journals the mark with its owner's
- * context, and the copy's ordinary sync publishes it: the answer starts a
- * step and doesn't wait for it. The caller authenticates the account, checks
- * that it owns the workspace and that the workspace shows on the phone, and
- * parses the mark. `authorize` runs once the copy is open, once it has
- * synced, after each target read, before the mark, and before the answer.
+ * context, and one sync step, bounded by the publication deadline, sends it
+ * before the visit ends. A step that fails or runs out of time answers
+ * "Couldn't send", which the phone retries. The caller authenticates the
+ * account, checks that it owns the workspace and that the workspace shows on
+ * the phone, and parses the mark. `authorize` runs once the copy is open,
+ * once it has synced, after each target read, before the mark, and after the
+ * step, before the answer.
  */
 export async function runAccountMarkRead(
   server: { storage: SyncRelayStorage; copies: ServerCopies },
@@ -955,11 +957,23 @@ export async function runAccountMarkRead(
       await adapter.markAccountThreadRead({
         workspaceId: copy.workspaceId, threadId: mark.threadId, messageId: mark.messageId, replicationOwnerUserId: copy.ownerUserId,
       });
-      // A sync that fails retries on the copy's own schedule.
-      void copy.step().catch(() => undefined);
     } catch (error) {
       if (error instanceof RelayError || signal.aborted) throw error;
       result = error instanceof TargetMissing ? missing(error.reason) : failure(error, `failed to mark read: ${mark.threadId}`, "operation-only");
+    }
+    if (result.ok) {
+      // One sync step publishes the mark inside this visit, so the copy stays open for it. A step that fails or passes
+      // the deadline answers "Couldn't send", and the phone sends the mark again; the copy keeps it meanwhile.
+      const expired = new AbortController();
+      const timer = setTimeout(() => expired.abort(new Error("The read mark's sync deadline passed.")), PUBLICATION_DEADLINE_MS);
+      try {
+        await copy.step(AbortSignal.any([signal, expired.signal]));
+      } catch (error) {
+        if (error instanceof RelayError || signal.aborted) throw error;
+        result = failure(error, COULD_NOT_SEND, "operation-only");
+      } finally {
+        clearTimeout(timer);
+      }
     }
     await input.authorize();
     return { result, cursor };

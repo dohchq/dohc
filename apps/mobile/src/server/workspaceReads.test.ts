@@ -108,7 +108,10 @@ describe("the account's unread state", () => {
   it("keeps each chat's unread messages across its threads", async () => {
     const { client } = serveOps("groupsFull", listed(listedThread("thread-1", 2), listedThread("thread-2", 0), listedThread("thread-3", 1)));
     expect((await readChats(client, "ws-a", signal)).value)
-      .toEqual([{ id: "channel-1", name: "Trip", kind: "group", threadIds: ["thread-1", "thread-2", "thread-3"], unreadCount: 3 }]);
+      .toEqual([{
+        id: "channel-1", name: "Trip", kind: "group", threadIds: ["thread-1", "thread-2", "thread-3"], unreadCount: 3,
+        unreadThreadIds: ["thread-1", "thread-3"],
+      }]);
   });
 
   it("fails the whole chat list when a thread's unread count doesn't check", async () => {
@@ -124,11 +127,22 @@ describe("the account's unread state", () => {
     expect((await readStream(client, "ws-a", "channel-1", signal)).value).toMatchObject({ readPosition: read, items: [{ lane: "chat" }] });
   });
 
+  it("takes a read place or an item's place with an engine ID up to 256 units", async () => {
+    for (const length of [201, 256]) {
+      const long = "x".repeat(length);
+      const read = { createdAtMs: 5, lane: "posts", id: long };
+      const items = [{ position: { createdAtMs: 5, lane: "chat", id: long }, message: answer }];
+      const { client } = serveOps("chat", { ok: true, stream: { ...stream(answer).stream, items, readPosition: read } });
+      expect((await readStream(client, "ws-a", "channel-1", signal)).value, String(length)).toMatchObject({ readPosition: read });
+    }
+  });
+
   it("fails the whole stream when its read place or an item's place doesn't check", async () => {
     const broken: Array<[label: string, change: Record<string, unknown>]> = [
       ["no read place", { readPosition: undefined }],
       ["a read place in no lane", { readPosition: { createdAtMs: 5, lane: "feed", id: "thread-1" } }],
       ["a read place with no time", { readPosition: { lane: "posts", id: "thread-1" } }],
+      ["a read place with a 257-unit ID", { readPosition: { createdAtMs: 5, lane: "posts", id: "x".repeat(257) } }],
       ["an item with no place", { items: [{ message: answer }] }],
       ["an item in no lane", { items: [{ position: { createdAtMs: 5, lane: "feed", id: "message-2" }, message: answer }] }],
     ];

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { CHATS_METHOD, ChatsLiveAdapter, VersionedLiveAdapter, type EngineTransport, type JsonValue } from "@dohc/workspace-engine-client";
@@ -19,6 +19,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
+import { PUBLICATION_DEADLINE_MS } from "./operationPublication";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 // The reads run over the real server copies and operations, with each copy's
@@ -931,6 +932,7 @@ describe("an account's chat writes through the server's copy", () => {
     const syncs: string[] = [];
     let syncError: Error | null = null;
     let heldStep: { reached(): void; open: Promise<void> } | null = null;
+    let stepError: Error | null = null;
     let requestId = 0;
     const lifetime = new AbortController();
     const copy: AutomationReplica = {
@@ -941,24 +943,33 @@ describe("an account's chat writes through the server's copy", () => {
         syncs.push("trip");
         if (syncError !== null) throw syncError;
       },
-      step: async () => {
+      // As a copy's step does, it gives up, rejecting, when its caller's signal aborts.
+      step: async (signal) => {
         const held = heldStep;
         heldStep = null;
         if (held !== null) {
           held.reached();
-          await held.open;
+          await new Promise<void>((resolve, reject) => {
+            if (signal?.aborted) return reject(signal.reason);
+            signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+            void held.open.then(resolve);
+          });
         }
+        if (stepError !== null) throw stepError;
         engine.push((pushed) => context.tx(() => context.db.prepare(`INSERT INTO sync_relay_log
           (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) VALUES ('trip', 'server-copy', ?, ?, ?, 1)`)
           .run(pushed.originSeq, pushed.kind, JSON.stringify(pushed.payload))));
         return true;
       },
     };
+    // Whether the copy is open, how often a pass closed it, and a pass run now, as the server runs one.
+    let open = false;
+    let closes = 0;
+    let pass = () => {};
     const copies = await startServerCopies({
       storage, root: "unused", engineExecutable: "unused", relayOrigin: ORIGIN, key: new Uint8Array(32), namespace: "test",
       startReplicas: async (hooks) => {
-        let open = false;
-        const pass = () => {
+        pass = () => {
           const reasons = hooks.wanted().get("trip");
           const joined = reasons === undefined ? null : storage.joinAutomationWorkspace({ workspaceId: "trip", nowMs: 1, reasons });
           const opens = joined?.incarnation === copy.incarnation && joined.ownerUserId === copy.ownerUserId;
@@ -966,6 +977,7 @@ describe("an account's chat writes through the server's copy", () => {
           const was = open;
           open = opens;
           if (opens && !was) hooks.onChanged?.("trip");
+          if (was && !opens) closes += 1;
         };
         return { unavailable: false, replica: (id) => id === "trip" && open ? copy : undefined, reconcile: () => queueMicrotask(pass),
           deleteWorkspaces: async () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
@@ -1001,6 +1013,11 @@ describe("an account's chat writes through the server's copy", () => {
       changeAt: (check: number, kind: AccessChange) => { changeAt = { check, kind }; },
       named: (next: () => string | null) => { name = next; },
       failSync: (error: Error | null) => { syncError = error; },
+      failStep: (error: Error | null) => { stepError = error; },
+      /** Runs a pass of the copies now, which closes the copy unless something still needs it. */
+      reconcile: () => pass(),
+      copyOpen: () => open,
+      closes: () => closes,
       /** Holds the copy's next step. `reached` resolves once it waits. */
       holdStep: () => {
         let reached!: () => void, release!: () => void;
@@ -1409,7 +1426,7 @@ describe("an account's chat writes through the server's copy", () => {
       return await marking;
     };
     // The checks: before the arguments, after them, once the copy is open, once it has synced, after the thread read,
-    // after the message read, and before the answer.
+    // after the message read, and after the copy's step, before the answer.
     const at = async (f: WriteRelay, kind: AccessChange, check: number) => {
       f.changeAt(check, kind);
       return await f.write("markRead", mark);
@@ -1420,6 +1437,14 @@ describe("an account's chat writes through the server's copy", () => {
       ["once the copy has synced", (f, kind) => at(f, kind, 4), 0],
       ["while the thread is read", (f, kind) => during(f, kind, CHATS_METHOD.threadsList), 0],
       ["while the message is read", (f, kind) => during(f, kind, CHATS_METHOD.messageGet), 0],
+      ["while the copy's step sends the mark", async (f, kind) => {
+        const held = f.holdStep();
+        const marking = f.write("markRead", mark);
+        await held.reached;
+        f.change(kind);
+        held.release();
+        return await marking;
+      }, 1],
       ["once the answer is ready", (f, kind) => at(f, kind, 7), 1],
     ];
     for (const [label, run, marks] of points) {
@@ -1429,5 +1454,54 @@ describe("an account's chat writes through the server's copy", () => {
         expect(f.engine.marks, `${label}, ${kind}`).toHaveLength(marks);
       }
     }
+  });
+
+  it("answers once the copy's step has sent the mark, and keeps the copy open while it runs", async () => {
+    const f = await writeRelay();
+    const held = f.holdStep();
+    let answered = false;
+    const marking = f.write("markRead", { threadId: "thread-stay", messageId: "message-poll" }).then((response) => {
+      answered = true;
+      return response;
+    });
+    await held.reached;
+    // A pass meanwhile, as when another visit ends, keeps the copy: this visit still holds it.
+    f.reconcile();
+    expect(f.copyOpen()).toBe(true);
+    expect(f.closes()).toBe(0);
+    expect(answered).toBe(false);
+    expect(markRows(f)).toEqual([]);
+    held.release();
+    expect(await answer(await marking)).toEqual({ ok: true });
+    expect(markRows(f)).toMatchObject([{ accountUserId: "ana", threadId: "thread-stay", lastReadMessageId: "message-poll" }]);
+    // Once the visit ends, nothing keeps the copy.
+    await expect.poll(() => f.closes()).toBe(1);
+  });
+
+  it("answers Couldn't send, without the copy's words, when its step fails or passes the deadline", async () => {
+    const couldNotSend = { ok: false, reason: "Couldn't send" };
+    const failed = await writeRelay();
+    failed.failStep(new Error("The relay at https://relay.internal refused the push."));
+    const response = await failed.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(JSON.parse(text).result).toEqual(couldNotSend);
+    expect(text).not.toContain("relay.internal");
+    expect(failed.engine.marks).toHaveLength(1);
+    expect(markRows(failed)).toEqual([]);
+
+    const slow = await writeRelay();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const held = slow.holdStep();
+      const marking = slow.write("markRead", { threadId: "thread-stay", messageId: "message-poll" });
+      await held.reached;
+      await vi.advanceTimersByTimeAsync(PUBLICATION_DEADLINE_MS);
+      expect(await answer(await marking)).toEqual(couldNotSend);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(slow.engine.marks).toHaveLength(1);
+    expect(markRows(slow)).toEqual([]);
   });
 });

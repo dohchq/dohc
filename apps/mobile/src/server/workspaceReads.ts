@@ -66,6 +66,8 @@ export interface ChatGroup {
   readonly threadIds: readonly string[];
   /** The account's unread messages across its threads. */
   readonly unreadCount: number;
+  /** Its threads with a message the account hasn't read. */
+  readonly unreadThreadIds: readonly string[];
 }
 
 /** The workspace's groups, direct messages and agent chats, with the account's unread counts. A phone's read never creates General. */
@@ -77,7 +79,10 @@ export function readChats(client: ServerClient, workspaceId: string, signal: Abo
     if (threads === null) return null;
     const unreadCount = threads.reduce((sum, thread) => sum + thread.unreadCount, 0);
     return Number.isSafeInteger(unreadCount)
-      ? { id: group.id, name: group.name, kind: group.kind, threadIds: threads.map(thread => thread.id), unreadCount }
+      ? {
+        id: group.id, name: group.name, kind: group.kind, threadIds: threads.map(thread => thread.id), unreadCount,
+        unreadThreadIds: threads.filter(thread => thread.unreadCount > 0).map(thread => thread.id),
+      }
       : null;
   }), signal);
 }
@@ -195,7 +200,7 @@ export interface GroupStream {
 
 const isLane = (value: unknown): value is "posts" | "chat" => value === "posts" || value === "chat";
 const readPosition = (value: unknown): StreamPosition | null =>
-  isFields(value) && count(value.createdAtMs) && isLane(value.lane) && text(value.id, 200)
+  isFields(value) && count(value.createdAtMs) && isLane(value.lane) && id(value.id)
     ? { createdAtMs: value.createdAtMs, lane: value.lane, id: value.id }
     : null;
 

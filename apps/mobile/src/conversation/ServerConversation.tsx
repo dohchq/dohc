@@ -8,20 +8,20 @@ import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/sample";
 import { views, type ViewState } from "../server/workspaceData";
-import type { ChatGroupKind, ChatMessage, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
+import type { ChatGroupKind, ChatThread, GroupStream, MissingChat } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
 import { EmptyLine, HoldRow, NoWorkspace, ScreenFailure, useWorkspaceGap } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { MessageRow } from "./MessageRow";
 import type { Message } from "./sample";
-import { markShown } from "./readMarks";
+import { markShown, markShownPosts } from "./readMarks";
 import { conversationItems, serverMessage } from "./serverMessages";
 
 
 // A chat or a thread in a signed-in build, read-only, as the server holds it: oldest at the top, newest at the bottom.
 // A chat's posts open their threads. The phone has no composer yet. The view reads again when the feed reports a change
-// to one of its threads. A thread, and a chat's conversation, are read up to the newest message shown while the
-// screen is in front and the app is active, as on the desktop; a post in a chat is read once its thread opens.
+// to one of its threads. While the screen is in front and the app is active, as on the desktop, a thread and a chat's
+// conversation are read up to the newest message shown, and an unread post up to its own message.
 export function ServerConversation() {
   const { id = "", name } = useLocalSearchParams<{ id: string; name?: string }>();
   return id.startsWith("thread-") ? <Thread threadId={id} /> : <Stream groupId={id} name={name ?? ""} />;
@@ -31,8 +31,16 @@ function Stream({ groupId, name }: { groupId: string; name: string }) {
   const view = useMemo(() => views.stream(groupId), [groupId]);
   const { state, retry } = useView(view);
   const stream = state.value?.kind === "stream" ? state.value : null;
-  const conversation = useMemo(() => stream?.items.filter(item => item.lane === "chat").map(item => item.message) ?? null, [stream]);
-  useMarkShown(conversation);
+  const { data } = useAccount();
+  const visible = useVisible();
+  // Which posts are unread comes from the chat list's counts.
+  const chats = useView(views.chats).state.value;
+  const unreadThreadIds = useMemo(() => chats ? new Set(chats.flatMap(group => group.unreadThreadIds)) : null, [chats]);
+  useEffect(() => {
+    const lane = (which: "posts" | "chat") => stream?.items.filter(item => item.lane === which).map(item => item.message) ?? null;
+    markShown(data, lane("chat"), visible);
+    markShownPosts(data, lane("posts"), unreadThreadIds, visible);
+  }, [data, stream, unreadThreadIds, visible]);
   const messages = useMemo(() => stream?.items.map(item => serverMessage(item.message,
     item.replyCount > 0 ? { count: item.replyCount, lastMs: item.lastReplyAtMs ?? item.message.createdAtMs } : null, workspaceMarkFills)) ?? null, [stream]);
   return <Conversation title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)} state={state} messages={messages} retry={retry} />;
@@ -42,7 +50,9 @@ function Thread({ threadId }: { threadId: string }) {
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const { state, retry } = useView(view);
   const thread = state.value?.kind === "thread" ? state.value : null;
-  useMarkShown(thread?.messages ?? null);
+  const { data } = useAccount();
+  const visible = useVisible();
+  useEffect(() => markShown(data, thread?.messages ?? null, visible), [data, thread, visible]);
   const messages = useMemo(() => thread?.messages.map(entry => serverMessage(entry, null, workspaceMarkFills)) ?? null, [thread]);
   return <Conversation title={thread?.title || workspaceWords.thread} state={state} messages={messages} retry={retry} />;
 }
@@ -113,12 +123,11 @@ const subscribeAppState = (listener: () => void) => {
 };
 const appActive = () => AppState.currentState === "active";
 
-/** Marks each thread read at the newest of its messages shown, while this screen is in front and the app is active. */
-function useMarkShown(messages: readonly ChatMessage[] | null) {
-  const { data } = useAccount();
+/** Whether the person can see this screen: it is in front and the app is active. */
+function useVisible(): boolean {
   const focused = useIsFocused();
   const active = useSyncExternalStore(subscribeAppState, appActive);
-  useEffect(() => markShown(data, messages, focused && active), [data, messages, focused, active]);
+  return focused && active;
 }
 
 const styles = StyleSheet.create({

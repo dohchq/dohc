@@ -586,3 +586,21 @@ describe("a workspace's read marks", () => {
     expect(count(server, path)).toBe(3);
   });
 });
+
+describe("a read mark the server couldn't send", () => {
+  it("counts as unsent, so the next showing sends it again, and one the server took is not sent again", async () => {
+    const server = testServer();
+    const path = "/sync/ws-a/ops/markRead";
+    server.on("POST", path, ops({ ok: false, reason: "Couldn't send" }, "0.1.1"), ops({ ok: true }, "0.1.1"));
+    const { data } = open(server);
+    data.markRead("thread-1", "message-1");
+    await vi.waitFor(() => expect(count(server, path)).toBe(1));
+    await vi.waitFor(() => {
+      data.markRead("thread-1", "message-1");
+      expect(count(server, path)).toBe(2);
+    });
+    // A mark on its way, or one the server took, is not sent again.
+    data.markRead("thread-1", "message-1");
+    expect(count(server, path)).toBe(2);
+  });
+});
