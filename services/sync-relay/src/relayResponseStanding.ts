@@ -1,7 +1,11 @@
-import { carryRequestMark } from "@dohc/service-http";
+import { carryRequestMark, ClientClosedRequest } from "@dohc/service-http";
+import { CLIENT_CLOSED_REQUEST, clientClosedResponse, errorBody } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 
-/** No result or later chunk may outlive its owner. Callers must consume or cancel the returned body. */
+/**
+ * No result or later chunk may outlive its owner. Callers must consume or cancel the returned body. A request its own
+ * client closed is answered quietly on every route; any other failure still logs.
+ */
 export function guardRelayResponses(
   storage: Pick<SyncRelayStorage, "captureStanding" | "unavailable">,
   handler: (request: Request) => Promise<Response>,
@@ -30,6 +34,17 @@ export function guardRelayResponses(
         carryRequestMark(inner, request);
       }
       check();
+      // errorResponse answers every client's close quietly. Another request's close reaching this one is a fault
+      // this request's client still waits on.
+      if (
+        response.status === CLIENT_CLOSED_REQUEST &&
+        !(request.signal.reason instanceof ClientClosedRequest)
+      ) {
+        releaseSignals();
+        void response.body?.cancel().catch(() => undefined);
+        console.error("[sync-relay] unhandled error", "ClientClosedRequest of another request");
+        return errorBody("internal_error");
+      }
       if (!response.body) {
         releaseSignals();
         return response;
@@ -95,6 +110,9 @@ export function guardRelayResponses(
           { ok: false, error: "service unavailable" },
           { status: 503, headers: { "cache-control": "no-store" } },
         );
+      }
+      if (error instanceof ClientClosedRequest && error === request.signal.reason) {
+        return clientClosedResponse();
       }
       throw error;
     }

@@ -1,4 +1,4 @@
-import { jsonResponse } from "@dohc/service-http";
+import { ClientClosedRequest, jsonResponse } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
 import { serverLogLine } from "./serverLogWords";
@@ -251,8 +251,21 @@ export function errorResponse(error: unknown): Response {
   if (error instanceof UnauthorizedError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
   }
+  // A client that closed its request is not a server fault, and nobody reads this answer.
+  // guardRelayResponses logs it after all when the close was another request's.
+  if (error instanceof ClientClosedRequest) return clientClosedResponse();
   console.error("[sync-relay] unhandled error", serverLogLine(error));
   return errorBody("internal_error");
+}
+
+/** The status a request line shows when the client closed the request before its answer (nginx's 499). */
+export const CLIENT_CLOSED_REQUEST = 499;
+
+export function clientClosedResponse(): Response {
+  return new Response(null, {
+    status: CLIENT_CLOSED_REQUEST,
+    headers: { "cache-control": "no-store" },
+  });
 }
 
 export function invalidLinkCapability(): RelayError {
