@@ -29,9 +29,10 @@ const userSettingKinds: typeof schemaSettingKinds = (path) =>
   path.length === 2 && path[0] === "appearance" && path[1] === "agentColors"
     ? "group"
     : schemaSettingKinds(path);
-// An agent starts from a tool or a command, never from parts of both.
+// An agent starts from a tool or a command, never from parts of both, and
+// its thread is one tool's thread.
 const agentLaunch = (path: readonly string[]) =>
-  path.length === 3 && path[0] === "agents" && path[2] === "launch";
+  path.length === 3 && path[0] === "agents" && (path[2] === "launch" || path[2] === "thread");
 
 function parseUserSettings(candidate: unknown): StoredUserSettings | null {
   const parsed = StoredUserSettings.safeParse(candidate);

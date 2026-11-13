@@ -11,6 +11,7 @@ import {
   AgentColors,
   clampZoomLevel,
   firstAgent,
+  forwardingAgents,
   agentHandle,
   agentIdsToWake,
   agentMentionCandidates,
@@ -358,6 +359,28 @@ describe("desktop user settings model", () => {
     ]);
   });
 
+  it("forwards a workspace's messages to each agent that is on, has a thread, and serves it", () => {
+    const { launch: _launch, ...unlaunched } = testAgent();
+    const thread = { tool: "t3-code" as const, id: "thread-1" };
+    const agents = AgentsSettings.parse({
+      chief: { ...unlaunched, name: "Chief", enabled: true, thread, workspaces: ["ws-1", "ws-2"] },
+      paused: { ...unlaunched, name: "Paused", enabled: false, thread, workspaces: ["ws-1"] },
+      elsewhere: { ...unlaunched, name: "Elsewhere", enabled: true, thread, workspaces: ["ws-2"] },
+      nowhere: { ...unlaunched, name: "Nowhere", enabled: true, thread },
+      started: testAgent({ name: "Started", enabled: true }),
+      connected: { ...unlaunched, name: "Connected", enabled: false },
+    });
+
+    expect(forwardingAgents({ agents }, "ws-1").map(({ id }) => id)).toEqual(["chief"]);
+    expect(forwardingAgents({ agents }, "ws-2").map(({ id }) => id)).toEqual([
+      "chief",
+      "elsewhere",
+    ]);
+    // An agent with a thread posts as itself, like any agent dohc does not start.
+    expect(agentYouRun({ agents }, "chief")?.name).toBe("Chief");
+    expect(agentIdsToWake({ agents }, "@Chief hello", "chief")).toEqual([]);
+  });
+
   it("says what is wrong with an agent entry in one sentence about its first problem", () => {
     const { name: _name, ...nameless } = testAgent();
     const { launch: _launch, ...unlaunched } = testAgent();
@@ -385,6 +408,37 @@ describe("desktop user settings model", () => {
         "`timeoutMinutes` must be a whole number from 1 to 1440.",
       ],
       ["agent-b", { ...testAgent(), launch: { tool: "cursor" } }, "dohc can't read `launch`."],
+      ["agent-b", { ...unlaunched, thread: { tool: "t3" } }, "dohc can't read `thread`."],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "a b" } },
+        "dohc can't read `thread`.",
+      ],
+      [
+        "agent-b",
+        { ...testAgent(), thread: { tool: "t3-code", id: "t-1" } },
+        "An agent with a `thread` has no `launch`. Its tool runs it.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, enabled: false, note: "Post here." },
+        "`whileBusy`, `note` and `workspaces` need a `thread`.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, whileBusy: "wait" },
+        "`whileBusy` must be line or steer.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, note: "" },
+        "`note` must be text of 1 to 4000 characters.",
+      ],
+      [
+        "agent-b",
+        { ...unlaunched, thread: { tool: "t3-code", id: "t-1" }, workspaces: ["Not An Id"] },
+        "`workspaces` must be a list of workspace ids.",
+      ],
       ["agent-b", { ...testAgent(), color: "teal" }, "dohc doesn't use `color`."],
       ["agent-b", ["Nova"], "This entry must be an object, like the other agents."],
       ["agent-b", null, "This entry must be an object, like the other agents."],

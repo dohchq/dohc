@@ -27,6 +27,19 @@ const Kept = z
 // What a request header can carry. A decryption that went wrong fails this.
 const VISIBLE_ASCII = /^[\x21-\x7e]+$/u;
 
+/**
+ * Whether Electron's credential storage encrypts with a key the system keeps.
+ * On Linux it falls back to a key fixed in its own source (basic_text) when
+ * no keyring answers, and reports unknown before it has chosen one. Neither
+ * keeps a secret, so neither counts.
+ */
+export function encryptsWithSystemKey(
+  platform: NodeJS.Platform,
+  linuxBackend: string | null,
+): boolean {
+  return platform !== "linux" || (linuxBackend !== "basic_text" && linuxBackend !== "unknown");
+}
+
 export class T3CodeSignInNotKept extends Error {
   constructor() {
     super("This computer cannot encrypt dohc's sign-in to T3 Code, so dohc did not connect it.");

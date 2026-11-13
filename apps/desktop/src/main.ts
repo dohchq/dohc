@@ -330,6 +330,7 @@ import {
   chatDispatchNoticeOperations,
   agentRunStateOperations,
   chatDispatchPauseOperations,
+  agentThreadOperations,
   agentsListeningOperations,
   personalAgentsOperations,
   type ScheduleHostResult,
@@ -601,6 +602,9 @@ import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices
 import { noticeReachFor } from "./notices/noticeReach";
 import { agentNotices } from "./notices/agentNotices";
 import { createCloudCredentialStore, mayUseKeychain } from "./workspaces/cloudCredentialStore";
+import { createAgentThreads } from "./agentThreads/agentThreads";
+import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
+import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
@@ -805,7 +809,7 @@ import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemon";
 import { rgPath } from "@vscode/ripgrep";
-import { createDesktopCliServer } from "./cli/desktopCliServer";
+import { createDesktopCliServer, workspaceRequesters } from "./cli/desktopCliServer";
 import { startCliServer, type CliRunMessageLink } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import {
@@ -1525,6 +1529,64 @@ const chatWakes = createChatWakeLifetime({
 });
 function chatWakeIntentsFile(): string {
   return join(stateDir(), "chat-wakes.json");
+}
+// Lazy, like the cloud login: safeStorage is only safe to touch after app ready.
+let cachedAgentThreads: ReturnType<typeof createAgentThreads> | null = null;
+let cachedT3Code: T3CodeConnection | null = null;
+function t3Code(): T3CodeConnection {
+  cachedT3Code ??= createT3CodeConnection({
+    home: join(app.getPath("home"), ".t3"),
+    store: createT3CodeSignInStore({
+      dir: stateDir(),
+      cipher: mayUseKeychain({
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        env: process.env,
+      })
+        ? {
+            isAvailable: () =>
+              safeStorage.isEncryptionAvailable() &&
+              encryptsWithSystemKey(
+                process.platform,
+                process.platform === "linux" ? safeStorage.getSelectedStorageBackend() : null,
+              ),
+            encrypt: (plain) => safeStorage.encryptString(plain).toString("base64"),
+            decrypt: (cipherText) => safeStorage.decryptString(Buffer.from(cipherText, "base64")),
+          }
+        : undefined,
+    }),
+  });
+  return cachedT3Code;
+}
+function agentThreads(): ReturnType<typeof createAgentThreads> {
+  const chats = <Result>(
+    workspaceId: string,
+    read: (store: DesktopLinkedChatStore) => Promise<Result>,
+  ) => withWorkspaceAttachmentAsync({ workspaceId }, (lease) => read(linkedChatStoreFor(lease)));
+  cachedAgentThreads ??= createAgentThreads({
+    cli: "dohc",
+    t3Code: t3Code(),
+    chats: {
+      listAgentRequestsPage: (input) =>
+        chats(input.workspaceId, (store) => store.listAgentRequestsPage(input)),
+      markThreadReadByAgent: (input) =>
+        chats(input.workspaceId, (store) => store.markThreadReadByAgent(input)),
+      getThread: (input) => chats(input.workspaceId, (store) => store.getThread(input)),
+    },
+    readSettings: async () => (await readCachedUserSettingsFile(stateDir())).settings,
+    workspace: (workspaceId) => {
+      const workspace = findWorkspace(workspaceId);
+      // A workspace is named for its folder.
+      return workspace
+        ? { name: basename(workspace.rootPath), ...workspaceRequesters(workspace) }
+        : null;
+    },
+    onProblem: (workspaceId, agentId, problem) => {
+      if (problem !== null)
+        console.error(`[desktop] forwarding to ${agentId ?? "agents"} in ${workspaceId}:`, problem);
+    },
+  });
+  return cachedAgentThreads;
 }
 function chatRunnerLedgerFile(): string {
   return join(stateDir(), "chat-runners.json");
@@ -7002,6 +7064,7 @@ const desktopEngine = createDesktopEngine({
     const workspace = findWorkspace(workspaceId);
     // A window's reads that came before this open, such as its settings, read again.
     notifyRenderer({ workspaceId });
+    agentThreads().watch(workspaceId);
     ownerPendingShare.refresh(workspaceId);
     if (workspace)
       void withWorkspaceAttachment({ workspaceId }, (lease) =>
@@ -7850,6 +7913,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       },
       stopNoticeRefusals: () => noticeStore().stopWorkspaceRefusals(),
       stopAutomationWakes: async () => {
+        cachedAgentThreads?.stop();
         await Promise.all([automationWakeConsumer.stop(), chatWakes.stop()]);
       },
       stopSearch: () => workspaceSearchOwner.dispose(),
@@ -8267,6 +8331,8 @@ const settingsIpc = createSettingsIpc<
     broadcastUserSettings(settings);
     void automationWakeConsumer.resume();
     chatWakes.resume();
+    // The save comes first, so the pass that follows reads the saved agents.
+    agentThreads().settingsChanged();
   },
   publishRunners: () => {
     void chatWakes.runnersChanged();
@@ -10599,6 +10665,51 @@ function registerIpcHandlers(): void {
     retryChatWakes: () => {
       chatWakes.retry();
     },
+  });
+
+  // One wait for the person's answer in T3 Code at a time.
+  let allowingT3Code: AbortController | null = null;
+  const t3CodeConnectionState = async () => ({
+    canKeep: t3Code().canKeep(),
+    signedInUntilMs: await t3Code().signedInUntil(),
+  });
+  registerOperations(operationBoundary, agentThreadOperations, {
+    readT3CodeConnection: t3CodeConnectionState,
+    allowDohcInT3Code: async () => {
+      allowingT3Code?.abort();
+      const allowing = (allowingT3Code = new AbortController());
+      try {
+        await t3Code().signIn({
+          open: (url) => shell.openExternal(url),
+          signal: allowing.signal,
+        });
+      } finally {
+        if (allowingT3Code === allowing) allowingT3Code = null;
+      }
+      return t3CodeConnectionState();
+    },
+    cancelAllowDohcInT3Code: () => {
+      allowingT3Code?.abort();
+    },
+    listT3CodeProjects: async () => ({ projects: await t3Code().projects() }),
+    listT3CodeThreads: async (input) => {
+      const page = await t3Code().threads(input);
+      return {
+        threads: page.threads.map(({ id, title, status, updatedAt }) => ({
+          id,
+          title,
+          status,
+          updatedAt,
+        })),
+        nextCursor: page.nextCursor,
+      };
+    },
+    readyAgentThread: ({ workspaceId, agentId, name, threadId }) =>
+      agentThreads().connect(workspaceId, {
+        id: agentId,
+        name,
+        thread: { tool: "t3-code", id: threadId },
+      }),
   });
 
   registerOperations(operationBoundary, chatDispatchPauseOperations, {
