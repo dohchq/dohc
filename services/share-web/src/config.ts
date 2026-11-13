@@ -6,7 +6,15 @@ import {
   parseNamedLiveBrowserClientLimits,
   type NamedLiveBrowserClientLimits,
 } from "./namedLiveBrowserClient";
-import { parseLiveGatewayLimits, type LiveGatewayLimits } from "./liveGateway";
+import {
+  NAMED_SESSION_CHECK_MAX_INTERVAL_MS,
+  NAMED_SESSION_CHECK_MIN_INTERVAL_MS,
+} from "@dohc/live-session-contract/named-session-check";
+import {
+  namedSessionCheckIntervalMs,
+  parseLiveGatewayLimits,
+  type LiveGatewayLimits,
+} from "./liveGateway";
 import {
   parseNamedLiveBrowserLimits,
   type NamedLiveBrowserLimits,
@@ -204,6 +212,15 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     namedLiveGatewayLimits = parseLiveGatewayLimits(
       JSON.parse(env.DOHC_SHARE_WEB_NAMED_LIVE_LIMITS),
     );
+    // The relay keeps a session only a few accepted intervals past its last check.
+    const interval = namedSessionCheckIntervalMs(namedLiveGatewayLimits);
+    if (
+      interval < NAMED_SESSION_CHECK_MIN_INTERVAL_MS ||
+      interval > NAMED_SESSION_CHECK_MAX_INTERVAL_MS
+    )
+      throw new Error(
+        `Named live idleTimeoutMs must check sessions every ${NAMED_SESSION_CHECK_MIN_INTERVAL_MS} to ${NAMED_SESSION_CHECK_MAX_INTERVAL_MS} ms.`,
+      );
   }
   let namedRecipientBrowserLimits: NamedLiveBrowserLimits | undefined;
   if (env.DOHC_SHARE_WEB_NAMED_EDITOR_LIMITS !== undefined) {

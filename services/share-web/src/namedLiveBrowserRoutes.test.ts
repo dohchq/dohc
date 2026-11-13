@@ -10,6 +10,7 @@ import {
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   parseLiveUpdateIdentifier,
 } from "@dohc/live-session-contract/live-update-admission";
+import { NAMED_SESSION_CHECK_HEADER } from "@dohc/live-session-contract/named-session-check";
 
 const origin = "https://share.example.test",
   exchangeKey = "named-bootstrap-test-exchange-key-32-characters";
@@ -43,7 +44,14 @@ function request(
 
 async function fixture(
   resolve?: ResolveActor,
-  options: { maxSessions?: number; maxPendingRequests?: number; timeoutMs?: number } = {},
+  options: {
+    maxSessions?: number;
+    maxPendingRequests?: number;
+    timeoutMs?: number;
+    retentionMs?: number;
+    checkIntervalMs?: number;
+    nowMs?: () => number;
+  } = {},
   access = "edit",
   lookups: {
     lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
@@ -84,13 +92,15 @@ async function fixture(
         return { userId, workspaceId };
       }),
   );
+  const { checkIntervalMs, nowMs, ...limits } = options;
   const relayOptions = {
     storage,
     resolveActor,
     ...lookups,
     shareWebOrigin: origin,
     relayExchangeKey: exchangeKey,
-    namedBrowserSessionLimits: { ...relayLimits, ...options },
+    namedBrowserSessionLimits: { ...relayLimits, ...limits },
+    nowMs,
   };
   let relay = createSyncRelayHandler(relayOptions);
   const forwarded: Request[] = [];
@@ -104,6 +114,7 @@ async function fixture(
       ...transport,
       timeoutMs: options.timeoutMs ?? transport.timeoutMs,
     },
+    namedSessionCheckIntervalMs: checkIntervalMs,
     fetchRelay: async (incoming) => {
       forwarded.push(incoming.clone());
       return relay(incoming);
@@ -495,6 +506,45 @@ describe("named browser HTTP bootstrap and private resolution", () => {
     ).toBe(404);
     expect((await f.web.handle(request(undefined, "alice", { body: "{" }))).status).toBe(404);
     expect(f.resolveActor).not.toHaveBeenCalled();
+  });
+
+  it("tells the relay its check interval on each check, which keeps a session three intervals", async () => {
+    const clock = { now: 1000 };
+    const f = await fixture(undefined, {
+      retentionMs: 12 * 60 * 60 * 1000,
+      checkIntervalMs: 120_000,
+      nowMs: () => clock.now,
+    });
+    const { discriminator } = (await (await f.web.handle(request())).json()) as {
+      discriminator: string;
+    };
+    expect(await f.web.resolveNamedBrowserSession(request(), discriminator)).not.toBeNull();
+    expect(f.forwarded.map((sent) => sent.headers.get(NAMED_SESSION_CHECK_HEADER))).toEqual([
+      null,
+      "120000",
+    ]);
+    clock.now += 360_000 - 1;
+    expect(await f.web.resolveNamedBrowserSession(request(), discriminator)).not.toBeNull();
+    clock.now += 360_000;
+    expect(await f.web.resolveNamedBrowserSession(request(), discriminator)).toBeNull();
+  });
+
+  it("keeps a session its whole retention for a share-web that announces no interval", async () => {
+    const clock = { now: 1000 };
+    const f = await fixture(undefined, {
+      retentionMs: 12 * 60 * 60 * 1000,
+      nowMs: () => clock.now,
+    });
+    const issue = async () =>
+      ((await (await f.web.handle(request())).json()) as { discriminator: string }).discriminator;
+    const checked = await issue(),
+      unchecked = await issue();
+    expect(await f.web.resolveNamedBrowserSession(request(), checked)).not.toBeNull();
+    expect(f.forwarded.at(-1)!.headers.get(NAMED_SESSION_CHECK_HEADER)).toBeNull();
+    clock.now += 12 * 60 * 60 * 1000 - 1;
+    expect(await f.web.resolveNamedBrowserSession(request(), checked)).not.toBeNull();
+    // A session no check reached is still released after its first window.
+    expect(await f.web.resolveNamedBrowserSession(request(), unchecked)).toBeNull();
   });
 
   it("rechecks revocation for bootstrap and private resolution without registering a document", async () => {

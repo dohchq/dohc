@@ -155,7 +155,7 @@ describe("share-web configuration", () => {
       maxFragments: 8,
       maxBufferedChunks: 16,
       upgradeTimeoutMs: 2000,
-      idleTimeoutMs: 2000,
+      idleTimeoutMs: 60_000,
       drainTimeoutMs: 100,
     };
     const env = {
@@ -171,6 +171,23 @@ describe("share-web configuration", () => {
     expect(loadShareWebConfig(env).namedLiveGatewayLimits).toBeUndefined();
     const enabled = { ...env, DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify(limits) };
     expect(loadShareWebConfig(enabled).namedLiveGatewayLimits).toEqual(limits);
+    // The gateway checks a session every 5 idle timeouts, which the relay accepts from 1 to 5 minutes.
+    for (const [idleTimeoutMs, starts] of [
+      [11_999, false],
+      [12_000, true],
+      [60_000, true],
+      [60_001, false],
+    ] as const) {
+      const checked = {
+        ...env,
+        DOHC_SHARE_WEB_NAMED_LIVE_LIMITS: JSON.stringify({ ...limits, idleTimeoutMs }),
+      };
+      if (starts) expect(loadShareWebConfig(checked).namedLiveGatewayLimits).toBeDefined();
+      else
+        expect(() => loadShareWebConfig(checked)).toThrow(
+          "Named live idleTimeoutMs must check sessions every 60000 to 300000 ms.",
+        );
+    }
     expect(loadShareWebConfig(enabled).namedRecipientBrowserLimits).toBeUndefined();
     const browser = {
       provider: {

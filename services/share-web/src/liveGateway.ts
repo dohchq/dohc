@@ -182,6 +182,11 @@ function untilCancelled<T>(
 // editor that stays open.
 const SESSION_CHECK_PINGS = 10;
 
+/** How often the gateway checks an open named editor's session. */
+export function namedSessionCheckIntervalMs(limits: Pick<LiveGatewayLimits, "idleTimeoutMs">) {
+  return (SESSION_CHECK_PINGS * limits.idleTimeoutMs) / 2;
+}
+
 /** Private transport: no production listener or admission defaults. */
 export function createLiveGateway(options: LiveGatewayOptions) {
   const parseRequest = createLiveGatewayRequestParser(options);

@@ -3,9 +3,17 @@ import {
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   parseLiveUpdateIdentifier,
 } from "@dohc/live-session-contract/live-update-admission";
+import {
+  NAMED_SESSION_CHECK_HEADER,
+  NAMED_SESSION_FIRST_WINDOW_MS,
+  namedSessionCheckWindowMs,
+} from "@dohc/live-session-contract/named-session-check";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedLiveBrowserResolver } from "./namedLiveBrowserAuth";
-import { createNamedLiveBrowserSessions } from "./namedLiveBrowserSessions";
+import {
+  createNamedLiveBrowserSessions,
+  NAMED_SESSIONS_PER_ACCOUNT,
+} from "./namedLiveBrowserSessions";
 import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import type { SyncRelayStorage } from "./storage";
 
@@ -73,8 +81,8 @@ export function createNamedLiveBrowserHttp(options: {
   const exchangeHash = hashRelayExchangeKey(options.exchangeKey);
   const sessions = createNamedLiveBrowserSessions({
     ...limits,
-    // The desktop's store, in namedDesktopLive.ts, has no per-account limit.
-    maxSessionsPerAccount: 16,
+    maxSessionsPerAccount: NAMED_SESSIONS_PER_ACCOUNT,
+    idleMs: NAMED_SESSION_FIRST_WINDOW_MS,
     storage: options.storage,
     resolveActor: options.resolveActor,
     now: options.now,
@@ -142,7 +150,13 @@ export function createNamedLiveBrowserHttp(options: {
           result = sessions.create(context);
         } else {
           if (typeof value !== "string" || !/^[A-Za-z0-9_-]{12}$/u.test(value)) return refusal();
-          const context = await sessions.resolve(authenticated, value);
+          // A share-web from before the header keeps a session for its whole retention.
+          const interval = request.headers.get(NAMED_SESSION_CHECK_HEADER);
+          const context = await sessions.check(
+            authenticated,
+            value,
+            interval === null ? Infinity : namedSessionCheckWindowMs(interval),
+          );
           // Share-web's server reads the real workspace ID here; never forward it to a browser.
           result = context && {
             userId: context.userId,

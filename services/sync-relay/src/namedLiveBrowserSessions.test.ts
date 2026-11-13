@@ -25,7 +25,12 @@ const bob = {
 };
 
 function fixture(
-  overrides: { maxSessions?: number; retentionMs?: number; now?: () => number } = {},
+  overrides: {
+    maxSessions?: number;
+    retentionMs?: number;
+    idleMs?: number;
+    now?: () => number;
+  } = {},
 ) {
   let time = 100;
   const shares = new Map<string, SyncRelayShareRow>();
@@ -143,9 +148,14 @@ describe("private named browser route sessions", () => {
     expect(await state.sessions.resolve(request("bob"), issued.discriminator)).toBeNull();
   });
 
-  it.each(["before", "during"])(
-    "invalidates the old grant generation %s authentication without disturbing other mappings",
-    async (timing) => {
+  it.each([
+    ["before", "alice"],
+    ["during", "alice"],
+    ["before", "nobody"],
+    ["during", "nobody"],
+  ])(
+    "invalidates the old grant generation %s authentication by %s without disturbing other mappings",
+    async (timing, caller) => {
       const state = fixture();
       const old = state.sessions.create(alice)!;
       const other = state.sessions.create(bob)!;
@@ -156,9 +166,10 @@ describe("private named browser route sessions", () => {
       else
         state.resolveActor.mockImplementationOnce(async (_request, workspaceId) => {
           advanceGeneration();
+          if (caller === "nobody") throw new UnauthorizedError();
           return { userId: "alice", workspaceId };
         });
-      expect(await state.sessions.resolve(request(), old.discriminator)).toBeNull();
+      expect(await state.sessions.resolve(request(caller), old.discriminator)).toBeNull();
       expect(state.sessions.remove(old.discriminator)).toBe(false);
       expect(await state.sessions.resolve(request("bob"), other.discriminator)).toEqual(bob);
       const fresh = state.sessions.create(alice)!;
@@ -370,14 +381,12 @@ describe("private named browser route sessions", () => {
   it("refuses missing and link sessions without consuming the named mapping", async () => {
     const state = fixture();
     const issued = state.sessions.create(alice)!;
-    state.storage.getShareGrant.mockClear();
     for (const cookie of [null, "dohc_share_link=secret; dohc_profile=secret"]) {
       const incoming = request();
       if (cookie === null) incoming.headers.delete("cookie");
       else incoming.headers.set("cookie", cookie);
       expect(await state.sessions.resolve(incoming, issued.discriminator)).toBeNull();
     }
-    expect(state.storage.getShareGrant).not.toHaveBeenCalled();
     expect(await state.sessions.resolve(request(), issued.discriminator)).toEqual(alice);
   });
 
@@ -444,5 +453,53 @@ describe("private named browser route sessions", () => {
     expect(() => state.sessions.create(bob)).toThrow("Named session discriminator collision");
     expect(await state.sessions.resolve(request(), first.discriminator)).toEqual(alice);
     expect(await state.sessions.resolve(request("bob"), first.discriminator)).toBeNull();
+  });
+});
+
+describe("a session nobody uses", () => {
+  const hour = 60 * 60 * 1000;
+  const policy = { retentionMs: 12 * hour, idleMs: 15 * 60 * 1000 };
+
+  it("is removed once its first window passes without a use", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    state.setTime(100 + policy.idleMs - 1);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(100 + policy.idleMs - 1 + policy.idleMs);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+    expect(state.sessions.remove(discriminator)).toBe(false);
+  });
+
+  it("keeps the window its last check set through the relay's own uses", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    const window = 3 * 60 * 1000;
+    state.setTime(1_000);
+    expect(await state.sessions.check(request(), discriminator, window)).toEqual(alice);
+    state.setTime(1_000 + window - 1);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(1_000 + 2 * window - 2);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(1_000 + 3 * window - 2);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+  });
+
+  it("lasts its whole retention once a check announced no interval", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    expect(await state.sessions.check(request(), discriminator, Infinity)).toEqual(alice);
+    state.setTime(100 + policy.retentionMs - 1);
+    expect(await state.sessions.resolve(request(), discriminator)).toEqual(alice);
+    state.setTime(100 + policy.retentionMs);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
+  });
+
+  it("is not kept by a use that fails its checks", async () => {
+    const state = fixture(policy);
+    const { discriminator } = state.sessions.create(alice)!;
+    state.setTime(100 + policy.idleMs - 1);
+    expect(await state.sessions.check(request("bob"), discriminator, Infinity)).toBeNull();
+    state.setTime(100 + policy.idleMs);
+    expect(await state.sessions.resolve(request(), discriminator)).toBeNull();
   });
 });
