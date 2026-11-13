@@ -1,7 +1,7 @@
 import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { CHAT_DECLARATIONS } from "@dohc/workspace-contracts/chat-declarations";
 import { LINKS_DECLARATIONS } from "@dohc/workspace-contracts/links-declarations";
-import { byName, distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
+import { byName, distinct, mapNamed, type EnvelopeField } from "@dohc/workspace-contracts/operation-declaration";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { HeldChange } from "@dohc/workspace-contracts/held-changes";
 import {
@@ -55,6 +55,8 @@ const argsBase = {
   actor: cliActorSchema,
   agentId: cliAgentIdSchema.optional(),
 };
+// A declared input cannot name a request or args field. Fails the typecheck if ENVELOPE_FIELDS misses one.
+true satisfies [Exclude<keyof typeof requestBase | keyof typeof argsBase, EnvelopeField>] extends [never] ? true : never;
 
 const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
 // A name the calling agent gives itself, recorded as the author of its edits

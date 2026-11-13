@@ -5,7 +5,7 @@ const unavailable = "Workspace links are unavailable.";
 
 export const LINKS_DECLARATIONS = {
   linksEdges: {
-    capabilityId: "links.edges", input: LinksEdgesInput, result: LinksEdgesResult,
+    access: "read", capabilityId: "links.edges", input: LinksEdgesInput, result: LinksEdgesResult,
     ipc: { channel: "desktop:links-edges", inactiveMessage: "Graph read stopped because this window changed workspaces." },
     cli: {
       verb: "linksEdges", command: ["links", "edges"], summary: "Read a bounded page of file links.",
@@ -17,7 +17,7 @@ export const LINKS_DECLARATIONS = {
     },
   },
   linksIn: {
-    capabilityId: "links.in", input: LinksInInput, result: LinksInResult,
+    access: "read", capabilityId: "links.in", input: LinksInInput, result: LinksInResult,
     ipc: { channel: "desktop:links-in", inactiveMessage: "Linked mentions stopped because this window changed workspaces." },
     cli: {
       verb: "linksIn", command: ["links", "in"], summary: "Read documents that link to a file.",
@@ -29,7 +29,7 @@ export const LINKS_DECLARATIONS = {
     },
   },
   linksResolve: {
-    capabilityId: "links.resolve", input: LinksResolveInput, result: LinksResolveResult,
+    access: "read", capabilityId: "links.resolve", input: LinksResolveInput, result: LinksResolveResult,
     ipc: { channel: "desktop:links-resolve", inactiveMessage: "Link navigation stopped because this window changed workspaces." },
     cli: {
       verb: "linksResolve", command: ["links", "resolve"], summary: "Resolve links from one document.",

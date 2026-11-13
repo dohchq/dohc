@@ -9,10 +9,22 @@ export type McpAccessLevel = "owner" | "view" | "comment" | "edit";
 // its own workspace and received-share rules, and capabilityId stays
 // metadata. Declarations import only contract schemas, so the preload can
 // load them.
+// The fields a door sets around a declared input: the CLI request and its args
+// (requestBase and argsBase in packages/cli/src/protocol.ts), and the IPC row's
+// workspace. An input that named one could let a caller replace the value the
+// server sets.
+export const ENVELOPE_FIELDS = ["token", "protocolVersion", "door", "runSecret", "cwd", "actor", "agentId", "workspaceId"] as const;
+export type EnvelopeField = (typeof ENVELOPE_FIELDS)[number];
+
 export interface OperationDeclaration {
   readonly capabilityId: string;
-  // What every caller sends. The IPC row adds the workspace.
-  readonly input: z.ZodObject;
+  // Only reads are declared. The CLI socket runs a declared verb without the
+  // agent, run, read-only, and path checks that other verbs get, and passes the
+  // reader no actor.
+  readonly access: "read";
+  // What every caller sends. The IPC row adds the workspace. The type refuses a
+  // shape that names an envelope field, and capabilities.ts refuses one at load.
+  readonly input: z.ZodObject<Readonly<Record<string, z.core.$ZodType>> & { readonly [Field in EnvelopeField]?: never }>;
   readonly result: z.ZodType;
   readonly ipc: {
     readonly channel: `desktop:${string}`;

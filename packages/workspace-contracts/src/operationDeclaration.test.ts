@@ -1,7 +1,9 @@
 // Each test changes one declaration in memory, as a contributor would in
 // linksDeclarations.ts, and expects the capability table to refuse it at load.
 import { afterEach, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { LINKS_DECLARATIONS } from "./linksDeclarations";
+import { ENVELOPE_FIELDS } from "./operationDeclaration";
 
 type Declarations = typeof LINKS_DECLARATIONS;
 
@@ -31,4 +33,10 @@ it("refuses a declared operation named like one in another family", async () => 
 it("refuses a declared MCP tool named like a hand-written tool", async () => {
   changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, mcp: { ...declarations.linksEdges.mcp, tool: "dohc_read_chat" } } }));
   await expect(import("./capabilities")).rejects.toThrow("dohc_read_chat is declared twice.");
+});
+
+// The type refuses these too, unless the input is widened to z.ZodObject.
+it.each(ENVELOPE_FIELDS)("refuses a declared input that names %s", async field => {
+  changeLinks(declarations => ({ ...declarations, linksEdges: { ...declarations.linksEdges, input: declarations.linksEdges.input.extend({ [field]: z.string() }) as z.ZodObject } }));
+  await expect(import("./capabilities")).rejects.toThrow(`linksEdges input names ${field}, which its doors set.`);
 });

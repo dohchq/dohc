@@ -7,7 +7,7 @@ const inactiveMessage = "Chats stopped because this window changed workspaces.";
 
 export const CHAT_DECLARATIONS = {
   chatLinks: {
-    capabilityId: "chat.read", input: ChatLinksInput, result: ChatLinksPage,
+    access: "read", capabilityId: "chat.read", input: ChatLinksInput, result: ChatLinksPage,
     ipc: { channel: "desktop:chat-links", inactiveMessage },
     cli: {
       verb: "chatLinks", command: ["chat", "links"], summary: "Read one page of files mentioned in a chat.",
@@ -19,7 +19,7 @@ export const CHAT_DECLARATIONS = {
     },
   },
   chatFileMentionsPage: {
-    capabilityId: "chat.read", input: ChatFileMentionsInput, result: ChatFileMentionsPage,
+    access: "read", capabilityId: "chat.read", input: ChatFileMentionsInput, result: ChatFileMentionsPage,
     ipc: {
       channel: "desktop:chat-file-mentions-page", inactiveMessage,
       // The engine adapter validates each page before the reader applies authority filtering.
