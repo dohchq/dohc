@@ -1072,6 +1072,23 @@ describe("engine Y.Doc IPC adapter", () => {
       }),
     ).rejects.toThrow("Stop live editing is waiting.");
   });
+  // Opening and closing a note with no window starts its live history, so a
+  // server can host a note its owner never opened in dohc.
+  it("starts a note's live history with no window, and leaves a note an editor holds to that editor", async () => {
+    const sender = new FakeSender(7);
+    const h = harness();
+    await h.ipc.startLiveHistory("workspace-1", "notes/a.md");
+    expect(h.capture.openYDocSession).toHaveBeenCalledTimes(1);
+    expect(h.capturedOpen()).toMatchObject({path: "notes/a.md", contentKind: "richdoc"});
+    expect(h.session.close).toHaveBeenCalledTimes(1);
+    await h.ipc.open(sender, openPayload);
+    await h.ipc.startLiveHistory("workspace-1", "notes/a.md");
+    expect(h.capture.openYDocSession).toHaveBeenCalledTimes(2);
+    expect(h.session.close).toHaveBeenCalledTimes(1);
+    h.setReadOnly(true);
+    await expect(h.ipc.startLiveHistory("workspace-1", "notes/b.md")).rejects.toThrow("Documents in a shared view");
+  });
+
   it("opens the canonical session and applies updates through its save sequence", async () => {
     const sender = new FakeSender(7);
     const h = harness();

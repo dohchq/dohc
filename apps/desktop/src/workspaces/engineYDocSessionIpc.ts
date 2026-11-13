@@ -1202,6 +1202,40 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
   }
 
+  /**
+   * Opens and closes a note with no window, which starts its live history
+   * here, so the server can host a note its owner never opened in dohc. An
+   * editor that holds the note starts it itself.
+   */
+  async startLiveHistory(workspaceId: string, requested: string): Promise<void> {
+    const authority = this.#acquireWorkspace(workspaceId);
+    try {
+      authority.assertCurrent();
+      const workspace = authority.workspace;
+      if (this.#isSharedView(workspace)) {
+        throw new Error("Documents in a shared view change through the share, not this workspace.");
+      }
+      const path = await this.#markdownDocumentPath(workspace, requested);
+      const attachment = workspace.attachmentId;
+      if (this.#owner.documentSession(attachment, path)) return;
+      await this.#documentReservations.runMutation(attachment, path, () => this.#owner.ownsDocument(attachment, path), async () => {
+        authority.assertCurrent();
+        let capture = this.#captureFor(workspace);
+        if (!capture) {
+          await this.#ensureCaptureFor(workspace);
+          capture = this.#captureFor(workspace);
+        }
+        if (!capture) throw new Error("The workspace engine is not running.");
+        const provider = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+        await provider.close();
+      }).catch((error: unknown) => {
+        if (!(error instanceof LiveDocumentOwnedError)) throw error;
+      });
+    } finally {
+      authority.release();
+    }
+  }
+
   async #editResolved(
     workspace: EngineYDocWorkspace,
     path: string,

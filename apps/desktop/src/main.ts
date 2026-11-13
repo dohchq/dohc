@@ -7494,6 +7494,8 @@ const desktopEngine = createDesktopEngine({
         }
       : null,
   existingOwnerFor: (binding) => engineYDocSessionIpc.existingOwner(binding),
+  startOwnerLiveHistory: (workspaceId, path) =>
+    engineYDocSessionIpc.startLiveHistory(workspaceId, path),
   findWorkspace,
   app,
   dialog,
