@@ -234,8 +234,8 @@ consent decision. Do not log request bodies, `Authorization`, `Cookie`,
 `Set-Cookie`, or the internal client-IP header. Disable body capture in traces
 and error reports. `share-web` already sends
 `private, no-store`; the proxy must not override or cache that response. The
-one exception is a file directly under `/s/assets/`: the viewer build names it
-by its content, needs no session, and is sent as
+one exception is a file directly under `/s/assets/` whose name ends in the
+viewer build's content hash: it needs no session and is sent as
 `public, max-age=31536000, immutable`, so a CDN may keep it.
 
 If the relay is unavailable or sends an invalid response to an authenticated

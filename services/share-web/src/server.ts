@@ -65,8 +65,9 @@ import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } fro
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 
-// A file the viewer build writes directly in assets/, relative to its output.
-const HASHED_VIEWER_FILE = /^assets\/[^/]+$/;
+// A file directly in the viewer build's assets/ whose name ends in the build's
+// 8-character hash. Anything else there, put in by hand, is never kept.
+const HASHED_VIEWER_FILE = /^assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
 const REFUSAL_VALUE = { ok: false, error: "not found" };
 const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
@@ -1277,10 +1278,9 @@ export function createShareWebApplication({
             `form-action https://*.${appLaunchConfig.appDomain}`,
           ),
         );
-      // The viewer build names every file directly in assets/ by its content,
-      // so a browser or CDN may keep it. A page, a refusal, and a file in a
-      // subfolder such as the Excalidraw fonts, some of whose names carry no
-      // hash, stay uncached.
+      // A file named by its content needs no session, so a browser or CDN may
+      // keep it. A page, a refusal, and a file in a subfolder such as the
+      // Excalidraw fonts, some of whose names carry no hash, stay uncached.
       if (HASHED_VIEWER_FILE.test(relative))
         result.headers.set("cache-control", "public, max-age=31536000, immutable");
       return result;

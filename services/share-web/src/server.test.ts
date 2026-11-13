@@ -229,6 +229,7 @@ describe("share-web sessions", () => {
       await mkdir(join(viewerAssetsDir, "assets", "fonts", "Virgil"), { recursive: true });
       await writeFile(join(viewerAssetsDir, "index.html"), "page");
       await writeFile(join(viewerAssetsDir, "assets", "link-AbC12_-9.js"), "script");
+      await writeFile(join(viewerAssetsDir, "assets", "viewer.js"), "unhashed");
       await writeFile(join(viewerAssetsDir, "assets", "fonts", "Virgil", "Virgil-Regular.woff2"), "font");
       const handler = createShareWebHandler({
         relayUrl: "http://relay.test",
@@ -248,6 +249,7 @@ describe("share-web sessions", () => {
           "/s/assets/",
           "/s/assets/fonts",
           "/s/assets/fonts/Virgil/Virgil-Regular.woff2",
+          "/s/assets/viewer.js",
           "/s/assets/missing-AbC12_-9.js",
           "/s/assets/%2e%2e/index.html",
           "/s/edit/assets/link-AbC12_-9.js",
@@ -265,6 +267,7 @@ describe("share-web sessions", () => {
         ["/s/assets/", 404, "private, no-store"],
         ["/s/assets/fonts", 404, "private, no-store"],
         ["/s/assets/fonts/Virgil/Virgil-Regular.woff2", 200, "private, no-store"],
+        ["/s/assets/viewer.js", 200, "private, no-store"],
         ["/s/assets/missing-AbC12_-9.js", 404, "private, no-store"],
         ["/s/assets/%2e%2e/index.html", 200, "private, no-store"],
         ["/s/edit/assets/link-AbC12_-9.js", 404, "private, no-store"],
