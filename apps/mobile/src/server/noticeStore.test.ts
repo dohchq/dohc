@@ -1,9 +1,15 @@
 import { NOTICE_READ_RETENTION_MS, NOTICE_WAIT_MAX_MS } from "@dohc/workspace-contracts/relay";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AccountState } from "./account";
 import type { AccountWorkspace } from "./api";
 import { createServerClient, ServerError, type Fetch } from "./client";
 import type { NoticeFiles } from "./noticeFiles";
-import { createNoticeStore, noticeScope, type NoticeStore } from "./noticeStore";
+import {
+  clearNoticesOnSignInChange,
+  createNoticeStore,
+  noticeScope,
+  type NoticeStore,
+} from "./noticeStore";
 import { noticePageBody, relayRow } from "./testServer";
 import type { WorkspaceList } from "./workspaceList";
 
@@ -95,23 +101,59 @@ function fakeList(workspaces: readonly AccountWorkspace[]) {
   };
 }
 
+/** A point a save stops at until the test releases it, as a closed app would stop it for good. */
+function gate() {
+  let reach!: () => void;
+  let release!: () => void;
+  const reached = new Promise<void>((done) => {
+    reach = done;
+  });
+  const released = new Promise<void>((done) => {
+    release = done;
+  });
+  return {
+    reached,
+    release,
+    /** Where the save stops: says it got there, then waits. */
+    pass() {
+      reach();
+      return released;
+    },
+  };
+}
+
 type MemoryFiles = NoticeFiles & {
   readonly lists: Map<string, unknown>;
   readonly marks: Map<string, unknown>;
+  /** Stops an ordered save before its list lands, or between its list and its marks. */
+  hold: { beforeList?: ReturnType<typeof gate>; beforeMarks?: ReturnType<typeof gate> };
+  /** An ordered save's list write fails. */
+  failList: boolean;
 };
 
-/** Files in memory, where a write lands at once. */
+/** Files in memory, where a write lands at once unless the test holds it. */
 function memoryFiles(): MemoryFiles {
   const lists = new Map<string, unknown>();
   const marks = new Map<string, unknown>();
-  return {
+  const files: MemoryFiles = {
     lists,
     marks,
+    hold: {},
+    failList: false,
     readList: async (scope) => lists.get(scope) ?? null,
     writeList: (scope, rows) => void lists.set(scope, rows()),
     readMarks: async (scope) => marks.get(scope) ?? null,
     async writeMarks(scope, list) {
       marks.set(scope, list);
+    },
+    // With nothing held, it all lands before the call returns.
+    async writeListThenMarks(scope, rows, list) {
+      if (files.hold.beforeList) await files.hold.beforeList.pass();
+      if (files.failList) return false;
+      lists.set(scope, rows);
+      if (files.hold.beforeMarks) await files.hold.beforeMarks.pass();
+      marks.set(scope, list());
+      return true;
     },
     flush: async () => undefined,
     async clear() {
@@ -119,6 +161,7 @@ function memoryFiles(): MemoryFiles {
       marks.clear();
     },
   };
+  return files;
 }
 
 const trip: AccountWorkspace = {
@@ -135,11 +178,14 @@ const work: AccountWorkspace = {
 };
 const OK = { ok: true, dismissed: [] };
 const scope = noticeScope({ origin: ORIGIN, userId: "u1" });
+/** The tests' clock: after the fixtures were made and before they expire (`relayRow`). */
+const NOW = 5_000_000;
 
 let stores: NoticeStore[] = [];
 afterEach(() => {
   for (const store of stores) store.stop();
   stores = [];
+  vi.useRealTimers();
 });
 
 function setup(
@@ -154,10 +200,19 @@ function setup(
   const files = options.files ?? memoryFiles();
   const list = fakeList(options.workspaces ?? [trip, work]);
   let current = true;
+  let checked: (() => void) | null = null;
   const signIn = {
     origin: ORIGIN,
     userId: "u1",
-    isCurrent: () => current,
+    // Once the sign-in has ended, the next check says so to the test: the store has taken what it was handling.
+    isCurrent() {
+      if (!current && checked) {
+        const done = checked;
+        checked = null;
+        done();
+      }
+      return current;
+    },
     client: createServerClient({
       origin: ORIGIN,
       token: "t",
@@ -170,11 +225,18 @@ function setup(
     list,
     files,
     sleep: timers.sleep,
-    ...(options.now ? { now: options.now } : {}),
+    now: options.now ?? (() => NOW),
   });
   stores.push(store);
   const ids = () => store.state().notices.map((row) => row.noticeId);
-  return { server, timers, files, list, store, ids, signOut: () => void (current = false) };
+  /** Ends the sign-in; resolves when the store next checks it. */
+  const signOut = () => {
+    current = false;
+    return new Promise<void>((done) => {
+      checked = done;
+    });
+  };
+  return { server, timers, files, list, store, ids, signIn, signOut };
 }
 
 /** Answers a read with a page, and resolves with the store's next read: by then it has taken the page. */
@@ -278,6 +340,7 @@ describe("the account's Notices", () => {
     const { server, store, ids } = setup();
     store.resume();
     const call = await reply(server, server.read(), [relayRow("a")], { replace: true });
+    expect(ids()).toEqual(["a"]);
     await reply(server, call, [
       relayRow("a", { removed: true, title: "", changeSeq: 2 }),
       relayRow("ghost", { removed: true, title: "", senderLabel: "Secret label", changeSeq: 3 }),
@@ -286,27 +349,38 @@ describe("the account's Notices", () => {
     expect(JSON.stringify(store.state())).not.toContain("Secret label");
   });
 
-  it("lets a row go at its expiry with no answer, and keeps a marked row for the mark's retention", async () => {
-    let now = 0;
-    const { server, store, ids, list } = setup({ now: () => now });
+  it("lets a row go at its expiry with no other event", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { server, store, ids } = setup({ now: () => Date.now() });
     store.resume();
     await reply(
       server,
       server.read(),
-      [relayRow("a", { expiresAtMs: 100 }), relayRow("b", { expiresAtMs: 100 })],
+      [relayRow("a", { expiresAtMs: 100 }), relayRow("b", { expiresAtMs: 200 })],
       { replace: true },
     );
+    expect(ids()).toEqual(["a", "b"]);
+    // Offline and idle: no answer, list change, or mark comes.
+    vi.advanceTimersByTime(99);
+    expect(ids()).toEqual(["a", "b"]);
+    vi.advanceTimersByTime(1);
+    expect(ids()).toEqual(["b"]);
+    vi.advanceTimersByTime(100);
+    expect(ids()).toEqual([]);
+  });
+
+  it("keeps a row it marked for the mark's retention, until a read gives the relay's", async () => {
+    const { server, store } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("b")], { replace: true });
     store.mark("b", "read");
     const first = await server.marks();
     store.mark("x", "read");
     first.answer(200, OK);
     // One request at a time: the second goes once the first answer is taken.
     await server.marks();
-    now = 150;
-    // Any change shows the list again; this one changes nothing else.
-    list.set([trip, work]);
-    expect(ids()).toEqual(["b"]);
-    expect(store.state().notices[0]?.expiresAtMs).toBe(NOTICE_READ_RETENTION_MS);
+    expect(store.state().notices[0]?.expiresAtMs).toBe(NOW + NOTICE_READ_RETENTION_MS);
   });
 });
 
@@ -323,9 +397,14 @@ describe("marks on the account's Notices", () => {
     expect(ids()).toEqual(["a"]);
     dismissal.offline();
     (await timers.next()).done();
-    // The next request sends only the later of the two.
+    // The next request sends both, in order, so the restore lands last.
     const retry = await server.marks();
-    expect(retry.body).toEqual({ marks: [{ noticeId: "a", mark: "restore" }] });
+    expect(retry.body).toEqual({
+      marks: [
+        { noticeId: "a", mark: "dismissed" },
+        { noticeId: "a", mark: "restore" },
+      ],
+    });
     retry.answer(200, OK);
     store.mark("a", "read");
     await server.marks();
@@ -346,6 +425,33 @@ describe("marks on the account's Notices", () => {
     store.mark("b", "read");
     await server.marks();
     expect(store.state().notices[0]?.readAtMs).toBeNull();
+  });
+
+  it("keeps a Read made after an Undo, sending the Undo's restore before it", async () => {
+    const { server, store, ids } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a")], { replace: true });
+    store.mark("a", "dismissed");
+    const first = await server.marks();
+    // Undo, Mark read, then Done again, all before the first Done's answer.
+    store.mark("a", "restore");
+    store.mark("a", "read");
+    store.mark("a", "dismissed");
+    expect(ids()).toEqual([]);
+    first.answer(200, OK);
+    const rest = await server.marks();
+    expect(rest.body).toEqual({
+      marks: [
+        { noticeId: "a", mark: "restore" },
+        { noticeId: "a", mark: "read" },
+        { noticeId: "a", mark: "dismissed" },
+      ],
+    });
+    rest.answer(200, OK);
+    store.mark("a", "restore");
+    (await server.marks()).answer(200, OK);
+    expect(ids()).toEqual(["a"]);
+    expect(store.state().notices[0]?.readAtMs).toBe(NOW);
   });
 
   it("keeps a row another device restored while this phone's dismissal was on its way", async () => {
@@ -373,7 +479,7 @@ describe("marks on the account's Notices", () => {
     (await first.server.marks()).offline();
     await first.timers.next();
     first.store.stop();
-    expect(files.marks.get(scope)).toMatchObject([{ noticeId: "a", mark: "dismissed" }]);
+    expect(files.marks.get(scope)).toEqual([{ noticeId: "a", mark: "dismissed", atMs: NOW }]);
 
     const second = setup({ files });
     second.store.resume();
@@ -383,7 +489,56 @@ describe("marks on the account's Notices", () => {
     sent.answer(200, { ok: true, dismissed: ["a"] });
     second.store.mark("b", "read");
     await second.server.marks();
-    expect(files.marks.get(scope)).toMatchObject([{ noticeId: "b", mark: "read" }]);
+    expect(files.marks.get(scope)).toEqual([{ noticeId: "b", mark: "read", atMs: NOW }]);
+  });
+
+  it.each(["beforeList", "beforeMarks"] as const)(
+    "keeps a taken Done across a relaunch stopped %s, without sending it again",
+    async (point) => {
+      const files = memoryFiles();
+      const first = setup({ files });
+      first.store.resume();
+      await reply(first.server, first.server.read(), [relayRow("a")], { replace: true });
+      first.store.mark("a", "dismissed");
+      const stop = gate();
+      files.hold[point] = stop;
+      (await first.server.marks()).answer(200, { ok: true, dismissed: ["a"] });
+      await stop.reached;
+      // The app closes here; the held save never finishes.
+      first.store.stop();
+      files.hold = {};
+      expect(files.marks.get(scope)).toEqual([
+        { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1 },
+      ]);
+
+      const second = setup({ files });
+      second.store.resume();
+      await second.server.read();
+      expect(second.ids()).toEqual([]);
+      // A mark made now is the first one sent: the taken Done isn't sent again.
+      second.store.mark("b", "read");
+      expect((await second.server.marks()).body).toEqual({
+        marks: [{ noticeId: "b", mark: "read" }],
+      });
+      expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a", dismissedAtMs: NOW }]);
+      expect(files.marks.get(scope)).toEqual([{ noticeId: "b", mark: "read", atMs: NOW }]);
+    },
+  );
+
+  it("keeps a taken mark in the marks file while the list can't be saved", async () => {
+    const files = memoryFiles();
+    const { server, store } = setup({ files });
+    store.resume();
+    await reply(server, server.read(), [relayRow("a")], { replace: true });
+    files.failList = true;
+    store.mark("a", "dismissed");
+    (await server.marks()).answer(200, OK);
+    store.mark("b", "read");
+    await server.marks();
+    expect(files.marks.get(scope)).toEqual([
+      { noticeId: "a", mark: "dismissed", atMs: NOW, taken: 1 },
+      { noticeId: "b", mark: "read", atMs: NOW },
+    ]);
   });
 
   it("marks read only the rows shown unread", async () => {
@@ -407,6 +562,7 @@ describe("Show on phone and the account's Notices", () => {
       [relayRow("a"), relayRow("b", { workspaceId: "w2" })],
       { replace: true },
     );
+    expect(ids()).toEqual(["a", "b"]);
     list.set([trip, { ...work, showOnPhone: false }], ["w2"]);
     expect(ids()).toEqual(["a"]);
     expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
@@ -441,17 +597,65 @@ describe("Show on phone and the account's Notices", () => {
   });
 });
 
+/** An account whose state the test sets, for `clearNoticesOnSignInChange`. */
+function fakeAccount(initial: AccountState) {
+  let state = initial;
+  const listeners = new Set<() => void>();
+  return {
+    state: () => state,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    set(next: AccountState) {
+      state = next;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+const signedOut: AccountState = {
+  status: "signed-out",
+  origin: ORIGIN,
+  ended: false,
+  forgetFailed: false,
+};
+
 describe("the account's Notices across sign-out and failure", () => {
-  it("lands nothing a read held before the sign-in ended answers", async () => {
-    const { server, store, ids, files, signOut } = setup();
+  it("lands nothing a read held before the sign-in ended answers, and its files go", async () => {
+    const { server, store, ids, files, signIn, signOut } = setup();
+    const account = fakeAccount({ status: "signed-in", signIn: { ...signIn, email: "a@b.c" } });
+    clearNoticesOnSignInChange(account, files);
     store.resume();
     const held = await reply(server, server.read(), [relayRow("a")], { replace: true });
-    signOut();
-    await files.clear();
-    held.answer(200, noticePageBody([relayRow("b", { changeSeq: 2 })]));
     store.mark("a", "read");
+    await server.marks();
+    expect(files.lists.size).toBe(1);
+    expect(files.marks.size).toBe(1);
+    const checked = signOut();
+    account.set(signedOut);
+    held.answer(200, noticePageBody([relayRow("b", { changeSeq: 2 })]));
+    await checked;
+    store.mark("a", "unread");
     expect(ids()).toEqual(["a"]);
     expect(files.lists.size + files.marks.size).toBe(0);
+  });
+
+  it("deletes the files on sign-out, a new sign-in, or a launch with none, never on the saved one", () => {
+    const signIn = (userId: string) => ({ ...setup().signIn, userId, email: `${userId}@b.c` });
+    const run = (from: AccountState, to: AccountState) => {
+      const files = memoryFiles();
+      files.marks.set(scope, []);
+      const account = fakeAccount(from);
+      clearNoticesOnSignInChange(account, files);
+      account.set(to);
+      return files.marks.size === 0;
+    };
+    const first: AccountState = { status: "signed-in", signIn: signIn("u1") };
+    expect(run({ status: "loading" }, first)).toBe(false);
+    expect(run({ status: "loading" }, signedOut)).toBe(true);
+    expect(run(first, signedOut)).toBe(true);
+    expect(run(first, { status: "signed-in", signIn: signIn("u2") })).toBe(true);
   });
 
   it("shows the first failure at once with nothing known, and takes it back on the next answer", async () => {

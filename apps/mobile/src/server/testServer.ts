@@ -125,7 +125,7 @@ export function memoryStore(initial: StoredSignIn | null = null) {
   };
 }
 
-/** A relay Notice row as the phone's scope sends it. */
+/** A relay Notice row as the phone's scope sends it. It expires at 10,000,000 ms: test clocks run before. */
 export function relayRow(noticeId: string, fields: Record<string, unknown> = {}) {
   return {
     noticeId,

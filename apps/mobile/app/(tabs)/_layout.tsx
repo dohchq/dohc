@@ -10,6 +10,13 @@ import { NoticesProvider, useNotices } from "../../src/notices/NoticesState";
 import { sampleBuild } from "../../src/sampleBuild";
 import { FeedNotice } from "../../src/workspace/FeedNotice";
 import { HideToast, ShowToast, Toast, type ToastMessage } from "../../src/notices/Toast";
+import {
+  closeToast,
+  hideToast,
+  NO_TOASTS,
+  showToast,
+  type ToastSlots,
+} from "../../src/notices/toastSlots";
 import { useTheme } from "../../src/theme";
 
 // Design review's toast. The sample test is written out, so a build without sample data drops it (src/sampleBuild.ts).
@@ -26,21 +33,26 @@ const sampleToast: ToastMessage | null =
 
 // The platform's own tab bar: Liquid Glass on iOS 26, Material on Android.
 // Toasts sit above every tab except Notices, where each one already has its row. A toast holding the only Undo for a
-// change shows there too. The Notices list reports through toasts as well, so their host sits above it.
+// change shows there too, and another toast waits behind it (src/notices/toastSlots.ts). The Notices list reports
+// through toasts as well, so their host sits above it.
 export default function TabsLayout() {
-  const [toast, setToast] = useState<ToastMessage | null>(
-    demoMode === "toast" || demoMode === "toast-copied" ? sampleToast : null,
+  const [slots, setSlots] = useState<ToastSlots>(
+    demoMode === "toast" || demoMode === "toast-copied"
+      ? { shown: sampleToast, waiting: null }
+      : NO_TOASTS,
   );
-  const hideToast = useCallback(
-    (id: string) => setToast((shown) => (shown?.id === id ? null : shown)),
+  const show = useCallback(
+    (message: ToastMessage) => setSlots((current) => showToast(current, message)),
     [],
   );
+  const hide = useCallback((id: string) => setSlots((current) => hideToast(current, id)), []);
+  const close = useCallback(() => setSlots(closeToast), []);
   return (
-    <ShowToast value={setToast}>
-      <HideToast value={hideToast}>
+    <ShowToast value={show}>
+      <HideToast value={hide}>
         <WorkspacesProvider>
           <NoticesProvider>
-            <Tabs toast={toast} onCloseToast={() => setToast(null)} />
+            <Tabs toast={slots.shown} onCloseToast={close} />
           </NoticesProvider>
         </WorkspacesProvider>
       </HideToast>
@@ -99,7 +111,7 @@ function Tabs({ toast, onCloseToast }: { toast: ToastMessage | null; onCloseToas
         </NativeTabs.Trigger>
       </NativeTabs>
       {toast && (pathname !== "/notices" || toast.holdsUndo) ? (
-        <Toast message={toast} onClose={onCloseToast} />
+        <Toast key={toast.id ?? toast.title} message={toast} onClose={onCloseToast} />
       ) : null}
       {sampleBuild ? null : <FeedNotice />}
     </View>

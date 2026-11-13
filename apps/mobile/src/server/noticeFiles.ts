@@ -2,17 +2,21 @@ import { Directory, File, Paths } from "expo-file-system";
 import { isFields } from "./api";
 import { fileName } from "./cacheFiles";
 
-// The account's Notices on disk, in two files per account.
+// The account's Notices on disk, per account.
 //
 // - The list, in Caches. It's a copy of what the server sent, so a relaunch shows it before the server answers. The
-//   system may delete it, and a file this build can't read is deleted and read again from the server.
-// - The marks this phone made that the server hasn't taken yet, in Documents, which the system never clears. Each
-//   change replaces the whole file: the new text goes to a file beside it, which then moves into its place. A closed
-//   app leaves the old file or the new one, never half of one. Nothing asks the disk to flush, so a power loss can
-//   still lose the last change.
+//   system may delete it, and a file this build can't read is deleted and read again from the server. A new copy is
+//   written beside it and moved into its place. expo-file-system's move deletes the old file first, so an app closed
+//   between the two can leave no list, never half of one; the relaunch then reads the list from the server.
+// - The marks this phone made that the server hasn't taken yet, in Documents, which the system never clears. They
+//   alternate between two slot files, each with a generation number. A save writes the whole queue to the slot that
+//   doesn't hold the newest generation, and a read takes the newest slot that parses and checks. An app closed at any
+//   point leaves at least the last whole save. Nothing asks the disk to flush, so a power loss can still lose the last
+//   save.
 //
-// Both files carry their account's scope and format, and go when the account's sign-in changes or ends. A clear moves
-// every scope's generation on, so a read or write that began before it lands nothing.
+// Everything runs in order on one queue. Both kinds carry their account's scope and format, and go when the account's
+// sign-in changes or ends. A clear moves every scope's generation on, so a read or write that began before it lands
+// nothing.
 
 export const NOTICE_LIST_FORMAT = 1;
 export const NOTICE_MARKS_FORMAT = 1;
@@ -29,10 +33,24 @@ export interface NoticeFiles {
   readMarks(scope: string): Promise<unknown>;
   /** Saves the waiting marks now, after every change before it. It never rejects. */
   writeMarks(scope: string, marks: readonly unknown[]): Promise<void>;
+  /**
+   * Saves the list now, after every change before it, in place of a save that waits. Only once that has landed does it
+   * save the marks `marks` answers then. Resolves whether the list landed; it never rejects.
+   */
+  writeListThenMarks(
+    scope: string,
+    rows: readonly unknown[],
+    marks: () => readonly unknown[],
+  ): Promise<boolean>;
   /** Saves now a list that waits to be saved. */
   flush(): Promise<void>;
-  /** Deletes both files of every scope, and drops every write that hasn't landed. */
+  /** Deletes every scope's files, and drops every write that hasn't landed. */
   clear(): Promise<void>;
+}
+
+interface Slot {
+  readonly slot: 0 | 1;
+  readonly generation: number;
 }
 
 export function createNoticeFiles(
@@ -43,6 +61,8 @@ export function createNoticeFiles(
   let epoch = 0;
   const waiting = new Map<string, () => readonly unknown[]>();
   let timer: ReturnType<typeof setTimeout> | null = null;
+  /** Each scope's slot holding its newest marks, once read or written this run. */
+  const newest = new Map<string, Slot | null>();
 
   // Every read, write and delete runs in order, so a read after a clear never finds a file the clear deletes.
   let queue: Promise<unknown> = Promise.resolve();
@@ -52,37 +72,99 @@ export function createNoticeFiles(
     return next;
   }
 
-  async function read(folder: Directory, scope: string, format: number, field: string) {
-    const expected = epoch;
-    const file = new File(folder, `${fileName(scope)}.json`);
+  /** The file's fields when it parses and is of this format and for `scope`, or null. */
+  async function parsed(file: File, scope: string, format: number) {
     if (!file.exists) return null;
-    let data: unknown = null;
     try {
-      data = JSON.parse(await file.text());
+      const data: unknown = JSON.parse(await file.text());
+      return isFields(data) && data.format === format && data.scope === scope ? data : null;
     } catch {
-      data = null;
+      return null;
     }
+  }
+
+  async function readListFile(scope: string) {
+    const expected = epoch;
+    const file = new File(lists, `${fileName(scope)}.json`);
+    const data = await parsed(file, scope, NOTICE_LIST_FORMAT);
     if (epoch !== expected) return null;
-    const found =
-      isFields(data) && data.format === format && data.scope === scope ? data[field] : null;
-    if (found === null || found === undefined) {
+    if (data === null || data.rows === undefined) {
       if (file.exists) file.delete();
       return null;
+    }
+    return data.rows;
+  }
+
+  async function replaceList(scope: string, text: string, expected: number): Promise<boolean> {
+    const name = fileName(scope);
+    const temp = new File(lists, `${name}.json.tmp`);
+    try {
+      if (!lists.exists) lists.create({ intermediates: true });
+      await temp.write(text);
+      if (epoch !== expected) {
+        temp.delete();
+        return false;
+      }
+      await temp.move(new File(lists, `${name}.json`), { overwrite: true });
+      return true;
+    } catch {
+      if (temp.exists) temp.delete();
+      return false;
+    }
+  }
+
+  const slotFile = (scope: string, slot: 0 | 1) =>
+    new File(marks, `${fileName(scope)}.${slot}.json`);
+
+  /** The newest slot that parses and checks, with its marks, or null. */
+  async function readSlots(scope: string) {
+    let found: (Slot & { readonly marks: unknown }) | null = null;
+    for (const slot of [0, 1] as const) {
+      const data = await parsed(slotFile(scope, slot), scope, NOTICE_MARKS_FORMAT);
+      const generation = data?.generation;
+      if (
+        !data ||
+        !Array.isArray(data.marks) ||
+        typeof generation !== "number" ||
+        !Number.isSafeInteger(generation) ||
+        (found !== null && found.generation >= generation)
+      )
+        continue;
+      found = { slot, generation, marks: data.marks };
     }
     return found;
   }
 
-  async function replace(folder: Directory, scope: string, text: string, expected: number) {
-    const name = fileName(scope);
-    const temp = new File(folder, `${name}.json.tmp`);
+  async function readMarksFile(scope: string) {
+    const expected = epoch;
+    const found = await readSlots(scope);
+    if (epoch !== expected) return null;
+    newest.set(scope, found && { slot: found.slot, generation: found.generation });
+    return found?.marks ?? null;
+  }
+
+  /** Writes the marks to the slot that doesn't hold the newest, unless a clear came first. */
+  async function writeSlot(scope: string, list: readonly unknown[], expected: number) {
+    if (epoch !== expected) return;
+    const known = newest.has(scope) ? (newest.get(scope) ?? null) : await readSlots(scope);
+    if (epoch !== expected) return;
+    const next: Slot = {
+      slot: known === null || known.slot === 1 ? 0 : 1,
+      generation: (known?.generation ?? 0) + 1,
+    };
+    const text = JSON.stringify({
+      format: NOTICE_MARKS_FORMAT,
+      scope,
+      generation: next.generation,
+      marks: list,
+    });
     try {
-      if (!folder.exists) folder.create({ intermediates: true });
-      await temp.write(text);
-      const file = new File(folder, `${name}.json`);
-      if (epoch === expected) await temp.move(file, { overwrite: true });
-      else temp.delete();
+      if (!marks.exists) marks.create({ intermediates: true });
+      await slotFile(scope, next.slot).write(text);
+      if (epoch === expected) newest.set(scope, next);
     } catch {
-      if (temp.exists) temp.delete();
+      // That slot may hold part of this save; the other still holds the last whole one, and the next save goes here.
+      newest.set(scope, known && { slot: known.slot, generation: known.generation });
     }
   }
 
@@ -95,34 +177,38 @@ export function createNoticeFiles(
     return serial(async () => {
       for (const [scope, rows] of batch) {
         if (epoch !== expected) return;
-        await replace(
-          lists,
-          scope,
-          JSON.stringify({ format: NOTICE_LIST_FORMAT, scope, rows: rows() }),
-          expected,
-        );
+        const text = JSON.stringify({ format: NOTICE_LIST_FORMAT, scope, rows: rows() });
+        await replaceList(scope, text, expected);
       }
     }, undefined);
   }
 
   return {
-    readList: (scope) => serial(() => read(lists, scope, NOTICE_LIST_FORMAT, "rows"), null),
+    readList: (scope) => serial(() => readListFile(scope), null),
     writeList(scope, rows) {
       waiting.set(scope, rows);
       if (timer === null) timer = setTimeout(() => void saveLists(), NOTICE_WRITE_DELAY_MS);
     },
-    readMarks: (scope) => serial(() => read(marks, scope, NOTICE_MARKS_FORMAT, "marks"), null),
+    readMarks: (scope) => serial(() => readMarksFile(scope), null),
     writeMarks(scope, list) {
       const expected = epoch;
-      const text = JSON.stringify({ format: NOTICE_MARKS_FORMAT, scope, marks: list });
+      return serial(() => writeSlot(scope, list, expected), undefined);
+    },
+    writeListThenMarks(scope, rows, list) {
+      const expected = epoch;
+      waiting.delete(scope);
+      const text = JSON.stringify({ format: NOTICE_LIST_FORMAT, scope, rows });
       return serial(async () => {
-        if (epoch === expected) await replace(marks, scope, text, expected);
-      }, undefined);
+        if (epoch !== expected || !(await replaceList(scope, text, expected))) return false;
+        await writeSlot(scope, list(), expected);
+        return true;
+      }, false);
     },
     flush: () => saveLists(),
     clear() {
       epoch += 1;
       waiting.clear();
+      newest.clear();
       if (timer !== null) clearTimeout(timer);
       timer = null;
       return serial(() => {

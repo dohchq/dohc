@@ -1,5 +1,4 @@
 import { accountWords } from "@dohc/interface-words/account";
-import { confirmWords } from "@dohc/interface-words/confirmations";
 import { noticesWords } from "@dohc/interface-words/notices";
 import { useRouter } from "expo-router";
 import {
@@ -22,6 +21,7 @@ import { serverName } from "../server/origin";
 import { failureStep, type Reported } from "../workspace/failureReports";
 import { presentNotice, type PhoneNotice, type PhoneTarget } from "./phoneNotice";
 import { useHideToast, useShowToast } from "./Toast";
+import { doneToast } from "./toastSlots";
 
 // The sample's notices, in a sample build only (src/sampleBuild.ts).
 // src/routes.test.ts reads the next statement as text, on one line.
@@ -174,13 +174,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       const relayId = shown.current.find((notice) => notice.id === id)?.relayId;
       if (relayId === undefined) return local.remove(id);
       store?.mark(relayId, "dismissed");
-      showToast({
-        id: `done:${relayId}`,
-        tone: "success",
-        title: noticesWords.markedDone,
-        holdsUndo: true,
-        action: { label: confirmWords.undo, onPress: () => store?.mark(relayId, "restore") },
-      });
+      showToast(doneToast(relayId, () => store?.mark(relayId, "restore")));
     },
     [store, local.remove, showToast],
   );
