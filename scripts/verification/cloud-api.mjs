@@ -6,13 +6,18 @@ export const GATE_POLL_MS = { js: 3_000, rust: 10_000 };
 
 export class WorkflowAllowanceError extends Error {}
 
-function requireAllowance(response) {
+async function requireAllowance(response) {
   if (
     ![403, 429].includes(response.status) ||
     response.headers.get("x-ratelimit-remaining") !== "0"
   )
     return;
-  const reset = new Date(Number(response.headers.get("x-ratelimit-reset")) * 1000).toISOString();
+  await response.body?.cancel().catch(() => {});
+  const seconds = Number(response.headers.get("x-ratelimit-reset"));
+  const reset =
+    Number.isFinite(seconds) && seconds > 0
+      ? new Date(seconds * 1000).toISOString()
+      : "the reset time";
   const message = `The repository's hourly GitHub API allowance for workflow runs is used up. Re-run all jobs after ${reset}.`;
   console.error(`::error title=GitHub API allowance used up::${message}`);
   throw new WorkflowAllowanceError(message);
@@ -67,7 +72,7 @@ export function cloudApi({
             return previous.data;
           }
           counted++;
-          requireAllowance(response);
+          await requireAllowance(response);
           if (response.ok) {
             try {
               const data = await response.json();
@@ -122,7 +127,7 @@ export function cloudApi({
       counted++;
       // Redirected blob responses have no REST rate-limit headers.
       if (response.headers.has("x-ratelimit-limit")) last = response.headers;
-      requireAllowance(response);
+      await requireAllowance(response);
       return response;
     },
     async jobs(options) {

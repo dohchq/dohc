@@ -1122,7 +1122,7 @@ for (const [scope, jobName, artifact] of [
   ["js", "shared preparation", "javascript-prepared"],
   ["rust", "Rust build once", "rust-tests"],
 ]) {
-  test(`${scope} preparation polls artifacts conditionally without reading jobs`, async (t) => {
+  test(`${scope} preparation polls artifacts conditionally before reading jobs`, async (t) => {
     let clock = 0,
       jobReads = 0,
       artifactReads = 0;
@@ -1164,10 +1164,14 @@ for (const [scope, jobName, artifact] of [
     });
     assert.equal(result.artifact.id, 42);
     assert.equal(clock, 5_000);
-    assert.equal(jobReads, 0);
+    // A Rust consumer starts after its build has ended, so it reads the jobs once when the archive is missing.
+    assert.equal(jobReads, scope === "rust" ? 1 : 0);
     assert.match(
       log.mock.calls.at(-1).arguments[0],
-      /x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=3 304=1/u,
+      new RegExp(
+        `x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=${scope === "rust" ? 4 : 3} 304=1`,
+        "u",
+      ),
     );
   });
 
@@ -1381,10 +1385,10 @@ for (const [scope, jobName, artifact] of [
       );
       assert.equal(clock, 900_000);
       assert.equal(lastJobRead, 900_000, "the cap refreshes the build state");
-      assert.deepEqual(
-        jobReadTimes,
-        [120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000],
-      );
+      assert.deepEqual(jobReadTimes, [
+        ...(scope === "rust" ? [0] : []),
+        ...[120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000],
+      ]);
     }
     for (const conclusion of ["failure", "cancelled", "skipped", "duplicate"]) {
       let clock = 0;
@@ -1407,7 +1411,7 @@ for (const [scope, jobName, artifact] of [
         }),
         conclusion === "duplicate" ? /Duplicate/u : new RegExp(`ended with ${conclusion}`, "u"),
       );
-      assert.equal(clock, 120_000);
+      assert.equal(clock, scope === "rust" ? 0 : 120_000);
     }
   });
 }
@@ -2522,16 +2526,23 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
 });
 test("preparation spends only artifact requests before two minutes", async (t) => {
   const log = t.mock.method(console, "log", () => {});
-  for (const [readyAt, expectedJobs, expectedCounted] of [
-    [0, 0, 2],
-    [90_000, 0, 3],
-    [130_000, 1, 4],
+  // A Rust consumer starts after its build has ended, so it checks a missing archive at once.
+  for (const [scope, readyAt, expectedJobs, expectedCounted, jobsAt] of [
+    ["rust", 0, 0, 2],
+    ["rust", 5_000, 1, 4, 0],
+    ["js", 0, 0, 2],
+    ["js", 90_000, 0, 3],
+    ["js", 130_000, 1, 4, 120_000],
   ]) {
+    const [job, artifact] =
+      scope === "rust"
+        ? ["Rust build once", "rust-tests-2"]
+        : ["shared preparation", "javascript-prepared-2"];
     let clock = 0,
       jobs = 0,
       lists = 0,
       downloads = 0;
-    await waitForPreparation("rust", {
+    await waitForPreparation(scope, {
       env: apiEnv,
       now: () => clock,
       pause: async (ms) => {
@@ -2540,8 +2551,8 @@ test("preparation spends only artifact requests before two minutes", async (t) =
       request: async (url, { headers }) => {
         if (url.includes("/jobs?")) {
           jobs++;
-          assert.equal(clock, 120_000);
-          return apiResponse({ jobs: [{ name: "Rust build once", status: "in_progress" }] });
+          assert.equal(clock, jobsAt);
+          return apiResponse({ jobs: [{ name: job, status: "in_progress" }] });
         }
         if (url.endsWith("/zip")) {
           downloads++;
@@ -2550,7 +2561,7 @@ test("preparation spends only artifact requests before two minutes", async (t) =
         lists++;
         assert.equal(headers["If-None-Match"], lists === 1 ? undefined : '"fixture"');
         return clock >= readyAt
-          ? apiResponse({ artifacts: [{ id: 42, name: "rust-tests-2" }] })
+          ? apiResponse({ artifacts: [{ id: 42, name: artifact }] })
           : lists === 1
             ? apiResponse({ artifacts: [] })
             : apiResponse(null, 304);
@@ -2628,4 +2639,21 @@ test("exhausted workflow allowance fails reads and downloads immediately with on
         `::error title=GitHub API allowance used up::${message}`,
       );
     }
+  for (const reset of [undefined, "soon"]) {
+    const api = cloudApi({
+      env: apiEnv,
+      request: async () =>
+        new Response("{}", {
+          status: 403,
+          headers: {
+            "x-ratelimit-remaining": "0",
+            ...(reset ? { "x-ratelimit-reset": reset } : {}),
+          },
+        }),
+    });
+    await assert.rejects(api.read("/artifacts"), {
+      message:
+        "The repository's hourly GitHub API allowance for workflow runs is used up. Re-run all jobs after the reset time.",
+    });
+  }
 });

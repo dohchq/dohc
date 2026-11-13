@@ -30,7 +30,8 @@ export async function waitForPreparation(
   const names = preparation.artifacts.map((artifact) => `${artifact}-${env.GITHUB_RUN_ATTEMPT}`);
   let name = names.shift();
   let build,
-    checkAt = startedAt + 120_000;
+    // Rust consumers start after their build has ended, so a missing archive is checked at once.
+    checkAt = scope === "rust" ? startedAt : startedAt + 120_000;
   const checkBuild = async () => {
     const { jobs } = await api.read(`/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`, {
       deadline: now() >= deadline ? now() + 10_000 : deadline,
