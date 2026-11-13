@@ -80,7 +80,7 @@ jobs:
           token: ""
           base: ${{ steps.merge-base.outputs.sha }}
           filters: |
-            # .cargo/ holds audit.toml, where advisory ignores would hide;
+            # an advisory ignore would go in .cargo/audit.toml;
             # .gitignore decides what the gate's own tree-provenance readings
             # can see, so it is an input to the gate and not just to git --
             # ignoring a path removes it from every reading, and the gate tees

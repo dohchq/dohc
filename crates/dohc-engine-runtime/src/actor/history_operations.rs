@@ -1219,10 +1219,10 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static DELETES: AtomicUsize = AtomicUsize::new(0);
         fn trace(event: rusqlite::trace::TraceEvent<'_>) {
-            if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event {
-                if sql.starts_with("DELETE FROM engine_search_files_fts") {
-                    DELETES.fetch_add(1, Ordering::Relaxed);
-                }
+            if let rusqlite::trace::TraceEvent::Stmt(_, sql) = event
+                && sql.starts_with("DELETE FROM engine_search_files_fts")
+            {
+                DELETES.fetch_add(1, Ordering::Relaxed);
             }
         }
         let (root, mut store) = fixture();

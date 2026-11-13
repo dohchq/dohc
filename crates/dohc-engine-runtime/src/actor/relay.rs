@@ -428,21 +428,20 @@ impl DeferredRelayTransport {
     fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
         if let (RelayIoRequest::BlobsHave(have), Ok(RelayIoResponse::BlobsHave(response))) =
             (&request, &result)
+            && let Ok(missing) = response.validated_missing(&have.sha256s)
         {
-            if let Ok(missing) = response.validated_missing(&have.sha256s) {
-                self.push_progress
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .confirm_blob_presence(
-                        &have.workspace_id,
-                        &have.replication_epoch,
-                        &have.stream_identity,
-                        have.sha256s
-                            .iter()
-                            .filter(|sha| !missing.contains(sha))
-                            .cloned(),
-                    );
-            }
+            self.push_progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .confirm_blob_presence(
+                    &have.workspace_id,
+                    &have.replication_epoch,
+                    &have.stream_identity,
+                    have.sha256s
+                        .iter()
+                        .filter(|sha| !missing.contains(sha))
+                        .cloned(),
+                );
         }
         let uploads = match (&request, &result) {
             (RelayIoRequest::UploadBlob(upload), Ok(RelayIoResponse::UploadBlob)) => {

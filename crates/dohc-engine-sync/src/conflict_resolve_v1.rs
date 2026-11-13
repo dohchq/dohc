@@ -884,17 +884,16 @@ fn validate_bindings(payload: &ConflictResolveV1) -> Result<(), SyncError> {
     if used_paths.len() != payload.paths.len() {
         return Err(invalid("conflict.resolve path table has an unused entry"));
     }
-    if let Some(exported) = &payload.exported_before {
-        if payload.lineage_transition.is_some()
+    if let Some(exported) = &payload.exported_before
+        && (payload.lineage_transition.is_some()
             || payload.current.present().is_none()
             || exported.present().is_some_and(|head| {
                 Some(&head.object_id) != payload.current.present().map(|head| &head.object_id)
-            })
-        {
-            return Err(invalid(
-                "conflict.resolve exported preimage must name its unclaimed object",
-            ));
-        }
+            }))
+    {
+        return Err(invalid(
+            "conflict.resolve exported preimage must name its unclaimed object",
+        ));
     }
     if payload.current.present().is_some()
         != payload
@@ -1522,17 +1521,17 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
         false
     };
     let mut retired = None;
-    if disposition != ImportedHeadDisposition::Diverged {
-        if let Err(error) = preflight_imported_lineage(tx, payload, key.as_ref(), disposition) {
-            match error {
-                SyncError::RetryableState { .. } => {
-                    retired = retired_kept_predecessor(tx, payload, key.as_ref(), disposition)?;
-                    if retired.is_none() {
-                        disposition = ImportedHeadDisposition::Diverged;
-                    }
+    if disposition != ImportedHeadDisposition::Diverged
+        && let Err(error) = preflight_imported_lineage(tx, payload, key.as_ref(), disposition)
+    {
+        match error {
+            SyncError::RetryableState { .. } => {
+                retired = retired_kept_predecessor(tx, payload, key.as_ref(), disposition)?;
+                if retired.is_none() {
+                    disposition = ImportedHeadDisposition::Diverged;
                 }
-                error => return Err(error),
             }
+            error => return Err(error),
         }
     }
 

@@ -2858,12 +2858,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let (queued, _) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
-        if let Some(cursor) = &current {
-            if cursor.replication_epoch != identity.replication_epoch
-                || cursor.stream_identity != identity.stream_identity
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+        if let Some(cursor) = &current
+            && (cursor.replication_epoch != identity.replication_epoch
+                || cursor.stream_identity != identity.stream_identity)
+        {
+            return Err(RelayError::InvalidResponse);
         }
         let (pull_token, previous_pull_token) = {
             let mut fetching = self
@@ -7686,33 +7685,30 @@ fn replay_share_view_op<T: RelayTransport>(
                     moment.payload_before.path,
                     moment.after_path(),
                     moment.payload_after.blob_sha256,
+                ) && let Err(error) = replay_share_write(
+                    context.transport,
+                    &mut *context.store,
+                    context.workspace_id,
+                    &main_version_id,
+                    context.share_id,
+                    envelope,
+                    after,
+                    sha,
+                    after_kind,
+                    moment.object_id,
+                    Some(before),
+                    context.faults,
+                    &mut *context.applied,
+                    &mut *context.changed,
+                    &mut *context.blob_refusals,
                 ) {
-                    if let Err(error) = replay_share_write(
-                        context.transport,
-                        &mut *context.store,
-                        context.workspace_id,
-                        &main_version_id,
-                        context.share_id,
-                        envelope,
-                        after,
-                        sha,
-                        after_kind,
-                        moment.object_id,
-                        Some(before),
-                        context.faults,
-                        &mut *context.applied,
-                        &mut *context.changed,
-                        &mut *context.blob_refusals,
-                    ) {
-                        refuse_replay_unit(context, &mut refused, after, error)?;
-                    }
+                    refuse_replay_unit(context, &mut refused, after, error)?;
                 }
             }
             Some("write") => {
                 if let (Some(after), Some(sha)) =
                     (moment.after_path(), moment.payload_after.blob_sha256)
-                {
-                    if let Err(error) = replay_share_write(
+                    && let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
                         context.workspace_id,
@@ -7728,9 +7724,9 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.applied,
                         &mut *context.changed,
                         &mut *context.blob_refusals,
-                    ) {
-                        refuse_replay_unit(context, &mut refused, after, error)?;
-                    }
+                    )
+                {
+                    refuse_replay_unit(context, &mut refused, after, error)?;
                 }
             }
             _ => {}

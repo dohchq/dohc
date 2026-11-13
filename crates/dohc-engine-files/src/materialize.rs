@@ -2101,10 +2101,10 @@ fn materialize_cross_volume(
     job: &MaterializationJob,
     options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    if let Some(dir) = target.parent() {
-        if let Ok(mut dirs) = dirs_without_atomic_placement().lock() {
-            dirs.insert(dir.to_owned());
-        }
+    if let Some(dir) = target.parent()
+        && let Ok(mut dirs) = dirs_without_atomic_placement().lock()
+    {
+        dirs.insert(dir.to_owned());
     }
     let recorded_preimage = match &job.preimage {
         Preimage::Present(expected) => {
