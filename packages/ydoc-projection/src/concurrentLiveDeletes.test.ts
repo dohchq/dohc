@@ -110,6 +110,12 @@ const SHAPES: Readonly<Record<string, Concurrent>> = {
     first: (doc) => append(textOf(elements(doc, "paragraph")[1]!), "x"),
     second: (doc) => doc.getXmlFragment("body").delete(1, 1),
   },
+  // An emoji is two UTF-16 units, so the typed text holds a point no edit may split. It goes with the deleted text.
+  "typing an emoji in a paragraph that someone else deletes": {
+    markdown: "Notes\n\nShared\n",
+    first: (doc) => append(textOf(elements(doc, "paragraph")[1]!), "💩x"),
+    second: (doc) => doc.getXmlFragment("body").delete(1, 1),
+  },
   "typing in a list item whose list someone else deletes": {
     markdown: "Notes\n\n- one\n- two\n",
     first: (doc) => append(textOf(elements(doc, "listItem")[1]!), "x"),
