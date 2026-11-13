@@ -2189,6 +2189,64 @@ it("answers a held-document read its detach or retired registration overtook as 
   await expect(read()).rejects.toMatchObject({ code: "not_found" });
 });
 
+it("stops the engine for a held read it answers neither at the deadline nor on cancel", async () => {
+  const o = await emptyServiceHost({ frameChanges: true }),
+    workspaces = [o.workspace];
+  await o.host.update({ workspaces, documents: [o.sibling], ...stay });
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true));
+  const send = o.client().sendRequest,
+    through = send.getMockImplementation()! as (...args: unknown[]) => ReturnType<typeof send>;
+  let answersCancel = true;
+  const deadlines: number[] = [];
+  send.mockImplementation(async (...args: unknown[]) => {
+    const request = args[0] as { id: number; method: string; deadlineMs: number };
+    if (request.method !== "sync.heldDocument") return through(...args);
+    deadlines.push(request.deadlineMs);
+    const cancel = args[3] as AbortSignal;
+    // The engine holds the read past its caller's deadline.
+    await new Promise((resolve) => cancel.addEventListener("abort", resolve, { once: true }));
+    // A healthy engine answers the cancel. A stuck one does not, and the client's own deadline ends the read later.
+    if (answersCancel)
+      throw new EngineRequestError(request.id, {
+        code: "CANCELLED",
+        message: "held document answer cancelled",
+        retry: "no",
+      });
+    throw new EngineRequestDeadlineError(request.id, request.method, request.deadlineMs);
+  });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  cleanup.push(async () => log.mockRestore());
+
+  await expect(o.host.heldDocument("workspace", "object", { markdown: false })).rejects.toThrow(
+    "Held read deadline exceeded.",
+  );
+  expect(deadlines).toEqual([1000 + 15_000]);
+
+  // A caller that joins later does not keep the read past its deadline.
+  const first = o.host.heldDocument("workspace", "object", { markdown: false });
+  const firstFailed = expect(first).rejects.toThrow("Held read deadline exceeded.");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await expect(
+    o.host.heldDocument("workspace", "object", { markdown: false }),
+  ).rejects.toMatchObject({
+    wireError: { code: "CANCELLED" },
+  });
+  await firstFailed;
+  expect(o.host.invalidated.aborted).toBe(false);
+
+  answersCancel = false;
+  await expect(o.host.heldDocument("workspace", "object", { markdown: false })).rejects.toThrow(
+    "Held read deadline exceeded.",
+  );
+  await vi.waitFor(() => expect(o.host.invalidated.aborted).toBe(true));
+  expect(
+    log.mock.calls.filter(([message]) => String(message).startsWith("Live host")),
+  ).toContainEqual([
+    "Live host stopped an engine that did not answer in time.",
+    { method: "sync.heldDocument", deadlineMs: 16_000 },
+  ]);
+});
+
 it("frees a cancelled held read's slot on the engine's answer, and answers the engine's busy refusal 429 to the owner alone", async () => {
   const o = await emptyServiceHost(),
     workspaces = [o.workspace];
