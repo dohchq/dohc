@@ -95,6 +95,11 @@ function fakeSleep() {
 function fakeList(workspaces: readonly AccountWorkspace[]) {
   let state: WorkspaceList = { status: "ready", workspaces, problem: null, pending: new Set() };
   const listeners = new Set<() => void>();
+  /** Any state, such as a list not read yet or one that failed. */
+  const replace = (next: WorkspaceList) => {
+    state = next;
+    for (const listener of listeners) listener();
+  };
   return {
     state: () => state,
     subscribe(listener: () => void) {
@@ -102,9 +107,9 @@ function fakeList(workspaces: readonly AccountWorkspace[]) {
       return () => void listeners.delete(listener);
     },
     set(next: readonly AccountWorkspace[], pending: readonly string[] = []) {
-      state = { status: "ready", workspaces: next, problem: null, pending: new Set(pending) };
-      for (const listener of listeners) listener();
+      replace({ status: "ready", workspaces: next, problem: null, pending: new Set(pending) });
     },
+    replace,
   };
 }
 
@@ -908,6 +913,102 @@ describe("Show on phone and the account's Notices", () => {
     await reply(server, server.read(), [relayRow("a")], { replace: true, nextCursor: "8" });
     list.set([trip, work]);
     expect((await server.read()).path).toBe("/sync/notices?scope=phone&limit=100");
+  });
+});
+
+describe("a workspace that leaves the list and the account's Notices", () => {
+  it("drops its rows naming a path, thread, or message at once, before any read answers", async () => {
+    const { server, store, ids, list, files } = setup();
+    store.resume();
+    await reply(
+      server,
+      server.read(),
+      [
+        relayRow("a"),
+        relayRow("b", { workspaceId: "w2" }),
+        relayRow("c", { workspaceId: "w2", kind: "mention", target: { path: "plan.md" } }),
+      ],
+      { replace: true },
+    );
+    expect(ids()).toEqual(["a", "b", "c"]);
+    list.set([trip]);
+    expect(ids()).toEqual(["a"]);
+    expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
+    const restart = await server.read();
+    expect(restart.path).toBe("/sync/notices?scope=phone&limit=100");
+    // The relay checks ownership as it answers, so a row it serves after the list was read stays.
+    await reply(server, restart, [relayRow("a"), relayRow("b", { workspaceId: "w2" })], {
+      replace: true,
+    });
+    expect(ids()).toEqual(["a", "b"]);
+  });
+
+  it("keeps a located row the relay serves in a workspace made since the list was read", async () => {
+    const { server, store, ids } = setup();
+    store.resume();
+    await reply(server, server.read(), [relayRow("a"), relayRow("n", { workspaceId: "w9" })], {
+      replace: true,
+    });
+    expect(ids()).toEqual(["a", "n"]);
+  });
+
+  it.each([
+    [
+      "a personal agent's sign-in in a workspace never listed",
+      relayRow("kept", {
+        kind: "personal-agent-signed-in",
+        workspaceId: "w3",
+        target: { settings: "agents", agent: "p-1" },
+      }),
+    ],
+    [
+      "a share's row, which names no workspace",
+      relayRow("kept", {
+        kind: "share-received",
+        workspaceId: null,
+        recipientShareId: "s1",
+        target: { share: "s1", path: "plan.md" },
+      }),
+    ],
+    [
+      "a row naming no path, thread, or message",
+      relayRow("kept", { workspaceId: "w2", target: { automation: "a1" } }),
+    ],
+  ])("keeps %s", async (_, row) => {
+    const { server, store, ids, list, files } = setup();
+    store.resume();
+    await reply(server, server.read(), [row, relayRow("b", { workspaceId: "w2" })], {
+      replace: true,
+    });
+    list.set([trip]);
+    expect(ids()).toEqual(["kept"]);
+    expect(files.lists.get(scope)).toMatchObject([{ noticeId: "kept" }]);
+  });
+
+  it("drops nothing while the list isn't read", async () => {
+    const files = memoryFiles();
+    files.lists.set(scope, [relayRow("a"), relayRow("b", { workspaceId: "w2" })]);
+    const { server, store, ids, list } = setup({ files });
+    list.replace({ status: "loading" });
+    store.resume();
+    const early = await server.read();
+    expect(ids()).toEqual(["a", "b"]);
+    list.replace({ status: "failed", problem: "offline" });
+    expect(ids()).toEqual(["a", "b"]);
+    expect(files.lists.get(scope)).toHaveLength(2);
+    // Once read, the list rules out the workspace it lacks.
+    list.set([trip]);
+    expect(ids()).toEqual(["a"]);
+    expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
+    // The read begun before the list was read is older than it, so it starts again, and its late answer lands nothing.
+    const fresh = server.read();
+    early.answer(
+      200,
+      noticePageBody([relayRow("a"), relayRow("b", { workspaceId: "w2" })], { replace: true }),
+    );
+    expect((await fresh).path).toBe("/sync/notices?scope=phone&limit=100");
+    expect(ids()).toEqual(["a"]);
+    expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
   });
 });
 
