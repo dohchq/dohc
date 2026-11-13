@@ -124,6 +124,15 @@ describe("revoking a session", () => {
     expect(activity.stats().waiters).toBe(0);
   });
 
+  it("ends a wake read held under the revoked session at once", async () => {
+    const { activity, h } = await relay();
+    const held = h(new Request("http://relay.test/sync/wakes?installId=mac&wait=25000", as("token-ana-phone")));
+    await expect.poll(() => activity.stats().waiters).toBe(1);
+    expect((await h(revoke("ana-phone", as("token-ana-desktop")))).status).toBe(200);
+    expect((await held).status).toBe(401);
+    expect(activity.stats().waiters).toBe(0);
+  });
+
   it("answers another account's session, a missing one, and an impossible ID with the same bytes", async () => {
     const { rows, h } = await relay();
     const missing = await denialBytes(await h(revoke("nobody", as("token-ana-phone"))));

@@ -3,8 +3,8 @@ import { TokenBucketLimiter } from "@dohc/service-http";
 import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { CHAT_WAKE_WAIT_MAX_MS, CHAT_WAKE_WAITS_PER_INSTALL } from "./chatWakeRoutes";
 import { DiscussionActivityHub } from "./discussionActivity";
-import { CHAT_WAKE_CONFIRM_MS, chatWakeId, type ChatWakeTarget } from "./storage/chatWakes";
-import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
+import { chatWakeId, type ChatWakeTarget } from "./storage/chatWakes";
+import { closeTestStorages, denialBytes, inspectDatabase, json, storagePath, testHandler, testStorage } from "./testing";
 
 // The routes run over real storage, with the wakes a publication would make written to it directly.
 
@@ -25,12 +25,28 @@ async function relay() {
   const storage = await testStorage();
   storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspace({ workspaceId: "bens", ownerUserId: "ben", createdAtMs: 1 });
-  // `Bearer session:<user>:<session>` is a valid sign-in, under `rename` while it is set.
+  // `Bearer session:<user>:<session>` is a valid sign-in, under `rename` while it is set. `holdSession(n)` holds the
+  // nth sign-in check from now until its release.
   let rename: string | null = null;
+  let checks = 0;
+  let held: { at: number; reached(): void; open: Promise<void> } | null = null;
   const resolveAccountSession: ResolveAccountSession = async (request) => {
     const match = /^Bearer session:([\w-]+):([\w-]+)$/u.exec(request.headers.get("authorization") ?? "");
     if (!match) throw new UnauthorizedError();
+    checks += 1;
+    if (held !== null && checks === held.at) {
+      const hold = held;
+      held = null;
+      hold.reached();
+      await hold.open;
+    }
     return { userId: match[1]!, sessionId: rename ?? match[2]!, expiresAtMs: Number.MAX_SAFE_INTEGER } satisfies AccountSession;
+  };
+  const holdSession = (nth: number) => {
+    let reached!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    held = { at: checks + nth, reached, open: new Promise<void>((resolve) => { release = resolve; }) };
+    return { reached: waiting, release: () => release() };
   };
   const hub = new DiscussionActivityHub();
   const h = testHandler(storage, {
@@ -50,7 +66,7 @@ async function relay() {
     storage.advanceAccountOperation({ accountId: "ana", operationId, message: "published", nowMs: NOW,
       wakes: { publish: { messageId, threadId: "thread-1", held: false, targets } } });
   };
-  return { storage, hub, call, publish, signOut: () => { rename = "another"; } };
+  return { storage, hub, call, publish, holdSession, signOut: () => { rename = "another"; } };
 }
 
 it("declares a computer's agents only where its account owns the workspace, with exactly the fields it allows", async () => {
@@ -69,6 +85,7 @@ it("declares a computer's agents only where its account owns the workspace, with
     { ...declaration, token: "x" },
     { ...declaration, runners: [{ ...runner, handle: "claude" }] },
     { ...declaration, runners: [{ ...runner, agentId: "Default" }] },
+    { ...declaration, runners: [{ ...runner, agentId: "p-nova" }] },
     { ...declaration, runners: [runner, { ...runner, agentId: "second" }] },
     { ...declaration, runners: [{ ...runner, enabled: "yes" }] },
   ]) {
@@ -155,37 +172,37 @@ it("holds a read without polling until a wake commits, within its bounds, and ch
   expect((await gone).status).toBe(404);
 });
 
-it("tries a wake again through the account's operations, with strict arguments, once per operation ID and without a copy", async () => {
-  const { storage, call, publish } = await relay();
-  publish("op-1", "message-1", [target("claude", "mac", "laptop")]);
-  publish("op-2", "message-2", [target("codex", "mac")]);
-  const wakeId = wakeOf("message-1");
-  // Claimed a day ago and never confirmed.
-  storage.claimChatWake({ accountId: "ana", wakeId, installId: "mac", nowMs: NOW - CHAT_WAKE_CONFIRM_MS });
-  const retry = (args: unknown, userId = "ana", workspaceId = "trip") => call("POST", `/sync/${workspaceId}/ops/retryWake`, args, { userId });
-  const next = { ok: true, result: { ok: true, wake: expect.objectContaining({ wakeId: wakeOf("message-1", "claude", 2), generation: 2, state: "waiting" }) }, cursor: "0.0.0" };
-  expect(await json(await retry({ operationId: "retry-1", wakeId }))).toEqual(next);
-  expect(await json(await retry({ operationId: "retry-1", wakeId }))).toEqual(next);
-  expect((await json(await retry({ operationId: "retry-1", wakeId: wakeOf("message-2", "codex") }))).result)
-    .toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
-  expect((await json(await retry({ operationId: "op-2", wakeId }))).result).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
-  const unknown = wakeOf("message-nowhere");
-  expect((await json(await retry({ operationId: "retry-2", wakeId: unknown }))).result)
-    .toEqual({ ok: false, refusal: "missing", reason: `no such wake: ${unknown}` });
+it("holds no more than 16 reads for one account across its computers", async () => {
+  const { storage, call } = await relay();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const head = storage.chatWakeHead.bind(storage);
+  let parked = 0;
+  let all!: () => void;
+  const filled = new Promise<void>((resolve) => { all = resolve; });
+  vi.spyOn(storage, "chatWakeHead").mockImplementation((accountId) => {
+    if (++parked === 16) all();
+    return head(accountId);
+  });
+  const read = (installId: string) => call("GET", `/sync/wakes?installId=${installId}&wait=${CHAT_WAKE_WAIT_MAX_MS}`);
+  // Two reads on each of eight computers fill the account.
+  const waiting = Array.from({ length: 16 }, (_, index) => read(`computer-${index % 8}`));
+  await filled;
+  const busy = await read("computer-8");
+  expect([busy.status, (await json(busy)).code]).toEqual([503, "server_busy"]);
+  vi.advanceTimersByTime(CHAT_WAKE_WAIT_MAX_MS);
+  for (const response of await Promise.all(waiting)) expect(response.status).toBe(200);
+});
 
-  for (const args of [
-    { operationId: "retry-3", wakeId, installId: "mac" },
-    { operationId: "retry-3", wakeId, messageId: "message-1" },
-    { operationId: "retry-3", wakeId: "wake-1" },
-    { operationId: "", wakeId },
-    { wakeId },
-  ]) {
-    const response = await retry(args);
-    expect({ status: response.status, body: await json(response) }, JSON.stringify(args))
-      .toEqual({ status: 400, body: { ok: false, code: "bad_request", error: "the arguments do not fit retryWake" } });
-  }
-  const missing = await denialBytes(await retry({ operationId: "retry-4", wakeId }, "ana", "nowhere"));
-  expect(await denialBytes(await retry({ operationId: "retry-4", wakeId }, "ben"))).toBe(missing);
-  storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
-  expect(await denialBytes(await retry({ operationId: "retry-4", wakeId }))).toBe(missing);
+it("answers no wake of a workspace deleted while the final sign-in check waits", async () => {
+  const { storage, call, publish, holdSession } = await relay();
+  publish("op-1", "message-1", [target("claude", "mac")]);
+  // The request's own check is the first; the check before the read is the second.
+  const held = holdSession(2);
+  const reading = call("GET", "/sync/wakes?installId=mac");
+  await held.reached;
+  const db = inspectDatabase(storagePath(storage), { foreignKeys: true });
+  db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id = 'trip'").run();
+  db.close();
+  held.release();
+  expect(await json(await reading)).toEqual({ ok: true, cursor: "1", wakes: [] });
 });

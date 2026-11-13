@@ -1,17 +1,15 @@
-import { phoneRetryWakeArgsSchema } from "@dohc/cli/protocol";
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
 import { handleForName, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
 import { asRecord } from "@dohc/workspace-core";
-import type { MissingResult } from "./accountOperations";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { DiscussionActivityCapacityError, type DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
-import { COULD_NOT_SEND, type RefusalReason } from "./operationPublication";
+import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import { observeChatWakeChanges } from "./relayWriteChanges";
 import { parseString, parseWorkspaceId } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
-import { CHAT_RUNNER_AGENTS, type ChatRunner, type ChatWakeView } from "./storage/chatWakes";
+import { CHAT_RUNNER_AGENTS, type ChatRunner } from "./storage/chatWakes";
 
 // The routes an owner's computers use to wake its agents: declare the agents
 // each computer runs in a workspace, wait for wakes that list the computer,
@@ -34,7 +32,7 @@ export const CHAT_WAKE_WAITS_PER_INSTALL = 2;
 const BODY_MAX_BYTES = 32 * 1024;
 const BODY_RECEIPT_MS = 10_000;
 const WAKE_ID = /^wake-[0-9a-f]{32}$/u;
-// A desktop agent's settings ID.
+// A desktop agent's settings ID. A personal agent's starts with `p-` and is never a runner.
 const AGENT_ID = /^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/u;
 const SEQUENCE = /^(?:0|[1-9]\d{0,15})$/u;
 
@@ -130,7 +128,9 @@ function parseDeclaration(body: Record<string, unknown>): Declaration {
   const runners = listed.map((value) => {
     const runner = asRecord(value);
     if (runner === null || !exactly(runner, ["agentId", "displayName", "enabled"]) || typeof runner.agentId !== "string" ||
-      !AGENT_ID.test(runner.agentId) || typeof runner.enabled !== "boolean") throw badRequest(shape);
+      !AGENT_ID.test(runner.agentId) || runner.agentId.startsWith(PERSONAL_AGENT_ID_PREFIX) || typeof runner.enabled !== "boolean") {
+      throw badRequest(shape);
+    }
     const displayName = parseString(runner.displayName, "displayName", 200);
     return { agentId: runner.agentId, displayName, handle: normalizeHandle(handleForName(displayName)), enabled: runner.enabled };
   });
@@ -190,17 +190,17 @@ export function createChatWakeRoutes(options: {
       const installId = parseString(url.searchParams.get("installId"), "installId", 256);
       const since = parseSequence(url.searchParams.get("since"), "since");
       const deadlineAtMs = Date.now() + parseSequence(url.searchParams.get("wait"), "wait", CHAT_WAKE_WAIT_MAX_MS);
-      const list = () => storage.listWaitingChatWakes({ accountId, installId, since, nowMs: options.nowMs() });
       // Parks only while nothing changed after `since`: a head that moved answers at once, even with no wake for this computer.
-      let page = list();
-      while (page.wakes.length === 0 && page.cursor === since && deadlineAtMs > Date.now() && !request.signal.aborted) {
+      // The sign-in is checked before each read, and nothing is awaited between the last read, which checks the owner, and the answer.
+      for (;;) {
+        await same();
+        const page = storage.listWaitingChatWakes({ accountId, installId, since, nowMs: options.nowMs() });
+        if (page.wakes.length > 0 || page.cursor !== since || deadlineAtMs <= Date.now() || request.signal.aborted) {
+          return jsonResponse({ ok: true, cursor: String(page.cursor), wakes: page.wakes });
+        }
         await waits.wait({ accountId, installId, caller: caller.sessionId, holdMs: deadlineAtMs - Date.now(), signal: request.signal,
           shouldPark: () => storage.chatWakeHead(accountId) === since });
-        await same();
-        page = list();
       }
-      await same();
-      return jsonResponse({ ok: true, cursor: String(page.cursor), wakes: page.wakes });
     }
 
     if (route.route === "chat-runners") {
@@ -224,22 +224,4 @@ export function createChatWakeRoutes(options: {
     if (confirmed === null) throw notFound();
     return jsonResponse({ ok: true, wake: confirmed });
   };
-}
-
-/** A Try again's answer: the next generation, a refusal from the closed list, or a wake the account can't reach, as reads answer one. */
-type RetryWakeAnswer = { ok: true; wake: ChatWakeView } | { ok: false; refusal: "refused"; reason: RefusalReason } | MissingResult;
-
-/**
- * The phone's Try again on a wake that didn't start or wasn't confirmed,
- * with its strict arguments. The caller has checked the account, its
- * ownership, and "Show on phone".
- */
-export function runRetryWake(storage: SyncRelayStorage, input: { accountId: string; workspaceId: string; args: unknown; nowMs: number }): RetryWakeAnswer {
-  const parsed = phoneRetryWakeArgsSchema.safeParse(input.args);
-  if (!parsed.success) throw badRequest("the arguments do not fit retryWake");
-  const { operationId, wakeId } = parsed.data;
-  const retried = storage.retryChatWake({ accountId: input.accountId, workspaceId: input.workspaceId, operationId, wakeId, nowMs: input.nowMs });
-  if (retried.kind === "retried") return { ok: true, wake: retried.wake };
-  if (retried.kind === "missing") return { ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" };
-  return { ok: false, refusal: "refused", reason: COULD_NOT_SEND };
 }

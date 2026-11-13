@@ -18,11 +18,19 @@ import type { ChatRunner, ChatWakeCandidate, ChatWakeTarget, OperationWakeChange
 export type FrozenWakes = { targets: ChatWakeTarget[]; unmatched: boolean };
 
 const NO_WAKES: FrozenWakes = { targets: [], unmatched: false };
-// The most targets one message wakes.
-const MAX_TARGETS = 32;
+/** The most candidates one message's targets list, all together. A message past it isn't sent. */
+export const MAX_WAKE_CANDIDATES = 64;
+
+/** A message would wake more computers' agents than MAX_WAKE_CANDIDATES. */
+export class TooManyWakeCandidates extends Error {
+  constructor() {
+    super(`A message wakes at most ${MAX_WAKE_CANDIDATES} agents on the account's computers.`);
+    this.name = "TooManyWakeCandidates";
+  }
+}
 
 // The characters the engine drops from a name (names.rs, shown_name), keeping ZWNJ, ZWJ, and variation selectors.
-const HIDDEN_IN_NAMES = /(?![‌‍\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+const HIDDEN_IN_NAMES = /(?![\u200C\u200D\p{Variation_Selector}])[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
 
 /** A name as the engine shows it: hidden characters dropped, trimmed, and cut to 40 characters. */
 export function shownName(name: string): string {
@@ -37,8 +45,10 @@ export interface WakeSources {
   thread(threadId: string): Promise<ChatThread | null>;
   /** A visible thread's first message. */
   opening(threadId: string): Promise<ChatMessage | null>;
-  /** The agent of an agent's DM, and its newest messages, oldest first. Null for any other channel. */
-  dm(channelId: string): Promise<{ agentId: string; messages: readonly ChatMessage[] } | null>;
+  /** The agent of an agent's DM, or null for any other channel. */
+  dmAgent(channelId: string): Promise<string | null>;
+  /** The newest message `pick` keeps in any of the channel's threads, replies included, across its whole history. */
+  latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<ChatMessage | null>;
 }
 
 type AgentMessage = ChatMessage & { authorAgentId: string };
@@ -53,8 +63,8 @@ async function answeredMessages(sources: WakeSources, accountId: string, write: 
   const ours = accountAgent(accountId);
   const found: Array<ChatMessage | null | undefined> = [];
   const dm = async (channelId: string) => {
-    const chat = await sources.dm(channelId);
-    if (chat !== null) found.push(chat.messages.findLast((message) => ours(message) && message.authorAgentId === chat.agentId));
+    const agentId = await sources.dmAgent(channelId);
+    if (agentId !== null) found.push(await sources.latest(channelId, (message) => ours(message) && message.authorAgentId === agentId));
   };
   if (write.kind === "start") {
     if (write.lane === "chat") await dm(write.channelId);
@@ -73,6 +83,8 @@ async function answeredMessages(sources: WakeSources, accountId: string, write: 
 const candidateOf = (runner: ChatRunner, matched: ChatWakeCandidate["matched"]): ChatWakeCandidate =>
   ({ installId: runner.installId, agentId: runner.agentId, label: runner.computerLabel, matched });
 const pair = (candidate: ChatWakeCandidate) => JSON.stringify([candidate.installId, candidate.agentId]);
+// An agent across computers: its local ID alone can name another agent elsewhere, so its shown name goes with it.
+const agentKey = (agentId: string, displayName: string) => JSON.stringify([agentId, shownName(displayName)]);
 
 /**
  * A write's wake targets. Each handle the body mentions that enabled agents
@@ -80,17 +92,19 @@ const pair = (candidate: ChatWakeCandidate) => JSON.stringify([candidate.install
  * An agent the write answers is a target only when exactly one enabled agent
  * matches its ID and name; one already in a mention target, or a repeat, adds
  * nothing. A reaction, or an account with no enabled agents, wakes nothing.
+ * Throws TooManyWakeCandidates past MAX_WAKE_CANDIDATES, rather than wake some.
  */
 export async function resolveWakeTargets(sources: WakeSources, accountId: string, write: WriteCommand): Promise<FrozenWakes> {
   const runners = sources.runners.filter((runner) => runner.enabled);
   if (write.kind === "react" || runners.length === 0) return NO_WAKES;
   const mentions: ChatWakeTarget[] = [];
+  const mentionedAgents = new Set<string>();
   for (const handle of new Set(chatMentionTokens(write.body).map((token) => normalizeHandle(token.handle)))) {
-    const candidates = runners.filter((runner) => runner.handle !== "" && runner.handle === handle).map((runner) => candidateOf(runner, { handle }));
-    if (candidates.length > 0) mentions.push({ target: `mention:${handle}`, candidates });
+    const matching = runners.filter((runner) => runner.handle !== "" && runner.handle === handle);
+    for (const runner of matching) mentionedAgents.add(agentKey(runner.agentId, runner.displayName));
+    if (matching.length > 0) mentions.push({ target: `mention:${handle}`, candidates: matching.map((runner) => candidateOf(runner, { handle })) });
   }
   const mentioned = new Set(mentions.flatMap((target) => target.candidates.map(pair)));
-  const mentionedAgents = new Set(mentions.flatMap((target) => target.candidates.map((candidate) => candidate.agentId)));
   const implicit = new Map<string, ChatWakeTarget>();
   let unmatched = false;
   for (const message of await answeredMessages(sources, accountId, write)) {
@@ -98,14 +112,16 @@ export async function resolveWakeTargets(sources: WakeSources, accountId: string
     const matches = runners.filter((runner) => runner.agentId === message.authorAgentId && shownName(runner.displayName) === name);
     const [runner] = matches;
     if (matches.length !== 1 || runner === undefined) {
-      if (!mentionedAgents.has(message.authorAgentId)) unmatched = true;
+      if (!mentionedAgents.has(agentKey(message.authorAgentId, message.author.displayName))) unmatched = true;
       continue;
     }
     const candidate = candidateOf(runner, { displayName: runner.displayName });
     const target = `implicit:${runner.installId}:${runner.agentId}`;
     if (!mentioned.has(pair(candidate))) implicit.set(target, { target, candidates: [candidate] });
   }
-  return { targets: [...mentions, ...implicit.values()].slice(0, MAX_TARGETS), unmatched };
+  const targets = [...mentions, ...implicit.values()];
+  if (targets.reduce((total, target) => total + target.candidates.length, 0) > MAX_WAKE_CANDIDATES) throw new TooManyWakeCandidates();
+  return { targets, unmatched };
 }
 
 /** The wakes an operation's command froze. A command without them wakes nothing. */

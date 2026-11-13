@@ -267,7 +267,7 @@ export function recordOperation(storage: StorageContext, input: RecordOperationI
        SELECT ?, ?, ?, 'recorded', ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL,
          (SELECT COALESCE(MAX(relay_seq), 0) FROM sync_relay_log WHERE workspace_id = ?), NULL
        WHERE EXISTS (SELECT 1 FROM sync_relay_workspaces WHERE workspace_id = ? AND owner_user_id = ?)
-         AND NOT EXISTS (SELECT 1 FROM sync_relay_chat_wakes WHERE account_id = ? AND retry_operation_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?)
        ON CONFLICT (account_id, operation_id) DO NOTHING`,
     ).run(
       input.accountId, input.operationId, hash, input.binding.workspaceId, input.incarnation, input.replicationEpoch,

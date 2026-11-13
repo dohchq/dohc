@@ -7,6 +7,7 @@ const MARKER = "chat-wakes-v1";
 const RUNNERS = "sync_relay_chat_runners";
 const WAKES = "sync_relay_chat_wakes";
 const HEADS = "sync_relay_chat_wake_heads";
+export const CHAT_WAKE_RETRIES = "sync_relay_chat_wake_retries";
 
 // The whole chat wake schema. Nothing that existed before reads these tables.
 //
@@ -19,12 +20,17 @@ const HEADS = "sync_relay_chat_wake_heads";
 // generation. It names the message and its actual thread by ID and holds no
 // message text. `candidates_json` is the frozen list of computers that may
 // claim it: `[{installId, agentId, label, matched: {handle} | {displayName}}]`.
-// Only one computer wins a row. A retry adds the next generation and names its
-// own operation ID. `change_seq` is the account's head when the row last
-// changed, which computers read after. Rows go with the workspace, and 30
-// days after they end.
+// Only one computer wins a row. A retry adds the next generation.
+// `change_seq` is the account's head when the row last changed, which
+// computers read after. Rows go with the workspace, and 30 days after they end.
 //
 // Heads: each account's last `change_seq`.
+//
+// Retries: each phone Try again that answered a generation, by the account
+// and the phone's operation ID, with the wake it named and the generation it
+// answered. It has no foreign key: it stays as long as the account, after its
+// wakes or its workspace go, so a replay is told apart from a new request and
+// its operation ID never names a write. Account deletion removes it.
 const SCHEMA = {
   [RUNNERS]: `CREATE TABLE sync_relay_chat_runners (
   account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 256),
@@ -53,7 +59,6 @@ const SCHEMA = {
   winner_install_id TEXT CHECK (winner_install_id IS NULL OR length(winner_install_id) BETWEEN 1 AND 256),
   winner_agent_id TEXT CHECK (winner_agent_id IS NULL OR length(winner_agent_id) BETWEEN 1 AND 64),
   winner_label TEXT CHECK (winner_label IS NULL OR length(winner_label) BETWEEN 1 AND 64),
-  retry_operation_id TEXT CHECK (retry_operation_id IS NULL OR length(retry_operation_id) BETWEEN 1 AND 128),
   change_seq INTEGER NOT NULL CHECK (change_seq BETWEEN 1 AND 9007199254740991),
   created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
   waiting_since_ms INTEGER CHECK (waiting_since_ms IS NULL OR waiting_since_ms BETWEEN 0 AND 9007199254740991),
@@ -64,19 +69,25 @@ const SCHEMA = {
   CHECK ((state IN ('claimed', 'queued', 'unconfirmed')) = (winner_install_id IS NOT NULL)),
   CHECK ((winner_install_id IS NULL) = (winner_agent_id IS NULL) AND (winner_install_id IS NULL) = (winner_label IS NULL)
     AND (winner_install_id IS NULL) = (claimed_at_ms IS NULL)),
-  CHECK ((state IN ('queued', 'unclaimed', 'unconfirmed')) = (ended_at_ms IS NOT NULL)),
-  CHECK ((generation = 1) = (retry_operation_id IS NULL))
+  CHECK ((state IN ('queued', 'unclaimed', 'unconfirmed')) = (ended_at_ms IS NOT NULL))
 ) STRICT`,
   [HEADS]: `CREATE TABLE sync_relay_chat_wake_heads (
   account_id TEXT NOT NULL PRIMARY KEY CHECK (length(account_id) BETWEEN 1 AND 256),
   head INTEGER NOT NULL CHECK (head BETWEEN 1 AND 9007199254740991)
 ) STRICT`,
+  [CHAT_WAKE_RETRIES]: `CREATE TABLE sync_relay_chat_wake_retries (
+  account_id TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 256),
+  operation_id TEXT NOT NULL CHECK (length(operation_id) BETWEEN 1 AND 128),
+  workspace_id TEXT NOT NULL CHECK (length(workspace_id) >= 1),
+  wake_id TEXT NOT NULL CHECK (length(wake_id) = 37),
+  next_wake_id TEXT NOT NULL CHECK (length(next_wake_id) = 37),
+  created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
+  PRIMARY KEY (account_id, operation_id)
+) STRICT`,
   idx_sync_relay_chat_wakes_changes: `CREATE INDEX idx_sync_relay_chat_wakes_changes
   ON sync_relay_chat_wakes(account_id, change_seq)`,
   idx_sync_relay_chat_wakes_operation: `CREATE INDEX idx_sync_relay_chat_wakes_operation
   ON sync_relay_chat_wakes(account_id, operation_id)`,
-  idx_sync_relay_chat_wakes_retry: `CREATE UNIQUE INDEX idx_sync_relay_chat_wakes_retry
-  ON sync_relay_chat_wakes(account_id, retry_operation_id) WHERE retry_operation_id IS NOT NULL`,
   idx_sync_relay_chat_wakes_waiting: `CREATE INDEX idx_sync_relay_chat_wakes_waiting
   ON sync_relay_chat_wakes(waiting_since_ms) WHERE state = 'waiting'`,
   idx_sync_relay_chat_wakes_claimed: `CREATE INDEX idx_sync_relay_chat_wakes_claimed
@@ -88,8 +99,8 @@ const SCHEMA = {
 const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu, " ");
 
 function assertSchema(db: SqliteDb): void {
-  const objects = db.prepare("SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (?, ?, ?) AND sql IS NOT NULL ORDER BY name")
-    .all(RUNNERS, WAKES, HEADS);
+  const objects = db.prepare("SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (?, ?, ?, ?) AND sql IS NOT NULL ORDER BY name")
+    .all(RUNNERS, WAKES, HEADS, CHAT_WAKE_RETRIES);
   const expected = Object.keys(SCHEMA).sort();
   const schema: Record<string, string> = SCHEMA;
   if (
@@ -185,6 +196,8 @@ export type ChatWakeRetry =
   | { kind: "mismatch" }
   /** No such wake for this account in this workspace. */
   | { kind: "missing" }
+  /** A repeat whose generation is gone. */
+  | { kind: "too-old" }
   /** Not a latest generation that didn't start or wasn't confirmed, or no candidate is left. */
   | { kind: "refused" };
 
@@ -320,7 +333,13 @@ export function applyOperationWakesInTransaction(storage: StorageContext, operat
 
 /** Whether a retry used this operation ID. Inside the caller's transaction. */
 export function retryUsesOperationIdInTransaction(storage: StorageContext, accountId: string, operationId: string): boolean {
-  return Boolean(storage.db.prepare("SELECT 1 FROM sync_relay_chat_wakes WHERE account_id = ? AND retry_operation_id = ?").get(accountId, operationId));
+  return Boolean(storage.db.prepare("SELECT 1 FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?").get(accountId, operationId));
+}
+
+/** The thread of a wake the account has in a workspace it owns, or null. */
+export function chatWakeThread(storage: StorageContext, input: { accountId: string; workspaceId: string; wakeId: string }): string | null {
+  return storage.readTx(() => nullableString(storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ? AND c.workspace_id = ?`)
+    .get(input.wakeId, input.accountId, input.workspaceId)?.thread_id ?? null));
 }
 
 /** The account's change head for its wakes. */
@@ -400,21 +419,24 @@ export function confirmChatWakeQueued(storage: StorageContext, input: {
 
 /**
  * Try again: the next generation of a wake that didn't start or wasn't
- * confirmed, in one transaction. A repeat of the same operation answers the
- * row it made; the operation ID used for anything else is a mismatch. A
- * superseded generation answers its next row. The new generation keeps the
- * candidates, less an unconfirmed winner, and is never made with none. The
- * old row stays as it is.
+ * confirmed, in one transaction. Each answered generation binds the
+ * operation ID to the wake it named: a repeat answers the same generation,
+ * or too old once that is gone, and the ID used for anything else is a
+ * mismatch. A superseded generation answers its next row. The new
+ * generation keeps the candidates, less an unconfirmed winner, and is never
+ * made with none. The old row stays as it is.
  */
 export function retryChatWake(storage: StorageContext, input: {
   accountId: string; workspaceId: string; operationId: string; wakeId: string; nowMs: number;
 }): ChatWakeRetry {
   const { accountId, workspaceId, operationId, nowMs } = input;
   return storage.tx(() => {
-    const made = storage.db.prepare("SELECT * FROM sync_relay_chat_wakes WHERE account_id = ? AND retry_operation_id = ?").get(accountId, operationId);
-    if (made !== undefined) {
-      const source = chatWakeId(accountId, String(made.workspace_id), String(made.message_id), String(made.target), Number(made.generation) - 1);
-      return made.workspace_id === workspaceId && source === input.wakeId ? { kind: "retried", wake: viewOf(made) } : { kind: "mismatch" };
+    const owned = (wakeId: string) => storage.db.prepare(`${OWNED} WHERE c.wake_id = ? AND c.account_id = ?`).get(wakeId, accountId);
+    const bound = storage.db.prepare("SELECT * FROM sync_relay_chat_wake_retries WHERE account_id = ? AND operation_id = ?").get(accountId, operationId);
+    if (bound !== undefined) {
+      if (bound.workspace_id !== workspaceId || bound.wake_id !== input.wakeId) return { kind: "mismatch" };
+      const answered = owned(String(bound.next_wake_id));
+      return answered === undefined ? { kind: "too-old" } : { kind: "retried", wake: viewOf(answered) };
     }
     if (storage.db.prepare("SELECT 1 FROM sync_relay_account_operations WHERE account_id = ? AND operation_id = ?").get(accountId, operationId)) {
       return { kind: "mismatch" };
@@ -424,20 +446,26 @@ export function retryChatWake(storage: StorageContext, input: {
     if (found === undefined) return { kind: "missing" };
     const generation = Number(found.generation) + 1;
     const nextId = chatWakeId(accountId, workspaceId, String(found.message_id), String(found.target), generation);
-    const next = storage.db.prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?").get(nextId);
-    if (next !== undefined) return { kind: "retried", wake: viewOf(next) };
+    const answer = (): ChatWakeRetry => {
+      storage.db.prepare(
+        `INSERT INTO sync_relay_chat_wake_retries (account_id, operation_id, workspace_id, wake_id, next_wake_id, created_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(accountId, operationId, workspaceId, input.wakeId, nextId, nowMs);
+      return { kind: "retried", wake: viewOf(owned(nextId)!) };
+    };
+    if (owned(nextId) !== undefined) return answer();
     const source = expire(storage, found, nowMs);
     if (source.state !== "unclaimed" && source.state !== "unconfirmed") return { kind: "refused" };
     const candidates = candidatesOf(source).filter((each) => source.state !== "unconfirmed" || each.installId !== source.winner_install_id);
     if (candidates.length === 0) return { kind: "refused" };
     storage.db.prepare(
       `INSERT INTO sync_relay_chat_wakes (wake_id, account_id, workspace_id, operation_id, message_id, thread_id, target, generation,
-         candidates_json, state, prerequisite_message_id, retry_operation_id, change_seq, created_at_ms, waiting_since_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?)`,
+         candidates_json, state, prerequisite_message_id, change_seq, created_at_ms, waiting_since_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?)`,
     ).run(nextId, accountId, workspaceId, source.operation_id, source.message_id, source.thread_id, source.target, generation,
-      JSON.stringify(candidates), source.prerequisite_message_id, operationId, bump(storage, accountId), nowMs, nowMs);
+      JSON.stringify(candidates), source.prerequisite_message_id, bump(storage, accountId), nowMs, nowMs);
     notifyChatWakeChange(storage, accountId);
-    return { kind: "retried", wake: viewOf(storage.db.prepare("SELECT * FROM sync_relay_chat_wakes WHERE wake_id = ?").get(nextId)!) };
+    return answer();
   });
 }
 

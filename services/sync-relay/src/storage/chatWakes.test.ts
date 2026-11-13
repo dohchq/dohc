@@ -45,7 +45,7 @@ function publish(storage: SyncRelayStorage, operationId: string, messageId: stri
 function wakes(storage: SyncRelayStorage) {
   return (storage as StorageContext).db.prepare(
     `SELECT wake_id, account_id, workspace_id, message_id, thread_id, target, generation, state, candidates_json, prerequisite_message_id,
-       winner_install_id, retry_operation_id, change_seq FROM sync_relay_chat_wakes ORDER BY account_id, workspace_id, message_id, generation`,
+       winner_install_id, change_seq FROM sync_relay_chat_wakes ORDER BY account_id, workspace_id, message_id, generation`,
   ).all().map((row) => ({ ...row, candidates_json: JSON.parse(String(row.candidates_json)) as unknown }));
 }
 
@@ -62,7 +62,7 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   };
   const older = inspectDatabase(path);
   older.exec(`DROP TABLE sync_relay_chat_wakes; DROP TABLE sync_relay_chat_runners; DROP TABLE sync_relay_chat_wake_heads;
-    DELETE FROM sync_relay_migrations WHERE migration_id = '${MARKER}';`);
+    DROP TABLE sync_relay_chat_wake_retries; DELETE FROM sync_relay_migrations WHERE migration_id = '${MARKER}';`);
   older.close();
 
   const upgraded = reopenTestStorage(path);
@@ -84,21 +84,38 @@ it("creates the chat wake tables on an older relay once, and refuses an unmarked
   expect(() => reopenTestStorage(path)).toThrow("unmarked chat wake schema already exists");
   const damaged = inspectDatabase(path);
   damaged.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, 1)").run(MARKER);
-  damaged.exec("DROP INDEX idx_sync_relay_chat_wakes_retry");
+  damaged.exec("DROP INDEX idx_sync_relay_chat_wakes_ended");
   damaged.close();
   expect(() => reopenTestStorage(path)).toThrow("chat wake schema is missing or damaged");
 });
 
-it("deletes runners and wakes with their workspace, and everything of an account with it", async () => {
+it("deletes runners and wakes with their workspace, keeps retries' bindings, and deletes everything of an account with it", async () => {
   const storage = await relay();
+  const context = storage as StorageContext;
+  const owner = (workspaceId: string, ownerUserId: string) =>
+    context.db.prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?").run(ownerUserId, workspaceId);
+  // A wake that wasn't confirmed, tried again under `operationId`.
+  const retried = (accountId: string, workspaceId: string, operationId: string) => {
+    const wakeId = wakeOf(`message-${workspaceId}`, "claude", 1, workspaceId, accountId);
+    storage.claimChatWake({ accountId, wakeId, installId: "mac", nowMs: NOW });
+    expect(storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: NOW + CHAT_WAKE_CONFIRM_MS }).kind).toBe("retried");
+  };
+  const bindings = () => context.db.prepare("SELECT account_id, workspace_id FROM sync_relay_chat_wake_retries ORDER BY account_id, workspace_id").all();
   const declare = (accountId: string, workspaceId: string) => storage.replaceChatRunners({
     accountId, workspaceId, installId: "mac", computerLabel: "Mac", runners: [{ agentId: "default", handle: "claude", displayName: "Claude", enabled: true }], nowMs: NOW,
   });
   for (const [accountId, workspaceId] of [["ana", "trip"], ["ana", "other"], ["ben", "bens"]] as const) {
     expect(declare(accountId, workspaceId)).toBe(true);
-    publish(storage, `op-${workspaceId}`, `message-${workspaceId}`, [target("claude", "mac")], { accountId, workspaceId });
+    publish(storage, `op-${workspaceId}`, `message-${workspaceId}`, [target("claude", "mac", "laptop")], { accountId, workspaceId });
   }
   expect(declare("ben", "trip"), "only the owner declares").toBe(false);
+  retried("ana", "trip", "retry-trip");
+  retried("ben", "bens", "retry-bens");
+  // Ben's wake in a workspace he owned then, which Ana owns when her account goes.
+  owner("other", "ben");
+  publish(storage, "op-ben-other", "message-other", [target("claude", "mac", "laptop")], { accountId: "ben", workspaceId: "other" });
+  retried("ben", "other", "retry-ben-other");
+  owner("other", "ana");
 
   const db = inspectDatabase(storagePath(storage), { foreignKeys: true });
   db.prepare("DELETE FROM sync_relay_workspaces WHERE workspace_id = ?").run("trip");
@@ -107,8 +124,12 @@ it("deletes runners and wakes with their workspace, and everything of an account
     .map((row) => row.workspace_id);
   expect(left("sync_relay_chat_runners")).toEqual(["bens", "other"]);
   expect(left("sync_relay_chat_wakes")).toEqual(["bens", "other"]);
+  expect(bindings(), "a binding outlives its wake's workspace").toEqual([
+    { account_id: "ana", workspace_id: "trip" }, { account_id: "ben", workspace_id: "bens" }, { account_id: "ben", workspace_id: "other" },
+  ]);
+  expect(storage.retryChatWake({ accountId: "ana", workspaceId: "trip", operationId: "retry-trip", wakeId: wakeOf("message-trip"), nowMs: NOW }))
+    .toEqual({ kind: "too-old" });
 
-  const context = storage as StorageContext;
   initializeAccountDeletion(context, "account-deletion-test-key");
   purgeAccountRows(context, "ana", "ana@dohc.test", {
     workspaces: [{ workspaceId: "other", replicationEpoch: null, streamIdentity: null }], shareIds: [], datasets: [], grantIds: [], publicationIds: [],
@@ -116,6 +137,7 @@ it("deletes runners and wakes with their workspace, and everything of an account
   expect(left("sync_relay_chat_runners")).toEqual(["bens"]);
   expect(left("sync_relay_chat_wakes")).toEqual(["bens"]);
   expect(context.db.prepare("SELECT account_id FROM sync_relay_chat_wake_heads").all()).toEqual([{ account_id: "ben" }]);
+  expect(bindings()).toEqual([{ account_id: "ben", workspace_id: "bens" }, { account_id: "ben", workspace_id: "other" }]);
 });
 
 it("makes a published message's wakes in its verdict's transaction, holds an answer's, and makes none when that fails", async () => {
@@ -125,7 +147,7 @@ it("makes a published message's wakes in its verdict's transaction, holds an ans
   message(published);
   expect(wakes(storage)).toEqual([expect.objectContaining({
     wake_id: wakeOf("message-1", "claude"), message_id: "message-1", thread_id: "thread-1", target: "mention:claude", generation: 1, state: "waiting",
-    candidates_json: target("claude", "mac", "laptop").candidates, change_seq: 1, retry_operation_id: null,
+    candidates_json: target("claude", "mac", "laptop").candidates, change_seq: 1,
   })]);
 
   // An answer's wake waits for its decision: released with the question as its prerequisite once saved.
@@ -208,7 +230,7 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
   const next = wakeOf("message-1", "claude", 2);
   expect(retry("retry-1")).toEqual({ kind: "retried", wake: expect.objectContaining({ wakeId: next, generation: 2, state: "waiting" }) });
   expect(wakes(storage).find((row) => row.wake_id === next)).toMatchObject({
-    candidates_json: target("claude", "laptop").candidates, retry_operation_id: "retry-1", message_id: "message-1",
+    candidates_json: target("claude", "laptop").candidates, message_id: "message-1",
   });
   expect(wakes(storage).find((row) => row.wake_id === source), "the old row stays").toMatchObject({ state: "unconfirmed", winner_install_id: "mac" });
   expect(retry("retry-1"), "a repeat answers its row").toMatchObject({ kind: "retried", wake: { wakeId: next } });
@@ -220,6 +242,12 @@ it("retries a wake that didn't start or wasn't confirmed once per generation, bo
   }), "a write can't take a retry's key").toEqual({ kind: "mismatch" });
   expect(retry("retry-2"), "a superseded generation answers its next row").toMatchObject({ kind: "retried", wake: { wakeId: next } });
   expect(count(storage, "sync_relay_chat_wakes")).toBe(3);
+  // That answer binds its key too.
+  expect(retry("retry-2", wakeOf("message-2", "codex"))).toEqual({ kind: "mismatch" });
+  expect(storage.recordAccountOperation({
+    accountId: "ana", operationId: "retry-2", binding: { workspaceId: "trip", operation: "reply", args: {} }, incarnation: 1,
+    replicationEpoch: "epoch", streamIdentity: "stream", command: {}, writesMessage: true, nowMs: NOW,
+  })).toEqual({ kind: "mismatch" });
 
   // The old winner can't claim the new generation; its late queued settles only its own row.
   expect(storage.claimChatWake({ accountId: "ana", wakeId: next, installId: "mac", nowMs: NOW + 1 })).toBeNull();

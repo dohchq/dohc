@@ -2,6 +2,7 @@ import { accountDeletionIdentity, type AccountDeletionScope } from "@dohc/worksp
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import { normalizeEmail } from "@dohc/workspace-auth/signUp";
 import { noticeIdFrom } from "./notices";
+import { CHAT_WAKE_RETRIES } from "./chatWakes";
 import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
 import { retireUncoveredServiceActivations, serviceHostEnrollmentsCoveredByShare } from "./serviceHostEnrollment";
@@ -125,8 +126,10 @@ export function purgeAccountRows(storage: StorageContext, userId: string, email:
       const columns = storage.db.prepare("PRAGMA table_info(" + identifier(table) + ")").all().map(row => String(row.name));
       if (table === "sync_relay_account_deletions" || table === "sync_relay_ended_shares" || table === "sync_relay_deleted_workspaces") continue;
       for (const workspace of manifest.workspaces) {
-        // Deleting the workspace row leaves another account's operations as tombstones.
-        if (columns.includes("workspace_id") && table !== ACCOUNT_OPERATIONS) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE workspace_id=?").run(workspace.workspaceId);
+        // Deleting the workspace row leaves another account's operations as tombstones, and its wake retries' bindings.
+        if (columns.includes("workspace_id") && table !== ACCOUNT_OPERATIONS && table !== CHAT_WAKE_RETRIES) {
+          storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE workspace_id=?").run(workspace.workspaceId);
+        }
         if (columns.includes("recipient_share_id")) for (const shareId of manifest.shareIds) storage.db.prepare("DELETE FROM " + identifier(table) + " WHERE recipient_share_id=?").run(shareId);
       }
       if (columns.includes("principal_key")) for (const grant of received) {

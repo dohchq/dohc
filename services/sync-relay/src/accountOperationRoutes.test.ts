@@ -16,6 +16,7 @@ import type { AutomationReplica } from "./automationReplicas";
 import { ACCOUNT_VISITS_PER_CALLER, startServerCopies } from "./serverCopies";
 import { streamsRequestBody } from "./server";
 import type { SyncRelayStorage } from "./storage";
+import { CHAT_WAKE_CONFIRM_MS, chatWakeId } from "./storage/chatWakes";
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, denialBytes, json, testHandler, testStorage } from "./testing";
 import { PhoneWriteEngine, seedPhoneChats } from "./testing/phoneWriteEngine";
@@ -920,7 +921,7 @@ describe("an account's chat writes through the server's copy", () => {
    * arguments, then after them, after the name lookup, once the copy is open,
    * and once the write's lock is held.
    */
-  async function writeRelay(options: { limiter?: TokenBucketLimiter } = {}) {
+  async function writeRelay(options: { limiter?: TokenBucketLimiter; nowMs?: () => number } = {}) {
     const storage = await testStorage();
     const context = storage as StorageContext;
     storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
@@ -1005,6 +1006,7 @@ describe("an account's chat writes through the server's copy", () => {
       accountOperationRateLimiter: options.limiter ?? new TokenBucketLimiter(10_000, 1, 16),
       lookupUserDisplayName: () => name(),
       relayPublicOrigin: ORIGIN,
+      ...(options.nowMs ? { nowMs: options.nowMs } : {}),
     });
     return {
       storage, engine, copy, h, syncs, seeded, change,
@@ -1310,6 +1312,111 @@ describe("an account's chat writes through the server's copy", () => {
     const bytes = async (operationId: string, threadId: string) =>
       (await (await f.write("reply", { operationId, threadId, body: "@claude hi" })).text()).replaceAll(threadId, "<id>");
     expect(await bytes("op-hidden", onSecret.id)).toBe(await bytes("op-missing", "thread-nowhere"));
+  });
+
+  // Declares one of Ana's computers and the agents it runs in "trip".
+  const declare = async (f: WriteRelay, installId: string, runners: Array<{ agentId: string; displayName: string }>) => {
+    const response = await f.h(new Request("http://relay.test/sync/workspaces/trip/runners", {
+      method: "PUT", headers: { ...signedIn("ana", "mac"), "content-type": "application/json" },
+      body: JSON.stringify({ installId, computerLabel: `${installId} label`, runners: runners.map((runner) => ({ ...runner, enabled: true })) }),
+    }));
+    expect(response.status, await response.clone().text()).toBe(200);
+  };
+  const frozenTargets = (f: WriteRelay, operationId: string) => (JSON.parse(String((f.storage as StorageContext).db.prepare(
+    "SELECT command_json FROM sync_relay_account_operations WHERE account_id = 'ana' AND operation_id = ?").get(operationId)?.command_json)) as
+    { wakes: { targets: Array<{ target: string; candidates: Array<{ installId: string; agentId: string }> }> } }).wakes.targets;
+
+  it("finds the agent of a DM from its whole history, replies included", async () => {
+    const f = await writeRelay();
+    const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
+    await declare(f, "mac", [{ agentId: "default", displayName: "Claude" }]);
+    await declare(f, "laptop", [{ agentId: "helper", displayName: "Claude" }]);
+    const human = { kind: "human" as const, displayName: "Ana" };
+    const agent = { author: { kind: "agent" as const, displayName: "Claude" }, authorOwnerDisplayName: "Ana", authorUserId: "ana", authorActorKey: null };
+    // The default agent last spoke in a reply; the helper in its DM's conversation. Then Ana wrote 55 more messages in each.
+    const dms: Record<string, string> = {};
+    for (const agentId of ["default", "helper"]) {
+      const dm = await chats.ensureAgentChannel({ workspaceId: "trip", agentId, name: "Claude" });
+      dms[agentId] = dm.channelId;
+      const threadId = `thread-dm-${agentId}`;
+      await chats.startChannelThread({ workspaceId: "trip", channelId: dm.channelId, threadId, messageId: `${threadId}-hello`, lane: "chat",
+        author: human, authorUserId: "ana", authorActorKey: null, body: "Hello" });
+      await chats.sendMessage({ workspaceId: "trip", threadId, messageId: `${threadId}-agent`, authorAgentId: agentId, ...agent, body: "Here.",
+        ...(agentId === "default" ? { parentMessageId: `${threadId}-hello` } : {}) });
+      for (let index = 0; index < 55; index += 1) {
+        await chats.sendMessage({ workspaceId: "trip", threadId, messageId: `${threadId}-${index}`, author: human, authorUserId: "ana",
+          authorActorKey: null, body: `Note ${index}` });
+      }
+    }
+    for (const [agentId, installId] of [["default", "mac"], ["helper", "laptop"]] as const) {
+      expect(await answer(await f.write("send", { operationId: `op-${agentId}`, streamId: dms[agentId], body: "Still there?" })))
+        .toMatchObject({ ok: true, state: "saved" });
+      expect(frozenTargets(f, `op-${agentId}`), agentId).toEqual([{ target: `implicit:${installId}:${agentId}`, candidates: [
+        { installId, agentId, label: `${installId} label`, matched: { displayName: "Claude" } },
+      ] }]);
+    }
+  });
+
+  it("keeps every target of a message, and refuses one that would wake more than 64 computers' agents before any change", async () => {
+    const f = await writeRelay();
+    const helpers = Array.from({ length: 33 }, (_, index) => ({ agentId: `helper-${index}`, displayName: `Helper ${index}` }));
+    const body = helpers.map((helper) => `@helper${helper.agentId.slice("helper-".length)}`).join(" ");
+    await declare(f, "mac", helpers);
+    expect(await answer(await f.write("reply", { operationId: "op-33", threadId: "thread-stay", body }))).toMatchObject({ ok: true, state: "saved" });
+    expect(frozenTargets(f, "op-33")).toHaveLength(33);
+
+    await declare(f, "laptop", helpers);
+    const [rows, writes] = [f.rows(), f.engine.writes.length];
+    expect(await answer(await f.write("reply", { operationId: "op-66", threadId: "thread-stay", body })))
+      .toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+    expect([f.rows(), f.engine.writes.length]).toEqual([rows, writes]);
+  });
+
+  it("tries a wake again with strict arguments, once per operation ID, and answers one in a thread now hidden as missing", async () => {
+    const NOW = 50_000_000;
+    const f = await writeRelay({ nowMs: () => NOW + CHAT_WAKE_CONFIRM_MS });
+    const { onSecret } = f.seeded;
+    const claude = { target: "mention:claude", candidates: ["mac", "laptop"].map((installId) =>
+      ({ installId, agentId: "default", label: installId, matched: { handle: "claude" } })) };
+    // A saved message's wake, claimed by one computer a day ago and never confirmed.
+    const unconfirmed = (operationId: string, messageId: string, threadId: string) => {
+      f.storage.recordAccountOperation({ accountId: "ana", operationId, binding: { workspaceId: "trip", operation: "send", args: { operationId } },
+        incarnation: 1, replicationEpoch: "epoch", streamIdentity: "stream", command: {}, writesMessage: true, nowMs: NOW });
+      f.storage.advanceAccountOperation({ accountId: "ana", operationId, stage: "saved", message: "published", result: { threadId }, nowMs: NOW,
+        wakes: { publish: { messageId, threadId, held: false, targets: [claude] } } });
+      const wakeId = chatWakeId("ana", "trip", messageId, "mention:claude", 1);
+      f.storage.claimChatWake({ accountId: "ana", wakeId, installId: "mac", nowMs: NOW });
+      return wakeId;
+    };
+    const visible = unconfirmed("op-visible", "message-visible", "thread-stay");
+    const hidden = unconfirmed("op-hidden", "message-hidden", onSecret.id);
+    const retry = (args: unknown) => f.write("retryWake", args);
+    const next = { ok: true, wake: expect.objectContaining({ wakeId: chatWakeId("ana", "trip", "message-visible", "mention:claude", 2), generation: 2 }) };
+    expect(await answer(await retry({ operationId: "retry-1", wakeId: visible }))).toEqual(next);
+    expect(await answer(await retry({ operationId: "retry-1", wakeId: visible }))).toEqual(next);
+    expect(await answer(await retry({ operationId: "op-visible", wakeId: visible }))).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
+
+    // A wake in a thread now on a secret file answers exactly as one that isn't there, and gets no generation.
+    const bytes = async (wakeId: string) => (await (await retry({ operationId: `retry-${wakeId}`, wakeId })).text()).replaceAll(wakeId, "<id>");
+    expect(await bytes(hidden)).toBe(await bytes(chatWakeId("ana", "trip", "message-nowhere", "mention:claude", 1)));
+    expect(await bytes(hidden)).toContain('"refusal":"missing"');
+    expect(Number((f.storage as StorageContext).db.prepare("SELECT count(*) AS n FROM sync_relay_chat_wakes WHERE message_id = 'message-hidden'").get()?.n))
+      .toBe(1);
+
+    for (const args of [
+      { operationId: "retry-2", wakeId: visible, installId: "mac" },
+      { operationId: "retry-2", wakeId: visible, messageId: "message-visible" },
+      { operationId: "retry-2", wakeId: "wake-1" },
+      { operationId: "", wakeId: visible },
+      { wakeId: visible },
+    ]) {
+      const response = await retry(args);
+      expect({ status: response.status, body: await json(response) }, JSON.stringify(args)).toEqual({ status: 400, body: schemaRefusal("retryWake") });
+    }
+    const missing = await denialBytes(await f.h(op("nowhere", "retryWake", { operationId: "retry-3", wakeId: visible })));
+    expect(await denialBytes(await f.h(op("trip", "retryWake", { operationId: "retry-3", wakeId: visible }, signedIn("ben"))))).toBe(missing);
+    f.change("show on phone");
+    expect(await denialBytes(await retry({ operationId: "retry-3", wakeId: visible }))).toBe(missing);
   });
 
   it("answers a new write whose copy can't sync as not sent, without the relay's words", async () => {

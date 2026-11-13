@@ -1,11 +1,12 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
-import { isPhoneWriteOperation, parseMarkRead, parsePhoneWrite, runAccountMarkRead, runAccountWrite } from "./accountChatWrites";
+import {
+  isPhoneWriteOperation, parseMarkRead, parsePhoneWrite, parseRetryWake, runAccountMarkRead, runAccountRetryWake, runAccountWrite,
+} from "./accountChatWrites";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
-import { currentAccountFeedCursor, readAccountFeed, type AccountFeedWaits } from "./accountFeed";
+import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
 import { isAccountOperation, runAccountOperation } from "./accountOperations";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
-import { runRetryWake } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { parseWorkspaceId } from "./requestInputs";
 import type { ServerCopies } from "./serverCopies";
@@ -75,14 +76,14 @@ export function createAccountOperationRoute(options: {
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
       throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
     }
-    // The feed reads only the relay's log, and a wake retry only the relay's wakes; every other operation needs a copy.
-    const retry = route.operation === "retryWake";
-    if (!feed && !retry && options.copies() === undefined) throw copiesUnavailable();
+    // The feed reads only the relay's log; every other operation needs a copy.
+    if (!feed && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
       storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
     const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
+    const retry = route.operation === "retryWake";
     if (!(feed || write || mark || retry || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
     const authorize = async () => {
       const current = await session(request);
@@ -107,11 +108,6 @@ export function createAccountOperationRoute(options: {
     await authorize();
     // A Bearer session reaches what shows on the phone, whatever the request says.
     const visitor = { reason: "account", caller: caller.sessionId, signal: request.signal, phone: true } as const;
-    if (retry) {
-      const result = runRetryWake(storage, { accountId: caller.userId, workspaceId: route.workspaceId, args, nowMs: options.nowMs() });
-      await authorize();
-      return jsonResponse({ ok: true, result, cursor: currentAccountFeedCursor(storage, route.workspaceId) });
-    }
     if (write) {
       const parsed = parsePhoneWrite(route.operation, args);
       // The author is the session's account, by the name it has now.
@@ -127,6 +123,12 @@ export function createAccountOperationRoute(options: {
     }
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
+    if (retry) {
+      const { result, cursor } = await runAccountRetryWake({ storage, copies }, {
+        workspaceId: route.workspaceId, accountId: caller.userId, retry: parseRetryWake(args), visitor, authorize, nowMs: () => options.nowMs(),
+      });
+      return jsonResponse({ ok: true, result, cursor });
+    }
     if (mark) {
       const { result, cursor } = await runAccountMarkRead({ storage, copies }, {
         workspaceId: route.workspaceId, accountId: caller.userId, mark: parseMarkRead(args), visitor, authorize,

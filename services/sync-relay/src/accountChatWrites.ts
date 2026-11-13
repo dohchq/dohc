@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { phoneMarkReadArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
+import { phoneMarkReadArgsSchema, phoneRetryWakeArgsSchema, phoneWriteArgsSchemas, type PhoneWriteOperation } from "@dohc/cli/protocol";
 import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage, ChatThread, ChatThreadLane } from "@dohc/workspace-contracts/engine";
 import { asRecord } from "@dohc/workspace-core";
@@ -14,7 +14,7 @@ import { currentAccountFeedCursor } from "./accountFeed";
 import { serverChats, type MissingResult } from "./accountOperations";
 import type { AutomationReplica } from "./automationReplicas";
 import { stableJsonStringify } from "./canonicalJson";
-import { frozenWakes, resolveWakeTargets, shownName, type FrozenWakes, type WakeSources } from "./chatWakes";
+import { frozenWakes, resolveWakeTargets, shownName, TooManyWakeCandidates, type FrozenWakes, type WakeSources } from "./chatWakes";
 import { badRequest, notFound, RelayError } from "./errors";
 import {
   COULD_NOT_SEND, PUBLICATION_DEADLINE_MS, TOO_OLD, WORKSPACE_CHANGED, commandStages, isRefusalReason, publishOperation, receiptReader,
@@ -22,6 +22,7 @@ import {
 } from "./operationPublication";
 import type { CopyVisitor, ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
+import type { ChatWakeView } from "./storage/chatWakes";
 import type { OperationRecord } from "./storage/operationRecords";
 
 // The phone's chat writes on this server's copy of a workspace its account
@@ -33,8 +34,9 @@ import type { OperationRecord } from "./storage/operationRecords";
 // stage that a crash or a lost answer left unwritten replays from that stored
 // command, when the copy opens or the phone retries. The agents a message
 // wakes are resolved once, before the row, and frozen in its command. The
-// account operations route calls `runAccountWrite`, and `runAccountMarkRead`
-// for a read mark, which has no row: a repeat, or an older mark, moves nothing.
+// account operations route calls `runAccountWrite`, `runAccountMarkRead` for
+// a read mark, which has no row: a repeat, or an older mark, moves nothing,
+// and `runAccountRetryWake` for a wake's Try again.
 
 /** The bounds of a phone write's operation ID, in UTF-16 code units, which storage's bound in characters admits. */
 export const OPERATION_ID_MIN_LENGTH = 1;
@@ -373,11 +375,29 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
     async opening(threadId: string): Promise<ChatMessage | null> {
       return (await adapter.listMessagesPage({ workspaceId, threadId, limit: 1 })).messages[0] ?? null;
     },
-    // An agent's DM, with its newest messages, or null for any other channel.
-    async dm(channelId: string): Promise<{ agentId: string; messages: ChatMessage[] } | null> {
+    // The agent of an agent's DM, or null for any other channel.
+    async dmAgent(channelId: string): Promise<string | null> {
       const found = (await chats.store.listChannels({ workspaceId })).find((each) => each.id === channelId);
-      if (found?.kind !== "agent" || found.agentId === undefined) return null;
-      return { agentId: found.agentId, messages: (await chats.store.listGroupStream({ workspaceId, channelId })).items.map((item) => item.message) };
+      return found?.kind === "agent" ? found.agentId ?? null : null;
+    },
+    // The newest message `pick` keeps in the channel's visible threads of both lanes, replies included, a page at a time.
+    async latest(channelId: string, pick: (message: ChatMessage) => boolean): Promise<ChatMessage | null> {
+      let newest: ChatMessage | null = null;
+      const lanes = await Promise.all((["posts", "chat"] as const)
+        .map((lane) => chats.store.listChannelThreads({ workspaceId, channelId, lane })));
+      for (const { thread } of lanes.flat()) {
+        let after: number | undefined;
+        do {
+          const page = await adapter.listMessagesPage({
+            workspaceId, threadId: thread.id, limit: MESSAGE_PAGE, ...(after === undefined ? {} : { afterMessageOrder: after }),
+          });
+          for (const message of page.messages) {
+            if (pick(message) && (newest === null || message.createdAtMs >= newest.createdAtMs)) newest = message;
+          }
+          after = page.nextAfterMessageOrder ?? undefined;
+        } while (after !== undefined);
+      }
+      return newest;
     },
     // IDs a write would create. One a hidden row already holds answers as missing, so no engine conflict reveals it.
     async unclaimed(ids: { threadId?: string; messageId: string }): Promise<void> {
@@ -390,6 +410,8 @@ function visibleTargets(storage: SyncRelayStorage, copy: AutomationReplica) {
 }
 
 type Targets = ReturnType<typeof visibleTargets>;
+// The engine's largest message page.
+const MESSAGE_PAGE = 500;
 
 // What wake resolution reads: the account's enabled agents, and the copy through the reads' filter, a hidden target
 // reading as a missing one. A failed read fails the write before its row.
@@ -407,7 +429,8 @@ function wakeSources(storage: SyncRelayStorage, copy: AutomationReplica, targets
     message: (messageId) => hidden(() => targets.message(messageId)),
     thread: (threadId) => hidden(() => targets.thread(threadId)),
     opening: (threadId) => targets.opening(threadId),
-    dm: (channelId) => targets.dm(channelId),
+    dmAgent: (channelId) => targets.dmAgent(channelId),
+    latest: (channelId, pick) => targets.latest(channelId, pick),
   };
 }
 
@@ -758,6 +781,7 @@ function refusalBeforeRecord(error: unknown, signal: AbortSignal | undefined): P
   if (error instanceof OperationError) return missing(error.message);
   if (error instanceof WriteInvalid) throw badRequest(error.message);
   if (error instanceof CopyReplaced) return refused(WORKSPACE_CHANGED);
+  if (error instanceof TooManyWakeCandidates) return refused(COULD_NOT_SEND);
   const { reason } = failure(error, COULD_NOT_SEND, "operation-only");
   return refused(isRefusalReason(reason) ? reason : COULD_NOT_SEND);
 }
@@ -1009,6 +1033,69 @@ export async function runAccountMarkRead(
     }
     await input.authorize();
     return { result, cursor };
+  });
+}
+
+/** The phone's Try again on a wake, as its strict request schema admits it. */
+type PhoneRetryWake = ReturnType<(typeof phoneRetryWakeArgsSchema)["parse"]>;
+
+/** The Try again a request names. Arguments outside its schema reject with a bad request. */
+export function parseRetryWake(args: unknown): PhoneRetryWake {
+  const parsed = phoneRetryWakeArgsSchema.safeParse(args);
+  if (!parsed.success) throw badRequest("the arguments do not fit retryWake");
+  return parsed.data;
+}
+
+/** A Try again's answer: the generation to show, a refusal from the closed list, or a wake the account can't see, as reads answer one. */
+type RetryWakeAnswer = { ok: true; wake: ChatWakeView } | { ok: false; refusal: "refused"; reason: RefusalReason } | MissingResult;
+
+/**
+ * Tries a wake again, in a visit to the account's copy of `workspaceId`,
+ * after the copy syncs. A wake whose thread the account may no longer see,
+ * through the reads' secret-file filter, answers as one that isn't there,
+ * and nothing changes. The caller authenticates the account, checks that it
+ * owns the workspace and that the workspace shows on the phone, and parses
+ * the request. `authorize` runs once the copy is open, once it has synced,
+ * after the thread read, and after the retry, before the answer.
+ */
+export async function runAccountRetryWake(
+  server: { storage: SyncRelayStorage; copies: ServerCopies },
+  input: {
+    workspaceId: string;
+    accountId: string;
+    retry: PhoneRetryWake;
+    visitor: Extract<CopyVisitor, { reason: "account" }>;
+    authorize(): Promise<void>;
+    nowMs(): number;
+  },
+): Promise<{ result: RetryWakeAnswer; cursor: string }> {
+  const { storage } = server;
+  const { workspaceId, accountId } = input;
+  const { operationId, wakeId } = input.retry;
+  const { signal } = input.visitor;
+  const missingWake: RetryWakeAnswer = { ok: false, reason: `no such wake: ${wakeId}`, refusal: "missing" };
+  const notSent: RetryWakeAnswer = { ok: false, refusal: "refused", reason: COULD_NOT_SEND };
+  return await server.copies.withServerCopy(accountId, workspaceId, input.visitor, async (copy) => {
+    await input.authorize();
+    const cursor = currentAccountFeedCursor(storage, workspaceId);
+    const answered = async (result: RetryWakeAnswer) => {
+      await input.authorize();
+      return { result, cursor };
+    };
+    try {
+      await copy.sync(signal);
+      await input.authorize();
+      const threadId = storage.chatWakeThread({ accountId, workspaceId, wakeId });
+      if (threadId !== null) await visibleTargets(storage, copy).thread(threadId);
+    } catch (error) {
+      if (error instanceof RelayError || signal.aborted) throw error;
+      return await answered(error instanceof TargetMissing ? missingWake : notSent);
+    }
+    await input.authorize();
+    const retried = storage.retryChatWake({ accountId, workspaceId, operationId, wakeId, nowMs: input.nowMs() });
+    if (retried.kind === "retried") return await answered({ ok: true, wake: retried.wake });
+    if (retried.kind === "missing") return await answered(missingWake);
+    return await answered({ ok: false, refusal: "refused", reason: retried.kind === "too-old" ? TOO_OLD : COULD_NOT_SEND });
   });
 }
 
