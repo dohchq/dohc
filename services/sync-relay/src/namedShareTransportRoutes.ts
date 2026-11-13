@@ -42,6 +42,12 @@ export type NamedShareTransportRoute =
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
 
+/** What a share reaches, without its level. */
+function shareScopeKey(selector: AnyShareSelector): string {
+  const { access: _access, ...scope } = selector;
+  return JSON.stringify(scope);
+}
+
 export function createNamedShareTransportRoutes(
   storage: Pick<
     SyncRelayStorage,
@@ -146,14 +152,22 @@ export function createNamedShareTransportRoutes(
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
         const deadline = Date.now() + hold;
         let scanSince = since;
+        let levelChanged = false;
         const readPage = (): typeof page => {
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
-          // A changed level or role ends the hold now; the final check below would refuse its page anyway.
+          // A changed scope ends the hold. A changed level alone answers
+          // with an empty page that says so, and the reader checks its access.
           if (
             fresh.share.workspaceId !== share.workspaceId ||
-            JSON.stringify(fresh.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)
+            shareScopeKey(fresh.effectiveSelector) !== shareScopeKey(authorized.effectiveSelector)
           )
             throw notFound();
+          if (
+            JSON.stringify(fresh.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector)
+          ) {
+            levelChanged = true;
+            return page;
+          }
           const next = filteredLogPage(
             share.workspaceId,
             share.shareId,
@@ -179,7 +193,7 @@ export function createNamedShareTransportRoutes(
                   try {
                     page = readPage();
                     scanSince = page.nextCursor;
-                    return page.ops.length === 0 && !page.hasMore;
+                    return !levelChanged && page.ops.length === 0 && !page.hasMore;
                   } catch {
                     return false;
                   }
@@ -191,9 +205,20 @@ export function createNamedShareTransportRoutes(
               throw relayError("share_access_rate_limited");
             throw error;
           }
-          if (page.ops.length === 0 && !page.hasMore) page = readPage();
+          if (!levelChanged && page.ops.length === 0 && !page.hasMore) page = readPage();
           scanSince = page.nextCursor;
-          if (page.ops.length > 0 || page.hasMore) break;
+          if (levelChanged || page.ops.length > 0 || page.hasMore) break;
+        }
+        if (levelChanged) {
+          requireShareAction(route.shareId, actor.userId, "read");
+          return jsonResponse({
+            ok: true,
+            ops: [],
+            nextCursor: since,
+            hasMore: false,
+            ownOriginId,
+            levelChanged: true,
+          });
         }
       }
       // Re-check revocation immediately before returning the body: a revoke

@@ -510,6 +510,77 @@ describe("what a member reaches", () => {
   });
 });
 
+describe("a member's share view", () => {
+  async function info(h: SyncRelayHandler, userId: string, shareId: string) {
+    return h(request(userId, `/sync/shares/${shareId}`));
+  }
+  async function access(h: SyncRelayHandler, userId: string, shareId: string) {
+    return h(request(userId, `/sync/shares/${shareId}/access`));
+  }
+
+  it("names the workspace, the role and the level for a member", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const response = await info(h, "ana", shareId);
+    expect(response.status).toBe(200);
+    expect(await json(response)).toMatchObject({
+      shareId,
+      subjectName: "Community",
+      selector: { kind: "workspace", role: "member" },
+      access: "comment",
+    });
+    expect(await json(await access(h, "ana", shareId))).toEqual({
+      status: "current",
+      access: "comment",
+    });
+  });
+
+  it("names the admin role with Edit", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const shareId = await shareIdOf(h, "ana");
+    expect(await json(await info(h, "ana", shareId))).toMatchObject({
+      subjectName: "Community",
+      selector: { kind: "workspace", role: "admin" },
+      access: "edit",
+    });
+    expect(await json(await access(h, "ana", shareId))).toEqual({
+      status: "current",
+      access: "edit",
+    });
+  });
+
+  it("says a removed member's access was removed", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/remove`)).status).toBe(200);
+    for (const response of [await info(h, "ana", shareId), await access(h, "ana", shareId)]) {
+      expect(response.status).toBe(404);
+      expect(await code(response)).toBe("share_access_removed");
+    }
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/let-back-in`)).status).toBe(
+      200,
+    );
+    expect((await info(h, "ana", shareId)).status).toBe(200);
+  });
+
+  it("says access was removed when the owner ends the membership", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/end`)).status).toBe(200);
+    for (const response of [await info(h, "ana", shareId), await access(h, "ana", shareId)]) {
+      expect(response.status).toBe(404);
+      expect(await code(response)).toBe("share_access_removed");
+    }
+  });
+});
+
 describe("who may change members", () => {
   it("needs a workspace name before the first invite", async () => {
     const { h } = await seed();
@@ -797,11 +868,42 @@ describe("ending access", () => {
     await heldRead((h) => post(h, "ana", `/sync/${WORKSPACE}/members/leave`));
   });
 
-  it("ends a held read when the level changes; the member then reads at the new level", async () => {
-    await heldRead(
-      (h) => post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "view" }),
-      200,
+  it("answers a held read with one empty page marked levelChanged when the level changes", async () => {
+    const activity = new DiscussionActivityHub();
+    const { h } = await seed({ activity });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const first = await json(await pull(h, "ana", shareId));
+    const controller = new AbortController();
+    const held = h(
+      request("ana", `/sync/shares/${shareId}/log?limit=500&since=${first.nextCursor}&hold=30000`, {
+        signal: controller.signal,
+      }),
     );
+    try {
+      await expect.poll(() => activity.stats().waiters).toBe(1);
+      expect(
+        (await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, { level: "view" })).status,
+      ).toBe(200);
+      const response = await held;
+      expect(response.status).toBe(200);
+      expect(await json(response)).toMatchObject({
+        ops: [],
+        hasMore: false,
+        nextCursor: first.nextCursor,
+        levelChanged: true,
+      });
+      expect(await json(await h(request("ana", `/sync/shares/${shareId}/access`)))).toEqual({
+        status: "current",
+        access: "view",
+      });
+      const after = await pull(h, "ana", shareId);
+      expect(after.status).toBe(200);
+      expect(await json(after)).not.toHaveProperty("levelChanged");
+    } finally {
+      controller.abort();
+      await held.catch(() => undefined);
+    }
   });
 
   it("ends everyone's access when the owner ends the membership", async () => {
