@@ -2592,6 +2592,7 @@ export function MarkdownView(props: {
           onRetry={props.onRetryEngineOpen}
           contentShown
           message={engine.openRefusal ?? sharedWaitingLine(engine.sharedWaiting)}
+          waiting={!engine.openRefusal && engine.sharedWaiting?.awaitsHost === true}
         />
       ) : null}
       {engine.removalInProgress ? (

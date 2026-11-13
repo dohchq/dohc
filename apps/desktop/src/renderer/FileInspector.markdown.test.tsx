@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
@@ -320,10 +320,41 @@ describe("FileInspector renders markdown through the shared component map", () =
         render(<FileInspector workspaceId="ws-1" path="a.md" />);
         const notice = await screen.findByTestId("engine-may-hold-document-notice");
         expect(notice.textContent).toBe(`${line}Try again`);
+        // Only a page dohc is still opening by itself wears the ring.
+        expect(within(notice).queryByTestId("engine-may-hold-document-ring")).toBeNull();
       } finally {
         Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
         if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
       }
     },
   );
+
+  // A page waiting for its owner's dohc opens live by itself, so the page
+  // shows a ring beside its state at once, and the toast waits.
+  it("shows a ring beside the state of a page waiting for its owner's dohc", async () => {
+    const read = bridgeMock.readWorkspaceText.getMockImplementation();
+    bridgeMock.readWorkspaceText.mockImplementation(async () => ({
+      text: "# Plan",
+      truncated: false,
+    }));
+    Object.assign(engineDocState, {
+      liveHostUnavailable: true,
+      sharedWaiting: {
+        state: "host-refused",
+        awaitsHost: true,
+        message:
+          "dohc could not open this page for editing. Editing starts once the owner's dohc is online.",
+        reason: "Editing starts once the owner's dohc is online.",
+      },
+    });
+    try {
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      const notice = await screen.findByTestId("engine-may-hold-document-notice");
+      expect(notice.textContent).toBe("You can read this page.Try again");
+      expect(within(notice).getByTestId("engine-may-hold-document-ring")).toBeTruthy();
+    } finally {
+      Object.assign(engineDocState, { liveHostUnavailable: false, sharedWaiting: null });
+      if (read) bridgeMock.readWorkspaceText.mockImplementation(read);
+    }
+  });
 });

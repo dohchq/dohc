@@ -49,7 +49,7 @@ import {
   useDocumentSaveNotices,
 } from "./useDocumentSaveNotices";
 import { useShellError } from "./useShellError";
-import { useLiveHostRefusalNotice } from "../collab/useLiveHostRefusalNotice";
+import { LIVE_HOST_WAIT_REPORT_MS, useLiveHostRefusalNotice } from "../collab/useLiveHostRefusalNotice";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
 
 type WriteResult = Awaited<ReturnType<DohcDesktopBridge["writeWorkspaceText"]>>;
@@ -1100,6 +1100,50 @@ describe("document save notices", () => {
     await userEvent.setup().click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
     view.rerender(<Shell><Page refusal={failed()} /></Shell>);
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  // A page waiting for its owner's dohc is something dohc fixes by itself.
+  // Its ring shows on the page at once; a toast and a row come only once it
+  // has waited 15 s, and never for a page that went live sooner.
+  describe("a page waiting for its owner's dohc", () => {
+    const TITLE = 'dohc could not open "plan.md" for editing';
+    const waiting = (): SharedDocumentOpenState => ({ state: "host-refused", awaitsHost: true,
+      message: "dohc could not open this page for editing. Editing starts once the owner's dohc is online.",
+      reason: "Editing starts once the owner's dohc is online." });
+    function Page(props: { refusal: SharedDocumentOpenState | null; available?: boolean }) {
+      useLiveHostRefusalNotice({ workspaceId: "ws-1", path: "notes/plan.md", refusal: props.refusal, available: props.available ?? false, retry: vi.fn() });
+      return null;
+    }
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("files no toast before 15 s, then a toast and a row, and clears the row once the page goes live", () => {
+      const view = render(<Shell />);
+      view.rerender(<Shell><Page refusal={waiting()} /></Shell>);
+      act(() => { vi.advanceTimersByTime(LIVE_HOST_WAIT_REPORT_MS - 1); });
+      // Each readiness round brings the same answer again, which does not restart the wait.
+      view.rerender(<Shell><Page refusal={waiting()} /></Shell>);
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+      act(() => { vi.advanceTimersByTime(1); });
+      const toast = screen.getByTestId("workspace-shell-error");
+      expect(toast.textContent).toContain(TITLE);
+      expect(toast.textContent).toContain("Editing starts once the owner's dohc is online. You can still read it.");
+      expect(screen.getByTestId("connection-notices")).toBeTruthy();
+      view.rerender(<Shell><Page refusal={null} available /></Shell>);
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+    });
+
+    it("files nothing for a page that goes live before 15 s", () => {
+      const view = render(<Shell />);
+      view.rerender(<Shell><Page refusal={waiting()} /></Shell>);
+      act(() => { vi.advanceTimersByTime(LIVE_HOST_WAIT_REPORT_MS - 1); });
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      view.rerender(<Shell><Page refusal={null} available /></Shell>);
+      act(() => { vi.advanceTimersByTime(LIVE_HOST_WAIT_REPORT_MS * 2); });
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      expect(screen.queryByTestId("connection-notices")).toBeNull();
+    });
   });
 
   it("files nothing for a page that waits on something it shows itself", () => {

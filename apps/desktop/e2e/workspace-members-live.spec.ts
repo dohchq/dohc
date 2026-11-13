@@ -18,8 +18,9 @@ import { createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, revealExpl
 // sees the other's typing. Text only: presence is not part of this proof.
 //
 // Then the owner writes a page on disk and quits dohc before opening it. The
-// member's open hears at once that editing starts once the owner's dohc is
-// online, and the page stays readable. The owner's dohc starts again and
+// member's page stays readable and shows at once, with a ring, that dohc is
+// still opening it. After 15 s a toast says editing starts once the owner's
+// dohc is online. The owner's dohc starts again and
 // starts the page's live history by itself, with no click, and the member's
 // page turns live where it is. Both write in it.
 //
@@ -253,13 +254,26 @@ test("@members-live a member at Edit and the owner write in one document and eac
     await clickDocument(mine, FRESH);
     const notice = mine.getByTestId("engine-may-hold-document-notice");
     const freshToast = mine.getByTestId("workspace-shell-error").filter({ hasText: 'dohc could not open "raffle.md" for editing' });
-    await expect(freshToast).toContainText("Editing starts once the owner's dohc is online. You can still read it.", { timeout: 60_000 });
-    testInfo.annotations.push({ type: "without-lineage answer ms", description: String(Date.now() - freshOpened) });
-    // The page names its state. The toast carries the reason.
-    await expect(notice).toHaveText(/^You can read this page\.\s*Try again$/);
+    // dohc opens the page by itself once the owner's dohc is online, so the page shows its state with a ring at once.
+    await expect(notice).toHaveText(/^You can read this page\.\s*Try again$/, { timeout: 60_000 });
+    await expect(notice.getByTestId("engine-may-hold-document-ring")).toBeVisible();
+    const answered = Date.now();
+    testInfo.annotations.push({ type: "without-lineage answer ms", description: String(answered - freshOpened) });
     const reader = mine.getByTestId("view-markdown");
     await expect(reader).toContainText("Prizes from local shops.");
     await expect(reader.locator('[contenteditable="true"]')).toHaveCount(0);
+    // The member's theme is Dark from the step before.
+    for (const theme of ["Dark", "Light"] as const) {
+      await setTheme(mine, theme);
+      await expect(freshToast).toHaveCount(0);
+      await mine.bringToFront();
+      await mine.screenshot({ path: shot(`without-lineage-waiting-member-${theme.toLowerCase()}`), animations: "disabled" });
+    }
+    // Still waiting after 15 s, the toast says why, and its row stays in Notices.
+    await expect(freshToast).toContainText("Editing starts once the owner's dohc is online. You can still read it.", { timeout: 60_000 });
+    testInfo.annotations.push({ type: "without-lineage toast after ms", description: String(Date.now() - answered) });
+    expect(Date.now() - answered).toBeGreaterThanOrEqual(14_000);
+    await expect(notice.getByTestId("engine-may-hold-document-ring")).toBeVisible();
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await expect(freshToast).toBeVisible();
@@ -267,12 +281,6 @@ test("@members-live a member at Edit and the owner write in one document and eac
       await mine.screenshot({ path: shot(`without-lineage-toast-member-${theme.toLowerCase()}`), animations: "disabled" });
     }
     await freshToast.getByRole("button", { name: "Dismiss workspace error" }).click();
-    for (const theme of ["Light", "Dark"] as const) {
-      await setTheme(mine, theme);
-      await expect(notice).toBeVisible();
-      await mine.bringToFront();
-      await mine.screenshot({ path: shot(`without-lineage-waiting-member-${theme.toLowerCase()}`), animations: "disabled" });
-    }
 
     // --- The owner's dohc starts again and starts the page by itself ---------
     const ownerAgain = await launchDesktopApp({ workspace: ownerTemp, env: stack.trustEnv });

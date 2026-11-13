@@ -3,7 +3,7 @@ import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, isOrphanedDraftStored, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import { FilePenLine, Lock, Play, Share2 } from "lucide-react";
+import { FilePenLine, LoaderCircle, Lock, Play, Share2 } from "lucide-react";
 import { useEffect, useId, useState, type ComponentProps, type ReactNode } from "react";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { bridge } from "./bridge";
@@ -184,6 +184,8 @@ export function EngineMayHoldDocumentNotice(props: {
   // content the user cannot see.
   contentShown: boolean;
   message?: string;
+  // dohc is still opening it by itself, so a ring shows beside the message.
+  waiting?: boolean;
   children?: ReactNode;
 }) {
   return (
@@ -200,7 +202,15 @@ export function EngineMayHoldDocumentNotice(props: {
           the user did not hit sends them looking for a slow machine (#564,
           codex r20). What is true of all of them is the sentence below, and
           the retry is the same either way. */}
-      <span>
+      <span className="flex items-center gap-1.5">
+        {props.waiting ? (
+          <LoaderCircle
+            data-testid="engine-may-hold-document-ring"
+            size={12}
+            aria-hidden
+            className="shrink-0 motion-safe:animate-spin"
+          />
+        ) : null}
         {props.message ?? "dohc could not open this document for editing."}
         {!props.message && props.contentShown ? " You can still read it." : ""}
       </span>
