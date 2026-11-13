@@ -790,17 +790,6 @@ async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refu
     assert_eq!(egress.bytes, oversized.as_bytes());
 }
 
-/// Replace every string in a JSON value with the empty string, leaving the
-/// structure, keys and numbers intact.
-fn blank_every_string(value: &mut Value) {
-    match value {
-        Value::String(text) => text.clear(),
-        Value::Array(items) => items.iter_mut().for_each(blank_every_string),
-        Value::Object(fields) => fields.values_mut().for_each(blank_every_string),
-        _ => {}
-    }
-}
-
 /// #2205: an original retained on a volume that cannot refuse to unlink an
 /// open file is counted in watcher.status, listed with its revision, and
 /// deleted only with the late-write risk accepted.

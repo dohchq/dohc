@@ -3523,11 +3523,8 @@ mod tests {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (release, released) = std::sync::mpsc::channel();
             let thread = std::thread::spawn({
-                let (ops, started, stop) = (
-                    Arc::clone(&ops),
-                    Arc::clone(&started),
-                    Arc::clone(&stop),
-                );
+                let (ops, started, stop) =
+                    (Arc::clone(&ops), Arc::clone(&started), Arc::clone(&stop));
                 move || {
                     let mut released = Some(released);
                     let mut repair_probe = hold_lookup.then_some(false);
