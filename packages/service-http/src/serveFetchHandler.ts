@@ -26,6 +26,16 @@ export interface ServeFetchHandlerOptions {
 }
 
 /**
+ * The request signal's abort reason when the client closed the connection.
+ * A connection the server closes itself, as at shutdown, aborts without it.
+ */
+export class ClientClosedRequest extends DOMException {
+  constructor() {
+    super("The client closed the request", "AbortError");
+  }
+}
+
+/**
  * A node:http server over a fetch-style handler. Bodies are buffered under a
  * cap unless a handler opts into bounded streaming. Raw bytes pass through
  * untouched in both directions. A client disconnect aborts the request signal.
@@ -33,7 +43,7 @@ export interface ServeFetchHandlerOptions {
 export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
   // Streaming handlers own their receive deadline. Ordinary bodies retain a
   // five-minute bound after headers; headers themselves remain bounded to 60s.
-  return createServer(options.streamBody ? { requestTimeout: 0, headersTimeout: 60_000 } : {}, (incoming, outgoing) => {
+  const server = createServer(options.streamBody ? { requestTimeout: 0, headersTimeout: 60_000 } : {}, (incoming, outgoing) => {
     let url: URL;
     try {
       url = new URL(incoming.url ?? "/", `http://${incoming.headers.host ?? "localhost"}`);
@@ -56,10 +66,12 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
     let received = 0;
     let rejected = false;
     const disconnect = new AbortController();
-    outgoing.once("close", () => disconnect.abort());
+    // A server that has stopped listening is shutting down and closes its own connections.
+    const closed = () => disconnect.abort(server.listening ? new ClientClosedRequest() : undefined);
+    outgoing.once("close", closed);
     incoming.on("error", () => {
       rejected = true;
-      disconnect.abort();
+      closed();
       outgoing.destroy();
     });
     if (options.streamBody?.(url, method)) {
@@ -132,6 +144,7 @@ export function serveFetchHandler(options: ServeFetchHandlerOptions): Server {
         });
     });
   });
+  return server;
 }
 
 async function writeResponse(

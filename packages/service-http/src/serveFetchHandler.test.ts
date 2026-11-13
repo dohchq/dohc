@@ -2,7 +2,7 @@ import { request as httpRequest, type IncomingMessage, type Server } from "node:
 import { connect } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DRAIN_TIMEOUT_HEADER } from "./pipeResponseBody";
-import { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
+import { ClientClosedRequest, serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
 
 const servers: Server[] = [];
 
@@ -311,8 +311,37 @@ describe("serveFetchHandler", () => {
       const poll = (): void => (signal!.aborted ? resolve() : void setTimeout(poll, 5));
       poll();
     });
-    expect(signal!.aborted).toBe(true);
+    expect(signal!.reason).toBeInstanceOf(ClientClosedRequest);
     release?.();
+  });
+
+  it("aborts without the client's reason when the server closes its own connections at shutdown", async () => {
+    let signal: AbortSignal | undefined;
+    const { port, server } = await serve({
+      handler: (request) => {
+        signal = request.signal;
+        return new Promise<Response>((resolve) => {
+          request.signal.addEventListener("abort", () => resolve(new Response(null, { status: 503 })));
+        });
+      },
+    });
+    const socket = connect(port, "127.0.0.1");
+    socket.on("error", () => undefined);
+    await new Promise<void>((resolve) => socket.once("connect", resolve));
+    socket.write("GET /park HTTP/1.1\r\nHost: test\r\n\r\n");
+    await new Promise<void>((resolve) => {
+      const poll = (): void => (signal ? resolve() : void setTimeout(poll, 5));
+      poll();
+    });
+    server.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => {
+      const poll = (): void => (signal!.aborted ? resolve() : void setTimeout(poll, 5));
+      poll();
+    });
+    expect(signal!.reason).toMatchObject({ name: "AbortError" });
+    expect(signal!.reason).not.toBeInstanceOf(ClientClosedRequest);
+    socket.destroy();
   });
 
   it("refuses an upload as it crosses the cap and closes the socket", async () => {
