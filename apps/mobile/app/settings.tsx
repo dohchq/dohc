@@ -83,14 +83,19 @@ function SettingsScreen() {
     }
   }, [pending, signIn]);
 
-  // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count.
+  // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count. When the
+  // delete can't be made safe, the phone stays signed in and says so here, with Try again.
+  const [signOutFailed, setSignOutFailed] = useState(false);
+  const leave = useCallback(() => {
+    setSignOutFailed(false);
+    account.signOut().catch(() => {
+      if (signIn.isCurrent()) setSignOutFailed(true);
+    });
+  }, [account, signIn]);
   const signOut = useCallback(async () => {
-    const counts = outbox.signOutCounts();
-    const message = counts ? accountWords.signOutBody(counts.unsent, counts.maySend) : accountWords.signOutUnchecked;
-    if (await confirm({ title: accountWords.signOutTitle(server), message, confirm: accountWords.signOut, destructive: true })) {
-      void account.signOut();
-    }
-  }, [account, outbox, server]);
+    const message = accountWords.signOutBody(outbox.signOutCounts());
+    if (await confirm({ title: accountWords.signOutTitle(server), message, confirm: accountWords.signOut, destructive: true })) leave();
+  }, [leave, outbox, server]);
 
   const end = (session: AccountSession) => act(session.sessionId, async () => {
     // Ending this phone's own session is signing out.
@@ -168,6 +173,7 @@ function SettingsScreen() {
       </Section>
 
       <Section>
+        {signOutFailed ? <ProblemLine text={accountWords.signOutFailed} onRetry={leave} /> : null}
         <Pressable accessibilityRole="button" onPress={() => void signOut()} style={({ pressed }) => [styles.signOut, { backgroundColor: pressed ? theme.panel2 : theme.panel }]}>
           <Text style={[styles.signOutLabel, { color: theme.danger }]}>{accountWords.signOut}</Text>
         </Pressable>

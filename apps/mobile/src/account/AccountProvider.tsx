@@ -49,9 +49,9 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 // only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
 // write's result hands it off. An app-state change tries again whatever failed, and asks again at once.
 export function AccountProvider({ children }: { children: ReactNode }) {
-  // Sign out deletes the outbox, awaited, before it deletes the token.
+  // Sign out deletes the outbox: the sign-in ends, and its token goes, once that delete can't be lost.
   const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
-  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch, onSignOut: () => outbox.signOut() }));
+  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch, onSignOut: leave => outbox.signOut(leave) }));
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => void account.restore(), [account]);
   const signIn = state.status === "signed-in" ? state.signIn : null;

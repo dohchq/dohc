@@ -59,9 +59,11 @@ The outbox (`src/server/outbox.ts`) keeps chat writes on disk, outside Caches, t
 record only with a sign-in for the record's own server and account, one at a time per thread or stream, in order, and
 asks again with the same operation ID until the write is saved or refused. A record whose write may not have been kept
 is withheld until the composer retries it under the same operation ID. A 401 keeps every record. Only the account's
-Sign out deletes them, through `onSignOut`, after sending stops and before the token goes: it writes a marker first and
-deletes it last, a launch that finds the marker finishes the delete before reading, and a failed delete keeps the
-outbox closed until the next app-state change. A record it can't read stays aside. A change to a record checks the
+Sign out deletes them, through `onSignOut`: sending stops, the outbox writes a marker, the account then ends the
+sign-in and deletes its token, and the records go, then the marker. A launch that finds the marker finishes the delete
+before reading, and a failed delete keeps the outbox closed until the next app-state change. If the marker can't be
+written, every record must go at once; otherwise Sign out fails, the phone stays signed in with its token, and
+Settings says so with Try again. A record it can't read stays aside. A change to a record checks the
 outbox's lifetime after every wait, so a late answer can't bring back a deleted record.
 
 Copy uses React Native's core `Clipboard`, which React Native marks deprecated. Switch `src/copy.ts` to

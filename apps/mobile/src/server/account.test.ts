@@ -188,6 +188,35 @@ describe("signing out", () => {
     expect(empty).not.toHaveBeenCalled();
   });
 
+  it("ends the sign-in only when the hook calls leave, and keeps it, with its token, when the hook rejects first", async () => {
+    const server = testServer();
+    server.on("GET", "/sync/account/sessions", "offline");
+    const tokens = memoryStore(SAVED);
+    const failing = createAccount({ store: tokens.store, fetch: server.fetch, onSignOut: async () => { throw new Error("couldn't delete"); } });
+    await failing.restore();
+    const earlier = signedIn(failing);
+    await expect(failing.signOut()).rejects.toThrow("couldn't delete");
+    expect(signedIn(failing)).toBe(earlier);
+    expect(earlier.isCurrent()).toBe(true);
+    expect(tokens.current()).toEqual(SAVED);
+    expect(server.calls).toHaveLength(0);
+
+    const seen: string[] = [];
+    const leaving = createAccount({
+      store: tokens.store, fetch: server.fetch,
+      onSignOut: async leave => {
+        seen.push(leaving.state().status);
+        await leave();
+        seen.push(`${leaving.state().status}, token ${tokens.current() ? "kept" : "gone"}`);
+        // A failure after leave is the hook's own to finish: Sign out still completes.
+        throw new Error("delete continues at wake");
+      },
+    });
+    await leaving.restore();
+    await expect(leaving.signOut()).resolves.toBeUndefined();
+    expect(seen).toEqual(["signed-in", "signed-out, token gone"]);
+  });
+
   it("refuses to sign in again while signed in, keeping the sign-in and the outbox", async () => {
     const { server, tokens } = setup();
     const cleaned = vi.fn(async () => {});

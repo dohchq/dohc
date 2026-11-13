@@ -1,6 +1,6 @@
 import { accountWords } from "@dohc/interface-words/account";
 import { describe, expect, it, vi } from "vitest";
-import { createAccount, type AccountState, type SignIn } from "./account";
+import { createAccount, type AccountState, type SignIn, type SignInStore, type StoredSignIn } from "./account";
 import { derivedMessageId, type ChatWrite } from "./chatWrites";
 import { createServerClient } from "./client";
 import { createDurableFiles, DurableFileError } from "./durableFiles";
@@ -44,7 +44,7 @@ function placeRecord(disk: Disk, sequence: number, fields: Record<string, unknow
 }
 
 /** The phone's sign-in, as the account gives it: a generation that ends at sign-out, a 401 and another sign-in. */
-function fakeAccount(onSignOut: () => Promise<void>) {
+function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
   let state: AccountState = { status: "loading" };
   let generation = 0;
   let controller = new AbortController();
@@ -81,11 +81,12 @@ function fakeAccount(onSignOut: () => Promise<void>) {
       set({ status: "signed-in", signIn });
       return signIn;
     },
-    /** As the account's Sign out: the state first, then the outbox's delete, awaited. */
+    /** As the account's Sign out: the outbox's delete, which ends the sign-in when it calls `leave`. */
     signOut() {
-      advance();
-      set({ status: "signed-out", origin: null, ended: false, forgetFailed: false });
-      return onSignOut();
+      return onSignOut(async () => {
+        advance();
+        set({ status: "signed-out", origin: null, ended: false, forgetFailed: false });
+      });
     },
   };
 }
@@ -109,10 +110,20 @@ function waits() {
 function launch(disk: Disk, server?: Server, options: { now?: () => number; stalledAfterMs?: number; stalledRetryMs?: number; retryMs?: (failures: number) => number } = {}) {
   const wait = waits();
   const outbox = createOutbox({ files: createDurableFiles(disk.launch()), sleep: wait.sleep, ...options });
-  const account = fakeAccount(() => outbox.signOut());
+  const account = fakeAccount(leave => outbox.signOut(leave));
   const stop = outbox.follow(account);
   if (server) account.signIn(server);
   return { outbox, account, stop, wait };
+}
+
+const SIGNED_IN: StoredSignIn = { origin: ORIGIN, token: "tok-1", userId: "u-1", email: "ice@example.com" };
+
+/** One run of the app with the real account over `store`, whose Sign out runs the outbox's delete. */
+function launchReal(disk: Disk, server: Server, store: SignInStore, files = createDurableFiles(disk.launch())) {
+  const outbox = createOutbox({ files, sleep: waits().sleep });
+  const account = createAccount({ store, fetch: server.fetch, onSignOut: leave => outbox.signOut(leave) });
+  const stop = outbox.follow(account);
+  return { outbox, account, stop };
 }
 
 const ready = (outbox: Outbox) => vi.waitFor(() => expect(outbox.state().status).toBe("ready"));
@@ -508,7 +519,7 @@ describe("asking again", () => {
   it("counts only continuous pending answers toward stalled: a failed request starts the count again", async () => {
     const disk = durableDisk();
     const server = testServer();
-    server.on("POST", path("post"), PENDING, "offline", PENDING);
+    server.on("POST", path("post"), PENDING, "offline", PENDING, "offline", PENDING);
     let clock = 0;
     const { outbox, stop, wait } = launch(disk, server, { now: () => clock, stalledAfterMs: 1000, retryMs: () => 10 });
     await ready(outbox);
@@ -525,6 +536,18 @@ describe("asking again", () => {
     wait.release();
     await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
     expect(record(outbox, 1)).toMatchObject({ stage: "sending", pendingSinceMs: 3_600_000 });
+
+    // Offline again, and this time the reset can't be written, so the record keeps the old start.
+    disk.failWrites = "write";
+    wait.release();
+    await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+    expect(record(outbox, 1)?.pendingSinceMs).toBe(3_600_000);
+    // Storage comes back, an hour passes, and pending resumes: still a new run.
+    disk.failWrites = null;
+    clock = 7_200_000;
+    wait.release();
+    await vi.waitFor(() => expect(record(outbox, 1)?.pendingSinceMs).toBe(7_200_000));
+    expect(record(outbox, 1)?.stage).toBe("sending");
     stop();
   });
 
@@ -857,7 +880,7 @@ describe("signing out", () => {
     const outbox = createOutbox({ files: createDurableFiles(disk.launch()), sleep: waits().sleep });
     const account = createAccount({
       store: memoryStore({ origin: server.origin, token: "tok-1", userId: "u-1", email: "ice@example.com" }).store,
-      fetch: server.fetch, onSignOut: () => outbox.signOut(),
+      fetch: server.fetch, onSignOut: leave => outbox.signOut(leave),
     });
     const stop = outbox.follow(account);
     await account.restore();
@@ -867,7 +890,7 @@ describe("signing out", () => {
     expect(records(disk)).toHaveLength(1);
 
     const relaunched = createOutbox({ files: createDurableFiles(disk.launch()), sleep: waits().sleep });
-    const signedOut = createAccount({ store: memoryStore(null).store, fetch: server.fetch, onSignOut: () => relaunched.signOut() });
+    const signedOut = createAccount({ store: memoryStore(null).store, fetch: server.fetch, onSignOut: leave => relaunched.signOut(leave) });
     const stopRelaunched = relaunched.follow(signedOut);
     await signedOut.restore();
     await ready(relaunched);
@@ -897,10 +920,10 @@ describe("signing out", () => {
     expect(outbox.signOutCounts()).toEqual({ unsent: 3, maySend: 1 });
     stop();
 
-    expect(accountWords.signOutBody(3, 1)).toBe("3 messages haven't been sent. Signing out deletes them. 1 message may still send.");
-    expect(accountWords.signOutBody(1, 0)).toBe("1 message hasn't been sent. Signing out deletes it.");
-    expect(accountWords.signOutBody(0, 2)).toBe("2 messages may still send.");
-    expect(accountWords.signOutBody(0, 0)).toBe("This phone stops reading your workspaces. Your work stays where it is.");
+    expect(accountWords.signOutBody({ unsent: 3, maySend: 1 })).toBe("3 messages haven't been sent. Signing out deletes them. 1 message may still send.");
+    expect(accountWords.signOutBody({ unsent: 1, maySend: 0 })).toBe("1 message hasn't been sent. Signing out deletes it.");
+    expect(accountWords.signOutBody({ unsent: 0, maySend: 2 })).toBe("2 messages may still send.");
+    expect(accountWords.signOutBody({ unsent: 0, maySend: 0 })).toBe("This phone stops reading your workspaces. Your work stays where it is.");
   });
 });
 
@@ -956,5 +979,275 @@ describe("recovery", () => {
     await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(2));
     expect(records(disk)).toEqual(["m-000000000001"]);
     second.stop();
+  });
+});
+
+describe("signing out with the account's token store", () => {
+  /** A signed-in run with one queued record whose request the server holds. */
+  async function signedInWithRecord(disk: Disk, server: Server, store: SignInStore) {
+    server.on("POST", path("post"), held);
+    const run = launchReal(disk, server, store);
+    await run.account.restore();
+    await ready(run.outbox);
+    await run.outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+    return run;
+  }
+
+  it("writes the marker, then deletes the token, then the records, then the marker", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    let atClear: string[] = [];
+    const store: SignInStore = {
+      load: () => tokens.store.load(), save: next => tokens.store.save(next),
+      clear: async () => { atClear = disk.names(); await tokens.store.clear(); },
+    };
+    const first = await signedInWithRecord(disk, server, store);
+    await first.account.signOut();
+    expect(atClear).toEqual(expect.arrayContaining(["signing-out", "m-000000000001"]));
+    expect(tokens.current()).toBeNull();
+    expect(disk.names()).toEqual([]);
+    first.stop();
+
+    const next = launchReal(disk, server, tokens.store);
+    await next.account.restore();
+    await ready(next.outbox);
+    expect(next.account.state().status).toBe("signed-out");
+    expect(next.outbox.state().records).toEqual([]);
+    next.stop();
+  });
+
+  it("completes when the marker can't be written but every record goes, and a later sign-in sends nothing", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const first = await signedInWithRecord(disk, server, tokens.store);
+    disk.failWrites = "write";
+    await first.account.signOut();
+    expect(first.account.state()).toMatchObject({ status: "signed-out", ended: false });
+    expect(tokens.current()).toBeNull();
+    expect(disk.names()).toEqual([]);
+    first.stop();
+    disk.failWrites = null;
+
+    const again = launchReal(disk, server, memoryStore(SIGNED_IN).store);
+    await again.account.restore();
+    await ready(again.outbox);
+    await settled();
+    expect(again.outbox.state().records).toEqual([]);
+    expect(requests(server, "post")).toHaveLength(1);
+    again.stop();
+  });
+
+  it("fails, keeping the sign-in, the token and the records, paused, when neither the marker nor every delete lands", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const first = await signedInWithRecord(disk, server, tokens.store);
+    disk.failWrites = "write";
+    disk.failRemoves = "unlink";
+    const error = await first.account.signOut().catch((reason: unknown) => reason);
+    expect(error instanceof OutboxError && error.kind).toBe("not-deleted");
+    expect(first.account.state().status).toBe("signed-in");
+    expect(tokens.current()).toEqual(SIGNED_IN);
+    expect(records(disk)).toEqual(["m-000000000001"]);
+    expect(first.outbox.state()).toMatchObject({ status: "ready", records: [expect.objectContaining({ sequence: 1 })] });
+    expect(first.outbox.signOutCounts()).toEqual({ unsent: 0, maySend: 1 });
+    first.outbox.wake();
+    await settled();
+    expect(requests(server, "post")).toHaveLength(1);
+
+    // Try again, once the deletes work.
+    disk.failRemoves = null;
+    await first.account.signOut();
+    expect(first.account.state().status).toBe("signed-out");
+    expect(tokens.current()).toBeNull();
+    expect(disk.names()).toEqual([]);
+    first.stop();
+  });
+
+  it("keeps only the sign-in when the app closes after the marker and before the token goes", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const gate = deferred<void>();
+    const store: SignInStore = {
+      load: () => tokens.store.load(), save: next => tokens.store.save(next),
+      clear: async () => { await gate.promise; await tokens.store.clear(); },
+    };
+    const first = await signedInWithRecord(disk, server, store);
+    void first.account.signOut();
+    await vi.waitFor(() => expect(first.account.state().status).toBe("signed-out"));
+    expect(disk.files.has("signing-out")).toBe(true);
+    expect(tokens.current()).toEqual(SIGNED_IN);
+    disk.crash();
+
+    const second = launchReal(disk, server, tokens.store);
+    await second.account.restore();
+    expect(second.account.state().status).toBe("signed-in");
+    await ready(second.outbox);
+    expect(disk.names()).toEqual([]);
+    await settled();
+    expect(requests(server, "post")).toHaveLength(1);
+    second.stop();
+  });
+
+  it("finishes the delete at the next launch when the app closes after the token went, and a new sign-in sends nothing", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const tokens = memoryStore(SIGNED_IN);
+    const first = await signedInWithRecord(disk, server, tokens.store);
+    disk.failRemoves = "unlink";
+    await first.account.signOut();
+    expect(tokens.current()).toBeNull();
+    expect(disk.names()).toEqual(expect.arrayContaining(["signing-out", "m-000000000001"]));
+    disk.crash();
+    disk.failRemoves = null;
+
+    const second = launchReal(disk, server, tokens.store);
+    await second.account.restore();
+    await ready(second.outbox);
+    expect(second.account.state().status).toBe("signed-out");
+    expect(disk.names()).toEqual([]);
+    second.stop();
+
+    const third = launchReal(disk, server, memoryStore(SIGNED_IN).store);
+    await third.account.restore();
+    await ready(third.outbox);
+    await settled();
+    expect(requests(server, "post")).toHaveLength(1);
+    third.stop();
+  });
+
+  it("shows the cautious sheet text when the records couldn't be read", async () => {
+    const disk = durableDisk();
+    const files = createDurableFiles(disk.launch());
+    const failing = { ...files, list: () => Promise.reject(new DurableFileError("failed", "Input/output error")) };
+    const { outbox, stop } = launchReal(disk, testServer(), memoryStore(SIGNED_IN).store, failing);
+    await vi.waitFor(() => expect(outbox.state().status).toBe("failed"));
+    expect(outbox.signOutCounts()).toBeNull();
+    expect(accountWords.signOutBody(outbox.signOutCounts())).toBe("dohc could not check this phone for unsent messages. Signing out deletes any it has.");
+    stop();
+  });
+});
+
+describe("fault schedules", () => {
+  it("holds a later reply in the thread while an earlier one is still taking its thread", async () => {
+    const disk = durableDisk();
+    placeRecord(disk, 1, { operationId: "op-parent", write: post("Plans"), target: { kind: "stream", id: "group-1" }, stage: "saved",
+      attempted: true, result: { kind: "saved", threadId: "thread-t", messageId: "message-p" } });
+    placeRecord(disk, 2, { operationId: "op-b", write: reply("B", null), dependsOn: "op-parent" });
+    placeRecord(disk, 3, { operationId: "op-c", write: reply("C", "thread-t"), target: { kind: "thread", id: "thread-t" } });
+    const server = testServer();
+    const calls = answerLater(server, "reply");
+    const release = disk.holdWrites();
+    const { stop } = launch(disk, server);
+    await vi.waitFor(() => expect(temporaries(disk).some(name => name.startsWith("m-000000000002."))).toBe(true));
+    await settled();
+    expect(calls).toHaveLength(0);
+    release();
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0]?.body).toEqual({ operationId: "op-b", threadId: "thread-t", body: "B" });
+    stop();
+  });
+
+  it("refuses a waiting reply after a failed refusal write, with backoff and at wake, and never sends it", async () => {
+    const disk = durableDisk();
+    placeRecord(disk, 1, { operationId: "op-parent", write: post("Plans"), target: { kind: "stream", id: "group-1" }, stage: "refused",
+      attempted: true, result: { kind: "refused", reason: "Couldn't send", threadId: null, winnerMessageId: null } });
+    placeRecord(disk, 2, { operationId: "op-child", write: reply("Yes", null), dependsOn: "op-parent" });
+    disk.failWrites = "write";
+    const server = testServer();
+    server.on("POST", path("reply"), held);
+    const { outbox, wait, stop } = launch(disk, server);
+    await ready(outbox);
+    await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+    expect(record(outbox, 2)?.stage).toBe("queued");
+
+    disk.failWrites = null;
+    outbox.wake();
+    await vi.waitFor(() => expect(record(outbox, 2)).toMatchObject({ stage: "refused", result: { reason: "The message it replies to wasn't sent" } }));
+    expect(onDisk(disk, 2)).toMatchObject({ stage: "refused" });
+    await settled();
+    expect(requests(server, "reply")).toHaveLength(0);
+    stop();
+  });
+
+  it("forgets the oldest observation past 1000 messages, and never reuses observations from another account or workspace", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const posts = answerLater(server, "post");
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+
+    const first = await outbox.enqueue({ workspaceId: "ws-1", write: post("First") });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    outbox.handoff(ME, "ws-1", [message(first.messageId ?? "")]);
+    outbox.handoff(ME, "ws-1", Array.from({ length: 1000 }, (_, i) => message(`other-${i}`)));
+    posts[0]?.answer(SAVED("thread-1"));
+    await vi.waitFor(() => expect(record(outbox, first.sequence)?.stage).toBe("saved"));
+    await settled();
+    expect(record(outbox, first.sequence)).toBeDefined();
+    outbox.handoff(ME, "ws-1", [message(first.messageId ?? "")]);
+    await vi.waitFor(() => expect(record(outbox, first.sequence)).toBeUndefined());
+
+    const second = await outbox.enqueue({ workspaceId: "ws-1", write: post("Second") });
+    await vi.waitFor(() => expect(posts).toHaveLength(2));
+    outbox.handoff(ME, "ws-1", [message(second.messageId ?? "")]);
+    // The person opens another workspace, then another account's read comes: neither keeps the first read.
+    outbox.handoff(ME, "ws-2", []);
+    posts[1]?.answer(SAVED("thread-2"));
+    await vi.waitFor(() => expect(record(outbox, second.sequence)?.stage).toBe("saved"));
+    outbox.handoff({ origin: ORIGIN, userId: "u-2" }, "ws-1", []);
+    await settled();
+    expect(record(outbox, second.sequence)).toBeDefined();
+    outbox.handoff(ME, "ws-1", [message(second.messageId ?? "")]);
+    await vi.waitFor(() => expect(record(outbox, second.sequence)).toBeUndefined());
+    stop();
+  });
+
+  it("keeps a parent saved while its reply was accepted ahead of the parent's handoff, until the reply takes its thread", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    const posts = answerLater(server, "post");
+    server.on("POST", path("send"), held);
+    const replies = answerLater(server, "reply");
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    const parent = await outbox.enqueue({ workspaceId: "ws-1", write: post("Plans") });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+
+    // The reply is queued while the parent is still sending, then the parent's answer and a read showing it arrive.
+    const release = disk.holdWrites();
+    const other = outbox.enqueue({ workspaceId: "ws-1", write: send("Elsewhere") });
+    await vi.waitFor(() => expect(temporaries(disk)).toHaveLength(1));
+    const child = outbox.enqueue({ workspaceId: "ws-1", write: reply("Me too", null), dependsOn: parent.operationId });
+    posts[0]?.answer(SAVED("thread-p", parent.messageId ?? ""));
+    outbox.handoff(ME, "ws-1", [message(parent.messageId ?? "")]);
+    release();
+    await other;
+    await expect(child).resolves.toMatchObject({ target: null });
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+    expect(replies[0]?.body).toMatchObject({ threadId: "thread-p", body: "Me too" });
+    expect(record(outbox, parent.sequence)?.stage).toBe("saved");
+    stop();
+  });
+
+  it("counts 404s only in a row: another answer between them starts the count again", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("post"), NOT_FOUND, NOT_FOUND, { status: 503 }, NOT_FOUND, NOT_FOUND, NOT_FOUND);
+    const { outbox, wait, stop } = launch(disk, server);
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: post("Hi") });
+    for (let i = 0; i < 5; i++) {
+      await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+      wait.release();
+    }
+    await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(6));
+    await settled();
+    expect(wait.pending).toHaveLength(0);
+    stop();
   });
 });

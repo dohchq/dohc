@@ -12,8 +12,11 @@ import { sleep, startDeviceSignIn, waitForDeviceToken } from "./deviceFlow";
 //
 // Ending a token deletes it from the store first, then revokes its session with the copy held in memory, so a phone
 // closed mid-way never keeps a token it signed out of. Writes to the store run one at a time, in order, so a delete
-// always lands after a save it raced. Sign out runs `onSignOut`, the outbox's delete, before the token goes, so a phone
-// closed between the two keeps its sign-in rather than messages it said it deleted.
+// always lands after a save it raced.
+//
+// Sign out runs `onSignOut`, the outbox's delete, first. The sign-in ends, and its token goes, only when that hook
+// calls `leave`: once its delete can no longer be lost. A hook that rejects before then keeps the phone signed in, so
+// it never deletes the token while messages it said it deleted could still send.
 
 /** What the token store keeps for this phone: the server, the session token, and whose it is. */
 export interface StoredSignIn {
@@ -63,9 +66,10 @@ export interface Account {
   /** Ends a sign-in in progress. A completed sign-in stays. */
   cancelSignIn(): void;
   /**
-   * Signs the phone out at once, ending everything the sign-in started, including after the server ended the session.
-   * Then it runs `onSignOut`, deletes the token, and revokes its session on the server, which may fail. It never
-   * rejects: a failed delete shows as `forgetFailed`.
+   * Signs the phone out, ending everything the sign-in started, also after the server ended the session. With
+   * `onSignOut`, the sign-in ends when the hook calls `leave`; without it, at once. Then it deletes the token and
+   * revokes its session, which may fail: a failed delete shows as `forgetFailed`. It rejects only when the hook rejects
+   * before `leave`, and then the phone stays signed in with its token.
    */
   signOut(): Promise<void>;
   /** Tries again to delete the tokens whose delete failed. */
@@ -79,8 +83,11 @@ export function createAccount(options: {
   readonly fetch: Fetch;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
-  /** Sign out's own cleanup, awaited before the token goes. Only Sign out runs it: a 401 and a launch never do. */
-  readonly onSignOut?: () => Promise<void>;
+  /**
+   * Sign out's own cleanup. It calls `leave`, which ends the sign-in and deletes the token, once its cleanup can't be
+   * lost. Only Sign out runs it: a 401 and a launch never do.
+   */
+  readonly onSignOut?: (leave: () => Promise<void>) => Promise<void>;
 }): Account {
   const { store, fetch } = options;
   const now = options.now ?? Date.now;
@@ -167,14 +174,35 @@ export function createAccount(options: {
     };
   }
 
+  let signingOut: Promise<void> | null = null;
   function signOut(): Promise<void> {
+    signingOut ??= endSignIn().finally(() => { signingOut = null; });
+    return signingOut;
+  }
+
+  async function endSignIn(): Promise<void> {
     const ending = saved;
     const origin = ending?.origin ?? (state.status === "signed-out" ? state.origin : null);
-    advance();
-    saved = null;
-    setState(signedOut(origin, false));
-    const cleaned = options.onSignOut?.().catch(() => undefined) ?? Promise.resolve();
-    return cleaned.then(() => ending ? endToken(ending.origin, ending.token) : undefined);
+    let left = false;
+    const leave = async () => {
+      if (left) return;
+      left = true;
+      advance();
+      saved = null;
+      setState(signedOut(origin, false));
+      if (ending) await forget(ending.origin, ending.token);
+    };
+    const cleaning = options.onSignOut?.(leave);
+    if (cleaning) {
+      try {
+        await cleaning;
+      } catch (error) {
+        // Signed out already: the hook finishes its cleanup itself.
+        if (!left) throw error;
+      }
+    }
+    await leave();
+    if (ending) await revoke(ending.origin, ending.token).catch(() => undefined);
   }
 
   return {
