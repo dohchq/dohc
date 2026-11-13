@@ -2157,6 +2157,9 @@ export function ChatsView(props: {
       }
       return;
     }
+    // An open Group's composer offers files by the rule in the channel list,
+    // which a change to the Group's shares moves.
+    if (nav.level === "thread" || nav.level === "channel") void refreshChannelBadges();
     if (nav.level === "thread") {
       const threadId = nav.thread.id;
       const token = liveToken.current;

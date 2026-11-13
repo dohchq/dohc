@@ -10,6 +10,7 @@ import {
   bridgeMock,
   shareListing,
   emitCloudSessionChanged,
+  emitWorkspaceActivity,
   renderView,
   navigatorView,
   mentionRoster,
@@ -659,11 +660,11 @@ describe("ChatsView shared channels (MU-C4)", () => {
     cleanup();
 
     // A Group of this workspace's offers every file until a share covers it.
-    // Once a refreshed channel list says a link shares it, the open composer
+    // Once a listing of its shares says a link shares it, the open composer
     // offers only its folder. The relay's grant listing names nobody for a link.
     listTeam({ kind: "any" });
     bridgeMock.listChatChannelShares.mockResolvedValue(shareListing());
-    const view = render(navigatorView(0, { workspaceFiles }));
+    renderView(vi.fn(), vi.fn(), { workspaceFiles });
     await userEvent.click(await screen.findByTestId("chats-channel"));
     expect((await offered()).sort()).toEqual([
       "finance/budget.md",
@@ -671,7 +672,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "team/mine.md",
     ]);
     listTeam({ kind: "shared", shares: [["team"]] });
-    view.rerender(navigatorView(1, { workspaceFiles }));
+    act(() => emitWorkspaceActivity());
     await waitFor(() => expect(options()).toEqual(["team/mine.md"]));
   });
 });

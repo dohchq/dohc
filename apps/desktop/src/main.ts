@@ -2269,7 +2269,12 @@ const shareRosters = createShareRosters({
   syncHistory: (workspace) => readSyncHistory(workspace.rootPath),
   logError: (workspaceId, error) =>
     console.warn(`[desktop] share roster refresh failed for ${workspaceId}:`, error),
-  onListed: (workspaceId) => collectionAutomationsOf(workspaceId)?.rosterChanged(),
+  // The renderer re-reads what each Group's messages may link, which the
+  // roster decides.
+  onListed: (workspaceId) => {
+    collectionAutomationsOf(workspaceId)?.rosterChanged();
+    notifyRenderer({ workspaceId });
+  },
 });
 
 const historyLabelWindows = new Map<WebContents, ReturnType<typeof createHistoryLabels>>();
