@@ -174,6 +174,7 @@ export const CAPABILITIES = {
   "chat.dispatch.notice.dismiss": capability("Dismiss a notice about agent replies.", {ipc: ["dismissChatDispatchNotice"]}),
   "chat.dispatch.pause.read": capability("Read whether agent replies are paused on this computer.", {ipc: ["readChatDispatchPaused"]}),
   "chat.dispatch.pause.switch": capability("Pause or resume agent replies on this computer.", {ipc: ["setChatDispatchPaused"]}),
+  "chat.wakes.retry": capability("Try again to start this computer's agents for messages from your phone.", {ipc: ["retryChatWakes"]}),
   "agent.run.state.read": capability("Read whether this computer's agent is working in this workspace.", {ipc: ["readAgentRunState"]}),
   "agent.run.retry": capability("Run an agent's stopped request in a conversation again, as Try again does.", {ipc: ["retryStoppedRun"], mcp: {owner: ["dohc_retry_chat_run"]}, mcpReason: "Only the computer that ran a request can run it again. Shared profiles omit it."}),
   "agent.listening.read": capability("Read which agents you run are waiting for messages on this computer.", {ipc: ["readAgentsListening"]}),

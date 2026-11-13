@@ -7267,8 +7267,17 @@ export type ScheduleHostResult = z.infer<typeof ScheduleHostResult>;
 export const ScheduleHostChangedEvent = z.string().min(1).max(256);
 export const ChatDispatchNotice = z.object({
   id: z.string().min(1),
-  reason: z.enum(["no-runner", "budget-paused", "restricted"]),
-  threadId: z.string().min(1),
+  // The wake reasons are about a message from your phone this computer won or
+  // saved and can't finish: the saved file is unreadable, the server no longer
+  // lists its claim, its workspace stopped syncing here, or the server no
+  // longer knows its queued request.
+  reason: z.enum(["no-runner", "budget-paused", "restricted", "wake-unreadable", "wake-dropped", "wake-parked", "wake-unconfirmed"]),
+  // Absent only for wake-unreadable, which is about a file rather than a thread.
+  threadId: z.string().min(1).optional(),
+  wakeId: z.string().min(1).optional(),
+  messageId: z.string().min(1).optional(),
+  // The saved file wake-unreadable names.
+  file: z.string().min(1).optional(),
   // The paused thread's group, so Open lands on the thread itself.
   channelId: z.string().min(1).optional(),
   runId: z.string().min(1).optional(),
@@ -7298,6 +7307,13 @@ export const chatDispatchNoticeOperations = {
     channel: "desktop:dismiss-chat-dispatch-notice",
     payload: WorkspaceIdPayload.extend({ id: z.string().min(1) }),
     guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its notice about agent replies.",
+  },
+  retryChatWakes: {
+    capabilityId: "chat.wakes.retry",
+    scope: "workspace",
+    channel: "desktop:retry-chat-wakes",
+    payload: WorkspaceIdPayload,
+    guard: "active-workspace", inactiveMessage: "Open this workspace to try its agent requests again.",
   },
 } as const satisfies OperationTable;
 

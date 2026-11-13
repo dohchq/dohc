@@ -58,15 +58,15 @@ it("keeps a pause per thread, and takes back only the thread that resumed", () =
 
 it("keeps every snapshot within the IPC contract, however many chats pause", () => {
   const notices = createChatDispatchNotices(vi.fn());
-  notices.report("a", { reason: "restricted", threadId: "r", message: "Restricted." });
-  notices.report("a", { reason: "no-runner", threadId: "n", message: "No runner." });
+  const others = ["restricted", "no-runner", "wake-unreadable", "wake-dropped", "wake-parked", "wake-unconfirmed"] as const;
+  for (const reason of others) notices.report("a", { reason, threadId: reason, message: `${reason}.` });
   for (let index = 0; index <= CHAT_DISPATCH_NOTICES_MAX; index += 1) {
     notices.report("a", { reason: "budget-paused", threadId: `t${index}`, message: `Paused in t${index}.` });
     expect(ChatDispatchNoticesEvent.safeParse(notices.register("a")).success).toBe(true);
   }
   const threads = notices.register("a").notices.map(({ threadId }) => threadId);
   expect(threads).toHaveLength(CHAT_DISPATCH_NOTICES_MAX);
-  expect(threads.slice(0, 2)).toEqual(["r", "n"]);
+  expect(threads.slice(0, others.length)).toEqual([...others]);
   // The oldest pauses gave way to the newest.
   expect(threads).not.toContain("t0");
   expect(threads.at(-1)).toBe(`t${CHAT_DISPATCH_NOTICES_MAX}`);

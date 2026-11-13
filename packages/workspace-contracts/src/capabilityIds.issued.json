@@ -77,6 +77,7 @@
   "chat.thread.revision.read",
   "chat.threads.list",
   "chat.unread.list",
+  "chat.wakes.retry",
   "collection.copies.left.read",
   "collection.copies.left.remove",
   "collection.query",

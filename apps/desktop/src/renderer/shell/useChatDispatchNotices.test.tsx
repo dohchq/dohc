@@ -14,12 +14,13 @@ function setup() {
   const store = createChatDispatchNotices((event) => { for (const listener of listeners) listener(event); });
   const register = vi.fn(async ({ workspaceId }: { workspaceId: string }) => store.register(workspaceId));
   const dismiss = vi.fn(async ({ workspaceId, id }: { workspaceId: string; id: string }) => store.dismiss(workspaceId, id));
+  const retryWakes = vi.fn(async (_input: { workspaceId: string }) => {});
   vi.stubGlobal("dohcDesktop", {
     onChatDispatchNotices: (listener: (event: ChatDispatchNoticesEvent) => void) => {
       listeners.add(listener);
       return () => { listeners.delete(listener); removed.push(listener); };
     },
-    registerChatDispatchNotices: register, dismissChatDispatchNotice: dismiss,
+    registerChatDispatchNotices: register, dismissChatDispatchNotice: dismiss, retryChatWakes: retryWakes,
     listChatChannels: async () => ({ channels: [AGENT_DM, GROUP] }),
     listChannelThreads: async ({ channelId, lane }: { channelId: string; lane: "posts" | "chat" }) =>
       ({ threads: [WAKE_POST, GROUP_CHAT].filter((thread) => thread.channelId === channelId && thread.lane === lane) }),
@@ -31,7 +32,7 @@ function setup() {
     useChatDispatchNotices(props.workspaceId, props.ready, errors.reportShellFailure, errors.clearKind, errors.clearIdentity, trust, openChat);
     return errors;
   }, { initialProps: { workspaceId, ready } });
-  return { store, register, dismiss, mount, listeners, removed, trust, openChat };
+  return { store, register, dismiss, retryWakes, mount, listeners, removed, trust, openChat };
 }
 const AGENT_DM = {
   id: "agent-dm", name: "My agent", slug: "my-agent", kind: "agent" as const,
@@ -214,4 +215,29 @@ it("still takes back a resumed chat's newer pause after an older dismissal fails
   expect(hook.result.current.shellErrors.map((row) => row.message)).toEqual([
     "Paused in \"Nova\".", "dohc could not dismiss this notice. Open this workspace again to try again.",
   ]);
+});
+
+it("keeps a wake row that is still wrong until Try again or its end, and lets a dropped one be dismissed", async () => {
+  const h = setup();
+  h.store.report("a", { reason: "wake-unreadable", message: "dohc can't read the file.", file: "/state/chat-wakes.json" });
+  h.store.report("a", { reason: "wake-parked", threadId: "t1", messageId: "m1", wakeId: "wake-1", message: "Its workspace no longer syncs here." });
+  h.store.report("a", { reason: "wake-dropped", threadId: "t2", messageId: "m2", wakeId: "wake-2", message: "Nothing ran here." });
+  const view = h.mount();
+  await act(async () => {});
+  const rows = view.result.current.shellErrors;
+  const unreadable = rows.find((item) => item.kind === "chat-wake-unreadable")!;
+  expect(unreadable).toMatchObject({ title: "dohc could not read the agent requests saved here", noDismiss: true, details: [["File", "/state/chat-wakes.json"]] });
+  const parked = rows.find((item) => item.kind === "chat-wake-parked")!;
+  expect(parked).toMatchObject({ noDismiss: true, details: [["Thread", "t1"], ["Message", "m1"], ["Wake", "wake-1"]] });
+  expect(parked.onDismiss).toBeUndefined();
+  act(() => { parked.retry?.(); });
+  expect(h.retryWakes).toHaveBeenCalledExactlyOnceWith({ workspaceId: "a" });
+  const dropped = rows.find((item) => item.kind === "chat-wake-dropped")!;
+  expect(dropped.noDismiss).toBeUndefined();
+  expect(dropped.retry).toBeNull();
+  await act(async () => view.result.current.dismissShellError(dropped.id));
+  expect(h.dismiss).toHaveBeenCalledOnce();
+  // Main takes the parked row back once its wake is recorded.
+  act(() => h.store.clear("a", "wake-parked"));
+  expect(view.result.current.shellErrors.map((item) => item.kind)).toEqual(["chat-wake-unreadable"]);
 });
