@@ -62,6 +62,17 @@ function documentRows(storage:StorageContext,document:LiveDocumentKey,source:Nat
   }
   return digest.digest("hex");
 }
+/**
+ * The document's rows a read takes from a lower relay position through the cursor, at most one past the entry limit.
+ * Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
+ */
+const selectedRows=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
+      AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
+      AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
+      AND NOT (${OTHER_LINEAGE_UPDATE})
+    ORDER BY relay_seq LIMIT ?`;
+const selectedParams=(document:LiveDocumentKey,lower:number,cursor:number,entryLimit:number)=>
+  [document.workspaceId,lower,cursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
 /** The history prefix a write at this relay position follows. */
 const prefixAt=(rows:OrdinaryActivationHistory["rows"],relaySeq:number)=>rows.filter(row=>row.relay_seq<relaySeq).length-1;
 /**
@@ -82,13 +93,7 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
   // A checkpoint stands for its rows, so the read starts after it; the base row is still checked on its own below.
   const lower=checkpoint?checkpoint.throughRelaySeq+1:source.baseRelaySeq,start=checkpoint?checkpoint.state:baselineBytes;
   const entryLimit=Math.min(bounds.maxHistoryEntries,MAX_OLD_SUFFIX_ENTRIES+2);
-  // Another lineage's rows are neither read nor charged. The captured full state must still equal the rebuilt history.
-  const selected=`FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page WHERE workspace_id=? AND relay_seq>=? AND relay_seq<=?
-      AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=?
-      AND COALESCE(json_extract(settlement_admission_json,'$.status'),'')<>'refused'
-      AND NOT (${OTHER_LINEAGE_UPDATE})
-    ORDER BY relay_seq LIMIT ?`;
-  const params=[document.workspaceId,lower,source.committedCursor,document.mainVersionId,document.objectId,document.lineageClaimId,entryLimit+1];
+  const selected=selectedRows,params=selectedParams(document,lower,source.committedCursor,entryLimit);
   // octet_length() takes each size from the row's header; no payload is read before the read is known to fit.
   const readable=bounds.maxBytesPerDrain-start.length;
   let read=0,pageRows=0;
@@ -229,9 +234,18 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
       }else{
         if(checkpoint&&!storage.db.prepare(`SELECT 1 FROM ${SETTLEMENT_BINDINGS} WHERE workspace_id=? AND moment_id=?`).get(document.workspaceId,source.sourceMomentId))return {kind:"base"};
         const proved=provedSettlementSource(storage,{source,document,charge});
-        if(checkpoint&&proved.relaySeq<=checkpoint.throughRelaySeq)return {kind:"base"};
         anchor=proved.relaySeq;settled={state:proved.state,stateSha256:proved.stateSha256};
-        from=history.filter(row=>row.relay_seq<anchor).length-1;
+        if(checkpoint&&anchor<=checkpoint.throughRelaySeq){
+          // A settlement the checkpoint folded: the fold kept the projection of the history before it, and the tail the rows after it.
+          const moment=checkpoint.moments.find(kept=>kept.relaySeq===anchor),tail=checkpoint.tail;
+          if(!moment||tail[0]!.relaySeq>=anchor)return {kind:"base"};
+          for(const row of [moment,...tail.filter(row=>row.relaySeq>anchor).map(row=>row.projection)]){
+            if(!row)return {kind:"base"};
+            requireValue(row.projectedMarkdownSha256===source.sourceDigest&&row.projectedMarkdownByteLength===source.sourceByteLength,
+              "Native activation source moment does not project the captured source.");
+          }
+          from=0;
+        }else from=history.filter(row=>row.relay_seq<anchor).length-1;
       }
     }
     // A returned document keeps the text it had before moving.
@@ -243,7 +257,7 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     const latest=moment&&Number(moment.relay_seq)===latestMove?latestWrite:moment?Number(moment.relay_seq):null;
     if(latest!==null&&latest>anchor&&!echoes)artifact=latest;
     // The artifact proof compares the writes behind it with the projections they followed, which the checkpoint keeps only for its latest moments.
-    if(artifact!==null&&checkpoint&&checkpoint.momentsFromSeq>source.baseRelaySeq)return {kind:"base"};
+    if(artifact!==null&&checkpoint&&checkpoint.momentsFromSeq>source.baseRelaySeq&&!keptBehind(storage,{source,document,entryLimit,checkpoint},artifact))return {kind:"base"};
   }
   if(latestMove!==null&&moment){
     const current=currentFileRow.get(document.workspaceId,document.mainVersionId,source.currentPath);
@@ -257,6 +271,28 @@ export function readOrdinaryActivationHistory(storage:StorageContext,input:Histo
     moments:checkpoint.moments.map(({relaySeq,projectedMarkdownSha256,projectedMarkdownByteLength})=>({relaySeq,projectedMarkdownSha256,projectedMarkdownByteLength}))}:null};
   reads.set(walked,{lower,cursor:source.committedCursor,rowsSha256});
   return {kind:"history",history:walked};
+}
+/**
+ * Whether the checkpoint still keeps every write the proof of `artifact` compares directly, and a read from the base
+ * could not decide it anyway. The proof compares the writes after the artifact origin's nearest Y.Doc row of this
+ * document, found as the proof finds it, so that row must be at or after the first moment the checkpoint kept. The
+ * lookup examines at most `entryLimit` rows. A write proved in turn as a stale artifact may still need a dropped one,
+ * so this answers false while a read from the base fits the entry limit.
+ */
+function keptBehind(storage:StorageContext,input:{source:NativeOwnerActivationSource;document:LiveDocumentKey;entryLimit:number;
+  checkpoint:{momentsFromSeq:number}},artifact:number):boolean{
+  const {source,document,entryLimit}=input;
+  const fromBase=storage.db.prepare(`SELECT count(*) AS entries FROM (SELECT 1 ${selectedRows})`)
+    .get(...selectedParams(document,source.baseRelaySeq,source.committedCursor,entryLimit));
+  if(!fromBase||Number(fromBase.entries)<=entryLimit)return false;
+  const origin=storage.db.prepare("SELECT origin_id FROM sync_relay_log WHERE workspace_id=? AND relay_seq=?").get(document.workspaceId,artifact);
+  if(!origin)return false;
+  const nearest=storage.db.prepare(`SELECT relay_seq FROM (SELECT relay_seq,origin_id,op_kind FROM sync_relay_log INDEXED BY idx_sync_relay_log_document_page
+      WHERE workspace_id=? AND json_extract(payload_json,'$.versionId')=? AND json_extract(payload_json,'$.objectId')=? AND relay_seq>=? AND relay_seq<?
+      ORDER BY relay_seq DESC LIMIT ?)
+    WHERE origin_id=? AND op_kind='ydoc.update' ORDER BY relay_seq DESC LIMIT 1`)
+    .get(document.workspaceId,document.mainVersionId,document.objectId,source.baseRelaySeq,artifact,entryLimit,origin.origin_id);
+  return !!nearest&&Number(nearest.relay_seq)>=input.checkpoint.momentsFromSeq;
 }
 /** Whether the lineage's checkpoint is still the one a read continued from, or still none it could use. */
 function sameCheckpoint(storage:StorageContext,scope:OrdinaryCheckpointScope|null,kept:OrdinaryActivationHistory["checkpoint"]):boolean{

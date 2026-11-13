@@ -41,6 +41,8 @@ import { hostedWindowCovers, releasedLineageBindingDigest, type HostedWindow, ty
 import bindingVectors from "../../../packages/workspace-engine-client/src/relay/releasedLineageBindingVectors.json" with { type: "json" };
 import { ServiceActivationHistoryOverBudget, validateOrdinaryActivation } from "./storage/ordinaryActivationValidation.js";
 import { readOrdinaryActivationHistory, ServiceActivationTooLarge, verifyOrdinaryActivationCut } from "./storage/ordinaryActivationSource.js";
+import { CHECKPOINT_MOMENTS, checkpointPolicySha256, readOrdinaryCheckpoint } from "./storage/ordinaryActivationCheckpoint.js";
+import { foldOrdinaryCheckpointPages, ORDINARY_FOLD_PAGE_ROWS, ORDINARY_FOLD_RUN_PAGES } from "./storage/ordinaryActivationFold.js";
 import { nativeSettlementId, prepareHostedSettlements, settlementRecordDigest } from "./storage/hostedSettlement.js";
 import { stableJsonStringify } from "./canonicalJson.js";
 import { encodeNativeRestoreProposal } from "./liveRestoreProposal.js";
@@ -3330,9 +3332,9 @@ it.each([
 const moveNote = (o: Enrolled, path: string, relaySeq: number) => o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,
   moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) SELECT workspace_id,object_id,?,?,version_id,?,blob_sha256,content_kind,byte_length,?
   FROM sync_relay_object_moments WHERE object_id='object' ORDER BY relay_seq DESC LIMIT 1`).run(relaySeq, `moved-${relaySeq}`, path, relaySeq);
-// The retiring host's push of the restored note, which puts the restore in the relay's ordinary history, and the
-// successor's native capture after it: the restored state, sourced from the restore's settlement moment.
-const pushRestoredNote = (o: Enrolled): NativeOwnerActivation => {
+// The retiring host's push of the restored note, which puts the restore in the relay's ordinary history. Returns the
+// restored note's complete state.
+const pushRestoredUpdate = (o: Enrolled) => {
   const ordinary = new Y.Doc({gc: false}), restored = new Y.Doc({gc: false});
   for (const bytes of [o.engine.capture.baselineBytes, o.engine.capture.fullState]) Y.applyUpdate(ordinary, bytes);
   // The state at the journal's last cursor, as the restore's settlement settled it.
@@ -3344,6 +3346,19 @@ const pushRestoredNote = (o: Enrolled): NativeOwnerActivation => {
   o.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',3,'ydoc.update',?,3)")
     .run(JSON.stringify({versionId: "main", objectId: "object", path: o.sibling.path, contentKind: "richdoc", isBaseState: false,
       lineageClaimId: o.document.lineageClaimId, updateBlobSha256: sha256(update)}));
+  return fullState;
+};
+// The note's first text, depth first.
+const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
+  for (const child of node.toArray()) {
+    const found = child instanceof Y.XmlText ? child : child instanceof Y.XmlElement ? firstText(child) : null;
+    if (found) return found;
+  }
+  return null;
+};
+// That push, and the successor's native capture after it: the restored state, sourced from the restore's settlement moment.
+const pushRestoredNote = (o: Enrolled): NativeOwnerActivation => restoredCapture(o, pushRestoredUpdate(o));
+const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation => {
   const moment = o.raw.prepare("SELECT moment_id,blob_sha256,byte_length FROM sync_relay_object_moments WHERE moment_id='restore-publication'").get()!;
   const head = Number(o.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head);
   return {...o.engine.capture, activationId: SUCCESSOR, fullState, source: {...o.engine.capture.source, predecessorActivationId: ACTIVATION,
@@ -3451,6 +3466,87 @@ it("activates a restored note's successor at the restored generation after Stop 
   expect(bindings).toEqual([o.binding, {...o.binding, restoreFenceGeneration: fence}]);
   expect(ownerBinding(o)).toMatchObject({kind: "current", binding: {...o.binding, restoreFenceGeneration: fence}});
   expect(o.errors).toEqual([]);
+});
+
+// Proves: after a restore and Stop, the successor that Resume starts, whose source is the restore's settlement
+// moment, reads from a checkpoint folded through that moment. Here the owner's ordinary history reached the restored
+// text before the settlement, and a later save of the same text makes the settlement no longer the note's newest file
+// moment, so the read proves the settlement. The checkpoint kept the projection of the history before the moment,
+// which is the prefix a read from the base validates. Where the checkpoint no longer holds the projection of every
+// history after the settlement, or no longer keeps the settlement, the read answers base.
+it.each<{after: string; steps: ("row" | "save")[]; read: "history" | "base"}>([
+  {after: "a save", steps: ["save"], read: "history"},
+  // More Y.Doc rows after the settlement than the checkpoint's tail keeps.
+  {after: "a save and 33 Y.Doc rows", steps: ["save", ...Array<"row">(33).fill("row")], read: "base"},
+  // A page that ended before a later moment kept the projection of its last row only.
+  {after: "two Y.Doc rows and a save", steps: ["row", "row", "save"], read: "base"},
+  // As many saves as the checkpoint keeps moments, so it no longer keeps the settlement.
+  {after: `${CHECKPOINT_MOMENTS} saves`, steps: Array<"save">(CHECKPOINT_MOMENTS).fill("save"), read: "base"},
+])("reads a restored note's successor followed by $after from a checkpoint folded through the restore's settlement: $read", async ({steps, read}) => {
+  const o = await enrolledServiceHost({supervised: true});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  o.beginRestore();
+  o.f.storage.advanceStopRestoreFence(stopLookup, 50);
+  await expect(o.host.stopRestore(stopLookup)).resolves.toEqual({kind: "pending", reason: "native-fence-pending"});
+  const proposalDigest = await admitRestore(o), {publish} = restoreEngine(o, o.host);
+  await expect(o.host.completeRestore(stopLookup, proposalDigest)).resolves.toMatchObject({kind: "resumed", proposalDigest});
+  const restored = pushRestoredUpdate(o);
+  await publish();
+  await vi.waitFor(() => expect(o.host.isDocumentReady(o.document)).toBe(true), {timeout: 10_000});
+  expect(preparedStop(o.f.storage, {workspaceId: "workspace", ownerUserId: "owner", path: o.sibling.path, enabled: false, retire: true, nowMs: 300, guard() {}}))
+    .toMatchObject({enabled: false, retired: true});
+  o.supervisor!.reconcile();
+  await vi.waitFor(() => expect(retiredRow(o).retired).toBe(true), {timeout: 10_000});
+  const capture = restoredCapture(o, restored), storage = o.f.storage as StorageContext;
+  const settlement = Number(o.raw.prepare("SELECT relay_seq FROM sync_relay_object_moments WHERE moment_id=?").get(capture.source.sourceMomentId)!.relay_seq);
+  // The owner's rows after the settlement: saves of the restored text, and Y.Doc rows that type a letter and take it
+  // back, so the note's Markdown stays the restored text.
+  const doc = new Y.Doc({gc: false});
+  Y.applyUpdate(doc, capture.fullState);
+  const text = firstText(doc.getXmlFragment("body"))!;
+  let originSeq = 4, cursor = 0;
+  const append = (opKind: string, payload: Record<string, unknown>) => {
+    o.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,4)")
+      .run(originSeq++, opKind, JSON.stringify({versionId: "main", objectId: "object", path: o.sibling.path, ...payload}));
+    cursor = Number(o.raw.prepare("SELECT max(relay_seq) AS head FROM sync_relay_log").get()!.head);
+  };
+  for (const step of steps) {
+    if (step === "row") {
+      const before = Y.encodeStateVector(doc);
+      doc.transact(() => {text.insert(0, "x"); text.delete(0, 1);});
+      const update = Buffer.from(Y.encodeStateAsUpdate(doc, before));
+      o.raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)").run(sha256(update), update.length, update);
+      append("ydoc.update", {contentKind: "richdoc", isBaseState: false, lineageClaimId: o.document.lineageClaimId, updateBlobSha256: sha256(update)});
+    } else {
+      const momentId = `saved-after-resume-${originSeq}`;
+      append("moment.append", {momentId, operation: "write", payloadAfterPath: o.sibling.path, payloadAfterContentKind: "text",
+        payloadAfterBlobSha256: capture.source.sourceDigest, payloadAfterByteLength: capture.source.sourceByteLength});
+      o.raw.prepare(`INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms)
+        VALUES ('workspace','object',?,?,'main',?,?,'text',?,4)`).run(cursor, momentId, o.sibling.path, capture.source.sourceDigest, capture.source.sourceByteLength);
+    }
+  }
+  const fullState = Buffer.from(Y.encodeStateAsUpdate(doc));
+  doc.destroy();
+  const source = {...capture.source, committedCursor: cursor, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length};
+  const scope = {namespace: source.relayDatabaseNamespace, document: o.document, replicationEpoch: source.replicationEpoch, streamIdentity: source.streamIdentity,
+    base: {relaySeq: source.baseRelaySeq, originId: source.baseOriginId, originSeq: source.baseOriginSeq}, policySha256: checkpointPolicySha256(restorePolicy)};
+  await expect(foldOrdinaryCheckpointPages(storage, {scope, pages: ORDINARY_FOLD_RUN_PAGES, nowMs: () => 500,
+    validate: async work => validateOrdinaryActivation(work, restorePolicy),
+    bounds: {pageRows: ORDINARY_FOLD_PAGE_ROWS, pageBytes: 1_000_000}})).resolves.toMatchObject({kind: "folded", reachedCursor: true});
+  const folded = readOrdinaryCheckpoint(storage, scope)!;
+  expect(folded.throughRelaySeq).toBe(source.committedCursor);
+  expect(folded.moments.some(moment => moment.relaySeq === settlement)).toBe(steps.filter(step => step === "save").length < CHECKPOINT_MOMENTS);
+  const input = {source, document: o.document, baselineBytes: capture.baselineBytes, fullState, checkpoint: scope,
+    bounds: {maxCaptureBytes: 1_000_000, maxHistoryEntries: 1_000, maxBytesPerDrain: 1_000_000}};
+  const found = readOrdinaryActivationHistory(storage, input);
+  if (read === "base") return expect(found.kind).toBe("base");
+  if (found.kind !== "history") throw new Error(`Expected a history read from the checkpoint, not ${found.kind}.`);
+  expect(found.history).toMatchObject({from: 0, artifact: null, checkpoint: {throughRelaySeq: folded.throughRelaySeq}});
+  expect(found.history.settled).not.toBeNull();
+  const validation = validateOrdinaryActivation({document: o.document, currentPath: source.currentPath, baselineBytes: capture.baselineBytes,
+    cut: {source, fullState, history: found.history, maxBytesPerDrain: input.bounds.maxBytesPerDrain}}, restorePolicy);
+  if (validation.kind !== "accepted") throw new Error(validation.message);
+  expect(() => verifyOrdinaryActivationCut(storage, {...input, history: found.history, baseline: validation.baseline, proof: validation.proof})).not.toThrow();
 });
 
 // Proves: a restore request cannot name a live session for the relay to keep.

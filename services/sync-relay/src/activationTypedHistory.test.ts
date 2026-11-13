@@ -241,6 +241,15 @@ it.each([
   else expect(outcome).toMatchObject({message: "Ordinary activation found a later ordinary file moment with a divergent projection."});
 });
 
+// A device's late write of text it settled earlier lands after the note's last keystroke. Its proof compares only the
+// writes after that device's last keystroke, which the checkpoint still keeps.
+it("a note saved more often than its checkpoint keeps activates past a stale write that follows its last keystroke", {timeout: 120_000}, async () => {
+  const validate = validation(), {note, longer} = await savedOften();
+  note.appendWrite(`moment-ydoc-${"5".repeat(64)}`, note.end, true);
+  const capture = note.captureAt(longer.fullState);
+  expect((await activate(note, validate, capture)).outcome).toEqual(activated(note));
+});
+
 // The relay saves a fold's checkpoint before the activation registers. A relay that stops between the two, and starts
 // again, continues from that checkpoint and validates no fold page twice.
 it.each([false, true])("an activation that stopped after its fold saved continues from the saved checkpoint, restarted: %s", {timeout: 120_000}, async restarted => {
