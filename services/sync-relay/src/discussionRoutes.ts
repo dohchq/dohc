@@ -272,6 +272,8 @@ export function createDiscussionRoutes(
       const input = parseLinkDiscussionAppendBody(await readJsonObject(request));
       requireFresh();
       if (capability.access === "view") return linkRefusal("link_view_access");
+      // A member's account never reaches a link's discussion.
+      if (credential.kind === "member") throw notFound();
       const writer =
         credential.kind === "agent"
           ? { agent: credential.check, now: nowMs }

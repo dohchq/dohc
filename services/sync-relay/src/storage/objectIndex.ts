@@ -208,6 +208,32 @@ export function findChannelCreateKind(
   return undefined;
 }
 
+/** Each channel's earliest create, in log order. The caller asks `findChannelCreateKind` which ones it may name. */
+export function listChannelCreates(
+  storage: StorageContext,
+  workspaceId: string,
+): { channelWireId: string; name: string }[] {
+  const rows = storage.db
+    .prepare(
+      `SELECT payload_json FROM sync_relay_log INDEXED BY idx_sync_relay_log_channel_creates
+     WHERE workspace_id = ? AND op_kind = 'chat.channel.create'
+     ORDER BY relay_seq`,
+    )
+    .iterate(workspaceId);
+  const channels = new Map<string, string>();
+  for (const row of rows) {
+    let record: Record<string, unknown> | null;
+    try {
+      record = asRecord(JSON.parse(String(row.payload_json)));
+    } catch {
+      continue;
+    }
+    if (!record || typeof record.wireId !== "string" || channels.has(record.wireId)) continue;
+    channels.set(record.wireId, typeof record.name === "string" ? record.name : "");
+  }
+  return [...channels].map(([channelWireId, name]) => ({ channelWireId, name }));
+}
+
 export function findChannelCreateFolderPath(
   storage: StorageContext,
   workspaceId: string,

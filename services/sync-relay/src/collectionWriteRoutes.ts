@@ -125,9 +125,14 @@ export function createCollectionWriteRoutes(input: {
       throw relayError("share_op_rejected");
     }
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
-    const decision = filterCollectionWriteForShare(authorized.effectiveSelector, body.changes, {
-      channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
-    }, storage.memberFolders(share.workspaceId, actorUserId));
+    const decision = filterCollectionWriteForShare(
+      authorized.effectiveSelector,
+      body.changes,
+      {
+        channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),
+      },
+      storage.memberFolders(share.workspaceId, actorUserId),
+    );
     if (!decision.allowed) throw relayError("share_op_rejected");
     return commit(
       storage,
@@ -249,8 +254,11 @@ export function createLinkCollectionWriteRoute(input: {
         capabilityHash: credential.capability.session.capabilityHash,
         profileTokenHash: hashLinkProfileSecret(secret, input.linkKey),
       };
-    } else {
+    } else if (credential.kind === "agent") {
       writer = { kind: "agent", ...credential.check };
+    } else {
+      // A member's account reads through the link routes and never writes here.
+      throw notFound();
     }
     // An Edit link only. A View or
     // Comment link learns nothing a missing share would not tell it.

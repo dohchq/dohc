@@ -8,7 +8,11 @@ import {
 } from "./discussionActivity";
 import { notFound, relayError, RelayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
-import type { LinkAuthorityResolver, LinkJsonResponse } from "./linkAuthority";
+import {
+  isMemberRequest,
+  type LinkAuthorityResolver,
+  type LinkJsonResponse,
+} from "./linkAuthority";
 import type { LinkEgressRateLimiter } from "./linkSecurity";
 import { assertSha256, parseCursor, parseLimit, parseLinkLogHold } from "./requestInputs";
 import { authorizeLinkChatAction } from "./shareAuthorization";
@@ -41,7 +45,7 @@ export function createLinkReadRoutes(
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
-  linkAuthority: Pick<LinkAuthorityResolver, "require" | "fresh">,
+  linkAuthority: Pick<LinkAuthorityResolver, "require" | "requireMember" | "fresh">,
   linkJsonResponse: LinkJsonResponse,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   newestFilteredOpFreshness: ReturnType<typeof createShareReadQueries>["newestFilteredOpFreshness"],
@@ -80,7 +84,9 @@ export function createLinkReadRoutes(
       route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
     const grantRateLimiter =
       route.route === "link-log" ? linkGrantLogReadRateLimiter : linkGrantReadRateLimiter;
-    const capability = linkAuthority.require(request, capabilityRateLimiter, grantRateLimiter);
+    const capability = isMemberRequest(request)
+      ? await linkAuthority.requireMember(request, capabilityRateLimiter, grantRateLimiter)
+      : linkAuthority.require(request, capabilityRateLimiter, grantRateLimiter);
     const requireFresh = () => linkAuthority.fresh(capability);
     if (request.method !== "GET") throw relayError("method_not_allowed");
     const share = storage.getShare(capability.shareId);

@@ -1600,6 +1600,12 @@ export interface SyncRelayStorage {
     direction: "older" | "newer";
     limit: number;
   }): FetchLogPageResult & { latestCursor: number };
+  fetchChannelMessages(input: {
+    workspaceId: string;
+    cursor: number | null;
+    direction: "older" | "newer";
+    limit: number;
+  }): FetchLogPageResult & { latestCursor: number };
   fetchCommentMessages(input: {
     workspaceId: string;
     objectId: string;
@@ -2042,6 +2048,8 @@ export interface SyncRelayStorage {
     workspaceId: string,
     channelWireId: string,
   ): string | null | undefined;
+  /** Each channel's earliest create, in log order: its wire id and its name. */
+  listChannelCreates(workspaceId: string): { channelWireId: string; name: string }[];
   // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason
   // the channel binding uses it: a later forged re-create must not re-bind an

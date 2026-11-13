@@ -105,6 +105,7 @@ export function createLinkChatRoutes(options: {
     SyncRelayStorage,
     | "appendLinkChatPost"
     | "fetchChatMessages"
+    | "fetchChannelMessages"
     | "findChannelCreateKind"
     | "getShare"
     | "getShareGrant"

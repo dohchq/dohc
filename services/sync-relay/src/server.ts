@@ -976,6 +976,7 @@ export function createSyncRelayHandler({
 
   // The routes share-web's MCP tool loop calls take a link holder's
   // capability or a connected agent's access token through this one resolver.
+  // The link read routes also take a workspace member's account.
   const linkAuthority = createLinkAuthorityResolver({
     storage,
     personalAgents,
@@ -986,6 +987,8 @@ export function createSyncRelayHandler({
     nowMs,
     requireLinkCapability,
     requireFreshLinkRead,
+    resolveActor,
+    publicOrigin: shareWebOrigin,
   });
   const respondToLinkCollectionWrites = linkKey
     ? createLinkCollectionWriteRoute({

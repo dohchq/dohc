@@ -282,6 +282,10 @@ export function holderLinkAuthority(
     nowMs: () => Date.now(),
     requireLinkCapability: holderOnly,
     requireFreshLinkRead: holderOnly,
+    resolveActor: () => {
+      throw new Error("A link route never resolves a member here.");
+    },
+    publicOrigin: undefined,
   });
 }
 export const table = "sync_relay_live_session_tickets";

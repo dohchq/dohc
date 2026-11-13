@@ -2124,6 +2124,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return objectIndexStorage.findChannelCreateKind(this, workspaceId, channelWireId);
   }
 
+  listChannelCreates(workspaceId: string): { channelWireId: string; name: string }[] {
+    return objectIndexStorage.listChannelCreates(this, workspaceId);
+  }
+
   findChannelCreateFolderPath(
     workspaceId: string,
     channelWireId: string,
@@ -2228,18 +2232,24 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       return this.owner.write(run);
     } finally {
       try {
-      const after = this.unavailable.aborted ? undefined : revision.get()!;
-      if (!after) notifyRelayWrite(this);
-      else if (after.changes !== before.changes || after.schema_version !== before.schema_version) {
-        notifyRelayWrite(
-          this,
-          scope === NO_LIVE_AUTHORITY &&
-            (after.authority !== before.authority || after.schema_version !== before.schema_version)
-            ? undefined
-            : scope,
-        );
+        const after = this.unavailable.aborted ? undefined : revision.get()!;
+        if (!after) notifyRelayWrite(this);
+        else if (
+          after.changes !== before.changes ||
+          after.schema_version !== before.schema_version
+        ) {
+          notifyRelayWrite(
+            this,
+            scope === NO_LIVE_AUTHORITY &&
+              (after.authority !== before.authority ||
+                after.schema_version !== before.schema_version)
+              ? undefined
+              : scope,
+          );
+        }
+      } catch {
+        notifyRelayWrite(this);
       }
-      } catch { notifyRelayWrite(this); }
     }
   }
 
@@ -2416,6 +2426,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     limit: number;
   }): SyncRelayLogRow[] {
     return logStorage.fetchLogPageDescending(this, input);
+  }
+
+  fetchChannelMessages(
+    input: Parameters<typeof logStorage.fetchChannelMessages>[1],
+  ): ReturnType<typeof logStorage.fetchChannelMessages> {
+    return logStorage.fetchChannelMessages(this, input);
   }
 
   fetchChatMessages(
