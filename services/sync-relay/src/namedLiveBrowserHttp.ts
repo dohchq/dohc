@@ -73,6 +73,8 @@ export function createNamedLiveBrowserHttp(options: {
   const exchangeHash = hashRelayExchangeKey(options.exchangeKey);
   const sessions = createNamedLiveBrowserSessions({
     ...limits,
+    // The desktop's store, in namedDesktopLive.ts, has no per-account limit.
+    maxSessionsPerAccount: 16,
     storage: options.storage,
     resolveActor: options.resolveActor,
     now: options.now,

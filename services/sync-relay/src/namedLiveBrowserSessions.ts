@@ -17,11 +17,21 @@ export function createNamedLiveBrowserSessions(
   options: Parameters<typeof createNamedLiveBrowserResolver>[0] & {
     maxSessions: number;
     retentionMs: number;
+    /**
+     * When set, an account's new session past this many replaces its least recently used one,
+     * which neither refuses that account nor touches another account.
+     */
+    maxSessionsPerAccount?: number;
     now?: () => number;
   },
 ) {
   const { maxSessions, retentionMs, now = Date.now, storage, resolveActor } = options;
-  for (const [name, value] of Object.entries({ maxSessions, retentionMs })) {
+  const perAccount = options.maxSessionsPerAccount ?? Infinity;
+  for (const [name, value] of Object.entries({
+    maxSessions,
+    retentionMs,
+    ...(options.maxSessionsPerAccount === undefined ? {} : { maxSessionsPerAccount: perAccount }),
+  })) {
     if (!Number.isSafeInteger(value) || value <= 0)
       throw new TypeError(`Invalid named session ${name}.`);
   }
@@ -68,14 +78,19 @@ export function createNamedLiveBrowserSessions(
       const createdAtMs = currentTime();
       const expiresAtMs = createdAtMs + retentionMs;
       if (!Number.isSafeInteger(expiresAtMs)) throw new TypeError("Invalid named session expiry.");
-      if (sessions.size >= maxSessions) {
-        for (const [key, session] of sessions) {
-          if (session.expiresAtMs <= createdAtMs) sessions.delete(key);
+      let held = 0,
+        oldest: string | undefined;
+      for (const [key, session] of sessions) {
+        if (session.expiresAtMs <= createdAtMs) sessions.delete(key);
+        else if (session.context.userId === userId) {
+          held += 1;
+          oldest ??= key;
         }
-        if (sessions.size >= maxSessions) return null;
       }
       const discriminator = randomBytes(9).toString("base64url");
       if (sessions.has(discriminator)) throw new Error("Named session discriminator collision.");
+      if (held >= perAccount && oldest !== undefined) sessions.delete(oldest);
+      if (sessions.size >= maxSessions) return null;
       sessions.set(discriminator, {
         context: Object.freeze({ kind: "named", userId, workspaceId, shareId, grantId }),
         expiresAtMs,
@@ -107,6 +122,10 @@ export function createNamedLiveBrowserSessions(
         sessions.delete(discriminator);
         return null;
       }
+      // The map keeps insertion order, so moving a resolved session to the end keeps each
+      // account's least recently used session first.
+      sessions.delete(discriminator);
+      sessions.set(discriminator, session);
       return context;
     },
 

@@ -69,6 +69,7 @@ function fixture(
     resolveActor,
     maxSessions: 3,
     retentionMs: 1000,
+    maxSessionsPerAccount: 16,
     now: () => time,
     ...overrides,
   };
@@ -238,6 +239,63 @@ describe("private named browser route sessions", () => {
     expect(state.sessions.create(bob)).toBeNull();
   });
 
+  it("keeps each account's most recently used sessions and leaves other accounts' sessions alone", async () => {
+    // The store is full once the account holds sixteen, and its next session still opens.
+    const state = fixture({ maxSessions: 17 });
+    const other = state.sessions.create(bob)!;
+    const issued = Array.from({ length: 16 }, () => state.sessions.create(alice)!);
+    expect(await state.sessions.resolve(request(), issued[0]!.discriminator)).toEqual(alice);
+    const newest = state.sessions.create(alice)!;
+    expect(newest).not.toBeNull();
+    expect(await state.sessions.resolve(request(), issued[1]!.discriminator)).toBeNull();
+    for (const kept of [issued[0]!, ...issued.slice(2), newest])
+      expect(await state.sessions.resolve(request(), kept.discriminator)).toEqual(alice);
+    expect(state.sessions.create(bob)).toBeNull();
+    expect(await state.sessions.resolve(request("bob"), other.discriminator)).toEqual(bob);
+  });
+
+  it("clears an account's expired sessions before it replaces one still in use", async () => {
+    const state = fixture({ maxSessions: 64 });
+    const expiring = state.sessions.create(alice)!;
+    state.setTime(200);
+    const issued = Array.from({ length: 15 }, () => state.sessions.create(alice)!);
+    state.setTime(1099);
+    expect(await state.sessions.resolve(request(), expiring.discriminator)).toEqual(alice);
+    state.setTime(1100);
+    const newest = state.sessions.create(alice)!;
+    expect(state.sessions.remove(expiring.discriminator)).toBe(false);
+    for (const kept of [...issued, newest])
+      expect(await state.sessions.resolve(request(), kept.discriminator)).toEqual(alice);
+  });
+
+  it("does not count a refused lookup as use", async () => {
+    const state = fixture({ maxSessions: 64 });
+    const issued = Array.from({ length: 16 }, () => state.sessions.create(alice)!);
+    expect(await state.sessions.resolve(request("bob"), issued[0]!.discriminator)).toBeNull();
+    state.sessions.create(alice);
+    expect(await state.sessions.resolve(request(), issued[0]!.discriminator)).toBeNull();
+    expect(await state.sessions.resolve(request(), issued[1]!.discriminator)).toEqual(alice);
+  });
+
+  it("keeps the account's sessions when a new one cannot be stored", async () => {
+    const state = fixture({ maxSessions: 64 });
+    vi.mocked(randomBytes).mockReturnValueOnce(Buffer.alloc(9) as never);
+    const issued = Array.from({ length: 16 }, () => state.sessions.create(alice)!);
+    vi.mocked(randomBytes).mockReturnValueOnce(Buffer.alloc(9) as never);
+    expect(() => state.sessions.create(alice)).toThrow("Named session discriminator collision");
+    for (const kept of issued)
+      expect(await state.sessions.resolve(request(), kept.discriminator)).toEqual(alice);
+  });
+
+  it("refuses an account when the store is full of other accounts' sessions, and drops none of them", async () => {
+    const state = fixture({ maxSessions: 2 });
+    const first = state.sessions.create(alice)!;
+    const second = state.sessions.create(alice)!;
+    expect(state.sessions.create(bob)).toBeNull();
+    expect(await state.sessions.resolve(request(), first.discriminator)).toEqual(alice);
+    expect(await state.sessions.resolve(request(), second.discriminator)).toEqual(alice);
+  });
+
   it("uses fixed expiry without renewal and releases capacity on removal", async () => {
     const state = fixture({ maxSessions: 1 });
     const first = state.sessions.create(alice)!;
@@ -250,14 +308,15 @@ describe("private named browser route sessions", () => {
     expect(state.sessions.create(alice)).not.toBeNull();
   });
 
-  it.each(["remove", "expire", "abort"])(
+  it.each(["remove", "replace", "expire", "abort"])(
     "refuses when %s occurs during authentication",
     async (action) => {
-      const state = fixture();
+      const state = fixture({ maxSessions: 17 });
       const issued = state.sessions.create(alice)!;
       const controller = new AbortController();
       state.resolveActor.mockImplementationOnce(async (_request, workspaceId) => {
         if (action === "remove") state.sessions.remove(issued.discriminator);
+        if (action === "replace") for (let i = 0; i < 16; i++) state.sessions.create(alice);
         if (action === "expire") state.setTime(issued.expiresAtMs);
         if (action === "abort") controller.abort();
         return { userId: "alice", workspaceId };
