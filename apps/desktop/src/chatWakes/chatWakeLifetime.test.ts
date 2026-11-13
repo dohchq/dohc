@@ -1,23 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatWakeView } from "@dohc/workspace-contracts/chat-wakes";
+import type { ChatWakeView, WaitingChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import { deferred } from "../testing/deferred";
-import { ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
+import { ChatWakeMissingError, type ChatWakeClient, type ChatWakePageAnswer } from "./chatWakeClient";
 import type { ChatWakeWorkspace } from "./chatWakeConsumer";
 import { ChatWakeIntentsUnreadableError, type ChatWakeIntent, type ChatWakeIntents } from "./chatWakeIntents";
 import {
   CHAT_WAKE_BACKOFF_MAX_MS, chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted,
   type ChatWakeLifetimeDeps, type ChatWakeSession,
 } from "./chatWakeLifetime";
+import { createChatWakeNotices } from "./chatWakeNotices";
 
 // The relay, the intent store, and the workspace are fakes. Each wait is on a
-// barrier: a read parking, a report, or a gate the test opens.
+// barrier: a read parking or ending, a report, a gate the test opens, or a
+// pass the test awaits. The lifetime's transitions run on a promise chain, so
+// a test lets one run (a barrier, or one event-loop turn where it proves an
+// absence) before it changes the session again or stops.
 
 afterEach(() => {
   vi.useRealTimers();
 });
 
 const WAKE = `wake-${"a".repeat(32)}`;
+
+/** One event-loop turn: every step already queued runs. Used only to show that something did not happen. */
+const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
 
 function session(scope: string, installId = "mac") {
   let current = true;
@@ -31,11 +38,12 @@ function session(scope: string, installId = "mac") {
   return value;
 }
 
+const candidate = { installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } };
+
 function intentOf(phase: ChatWakeIntent["phase"], scope = "A"): ChatWakeIntent {
   return {
     account: scope, userId: "ana", installId: "mac", wakeId: WAKE, generation: 1, workspaceId: "ws", threadId: "t1",
-    messageId: "m1", prerequisiteMessageId: null,
-    candidate: { installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } }, phase,
+    messageId: "m1", prerequisiteMessageId: null, candidate, phase,
   };
 }
 
@@ -43,17 +51,27 @@ const view = (state: ChatWakeView["state"]): ChatWakeView => ({
   wakeId: WAKE, workspaceId: "ws", messageId: "m1", threadId: "t1", generation: 1, state,
   prerequisiteMessageId: null, winnerLabel: "Mac",
 });
+const waiting: WaitingChatWake = { ...view("waiting"), state: "waiting", candidate };
 
-/** Reads park until their consumer stops. `untilReads(n)` resolves once n reads have parked. */
+/** Each read answers a page the test queued, or parks until its consumer stops. */
 function fakeRelay() {
   const reads: string[] = [];
   const aborted: string[] = [];
-  let watchers: Array<{ count: number; resolve: () => void }> = [];
-  const untilReads = (count: number) => count <= reads.length ? Promise.resolve()
-    : new Promise<void>((resolve) => { watchers.push({ count, resolve }); });
+  const watchers: Array<{ count: () => number; at: number; resolve: () => void }> = [];
+  const notify = () => {
+    for (const watcher of [...watchers]) {
+      if (watcher.count() < watcher.at) continue;
+      watchers.splice(watchers.indexOf(watcher), 1);
+      watcher.resolve();
+    }
+  };
+  const until = (count: () => number, at: number) => count() >= at ? Promise.resolve()
+    : new Promise<void>((resolve) => { watchers.push({ count, at, resolve }); });
+  const pages: ChatWakePageAnswer[] = [];
   const firstRead = new Map<string, () => Promise<never>>();
   const claims: string[] = [];
   const confirms: Array<() => Promise<ChatWakeView>> = [];
+  let wins = false;
   const client = (wakeSession: ChatWakeSession): ChatWakeClient => ({
     replaceRunners: async () => undefined,
     async waitWakes(_input, signal) {
@@ -63,16 +81,22 @@ function fakeRelay() {
         firstRead.delete(scope);
         return await refusal();
       }
+      const page = pages.shift();
+      if (page) return page;
       reads.push(scope);
-      for (const watcher of watchers.filter((each) => each.count <= reads.length)) watcher.resolve();
-      watchers = watchers.filter((each) => each.count > reads.length);
+      notify();
       return await new Promise<never>((_, reject) => {
-        signal.addEventListener("abort", () => { aborted.push(scope); reject(new Error("aborted")); }, { once: true });
+        signal.addEventListener("abort", () => {
+          aborted.push(scope);
+          notify();
+          reject(new Error("aborted"));
+        }, { once: true });
       });
     },
     async claimWake() {
       claims.push(wakeSession.account.scope);
-      throw new ChatWakeMissingError();
+      if (!wins) throw new ChatWakeMissingError();
+      return { won: true, wake: view("claimed") };
     },
     async confirmQueued() {
       const next = confirms.shift();
@@ -80,11 +104,18 @@ function fakeRelay() {
       return await next();
     },
   });
-  return { reads, aborted, untilReads, firstRead, claims, confirms, client };
+  return {
+    reads, aborted, pages, firstRead, claims, confirms, client,
+    /** Resolves once `count` reads have parked. */
+    untilReads: (count: number) => until(() => reads.length, count),
+    /** Resolves once `count` parked reads have ended. */
+    untilAborted: (count: number) => until(() => aborted.length, count),
+    winClaims: () => { wins = true; },
+  };
 }
 
 function memoryIntents(rows: ChatWakeIntent[] = []) {
-  const state = { rows, unreadable: false, listGate: null as Promise<void> | null, lists: 0 };
+  const state = { rows, unreadable: false, listGate: null as Promise<void> | null, listEntered: deferred<void>(), lists: 0 };
   const same = (a: ChatWakeIntent, b: ChatWakeIntent) => a.account === b.account && a.installId === b.installId && a.wakeId === b.wakeId;
   const check = () => { if (state.unreadable) throw new ChatWakeIntentsUnreadableError(); };
   const store: ChatWakeIntents = {
@@ -92,7 +123,10 @@ function memoryIntents(rows: ChatWakeIntent[] = []) {
       state.lists += 1;
       const gate = state.listGate;
       state.listGate = null;
-      if (gate) await gate;
+      if (gate) {
+        state.listEntered.resolve();
+        await gate;
+      }
       check();
       return [...state.rows];
     },
@@ -103,7 +137,7 @@ function memoryIntents(rows: ChatWakeIntent[] = []) {
 }
 
 /** A workspace where the wake's message, thread, and agent all allow it. */
-function readyWorkspace(): ChatWakeWorkspace {
+function readyWorkspace(over: Partial<ChatWakeWorkspace> = {}): ChatWakeWorkspace {
   return {
     current: () => true,
     requestSync: () => undefined,
@@ -114,6 +148,7 @@ function readyWorkspace(): ChatWakeWorkspace {
     recordTrigger: async () => true,
     dispatch: () => undefined,
     release: async () => undefined,
+    ...over,
   };
 }
 
@@ -137,14 +172,19 @@ function setup(over: Partial<ChatWakeLifetimeDeps> = {}, rows: ChatWakeIntent[] 
   return { relay, intents, deps, lifetime: createChatWakeLifetime(deps) };
 }
 
+const NOTHING_NEW = { applied: false, recovered: false } as const;
+const APPLIED = { applied: true, recovered: false } as const;
+
 describe("the chat wake lifetime", () => {
   it("starts nothing while chat wakes are off", async () => {
     const w = setup({ on: false });
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
-    await w.lifetime.stop();
+    // The start transition has run.
+    await turn();
     expect(w.deps.client).not.toHaveBeenCalled();
     expect(w.intents.state.lists).toBe(0);
+    await w.lifetime.stop();
   });
 
   it("reads only from startup, with no window or focus, and once per snapshot", async () => {
@@ -152,12 +192,14 @@ describe("the chat wake lifetime", () => {
     const a = session("A");
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.resume();
+    await turn();
     expect(w.deps.client).not.toHaveBeenCalled();
     w.lifetime.start();
     await w.relay.untilReads(1);
     // The same snapshot again changes nothing.
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.start();
+    await turn();
     await w.lifetime.stop();
     expect(w.deps.client).toHaveBeenCalledOnce();
     expect(w.relay.reads).toEqual(["A"]);
@@ -171,13 +213,15 @@ describe("the chat wake lifetime", () => {
     const a = session("A");
     w.lifetime.credentialsChanged(a, true);
     w.lifetime.start();
-    // A's recovery is holding the intent file.
+    // A's recovery is inside the intent file.
+    await w.intents.state.listEntered.promise;
+    expect(w.deps.client).toHaveBeenCalledExactlyOnceWith(a);
     const b = session("B");
     a.end();
     w.lifetime.credentialsChanged(b, true);
-    // Every pending step runs before this; B must still wait for A.
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(w.deps.client).toHaveBeenCalledTimes(1);
+    await turn();
+    // B waits for A's stop, which waits for A's recovery.
+    expect(w.deps.client).toHaveBeenCalledOnce();
     gate.resolve();
     await w.relay.untilReads(1);
     expect(w.relay.reads).toEqual(["B"]);
@@ -218,12 +262,47 @@ describe("the chat wake lifetime", () => {
   });
 
   it("refuses an install ID the relay can't take", async () => {
-    const w = setup();
+    const logged = deferred<void>();
+    const w = setup({ log: vi.fn(() => logged.resolve()) });
     w.lifetime.credentialsChanged(session("A", "x".repeat(257)), true);
     w.lifetime.start();
+    await logged.promise;
     await w.lifetime.stop();
     expect(w.deps.client).not.toHaveBeenCalled();
     expect(w.deps.log).toHaveBeenCalledOnce();
+  });
+
+  it("resumes after a pull only when it brought changes or reached the relay again", async () => {
+    let arrived = false;
+    let syncs = 0;
+    const workspace = readyWorkspace({
+      requestSync: () => { syncs += 1; },
+      message: async () => arrived
+        ? { id: "m1", workspaceId: "ws", threadId: "t1", author: { kind: "human", displayName: "Ana" }, authorUserId: "ana" }
+        : null,
+    });
+    const w = setup({ openWorkspace: vi.fn(async () => workspace) });
+    w.relay.pages.push({ cursor: 1, wakes: [waiting] });
+    w.relay.winClaims();
+    w.relay.confirms.push(async () => view("queued"));
+    w.lifetime.credentialsChanged(session("A"), true);
+    w.lifetime.start();
+    // The wake came before its message: it asked for one pull and waits.
+    await w.relay.untilReads(1);
+    expect(syncs).toBe(1);
+    // That pull came back empty: nothing to check again, so no second pull.
+    await w.lifetime.pulled(NOTHING_NEW);
+    expect(syncs).toBe(1);
+    // Reaching the relay again is worth another look.
+    await w.lifetime.pulled({ applied: false, recovered: true });
+    expect(syncs).toBe(2);
+    expect(w.relay.claims).toEqual([]);
+    arrived = true;
+    await w.lifetime.pulled(APPLIED);
+    expect(w.relay.claims).toEqual(["A"]);
+    expect(syncs).toBe(2);
+    expect(w.intents.state.rows).toEqual([]);
+    await w.lifetime.stop();
   });
 });
 
@@ -235,27 +314,55 @@ describe("rows a person sees", () => {
     w.lifetime.start();
     await reported.promise;
     expect(w.deps.report).toHaveBeenCalledExactlyOnceWith("ws", "dropped", intentOf("claim-pending"));
+    await w.relay.untilReads(1);
     w.lifetime.credentialsChanged(null, false);
+    // The placeholder stopped A's reader.
+    await w.relay.untilAborted(1);
     w.lifetime.credentialsChanged(session("A"), true);
     await w.relay.untilReads(2);
     await w.lifetime.stop();
     expect(w.deps.clear).not.toHaveBeenCalled();
   });
 
-  it("takes rows back at sign-out and when another account signs in", async () => {
+  it("takes rows back at a settled sign-out", async () => {
     const reported = deferred<void>();
-    const w = setup({ report: vi.fn(() => reported.resolve()), openWorkspace: vi.fn(async () => readyWorkspace()) }, [intentOf("claim-pending")]);
+    const cleared = deferred<void>();
+    const w = setup({
+      report: vi.fn(() => reported.resolve()), clear: vi.fn(() => cleared.resolve()),
+      openWorkspace: vi.fn(async () => readyWorkspace()),
+    }, [intentOf("claim-pending")]);
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
     await reported.promise;
+    await w.relay.untilReads(1);
     w.lifetime.credentialsChanged(null, true);
-    w.lifetime.credentialsChanged(session("B"), true);
-    await w.relay.untilReads(2);
-    await w.lifetime.stop();
+    await cleared.promise;
     expect(w.deps.clear).toHaveBeenCalledExactlyOnceWith("ws", "dropped");
+    await w.lifetime.stop();
   });
 
-  it("reports an unreadable intent file once, and Try again takes it back once the file reads", async () => {
+  it("takes rows back when another account signs in", async () => {
+    const reported = deferred<void>();
+    const cleared = deferred<void>();
+    const w = setup({
+      report: vi.fn(() => reported.resolve()), clear: vi.fn(() => cleared.resolve()),
+      openWorkspace: vi.fn(async () => readyWorkspace()),
+    }, [intentOf("claim-pending")]);
+    const a = session("A");
+    w.lifetime.credentialsChanged(a, true);
+    w.lifetime.start();
+    await reported.promise;
+    await w.relay.untilReads(1);
+    a.end();
+    w.lifetime.credentialsChanged(session("B"), true);
+    await cleared.promise;
+    await w.relay.untilReads(2);
+    expect(w.relay.reads).toEqual(["A", "B"]);
+    expect(w.deps.clear).toHaveBeenCalledExactlyOnceWith("ws", "dropped");
+    await w.lifetime.stop();
+  });
+
+  it("reports an unreadable intent file, and Try again takes it back once the file reads", async () => {
     const reported = deferred<void>();
     const w = setup({ report: vi.fn(() => reported.resolve()) });
     w.intents.state.unreadable = true;
@@ -273,26 +380,55 @@ describe("rows a person sees", () => {
     expect(w.deps.report).toHaveBeenCalledOnce();
   });
 
-  it("reports a won wake parked on a workspace that left, and takes it back once it is recorded and confirmed", async () => {
-    const reported = deferred<void>();
-    const cleared = deferred<void>();
+  it("shows an unreadable file in a workspace that starts syncing after the first failure, once", async () => {
+    let workspaces: string[] = [];
+    const shown = vi.fn();
+    const takenBack = vi.fn();
+    const notices = createChatWakeNotices({
+      file: "/state/chat-wakes.json", workspaces: () => workspaces, report: shown, clear: takenBack, log: vi.fn(),
+    });
+    const w = setup({ report: notices.report, clear: notices.clear });
+    w.intents.state.unreadable = true;
+    w.lifetime.credentialsChanged(session("A"), true);
+    w.lifetime.start();
+    await w.relay.untilReads(1);
+    // No synced workspace yet, so no row anywhere.
+    expect(shown).not.toHaveBeenCalled();
+    workspaces = ["ws"];
+    await w.lifetime.pulled(APPLIED);
+    expect(shown).toHaveBeenCalledExactlyOnceWith("ws", expect.objectContaining({ reason: "wake-unreadable", file: "/state/chat-wakes.json" }));
+    await w.lifetime.pulled(APPLIED);
+    expect(shown).toHaveBeenCalledOnce();
+    w.intents.state.unreadable = false;
+    await w.lifetime.pulled(APPLIED);
+    expect(takenBack).toHaveBeenCalledExactlyOnceWith("ws", "wake-unreadable");
+    await w.lifetime.stop();
+  });
+
+  it("offers a row again after its report failed, and takes it back once the wake is recorded and confirmed", async () => {
+    const tried = deferred<void>();
     let workspace: ChatWakeWorkspace | null = null;
-    const w = setup({
-      report: vi.fn(() => reported.resolve()),
-      clear: vi.fn(() => cleared.resolve()),
-      openWorkspace: vi.fn(async () => workspace),
-    }, [intentOf("won")]);
+    const failure = new Error("The window could not take the row.");
+    const report = vi.fn<ChatWakeLifetimeDeps["report"]>()
+      .mockImplementationOnce(() => { tried.resolve(); throw failure; });
+    const w = setup({ report, openWorkspace: vi.fn(async () => workspace) }, [intentOf("won")]);
     w.relay.confirms.push(async () => view("queued"));
     w.lifetime.credentialsChanged(session("A"), true);
     w.lifetime.start();
-    await reported.promise;
-    expect(w.deps.report).toHaveBeenCalledExactlyOnceWith("ws", "parked", intentOf("won"));
+    await tried.promise;
+    await w.relay.untilReads(1);
+    expect(w.deps.log).toHaveBeenCalledWith(failure);
+    await w.lifetime.pulled(APPLIED);
+    expect(report).toHaveBeenCalledTimes(2);
+    expect(report).toHaveBeenLastCalledWith("ws", "parked", intentOf("won"));
+    // Shown now, so a later pass doesn't show it again.
+    await w.lifetime.pulled(APPLIED);
+    expect(report).toHaveBeenCalledTimes(2);
     workspace = readyWorkspace();
-    w.lifetime.resume();
-    await cleared.promise;
+    await w.lifetime.pulled(APPLIED);
     expect(w.deps.clear).toHaveBeenCalledExactlyOnceWith("ws", "parked");
-    await w.lifetime.stop();
     expect(w.intents.state.rows).toEqual([]);
+    await w.lifetime.stop();
   });
 
   it("logs nothing for a busy relay or a server without wake routes", async () => {

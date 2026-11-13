@@ -17,10 +17,10 @@ const kinds = {
 // A message from your phone that this computer's agents can't take. Main's
 // message says why, and the next step.
 const wakeTitles = {
-  "wake-unreadable": "Agents here can't take messages from your phone",
-  "wake-dropped": "An agent didn't start for a message from your phone",
-  "wake-parked": "An agent can't start for a message from your phone",
-  "wake-unconfirmed": "Couldn't confirm an agent request from your phone",
+  "wake-unreadable": "dohc could not read the agent requests saved here",
+  "wake-dropped": "An agent did not start for a message from your phone",
+  "wake-parked": "An agent could not start for a message from your phone",
+  "wake-unconfirmed": "dohc could not confirm an agent request from your phone",
 } as const;
 type WakeReason = keyof typeof wakeTitles;
 const isWake = (reason: ChatDispatchNotice["reason"]): reason is WakeReason => reason in wakeTitles;

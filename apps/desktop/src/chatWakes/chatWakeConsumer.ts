@@ -71,7 +71,8 @@ export interface ChatWakeWorkspace {
 /**
  * A saved wake this computer can't finish by itself. dropped: the relay no longer lists a claim this computer
  * may have sent, so nothing ran here. parked: it won, and its workspace is no longer this account's synced
- * workspace here. unconfirmed: its trigger is recorded, and the relay keeps answering that it has no such wake.
+ * workspace here, or the attachment it was held on retired. unconfirmed: its trigger is recorded, and the relay
+ * keeps answering that it has no such wake.
  */
 export type ChatWakeStuck = "dropped" | "parked" | "unconfirmed";
 
@@ -252,7 +253,14 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   async function record(intent: ChatWakeIntent, workspace: ChatWakeWorkspace): Promise<ChatWakeIntent | null> {
     if (!live()) return null;
     const verdict = await admit(workspace, intent);
-    if (!live() || verdict === "defer") return null;
+    if (!live()) return null;
+    if (verdict === "defer") {
+      // Its attachment retired or stopped syncing under this account, as when it retires during the claim. The
+      // trigger can't be recorded anywhere else, so it waits for its workspace to come back. A paused or switched
+      // off agent defers with its attachment current, and isn't parked.
+      if (!workspace.current()) deps.onStuck(intent, "parked");
+      return null;
+    }
     if (verdict === "reject") {
       // Never another agent, and never a new claim: the server lets the claim end unconfirmed.
       await deps.intents.remove(intent);
@@ -295,7 +303,7 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       if (held) next = await record(won, held);
       else {
         const result = await opened(won.workspaceId, async (workspace) => ({ next: await record(won, workspace) }));
-        // Its trigger can't be recorded anywhere else, so it waits for its workspace to come back.
+        // No workspace to open: parked, as in `record`.
         if (result === null) deps.onStuck(won, "parked");
         next = result?.next ?? null;
       }

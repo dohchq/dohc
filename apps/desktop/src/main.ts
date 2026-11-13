@@ -201,7 +201,6 @@ import {
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
-  type ChatDispatchNotice,
   agentRunStateOperations,
   chatDispatchPauseOperations,
   agentsListeningOperations,
@@ -368,12 +367,13 @@ import { localAutomationStoreFolder } from "./automations/localAutomationStore";
 import { findChatMessage, hasChatMessage, readChatDirectory } from "@dohc/automation-executor/automation-chat";
 import { wakeAgent, wokenAgent, type WokenAgent } from "./automations/automationAgentWake";
 import { createAutomationWakeConsumer, createAutomationWakeIntents } from "./automations/automationWakeIntents";
+import { currentChatWakeAgent } from "./chatWakes/chatWakeAgent";
 import { createChatWakeClient } from "./chatWakes/chatWakeClient";
 import { chatWakeThreadVisibility, type ChatWakeAgent, type ChatWakeThreadVisibility, type ChatWakeWorkspace } from "./chatWakes/chatWakeConsumer";
-import { createChatWakeIntents, type ChatWakeIntent } from "./chatWakes/chatWakeIntents";
+import { createChatWakeIntents } from "./chatWakes/chatWakeIntents";
+import { createChatWakeNotices } from "./chatWakes/chatWakeNotices";
 import {
-  CHAT_WAKES_ON, chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted,
-  type ChatWakeProblem, type ChatWakeSession,
+  CHAT_WAKES_ON, chatWakeBackoffMs, createChatWakeLifetime, sleepUnlessAborted, type ChatWakeSession,
 } from "./chatWakes/chatWakeLifetime";
 import type { AutomationChatMessage } from "@dohc/automation-executor/automation-chat";
 import { createAutomationEvaluator } from "@dohc/app-backend-runtime/automation";
@@ -1186,6 +1186,20 @@ const personalAgentRoster = createPersonalAgentRoster({
 // This computer's share of the account's chat wakes: messages from your
 // phone that name an agent this computer runs. One reader per credential
 // snapshot, from startup until quit, open window or not.
+// Wake rows in each workspace's Notices. The file's row reaches every synced
+// workspace of this account, read from the registry without opening any.
+const chatWakeNotices = createChatWakeNotices({
+  file: chatWakeIntentsFile(),
+  workspaces: () => {
+    const credentials = cachedCredentials;
+    if (!credentials) return [];
+    return listWorkspaces().filter((workspace) => workspace.remote !== undefined && !sharedViewOf(workspace.workspaceId) &&
+      workspaceRemoteMatchesCredentials(workspace.remote, credentials)).map((workspace) => workspace.workspaceId);
+  },
+  report: (workspaceId, notice) => chatDispatchNotices.report(workspaceId, notice),
+  clear: (workspaceId, reason) => chatDispatchNotices.clear(workspaceId, reason),
+  log: (error) => console.error("[desktop] chat wake notice:", error),
+});
 const chatWakes = createChatWakeLifetime({
   on: CHAT_WAKES_ON,
   intents: createChatWakeIntents(chatWakeIntentsFile()),
@@ -1194,8 +1208,8 @@ const chatWakes = createChatWakeLifetime({
   sleep: sleepUnlessAborted,
   backoffMs: chatWakeBackoffMs,
   nowMs: () => Date.now(),
-  report: reportChatWake,
-  clear: clearChatWake,
+  report: (workspaceId, problem, intent) => chatWakeNotices.report(workspaceId, problem, intent),
+  clear: (workspaceId, problem) => chatWakeNotices.clear(workspaceId, problem),
   log: (error) => console.error("[desktop] chat wake:", error),
 });
 function chatWakeIntentsFile(): string {
@@ -2572,8 +2586,8 @@ function engineForWorkspace(
     afterSuccessfulPull: ({ recovered, applied }) => {
       // Waits rerun their inbox query, so only a pull that brought ops wakes them.
       if (applied) signalChatWrite(workspace.workspaceId);
-      // A deferred wake's message or decision may have arrived.
-      chatWakes.resume();
+      // A deferred wake's message or decision may have arrived. An empty pull brought nothing to wait for.
+      void chatWakes.pulled({ applied, recovered });
       void noticeStore().sync();
       void shareRosters.pulled(workspace.workspaceId, recovered);
       refreshShareLabels();
@@ -3332,8 +3346,10 @@ async function openChatWakeWorkspace(wakeSession: ChatWakeSession, workspaceId: 
       registered.remote !== undefined && workspaceRemoteMatchesCredentials(registered.remote, cachedCredentials);
   };
   if (!owned()) return null;
+  // Owned and not a share, so a refusal here is a folder inside dohc's own. That isn't a workspace that stopped
+  // syncing, so it throws and isn't reported as parked.
   const dispatchWorkspace = workspaceForDispatch(workspaceId);
-  if (dispatchWorkspace === null) return null;
+  if (dispatchWorkspace === null) throw new Error("dohc does not start agents in a workspace inside its own folder.");
   await desktopEngine.startup;
   const { workspace, release } = await withWorkspaceAttachmentAsync(dispatchWorkspace, async (lease) => {
     const registered = canonicalWorkspaceFor(lease);
@@ -3389,48 +3405,13 @@ async function chatWakeThreadVisibilityIn(workspace: AttachedEngineWorkspace, th
 
 // The candidate's agent as settings have it now. Dispatch admits it while
 // replies aren't paused here and the workspace is trusted.
-async function chatWakeAgent(workspace: AttachedEngineWorkspace, agentId: string): Promise<ChatWakeAgent | null> {
-  const agent = listAgents((await readCachedUserSettingsFile(stateDir())).settings).find((each) => each.id === agentId);
-  if (agent === undefined) return null;
-  return {
-    name: agent.name,
-    enabled: agent.enabled,
-    launch: agent.launch !== undefined,
-    admitted: !chatDispatchService.isPaused() && await workspaceTrust.isTrusted(workspace),
-  };
-}
-
-const CHAT_WAKE_NOTICES = {
-  unreadable: "wake-unreadable",
-  dropped: "wake-dropped",
-  parked: "wake-parked",
-  unconfirmed: "wake-unconfirmed",
-} as const satisfies Record<ChatWakeProblem, ChatDispatchNotice["reason"]>;
-const CHAT_WAKE_MESSAGES: Record<ChatWakeProblem, string> = {
-  unreadable: "dohc can't read the file where this computer keeps them. Move the file in Details out of its folder, then choose Try again.",
-  dropped: "The server no longer lists this computer for it, so nothing ran here.",
-  parked: "Its workspace no longer syncs here with this account. Turn its sync back on, then choose Try again.",
-  unconfirmed: "Its request is queued on this computer, and the server no longer lists it.",
-};
-// The workspaces the unreadable file's row went to.
-const chatWakeUnreadableIn = new Set<string>();
-function reportChatWake(workspaceId: string | null, problem: ChatWakeProblem, intent: ChatWakeIntent | null): void {
-  const notice = {
-    reason: CHAT_WAKE_NOTICES[problem],
-    message: CHAT_WAKE_MESSAGES[problem],
-    ...(intent ? { threadId: intent.threadId, messageId: intent.messageId, wakeId: intent.wakeId } : { file: chatWakeIntentsFile() }),
-  };
-  // The file is about every workspace whose agents this computer would wake.
-  const workspaceIds = workspaceId !== null ? [workspaceId] : syncDispatchWorkspaces().map((each) => each.workspaceId);
-  for (const id of workspaceIds) {
-    if (workspaceId === null) chatWakeUnreadableIn.add(id);
-    chatDispatchNotices.report(id, notice);
-  }
-}
-function clearChatWake(workspaceId: string | null, problem: ChatWakeProblem): void {
-  const workspaceIds = workspaceId !== null ? [workspaceId] : [...chatWakeUnreadableIn];
-  if (workspaceId === null) chatWakeUnreadableIn.clear();
-  for (const id of workspaceIds) chatDispatchNotices.clear(id, CHAT_WAKE_NOTICES[problem]);
+function chatWakeAgent(workspace: AttachedEngineWorkspace, agentId: string): Promise<ChatWakeAgent | null> {
+  return currentChatWakeAgent({
+    agentId,
+    trusted: () => workspaceTrust.isTrusted(workspace),
+    agents: async () => listAgents((await readCachedUserSettingsFile(stateDir())).settings),
+    repliesPaused: () => chatDispatchService.isPaused(),
+  });
 }
 
 // Tray-only scans use a scoped capture instead of retaining a file watcher.
@@ -6343,7 +6324,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       void automationWakeConsumer.resume();
       // Reads the account without waiting for a window, so wakes start at login on an idle computer.
       chatWakes.start();
-      void warmCredentialCache().catch((error: unknown) => console.error("[desktop] chat wake sign-in:", error));
+      if (CHAT_WAKES_ON) void warmCredentialCache().catch((error: unknown) => console.error("[desktop] chat wake sign-in:", error));
       app.on("browser-window-focus", () => { resumeRunNow(); void automationWakeConsumer.resume(); chatWakes.resume(); });
       powerMonitor.on("resume", () => { void automationWakeConsumer.resume(); chatWakes.resume(); });
       powerMonitor.on("suspend", () => automationScheduler.suspended());

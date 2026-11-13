@@ -67,7 +67,10 @@ export interface ChatWakeLifetimeDeps {
   sleep(ms: number, signal: AbortSignal): Promise<void>;
   backoffMs(failures: number): number;
   nowMs(): number;
-  /** Shows the problem as a toast and a Notices row. Null workspace: the intent file. */
+  /**
+   * Shows the problem as a toast and a Notices row. Null workspace: the intent file, offered again on each
+   * failed read so a workspace that starts syncing meanwhile gets its row; the owner shows it once per workspace.
+   */
   report(workspaceId: string | null, problem: ChatWakeProblem, intent: ChatWakeIntent | null): void;
   /** Takes back that row. */
   clear(workspaceId: string | null, problem: ChatWakeProblem): void;
@@ -81,6 +84,11 @@ export interface ChatWakeLifetime {
   start(): void;
   /** Something a deferred wake waits for may have arrived. */
   resume(): void;
+  /**
+   * A pull finished. Only one that brought changes or reached the relay again resumes: a deferred wake asks
+   * for a pull, so resuming on an empty one would ask for another, and another.
+   */
+  pulled(pull: { applied: boolean; recovered: boolean }): Promise<void>;
   /** Try again: takes back the rows, and starts the current snapshot's consumer afresh. */
   retry(): void;
   /** Quit: starts nothing more, and settles once the running consumer has drained. */
@@ -104,21 +112,31 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
     const key = JSON.stringify([workspaceId, problem]);
     const row = rows.get(key);
     const wake = intent?.wakeId ?? "";
-    if (row?.wakes.has(wake)) return;
+    if (problem !== "unreadable" && row?.wakes.has(wake)) return;
+    // A row counts as shown only once its report went through; a failed one is offered again next time.
+    try { deps.report(workspaceId, problem, intent); }
+    catch (error) {
+      deps.log(error);
+      return;
+    }
     if (row) row.wakes.add(wake);
     else rows.set(key, { workspaceId, problem, wakes: new Set([wake]) });
-    deps.report(workspaceId, problem, intent);
+  }
+  // Taking a row back never fails the read or step that ended it.
+  function takeBack(row: { workspaceId: string | null; problem: ChatWakeProblem }): void {
+    try { deps.clear(row.workspaceId, row.problem); }
+    catch (error) { deps.log(error); }
   }
   // A wake moved on: its rows of these problems go once they stand for no other wake.
   function moved(wake: string, problems: readonly ChatWakeProblem[]): void {
     for (const [key, row] of rows) {
       if (!problems.includes(row.problem) || !row.wakes.delete(wake) || row.wakes.size > 0) continue;
       rows.delete(key);
-      deps.clear(row.workspaceId, row.problem);
+      takeBack(row);
     }
   }
   function clearRows(): void {
-    for (const row of rows.values()) deps.clear(row.workspaceId, row.problem);
+    for (const row of rows.values()) takeBack(row);
     rows.clear();
   }
 
@@ -209,6 +227,9 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
     },
     resume() {
       void running?.consumer.resume();
+    },
+    pulled({ applied, recovered }) {
+      return applied || recovered ? running?.consumer.resume() ?? Promise.resolve() : Promise.resolve();
     },
     retry() {
       cycle(true);

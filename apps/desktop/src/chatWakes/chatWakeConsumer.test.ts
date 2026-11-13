@@ -11,6 +11,7 @@ import {
   type ChatWakeAgent, type ChatWakeConsumerDeps, type ChatWakeDecision, type ChatWakeMessage, type ChatWakeThreadVisibility,
 } from "./chatWakeConsumer";
 import { createChatWakeIntents, ChatWakeIntentsUnreadableError, type ChatWakeIntent, type ChatWakeIntents } from "./chatWakeIntents";
+import { currentChatWakeAgent } from "./chatWakeAgent";
 
 // The relay and the computer are fakes; the intent file is real. Every wait
 // is on a barrier the test controls: the relay's next parked read, a gate, or
@@ -1096,6 +1097,77 @@ describe("a wake this computer can't finish", () => {
     expect(w.relay.calls.confirms).toHaveLength(CHAT_WAKE_CONFIRM_MISSES);
     expect(intents.rows).toEqual([intentOf("recorded")]);
     expect(w.mac.local.ledger.size).toBe(0);
+    await consumer.stop();
+  });
+});
+
+describe("a won wake on the attachment it was held on", () => {
+  it("is parked when that attachment retires during its claim, with no resume after", async () => {
+    const w = await setup();
+    w.relay.add();
+    w.relay.offer(1);
+    w.relay.hooks.claim = async () => { w.mac.local.current = false; };
+    const { consumer, deps } = await w.settled();
+    expect(w.relay.state()).toBe("claimed");
+    expect(deps.onStuck).toHaveBeenCalledExactlyOnceWith(intentOf("won"), "parked");
+    expect(await w.intents()).toEqual([intentOf("won")]);
+    expect(w.mac.local.ledger.size).toBe(0);
+    await consumer.stop();
+  });
+
+  it.each([["switched off", { enabled: false }], ["held by paused replies", { admitted: false }]] as const)(
+    "isn't parked while its agent is %s",
+    async (_name, change) => {
+      const w = await setup();
+      w.relay.add();
+      w.relay.offer(1);
+      w.relay.hooks.claim = async () => {
+        w.mac.local.agents.set("default", { name: "Claude", enabled: true, launch: true, admitted: true, ...change });
+      };
+      const { consumer, deps } = await w.settled();
+      expect(deps.onStuck).not.toHaveBeenCalled();
+      expect(await w.intents()).toEqual([intentOf("won")]);
+      expect(w.mac.local.ledger.size).toBe(0);
+      await consumer.stop();
+    },
+  );
+
+  it("reads its agent after the trust lookup, so a rename during that lookup records nothing", async () => {
+    const w = await setup();
+    w.relay.add();
+    w.relay.offer(1);
+    let agents = [{ id: "default", name: "Claude", enabled: true, launch: "configured" }];
+    let lookups = 0;
+    const entered = deferred<void>();
+    const trust = deferred<boolean>();
+    const open: ChatWakeConsumerDeps["openWorkspace"] = async (workspaceId) => {
+      const workspace = await w.mac.open(workspaceId);
+      return workspace && {
+        ...workspace,
+        agent: (agentId) => currentChatWakeAgent({
+          agentId,
+          trusted: () => {
+            lookups += 1;
+            // The second lookup is the one just before the trigger.
+            if (lookups < 2) return Promise.resolve(true);
+            entered.resolve();
+            return trust.promise;
+          },
+          agents: async () => agents,
+          repliesPaused: () => false,
+        }),
+      };
+    };
+    const parked = w.relay.nextPark();
+    const { consumer } = w.consumer({ openWorkspace: open });
+    consumer.start();
+    await entered.promise;
+    agents = [{ ...agents[0]!, name: "Claudia" }];
+    trust.resolve(true);
+    await parked;
+    expect(w.relay.state()).toBe("claimed");
+    expect(w.mac.local.ledger.size).toBe(0);
+    expect(await w.intents()).toEqual([]);
     await consumer.stop();
   });
 });

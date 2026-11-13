@@ -1,0 +1,65 @@
+import { describe, expect, it, vi } from "vitest";
+import type { ChatWakeIntent } from "./chatWakeIntents";
+import { createChatWakeNotices } from "./chatWakeNotices";
+
+const FILE = "/state/chat-wakes.json";
+const intent: ChatWakeIntent = {
+  account: "A", userId: "ana", installId: "mac", wakeId: `wake-${"a".repeat(32)}`, generation: 1, workspaceId: "ws",
+  threadId: "t1", messageId: "m1", prerequisiteMessageId: null,
+  candidate: { installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } }, phase: "won",
+};
+
+function setup(workspaces: () => readonly string[]) {
+  const deps = { file: FILE, workspaces, report: vi.fn(), clear: vi.fn(), log: vi.fn() };
+  return { deps, notices: createChatWakeNotices(deps) };
+}
+
+describe("wake rows in Notices", () => {
+  it("files a wake's row in its own workspace with its IDs, and takes it back there", () => {
+    const { deps, notices } = setup(() => ["ws", "other"]);
+    notices.report("ws", "parked", intent);
+    expect(deps.report).toHaveBeenCalledExactlyOnceWith("ws", expect.objectContaining({
+      reason: "wake-parked", threadId: "t1", messageId: "m1", wakeId: intent.wakeId,
+    }));
+    notices.clear("ws", "parked");
+    expect(deps.clear).toHaveBeenCalledExactlyOnceWith("ws", "wake-parked");
+  });
+
+  it("shows the unreadable file once in each synced workspace, including one that syncs later", () => {
+    let workspaces: string[] = [];
+    const { deps, notices } = setup(() => workspaces);
+    notices.report(null, "unreadable", null);
+    expect(deps.report).not.toHaveBeenCalled();
+    workspaces = ["ws"];
+    notices.report(null, "unreadable", null);
+    notices.report(null, "unreadable", null);
+    expect(deps.report).toHaveBeenCalledExactlyOnceWith("ws", expect.objectContaining({ reason: "wake-unreadable", file: FILE }));
+    workspaces = ["ws", "later"];
+    notices.report(null, "unreadable", null);
+    expect(deps.report.mock.calls.map(([id]) => id)).toEqual(["ws", "later"]);
+    notices.clear(null, "unreadable");
+    expect(deps.clear.mock.calls).toEqual([["ws", "wake-unreadable"], ["later", "wake-unreadable"]]);
+    // Once taken back, a new failure shows it again.
+    notices.report(null, "unreadable", null);
+    expect(deps.report).toHaveBeenCalledTimes(4);
+  });
+
+  it("never throws for the file's row: a workspace that could not take it is offered it next time", () => {
+    const { deps, notices } = setup(() => ["ws", "other"]);
+    const failure = new Error("That window is gone.");
+    deps.report.mockImplementationOnce(() => { throw failure; });
+    notices.report(null, "unreadable", null);
+    expect(deps.report.mock.calls.map(([id]) => id)).toEqual(["ws", "other"]);
+    expect(deps.log).toHaveBeenCalledWith(failure);
+    notices.report(null, "unreadable", null);
+    expect(deps.report.mock.calls.map(([id]) => id)).toEqual(["ws", "other", "ws"]);
+  });
+
+  it("never throws when the workspace list can't be read", () => {
+    const failure = new Error("This workspace was closed.");
+    const { deps, notices } = setup(() => { throw failure; });
+    expect(() => notices.report(null, "unreadable", null)).not.toThrow();
+    expect(deps.report).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith(failure);
+  });
+});

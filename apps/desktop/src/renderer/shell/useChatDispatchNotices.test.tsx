@@ -226,7 +226,7 @@ it("keeps a wake row that is still wrong until Try again or its end, and lets a 
   await act(async () => {});
   const rows = view.result.current.shellErrors;
   const unreadable = rows.find((item) => item.kind === "chat-wake-unreadable")!;
-  expect(unreadable).toMatchObject({ title: "Agents here can't take messages from your phone", noDismiss: true, details: [["File", "/state/chat-wakes.json"]] });
+  expect(unreadable).toMatchObject({ title: "dohc could not read the agent requests saved here", noDismiss: true, details: [["File", "/state/chat-wakes.json"]] });
   const parked = rows.find((item) => item.kind === "chat-wake-parked")!;
   expect(parked).toMatchObject({ noDismiss: true, details: [["Thread", "t1"], ["Message", "m1"], ["Wake", "wake-1"]] });
   expect(parked.onDismiss).toBeUndefined();
