@@ -8086,7 +8086,8 @@ it("settles an edit a connection applies on an idle host at once, with the fixed
   expect(o.tip()).toEqual(edit);
   const methods = () => o.client().sendRequest.mock.calls.map(call => ((call as unknown[])[0] as {method: string}).method);
   await vi.waitFor(() => expect(methods().lastIndexOf("sync.push")).toBeGreaterThan(methods().lastIndexOf("liveApplication.settle")));
-  expect(passes).toBeGreaterThanOrEqual(1);
+  // The settle and the push are sent inside the pass, so wait for the pass itself to end before reading the clock.
+  await vi.waitFor(() => expect(passes).toBeGreaterThanOrEqual(1));
   expect(paced.clock.nowMs()).toBe(idle + paced.poll);
 });
 
