@@ -3366,7 +3366,9 @@ it(
       expect(attempts()).toBe(before + 1);
       // The operator is told of nothing they need to do.
       expect(
-        proof.reports.filter((report) => report.startsWith("Live editing of docs/a.md")),
+        proof.reports.filter((report) =>
+          report.startsWith(`Live editing of object ${proof.objectId} `),
+        ),
       ).toEqual([]);
       return { attemptsBeforeResume: before, reports: proof.reports };
     }),
@@ -3809,7 +3811,9 @@ it(
       await settledPasses(proof);
       expect(attempts()).toBe(captured + 1);
       expect(
-        proof.reports.filter((report) => report.startsWith("Live editing of docs/a.md")),
+        proof.reports.filter((report) =>
+          report.startsWith(`Live editing of object ${proof.objectId} `),
+        ),
       ).toEqual([]);
       expect(proof.storage.readServiceHostEnrollment("workspace", "docs/a.md")).toMatchObject({
         ownerStop: null,
@@ -3961,9 +3965,11 @@ it(
       await settledPasses(proof);
       expect(attempts()).toBe(blocked);
       expect(
-        proof.reports.filter((report) => report.startsWith("Live editing of docs/plain.md")),
+        proof.reports.filter((report) =>
+          report.startsWith(`Live editing of object ${plain.objectId} `),
+        ),
       ).toEqual([
-        `Live editing of docs/plain.md in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store is kept at ${proof.store}.`,
+        `Live editing of object ${plain.objectId} in workspace workspace cannot start: the document has no live-editing history. It starts once its owner opens it in dohc on a desktop. Its store ${basename(proof.store)} is kept.`,
       ]);
       // Its owner opens it on their device without changing it, which starts its Y.Doc and pushes it to the relay.
       // The next pass pulls it into the host's replica and captures once more, with no Resume.
