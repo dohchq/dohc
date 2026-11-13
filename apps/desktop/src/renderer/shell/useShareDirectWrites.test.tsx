@@ -61,6 +61,8 @@ async function setup(
     workspaceId?: string;
     opened?: PushShareDirectWritesResult;
     ended?: boolean;
+    changed?: boolean;
+    membership?: boolean;
   } = {},
 ) {
   const workspaceId = options.workspaceId ?? "share-view";
@@ -70,13 +72,14 @@ async function setup(
     options.ended ? "ended" : "current",
   );
   const checkShareAccess = vi.fn(async (): Promise<ShareViewRefresh> =>
-    options.ended ? "ended" : "current",
+    options.ended ? "ended" : options.changed ? "changed" : "current",
   );
   const sendShareChanges = vi.fn(async () => undefined);
   const hook = renderHook(() =>
     useShareDirectWrites({
       workspaceId,
       sharedView: true,
+      membership: options.membership ?? false,
       enabled: options.enabled ?? true,
       ready: options.ready ?? true,
       ownerName: "ana@example.com",
@@ -314,6 +317,42 @@ it("reports a record name race once and tells where the losing draft is kept", a
       "packing/One.md is taken. Your text draft is kept in trip/packing/Record draft abc-2.txt on this computer. Use New record to create another record.",
   });
   expect(refreshShareView).toHaveBeenCalledOnce();
+});
+
+it("tells a member who lost a page name race to use New page", async () => {
+  const { notices } = await setup({ membership: true });
+  await answer({
+    status: "pushed",
+    writes: [
+      {
+        result: "stale",
+        paths: ["ideas/Plan.md"],
+        stalePath: "ideas/Plan.md",
+        recoveredDraftPath: "ideas/Page draft abc-2.txt",
+      },
+    ],
+  });
+  expect(notices[0]?.message).toBe(
+    "ideas/Plan.md is taken. Your text draft is kept in ideas/Page draft abc-2.txt on this computer. Use New page to create another page.",
+  );
+});
+
+it("keeps a member's unsent pages when their level drops and offers them as a proposal once they can edit", async () => {
+  const { notices, sendShareChanges } = await setup({
+    membership: true,
+    opened: { status: "unavailable" },
+    changed: true,
+  });
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(notices[0]).toMatchObject({
+    kind: "direct-write-unavailable",
+    message:
+      "You can no longer edit in this workspace. Your unsent pages stay on this computer. When you can edit again, send them as a proposal.",
+    retry: null,
+    send: { label: "Send as proposal" },
+  });
+  notices[0]!.send!.run();
+  expect(sendShareChanges).toHaveBeenCalledOnce();
 });
 
 it("counts several refused writes and gives the first reason", async () => {

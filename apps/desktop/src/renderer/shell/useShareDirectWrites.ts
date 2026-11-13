@@ -35,6 +35,8 @@ export interface DirectWriteNotice {
 export function useShareDirectWrites(input: {
   workspaceId: string;
   sharedView: boolean;
+  // A joined workspace, where a member's new pages take this path too.
+  membership?: boolean;
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
   ready: boolean;
@@ -79,15 +81,35 @@ export function useShareDirectWrites(input: {
       delivery?: ShareDirectWriteAnswerDelivery,
     ): Promise<void> => {
       if (!isCurrent() || !latest.current.ready) return;
-      const { ownerName, refreshShareView, sendShareChanges } = latest.current;
+      const { ownerName, refreshShareView, sendShareChanges, membership } = latest.current;
       const notices: DirectWriteNotice[] = [];
       const showNotice = (notice: DirectWriteNotice) => {
         notices.push(notice);
       };
       let refresh = false;
       try {
+        const sendAsProposal = {
+          label: "Send as proposal",
+          run: () => {
+            if (!isCurrent()) return;
+            if (!latest.current.enabled) void report({ status: "unavailable" });
+            else void sendShareChanges();
+          },
+        };
         const reportAccess = (access: ShareViewRefresh): boolean => {
           if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
+          // A member's unsent page is kept as a proposal. The relay takes
+          // proposals only at Edit, so it goes once the level returns.
+          if (membership && access === "changed") {
+            showNotice({
+              kind: "direct-write-unavailable",
+              message:
+                "You can no longer edit in this workspace. Your unsent pages stay on this computer. When you can edit again, send them as a proposal.",
+              retry: null,
+              send: sendAsProposal,
+            });
+            return true;
+          }
           showNotice({
             kind: "direct-write-unavailable",
             message:
@@ -109,14 +131,6 @@ export function useShareDirectWrites(input: {
             .catch((): ShareViewRefresh => "stale");
           if (!isCurrent() || reportAccess(access)) return;
         }
-        const sendAsProposal = {
-          label: "Send as proposal",
-          run: () => {
-            if (!isCurrent()) return;
-            if (!latest.current.enabled) void report({ status: "unavailable" });
-            else void sendShareChanges();
-          },
-        };
         if (needsCheck && (result.status === "unavailable" || !latest.current.enabled)) {
           // Any 404 on the way to the relay reads as unavailable, so only the
           // access check can say the share ended. It then shows it ended.
@@ -140,7 +154,7 @@ export function useShareDirectWrites(input: {
           showNotice({
             kind: "direct-write-stale",
             message: draft
-              ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. Use New record to create another record.`
+              ? `${writeLabel(stale[0]!)} is taken. Your text draft is kept in ${draft} on this computer. ${draftNext(draft)}`
               : `${writesLabel(stale)} changed before your change reached ${ownerName}. Check the new version, or send yours as a proposal.`,
             retry: draft ? null : () => void push(),
             send: sendAsProposal,
@@ -243,6 +257,14 @@ function writeLabel(write: DirectWriteRow): string {
   }
   const path = write.result === "stale" ? write.stalePath : write.paths[0]!;
   return path.split("/").slice(-2).join("/");
+}
+
+// The engine names a page's kept draft "Page draft …" and a record's
+// "Record draft …", so the next step follows the draft.
+function draftNext(draft: string): string {
+  return draft.slice(draft.lastIndexOf("/") + 1).startsWith("Page draft ")
+    ? "Use New page to create another page."
+    : "Use New record to create another record.";
 }
 
 function writesLabel(writes: readonly DirectWriteRow[]): string {
