@@ -31,8 +31,6 @@ const desktopDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fixture = join(desktopDir, "scripts/fixtures/app-name-profile");
 const packageName = JSON.parse(readFileSync(join(desktopDir, "package.json"), "utf8")).name;
 
-// The probe app: the desktop's package name, as Electron reads it before main
-// runs, and the desktop's own nameApp, called first, as src/entry.ts does.
 const PROBE = `
 import { app } from "electron";
 import { readdirSync } from "node:fs";

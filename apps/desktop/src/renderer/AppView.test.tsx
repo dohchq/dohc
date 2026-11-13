@@ -176,7 +176,6 @@ describe("an owner app in its tab", () => {
     const view = webview();
     expect(view.getAttribute("src")).toBe("http://127.0.0.1:43101/");
     expect(view.getAttribute("partition")).toBe(`dohc-app-view-${request.viewId}`);
-    // Until the app paints, the webview shows dohc's paper, not white.
     expect(view.className).toContain("bg-bg");
     expect(view.className).toContain("opacity-0");
     expect(screen.getByTestId("app-view-loading").className).toContain("dohc-reveal-if-slow");

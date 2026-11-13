@@ -3,13 +3,6 @@ import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { each, isFields, okAnswer, segment, text, type Fields } from "./api";
 import { REQUEST_TIMEOUT_MS, ServerError, type ServerClient } from "./client";
 
-// The reads a signed-in phone makes of one workspace, through the server's copy of it
-// (services/sync-relay/src/accountOperationRoutes.ts), and the workspace's change feed. Every read answers
-// `{ ok, result, cursor }`: the cursor says how far the copy had synced, and the feed starts from it. Each answer is
-// checked for the fields the phone shows; one that lacks any of them fails as a whole. A result that names a refusal
-// the phone knows, `missing` or `too-large`, is a value; any other unsuccessful result is a failed read, which the
-// screen offers to try again.
-
 /** A read's value, and the feed's cursor for what the server's copy had synced when it answered. */
 export interface Read<T> {
   readonly value: T;
@@ -34,8 +27,6 @@ function operation<T>(client: ServerClient, workspaceId: string, name: string, a
   }, args, { signal });
 }
 
-// --- files --------------------------------------------------------------------------------------------------------
-
 export interface WorkspaceFile {
   readonly path: string;
   readonly objectId: string;
@@ -52,8 +43,6 @@ export function readFiles(client: ServerClient, workspaceId: string, signal: Abo
       : null);
   }, signal);
 }
-
-// --- chats --------------------------------------------------------------------------------------------------------
 
 export type ChatGroupKind = "group" | "dm" | "agent";
 const isGroupKind = (value: unknown): value is ChatGroupKind => value === "group" || value === "dm" || value === "agent";
@@ -118,7 +107,6 @@ export interface ChatMessage {
   /** A poll's choices. A question has none. */
   readonly options: readonly string[];
   readonly chosenOption: string | null;
-  /** The reply that answered it. */
   readonly resolvedByMessageId: string | null;
   readonly reactions: readonly ChatReaction[];
 }
@@ -262,8 +250,6 @@ export function markThreadRead(client: ServerClient, workspaceId: string, thread
   }, { threadId, messageId }, { signal });
 }
 
-// --- pages --------------------------------------------------------------------------------------------------------
-
 /**
  * A page as the server's copy holds it: its Markdown, or why there is none, by the refusal the server names. `missing`
  * is a page not at its path, and the server answers a secret file's page the same way. Its `last` is the text this
@@ -284,8 +270,6 @@ export function readPage(client: ServerClient, workspaceId: string, path: string
     return result.refusal === "missing" ? { kind: "missing" } : null;
   }, signal);
 }
-
-// --- the change feed ----------------------------------------------------------------------------------------------
 
 /** What changed by kind, with the objects or threads the server knows changed. An empty list means some, unnamed. */
 export interface FeedChanges {
@@ -322,8 +306,6 @@ export function readChanges(client: ServerClient, workspaceId: string, since: st
     return { cursor: answer.cursor, replace: false, changed: { ...(files ? { files } : {}), ...(pages ? { pages } : {}), ...(chats ? { chats } : {}) } };
   }, undefined, { signal: options.signal, timeoutMs: options.holdMs + REQUEST_TIMEOUT_MS });
 }
-
-// --- cursors ------------------------------------------------------------------------------------------------------
 
 const parts = (cursor: string) => cursor.split(".").map(Number) as [number, number, number];
 

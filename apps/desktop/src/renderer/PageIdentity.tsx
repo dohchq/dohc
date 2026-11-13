@@ -33,9 +33,6 @@ const BODY_FIELD = "body";
 // H1 as its title, and the title field folds into the row beside the icon.
 // Both answers read the first block alone, never the rest of the document.
 
-// The editor's own Markdown lexer, for a paragraph with an underline (see
-// markdown/firstBlock.ts). It loads with the editor's chunk, not at launch;
-// until it arrives, such a page shows its title open.
 let lexer: typeof Lexer | null = null;
 let lexerLoad: Promise<typeof Lexer> | null = null;
 function loadLexer(): Promise<typeof Lexer> {

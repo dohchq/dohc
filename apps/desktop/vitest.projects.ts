@@ -49,7 +49,6 @@ export interface DesktopTestFiles {
   isolated: string[];
   /** jsdom files that share workers. */
   sharedDom: string[];
-  /** node files that share workers. */
   sharedNode: string[];
 }
 

@@ -46,14 +46,6 @@ export interface WorkspaceListStore {
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
 }
 
-// One sign-in's workspace list. A Show on phone change shows at once and keeps its workspace's switch busy until the
-// server answers; a failed change goes back to the value the server last confirmed. A list read that started before a
-// change can't land over it: starting a change drops every read in flight, and once no change is waiting, the list
-// is read again.
-//
-// Given a saved list, the store shows it until the server answers, or with the problem when the server's answer
-// fails, so a relaunch opens a workspace from the cache before any request lands. Only the server's list, and changes
-// made on this phone, are saved and decide what the cache keeps.
 export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">, saved?: SavedList | null): WorkspaceListStore {
   let state: WorkspaceList = { status: "loading" };
   const listeners = new Set<() => void>();

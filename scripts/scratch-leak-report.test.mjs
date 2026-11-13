@@ -155,14 +155,6 @@ test("a run root without the sentinel fails instead of reporting clean", async (
   }
 });
 
-// A test that removes and recreates the handed-down root loses the sentinel and
-// can still leave a tree. The row's caller generates this root per run and makes
-// it moments before the tests, so it is the caller's to reclaim — and this is
-// the last point in the gate that can. An earlier version of this file asserted
-// the opposite, on the reasoning that a row should not delete a tree it does not
-// own. That reasoning belonged to the version where the row re-derived the path
-// and could land on an unrelated directory; the root is handed down now, so the
-// only tree this can reach is the one the caller made.
 test("a run root without the sentinel is still reclaimed, tree and all", async () => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");

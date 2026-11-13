@@ -6,42 +6,6 @@ import { atomicCreateFile, atomicWriteFile } from "../atomicReplaceFile";
 import type { RegistryEntry } from "./registryStore";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
-// Whether a workspace ever synced or opened as a share, kept in its own
-// .dohc folder. Forgetting the workspace removes its registry entry, and
-// reattaching the folder keeps its workspace id, so only the folder can
-// still say it synced. A workspace runs its schedules on one computer, with
-// no relay to choose it, only when this history says it never synced.
-//
-// iCloud Drive, Dropbox, or a copy carries the folder to other computers,
-// and a stale copy can replace any file another computer rewrote. So each
-// fact lives where a stale copy cannot undo it:
-//
-//   sync-history.json            written once when dohc makes a workspace
-//                                that has not synced, naming the installation
-//                                that made it, which runs its schedules
-//   sync-history/synced          present once it synced or opened as a share
-//   sync-history/received-share  present once a received share was mounted
-//                                in it, or a shared chat joined it
-//   sync-history/schedules.json  the installation chosen since to run them
-//
-// The two marks are never written with anything to undo, and nothing removes
-// them. The schedules record is the only file rewritten: the last computer
-// chosen keeps the schedules, and every other computer reads that it does
-// not. The first host travels inside the record, so a computer that gets
-// the record before the schedules file does not take it for an old record
-// and claim the schedules.
-//
-// A received share or chat does not make the workspace sync, so schedules
-// still run, but the workspace is no longer one nobody else ever had a part
-// in. A record from before dohc kept received shares has no `receivedShare`.
-// One from before these marks may say `synced` or `receivedShare` itself:
-// the first read that sees it records the mark, so a stale copy cannot
-// take it back after.
-//
-// .dohc resolves through resolveWorkspaceMetadataDir, and .dohc/sync-history
-// must be a real folder, so a planted link cannot send a write outside the
-// workspace.
-
 // "absent" when the folder has no record, as one made before dohc kept it;
 // "unknown" when it has one dohc cannot read or parse, which may say synced.
 export type SyncHistory = "never-synced" | "synced" | "absent" | "unknown";

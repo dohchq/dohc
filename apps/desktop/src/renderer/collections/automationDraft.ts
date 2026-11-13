@@ -91,7 +91,6 @@ export function conditionRows(expression: string): ConditionRow[] | null {
   return conditionFormula(rows) === expression.trim() ? rows : null;
 }
 
-/** What a value is, as the builder offers it. */
 export type ValueKind = "any" | "today" | "now" | "value" | "empty" | "formula";
 
 export function valueKindOf(value: AutomationValue | null): ValueKind {

@@ -1,10 +1,3 @@
-// One line per answered request: the service, when the request arrived, its
-// method, the pattern of the route that matched it, and the status. Never the
-// path, query, host, address or a header: paths and queries carry link secrets,
-// session ids and sign-in tokens. Only a route pattern a service lists can
-// appear: a mark outside the list is dropped, and a request with no mark logs as
-// one fixed word.
-
 const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]);
 // Short lowercase literal segments, `:name` placeholders and an optional
 // trailing `*` or `/`, or one lowercase word. This refuses most secrets and

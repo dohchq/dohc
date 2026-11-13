@@ -279,15 +279,6 @@ describe("createPresenceChannel", () => {
     await flush(); // any unhandled rejection would fail the test run here
   });
 
-  // Awaiting transport.leave alone does not order it after
-  // a publish already in flight when stop() is called — a late-arriving
-  // publish (a heartbeat, or setState) can reach the transport after leave
-  // does, reviving presence the instant after it left (ghost until the
-  // relay's TTL). This transport hangs its SECOND publish (the kickoff's
-  // first publish settles immediately, matching real startup) until the test
-  // releases it, and proves leave is withheld for the whole hang — not just
-  // dispatched-then-reordered, which a transport-level spy on call order
-  // alone could not distinguish from a real wait.
   it("waits out an in-flight publish before sending leave", async () => {
     let releasePublish!: (snapshot: PresenceSnapshot) => void;
     const publishGate = new Promise<PresenceSnapshot>((resolve) => {

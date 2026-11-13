@@ -151,8 +151,6 @@ describe("conflictPreview", () => {
         expect(next.hiddenChars).toBe(0);
         continue;
       }
-      // The press must pay for itself: strictly more painted, strictly less
-      // held back, every time, until the side is fully shown.
       expect(next.text.length).toBeGreaterThan(previous.text.length);
       expect(next.hiddenChars).toBeLessThan(previous.hiddenChars);
       previous = next;

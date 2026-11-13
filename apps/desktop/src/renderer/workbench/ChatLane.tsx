@@ -45,8 +45,6 @@ type PaintedLane = {
   readState: "retry" | "pending" | "done";
 };
 
-// An agent DM's posts from before it was one conversation. Each post's first
-// message joins the stream, and the rest of the post is its thread.
 function postAsThread(messages: readonly ChatMessageRecord[]): ChatMessageRecord[] {
   const first = messages[0];
   if (!first) return [];
@@ -226,8 +224,6 @@ export function ChatLane(props: {
       if (!isCurrent()) return;
       const laneMessages = laneRead?.messages ?? [];
       if (lane && paintedRevision.current?.threadId !== lane.id) {
-        // The read place counts the messages before the first unread one in
-        // arrival order, so it indexes that message.
         const firstUnread = lane.unreadCount > 0 ? laneMessages[lane.lastReadSequence] : undefined;
         setFirstUnreadMessageId(firstUnread?.id ?? null);
       }

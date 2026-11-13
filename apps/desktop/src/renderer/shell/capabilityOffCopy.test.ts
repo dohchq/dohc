@@ -31,8 +31,6 @@ describe("refused data store copy", () => {
   });
 });
 
-// A store this build could not migrate is intact. No surface may send the
-// user to a rebuild that would lose what a fixed build still opens.
 describe("migration failure copy", () => {
   it("directs every unavailable surface to an update, not a rebuild", () => {
     const status: SyncStatusResult = {

@@ -1,7 +1,5 @@
 import { validateUserMaterializePath } from "@dohc/workspace-contracts/workspace-paths";
 
-// Long enough for any title, short enough to keep the path well inside
-// Windows' 260-character limit in a nested folder.
 const PAGE_NAME_LIMIT = 120;
 
 // A new page's file name comes from its title. Characters a file name cannot

@@ -35,12 +35,6 @@ function tabTitle(path: string, label?: string): string {
 // The drawing's tab glyph is 14px.
 const TAB_GLYPH_SIZE = 14;
 
-// The active tab and the editor body below it share one surface. The tab's
-// bottom outer corners curve out into the strip's hairline (the joins) and
-// the body's top corners curve up into it (the pane corners). Both radii
-// follow the active tab's distance from the pane edge: a tab at the edge
-// leaves one straight line, a tab further in sits on a rounded pane, and a
-// dragged tab morphs between the two as it passes.
 const CORNER_RADIUS = 8;
 const MORPH_RANGE = 20;
 const DRAG_THRESHOLD = 4;
@@ -98,18 +92,8 @@ const ACTIVE_GROUP_LINE =
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 const INACTIVE_GROUP_GLYPH = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-subtle";
 
-// An edge the strip can still scroll past fades over this width. A revealed
-// tab stops clear of the fade, its joins included, where the strip has room
-// for both. A tab that can't clear both fades starts at the strip's start,
-// where the left fade gives way to it.
 const EDGE_FADE = 40;
 const REVEAL_MARGIN = EDGE_FADE + CORNER_RADIUS + 1;
-// The fade is the strip's own fill drawn over the tab names, w-10 being
-// EDGE_FADE. Its outer 16px are solid, so a cut name shows no fragment of
-// two or three letters, and the rest fades in. It starts under the strip's
-// top band, where the split's accent line runs, and stops above the
-// hairline; it sits above the other tabs and under the active one (z-10),
-// and takes no clicks.
 const STRIP_FADE =
   "pointer-events-none absolute top-1 bottom-px z-[6] w-10 from-panel from-40% to-transparent";
 // The last of the strip's buttons meets the pane edge, where the window edge
@@ -118,12 +102,6 @@ const STRIP_FADE =
 const STRIP_BUTTON =
   "grid w-7 shrink-0 place-items-center border-b border-line text-muted hover:text-ink focus-visible:-outline-offset-2";
 
-// An unsaved tab's dot and its close share the close's 16px slot, and each
-// hides exactly while the other shows: on hover, while the keyboard focuses
-// the tab (the moment its ring draws), and while the close has focus. Opacity,
-// not visibility, so the dot's label stays in the tab's name. The tab's named
-// group keeps focus in an enclosing group, such as the editor's, from hiding
-// the dot.
 const CLOSE_SLOT = "[grid-area:1/1]";
 const DIRTY_DOT_SWAP = "group-hover/tab:opacity-0 keyboard:group-focus-visible/tab:opacity-0 group-has-[:focus]/tab:opacity-0";
 const DIRTY_CLOSE_SWAP = "opacity-0 group-hover/tab:opacity-100 keyboard:group-focus-visible/tab:opacity-100 focus:opacity-100";

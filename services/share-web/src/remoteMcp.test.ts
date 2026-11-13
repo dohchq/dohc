@@ -274,7 +274,6 @@ it("limits refused bearers by client address, and never spends for a valid one",
     headers: {authorization, "content-type": "application/json", accept: "application/json, text/event-stream", "x-dohc-share-web-client-ip": address}});
   // A valid bearer never spends from its address.
   for (let i = 0; i <= MCP_FAILED_SIGN_IN_CAPACITY; i++) expect((await send("192.0.2.1", `Bearer ${bearer}`)).status).toBe(200);
-  // An unknown token and a malformed header each spend one, until the address waits.
   for (let i = 0; i < MCP_FAILED_SIGN_IN_CAPACITY; i++) {
     expect((await send("192.0.2.2", i % 2 ? "Bearer short" : `Bearer ${"D".repeat(43)}`)).status).toBe(401);
   }

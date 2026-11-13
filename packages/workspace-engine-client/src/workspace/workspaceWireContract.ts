@@ -797,7 +797,6 @@ const ConflictFileStateSchema = mutableStruct({
   metadataCorrelationId: NullableString,
 });
 
-/** A newer version another computer saved, held until the conflict resolves. */
 const ConflictWaitingVersionSchema = mutableStruct({
   code: Schema.Literal("resolve-existing-conflict"),
   objectId: Schema.NonEmptyString,

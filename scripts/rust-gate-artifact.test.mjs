@@ -1,21 +1,3 @@
-// The gate's artifact, produced by the gate.
-//
-// `tree-provenance.mjs` is well covered, and covering it proves nothing about
-// the file that writes what humans and `require-ci-pass-verdict.mjs` read.
-// Five mutations of the wiring in `run-rust-checks.mjs` once survived the
-// whole suite, and two of them turn the feature off silently:
-//
-//   - reusing the opening reading instead of reading the tree again makes
-//     provenance always PASS, so every log reads `tree <sha> clean` and the
-//     verifier accepts it;
-//   - stamping the opening reading instead of the judgement prints
-//     `tree <sha> clean` directly above `FAIL tree provenance`, which is
-//     evidence disagreeing with its own summary.
-//
-// So these tests run the real script and read its real output. `cargo` and
-// `node` are stubbed on PATH so the run costs a second rather than an hour —
-// the steps' verdicts are not the subject here, the artifact is.
-
 import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -178,12 +160,6 @@ try {
 const probePath = () =>
   join(repoRoot, `.dohc-gate-wiring-probe-${process.pid}-${randomUUID().slice(0, 8)}.tmp`);
 
-/**
- * Take ownership of a path, or refuse it. This test deletes its probe when it
- * finishes, so it must never adopt a file it did not create: an untracked file
- * at that path is a developer's work, and deleting it to make room is the
- * unowned write this whole test exists to catch the gate missing.
- */
 function claim(path) {
   if (existsSync(path)) {
     throw new Error(
@@ -287,12 +263,6 @@ test("the gate stamps the tree it read, at every step boundary", () => {
     }).stdout.trim();
     assert.match(run.evidence, new RegExp(` head ${head.slice(0, 8)} `));
 
-    // And the canonical verifier accepts what the producer just wrote. This
-    // replaces a frozen copy of a past run's verdict line, which said the
-    // same thing until the producer changed and the copy did not — twice in
-    // this PR alone. Asking the live producer cannot go stale, and it pins
-    // what the frozen line was really pinning: that every row name the gate
-    // emits is a name the verifier requires, spaces and hyphens and all.
     assert.doesNotThrow(() => requireCiPassVerdict(run.evidence, () => head));
   } finally {
     rmSync(stub, { recursive: true, force: true });
@@ -541,11 +511,6 @@ test("Rust tree reads retry transient errors and retain persistent stderr in the
 });
 
 test("the wiring probe belongs to the run that made it", () => {
-  // The test below writes into the repo root and deletes what it wrote. Both
-  // halves are shared state: a fixed name lets two `pnpm test` processes in
-  // one checkout delete each other's probe, and an unconditional delete
-  // destroys whatever untracked file happens to sit at that path. A test
-  // proving the gate catches foreign writes must not be making one.
   assert.notEqual(probePath(), probePath());
 
   const taken = join(tmpdir(), `dohc-probe-claim-${randomUUID()}`);

@@ -24,7 +24,6 @@ export function crashEventSource(event: CrashEvent): CrashReportSource {
   return event.source;
 }
 
-// Facts about this build and computer, read when the problem happens.
 export interface CrashFacts {
   atMs: number;
   version: string;

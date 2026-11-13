@@ -128,8 +128,6 @@ describe("engine.ping against a real daemon", () => {
           { timeout: REAL_DAEMON_DEADLINE_MS },
         )
         .toEqual({ failures: [], spannedTwoExpiries: true });
-      // And none of them carried a wire deadline, which is what keeps the
-      // client's own timer out of the silence measurement.
       expect(
         probes.every(({ request }) => (request.deadlineMs ?? null) === null),
       ).toBe(true);

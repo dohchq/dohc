@@ -344,7 +344,6 @@ describe("blockExit folded callout (toggle) guards", () => {
 
     press(editor, { key: "Backspace" });
 
-    // First press: nothing joined into the hidden body, callout selected.
     expect(editor.getJSON()).toEqual(before);
     expect(selectedNodeName(editor)).toBe("callout");
 

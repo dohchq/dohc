@@ -11,7 +11,6 @@ import type {
   RegistrationRow, RegistrationStatus, RegistrationSummary, Role, RosterInput, SessionId, SetPlayerReclubInput, SetStatusInput, StatusResult,
 } from "./ui-types.ts";
 
-// ---------- shared vocabulary ----------
 export const EXAMPLE_NOTICE = "Example event — use test details and a sample receipt. Do not send money.";
 const SESSION_IDS: readonly SessionId[] = ["s1", "s2"];
 const DEFAULT_SESSION_NAME: Record<SessionId, string> = { s1: "Session 1", s2: "Session 2" };
@@ -83,7 +82,6 @@ function sameRetainedRegistration(current: RegistrationRetry, saved: RetainedReg
     JSON.stringify(values(current.input)) === JSON.stringify(values(saved.input));
 }
 
-// ---------- DOM helpers ----------
 type Child = Node | string | null | undefined | false;
 type Handler = (event: Event) => void;
 type Attrs = Record<string, string | number | boolean | Handler | undefined>;
@@ -156,7 +154,6 @@ const ORGANIZER_MESSAGES: Partial<Record<BackendStatus, string>> = {
 interface View { element: HTMLElement; show(): void }
 interface StatusView extends View { setToken(token: string): void }
 
-// ---------- registration ----------
 function createRosterGroup(role: Role, max: number, onChange: () => void) {
   const title = role === "player" ? "Players" : "Spectators";
   const list = el("div", { class: "names" });
@@ -496,7 +493,6 @@ function createRegisterView(client: FundraiserClient, context: AppContext, hooks
   return { element, show() { element.hidden = false; heading.focus(); if (!sessions) void loadSessions(); } };
 }
 
-// ---------- private status ----------
 function createStatusView(client: FundraiserClient, context: AppContext): StatusView {
   let seq = 0;
   const heading = el("h2", { tabindex: "-1" }, "My registration");
@@ -539,7 +535,6 @@ function createStatusView(client: FundraiserClient, context: AppContext): Status
   return { element, show() { element.hidden = false; heading.focus(); }, setToken(token) { tokenInput.value = token; messages.replaceChildren(); result.replaceChildren(); } };
 }
 
-// ---------- organizer ----------
 type Filter = RegistrationStatus | "all";
 const FILTERS: ReadonlyArray<readonly [Filter, string]> = [
   ["pending_verification", "Pending verification"], ["verified", "Verified"], ["pay_at_venue", "Pay at venue"], ["rejected", "Rejected"], ["all", "All"],
@@ -979,7 +974,6 @@ function createOrganizerView(client: FundraiserClient): View {
   return { element, show() { element.hidden = false; heading.focus(); if (state === "idle") void check(); } };
 }
 
-// ---------- shell ----------
 export function mountFundraiser(root: HTMLElement, client: FundraiserClient, context: AppContext = defaultAppContext): void {
   const status = createStatusView(client, context);
   const register = createRegisterView(client, context, { remember: token => status.setToken(token), openStatus: () => open("status") });

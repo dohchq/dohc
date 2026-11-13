@@ -41,8 +41,6 @@ import {
 // workspace is resolved via requireWorkspace and the relay connection is
 // built from the machine's own credentials — never from renderer input.
 
-// Folder-name budget for a mount label; generous but bounded (labels become
-// one path component under shared-with-me/).
 const MOUNT_LABEL_MAX = 64;
 const SHARE_ID_MAX = 200;
 const INVALID_SHARE_MOUNT_DETAILS =

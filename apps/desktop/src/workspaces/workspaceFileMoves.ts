@@ -197,8 +197,6 @@ async function notVersionedAt(rootPath: string, capture: Partial<Pick<WorkspaceE
   return untracked === null ? [] : [...untracked, ...unaddressed];
 }
 
-// An agent's path as it is spelled on disk, or null where it leads nowhere
-// the change could go. The change itself then says why.
 const spelledOnDisk = (rootPath: string, path: string) => admitPath(rootPath, path).then(entry => entry.physical, () => null);
 
 // The regular files at or under `entry` that History records. A link moves
@@ -620,7 +618,6 @@ async function prepareMoveWorkspacePath(operation: PathChangeOperation,
 
 interface MoveProgress {
   staged: string | undefined;
-  // A single file's source, staged in the trash until it is placed.
   sourceStaged: string | undefined;
   destDeleted: Array<{ path: string; sub: string; momentId: string }>;
   moved: boolean;

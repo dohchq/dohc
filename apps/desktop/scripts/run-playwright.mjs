@@ -32,11 +32,6 @@ export function playwrightRunEnv(baseEnv, cacheDir) {
   return { ...baseEnv, PWTEST_CACHE_DIR: cacheDir };
 }
 
-// Resolves and validates the CLI entry, naming the constraint and the remedy
-// when the package is missing. This must run inside runPlaywright's guarded
-// flow: a default parameter evaluates before any try block, and spawning
-// node with a nonexistent script "succeeds" and exits 1 with node's own
-// message — both paths would bypass the actionable error.
 export function requirePlaywrightCli(cliPath, resolveCli = playwrightCliPath) {
   let resolved = cliPath ?? null;
   if (resolved === null) {
@@ -117,11 +112,6 @@ export async function runPlaywright(args, {
     const signalNumber = osConstants.signals[signal];
     return signalNumber ? 128 + signalNumber : 1;
   } catch (error) {
-    // Only ENOENT means the CLI entry vanished — the missing-install case
-    // the pnpm-install remedy can fix. EACCES, EMFILE, EAGAIN and friends
-    // are permission or resource failures: name the code and keep the
-    // original message, so the entry point (which prints only message)
-    // still shows the OS error.
     const code =
       error instanceof Error
         ? /** @type {NodeJS.ErrnoException} */ (error).code

@@ -8,17 +8,6 @@ import {
   type PresenceTransport,
 } from "./presenceChannel";
 
-// MU-C1 — the React binding for channel/doc presence + typing.
-//
-// It is dormant for solo/offline: with `enabled === false` (or no transport)
-// it constructs no channel, opens no poll, and returns an empty presence — the
-// same "build nothing for solo" posture as the engine co-editing hook.
-//
-// No-stale-repaint guard (product invariant): every channel carries a
-// monotonic token. A slow poll for workspace/topic A can never repaint after
-// the user switches to B — the stale snapshot is dropped because its token no
-// longer matches the live one.
-
 interface PresenceLocalState {
   typing: boolean;
 }

@@ -1188,10 +1188,6 @@ test("a record names its service's processes in the boot that wrote it, and stay
   assert.equal(existsSync(treePath(root)), false);
 });
 
-/**
- * A stub service under `root`: it records its pid in spawned.log, then waits for go and exits without it, as the
- * real service does. After go it runs `body`, records its pid in services.log, and heartbeats until the test process exits.
- */
 function stubService(root, body = "", { onEof = "process.exit(1)" } = {}) {
   const service = join(root, "service", "stub", "scripts", "verification");
   mkdirSync(service, { recursive: true });
@@ -1455,7 +1451,6 @@ test("a preparation that hangs is stopped at its deadline and retried, and the l
   let preparations = 0;
   const { request, settled, calls } = harness(t, { prepareLimitMs: 200, prepare: ({ signal }) => {
     preparations += 1;
-    // The first preparation hangs until it is stopped; later ones finish.
     if (preparations > 1) return Promise.resolve();
     return new Promise((_, fail) => signal.addEventListener("abort", () => fail(signal.reason), { once: true }));
   } });

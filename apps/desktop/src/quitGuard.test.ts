@@ -421,8 +421,6 @@ describe("exit rounds", () => {
     r.exits.answer(1, round.roundId, "clear");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(r.confirmProceed).toHaveBeenCalledOnce();
-    // A new window is tracked and then loads, and a member that already
-    // answered reloads. Each is asked, and none re-prompts the user.
     const third = window(3);
     r.exits.enroll(third);
     r.exits.enroll(third);

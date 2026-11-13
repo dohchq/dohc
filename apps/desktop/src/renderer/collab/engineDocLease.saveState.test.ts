@@ -24,7 +24,6 @@ import {
 const projectionGate = vi.hoisted(() => ({
   pending: null as Promise<void> | null,
   completed: 0,
-  // When set, each projection waits until the test releases it.
   held: null as Array<{ markdown: string; release: () => void }> | null,
 }));
 

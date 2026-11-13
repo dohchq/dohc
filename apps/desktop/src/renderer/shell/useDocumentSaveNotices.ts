@@ -84,10 +84,6 @@ export function reportTextSave(workspaceId: string, path: string, failure: TextS
   for (const listener of [...textSaveListeners]) listener({ workspaceId, path, failure: failed });
 }
 
-// A live document's history was replaced while its editor was open.
-// `setAside` says a draft in Notices holds the editor's earlier edits.
-// `failure` is null once the new history shows; until then `retry` sets the
-// edits aside again and installs the same new history.
 interface DocumentReplacement {
   workspaceId: string;
   path: string;
@@ -182,11 +178,6 @@ export function useDocumentSaveNotices(input: {
         ...(cause === undefined ? {} : { cause }),
         identity: identity(path),
         target: { to: "file", path },
-        // The engine refuses every save over a deleted file until the file is
-        // back, and only the person chooses to bring it back. A note too
-        // dense to check never gets lighter, so asking again cannot save it:
-        // its row copies the note's text, read from the open editor without
-        // the engine's check, for the person to move into new notes.
         ...(reason === "deleted"
           ? { retry: null, action: { label: "Save it again", run: retry(true), ends: true } }
           : reason === "document-too-dense"

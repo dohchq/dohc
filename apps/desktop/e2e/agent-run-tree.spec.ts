@@ -40,8 +40,6 @@ async function runTree(path: string): Promise<number[] | null> {
   }
 }
 
-// The npm -g layout starts the agent from a .cmd shim through cmd.exe. A direct
-// launch starts the agent's own program.
 async function seedAgent(temp: TempWorkspace, mode: "hold-tree" | "leave-tree", launch: "npm shim" | "direct"): Promise<string> {
   const pids = join(temp.baseDir, "run-tree.json");
   const direct = `"${process.execPath}" "${fakeRunner}" ${mode} "${pids}"`;

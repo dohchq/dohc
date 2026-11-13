@@ -319,11 +319,6 @@ async function releaseEditorUpdates(desktop: LaunchedDesktopApp): Promise<void> 
   });
 }
 
-/**
- * The set-aside drafts this window stored for the document, read from the
- * renderer's store (orphanedDraftStorage.ts). A draft still carries the
- * recovery marker until the projection refines it to Markdown.
- */
 async function storedDrafts(page: Page, workspaceId: string): Promise<{ id: number; text: string; refined: boolean }[]> {
   return page.evaluate(({ workspaceId, path }) => {
     const drafts: { id: number; text: string; refined: boolean }[] = [];

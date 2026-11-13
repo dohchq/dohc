@@ -153,7 +153,6 @@ export function createSyncDemo(syncDemo) {
     }
   };
 
-  // ---------- autoplay ----------
   let typeFrame = null;
   let autoplayVisible = false;
   const foregroundWaiters = new Set();

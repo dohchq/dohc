@@ -1,11 +1,6 @@
 import { compareMessageOrder } from "@dohc/workspace-contracts/chat-order";
 import type { ChatMessage } from "../server/workspaceReads";
 
-// What a chat or thread screen marks read: the newest message of each thread it shows, in the engine's order, and each
-// unread post it shows up to the post's own message, never its replies, as the desktop does. It marks only while the
-// person can see it. A screen another covers, or one in an app that isn't active, marks nothing; it marks again once it
-// shows, which also sends a mark that failed.
-
 /** The store's mark, which the screen sends without waiting for it. */
 type Marks = { markRead(threadId: string, messageId: string): void };
 

@@ -314,7 +314,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const detailsRef = useRef(details); detailsRef.current = details;
   // What the panel says instead of the record's values, by the record's key, once a read could not find it.
   const [detailsUnavailable, setDetailsUnavailable] = useState<{ id: string; text: string } | null>(null);
-  // The by-key read of an open record a read in place left out, while it runs.
   const openRecordRead = useRef<AbortController | null>(null);
   // The panel of a new record, before the record exists.
   const draftPanel = useRef<HTMLElement | null>(null);
@@ -606,7 +605,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   async function readOpenRecord(key: string): Promise<void> {
     if (!read || !alive.current || locked.current) return;
     const fieldId = table?.primaryKeyFieldId;
-    // A key the host kept is foreign text until it reads as a record's id.
     let id: unknown;
     try { id = JSON.parse(key); } catch { id = undefined; }
     if (typeof id !== "string" && typeof id !== "number") { setDetailsUnavailable({ id: key, text: "This record is no longer in this Collection." }); return; }
@@ -789,7 +787,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     queue.enqueue({ kind: "create", record: null, operationId: create.operationId, values: typed, label: "Created a record" }, view);
   };
   function submitEditor(): void {
-    // The panel's own change is with the host until it answers.
     if (!editor || awaitingRef.current !== null) return;
     if (!formOperation) return;
     // An editor that holds a value it has not saved keeps the panel and takes focus, as in the table.
@@ -854,9 +851,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     draftPanel.current?.querySelector<HTMLElement>('[data-invalid] [data-property-value] button, [data-invalid] [data-property-value] input, [aria-invalid="true"]')?.focus();
   }, [invalid]);
 
-  // The table. Its schema and records key fields by id, and each record's row stays here, by the record's id,
-  // so a version or a value as read never enters the shared table. Everything the table gets keeps its
-  // identity until the fields, the rules or the records change, so a queued change builds no column again.
   const buttonNames = props.buttons?.fields ?? NO_BUTTONS;
   const fieldKey = JSON.stringify(fields), buttonKey = JSON.stringify(buttonNames);
   const schema = useMemo(() => tableSchema(fields, buttonNames), [fieldKey, buttonKey]);
@@ -1101,8 +1095,6 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     if (openKey === null || failure !== null || automationsOpen) return null;
     const unavailable = detailsUnavailable?.id === openKey ? detailsUnavailable.text : undefined;
     const nameStatus = nameField && view.statuses.get(openKey, nameField.fieldId);
-    // The name as its cell shows it: what the person gave, until the host confirms it. A record with no name
-    // says so in its heading. Only the panel's accessible name falls back to what the table's Open control calls it.
     const nameText = !details ? undefined : nameField ? display(nameStatus ? nameStatus.value as AppBackendJson : details.values[nameField.fieldId]) : "";
     // An offline copy lists no action, as it takes no change.
     const recordActions = onCustomAction && !offline ? operations.filter(operation => operation.kind === "action") : [];

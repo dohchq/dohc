@@ -127,7 +127,6 @@ describe("a conflict side pane", () => {
     const painted = panes[1].textContent ?? "";
     expect(painted.length).toBeLessThanOrEqual(CONFLICT_PREVIEW_MAX_CHARS);
     expect(painted.length).toBeGreaterThan(0);
-    // The small side is untouched: the bound only cuts what is over it.
     expect(panes[0].textContent).toBe("main side\n");
 
     const hidden = screen.getByTestId("version-conflict-side-hidden");

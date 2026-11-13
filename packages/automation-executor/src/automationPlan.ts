@@ -1411,11 +1411,6 @@ export type PlannedEffect =
   /** A dataset action to run, by name, with its input as the formulas gave it. */
   | { kind: "invoke"; operation: string; input: JsonObject };
 
-/**
- * What a completed step leaves for the steps after it: the records a Find
- * returned, which branch an If took, or the value a code step returned. A
- * record an Add record step added is known from what the run recorded.
- */
 export type StepOutput =
   | { kind: "find"; records: RunRef[] }
   | { kind: "if"; branch: boolean }

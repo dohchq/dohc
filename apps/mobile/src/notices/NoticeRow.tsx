@@ -15,11 +15,6 @@ import { useRouter } from "expo-router";
 import { SenderMark } from "./SenderMark";
 import { TitleControls } from "./TitleControls";
 
-// One row in Notices, as on the desktop: unread dot, sender mark, title, body, worded actions on a row below,
-// then the time. Copy and × sit on the title line; swiping dismisses too, and × stays visible. At accessibility text
-// sizes they move to the action line, after the worded action, so the title has the row's full width.
-// VoiceOver hears the row as one element with its actions in the rotor, the worded action first. A row has no
-// tap of its own on screen, so it has no double-tap either.
 export const NoticeRow = memo(function NoticeRow({ notice, onDismiss }: { notice: PhoneNotice; onDismiss(id: string): void }) {
   const theme = useTheme();
   const titleLines = useLineClamp(3);

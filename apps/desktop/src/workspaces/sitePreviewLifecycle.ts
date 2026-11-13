@@ -67,8 +67,6 @@ type PreviewRecord = RunningPreview | ExitedPreview | StoppingPreview;
 
 type PendingStart = {
   sequence: number;
-  // The window whose closing cancels this start, or null for a start the
-  // surfaces holding it own.
   senderId: number | null;
   workspaceId: string;
   siteKey: string;
@@ -262,9 +260,6 @@ export function createSitePreviewLifecycle<
     const attempt = Promise.resolve()
       .then(() => record.handle.stop())
       .then(async () => {
-        // A stop counts once the command's processes are gone. Until then the
-        // record stays, so nothing starts over them and the next stop retries.
-        // A static preview runs no app process.
         const { handle } = record;
         if ("stillRunning" in handle) {
           const left = await handle.stillRunning();

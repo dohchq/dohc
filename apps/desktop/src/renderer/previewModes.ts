@@ -14,7 +14,6 @@ export function modeLabel(mode: SitePreviewMode): string {
   return "Static";
 }
 
-/** The modes this app can preview in, in the order the preview menu lists them. */
 export function availableModes(
   site: SitePackageInfo,
   sharedView = false,

@@ -46,7 +46,6 @@ export function workspaceTrustHandlers<
   notifyChanged(workspaceId: string, trusted: boolean): void;
 }): OperationHandlers<typeof workspaceTrustOperations, Event, Operation> {
   const { trust } = dependencies;
-  // One dialog per workspace. A second request waits for the first answer.
   const asking = new Map<string, Promise<void>>();
 
   async function askAndTrust(event: Event, operation: Operation): Promise<void> {
@@ -77,8 +76,6 @@ export function workspaceTrustHandlers<
       }
       if (!(await trust.isTrusted(workspace))) {
         let answer = asking.get(workspaceId);
-        // A question a send asked for automatically opens only until it
-        // was shown; Trust workspace the person clicks always opens it.
         if (!answer && !(input.automatic && dependencies.wasAsked?.(workspaceId))) {
           answer = askAndTrust(event, operation).finally(() => asking.delete(workspaceId));
           asking.set(workspaceId, answer);

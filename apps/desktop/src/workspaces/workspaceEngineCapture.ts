@@ -273,22 +273,6 @@ export async function probeEngineStoreRefusal(
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 export const YDOC_UNCERTAIN_FAILURE_BACKOFF_MS = TRANSPORT_REBIND_MAX_BACKOFF_MS;
 
-// How long one document-open TASK may keep retrying transport errors
-// while it holds the capture chain. The task is more than the provider open —
-// it reads the active version first, and that read has its own six-attempt
-// ladder — so this is spent by the whole task through `withRetryBudget`,
-// never per call. Derived from the session constants it bounds: two full
-// open attempts plus two worst-case backoffs, so it always admits the
-// single-recovery path (daemon died, relaunched, second attempt bound:
-// ~2.1 s) and refuses the ladders that starved listMoments, readMoment, and
-// capture.stop(). A healthy open never consults it: the budget gates retries
-// only. Measured healthy opens on a busy chain are in ydocOpenDeadline.test.ts.
-//
-// It does not bound one in-flight `ydoc.open` either, and does not have to:
-// that request carries its own measured YDOC_OPEN_DEADLINE_MS, so a
-// daemon that accepts the open and then hangs frees the chain at that bound.
-// The two limits answer different questions — this one bounds retry waiting,
-// which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
 // How long a close waits for capture to record a change made outside dohc
@@ -905,7 +889,6 @@ export interface WorkspaceEngineCaptureOptions {
   attachmentId: symbol;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: CaptureVersionedTextStore;
-  // Injectable for tests; production uses the daemon's encrypted secret store.
   secretStore?: SecretFileStore;
   // Milliseconds on a monotonic clock, which times when the capture's delete
   // records and expected removals expire. A wall clock that steps forward
@@ -4905,8 +4888,6 @@ export function createWorkspaceEngineCapture(
         // save that never happened.
         let updatesSeen = 0;
         let updatesSettled = 0;
-        // Set by capture events or the health poll while capture holds an
-        // outside change to this file. The session keeps it until it closes.
         let changedOutside = false;
         // Capture keeps a note's unsaved text in History when it records an
         // outside version, but has no such copy for a drawing's strokes. A
@@ -7378,7 +7359,6 @@ export function createWorkspaceEngineCapture(
           text: copy.text,
           metadata: {
             origin: "restore",
-            // Protected History names no author, so the summary says who.
             summary: restoredBy === "agent" ? `An agent restored your change to ${name}` : `Restored your change to ${name}`,
             correlationId,
           },

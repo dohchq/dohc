@@ -1617,7 +1617,6 @@ it("opens the agent a notice names on a page of its own, with that agent's reach
 });
 
 it("opens a personal agent's page after it was renamed on another computer", async () => {
-  // The notice said "Grok Bot signed in as your agent"; the roster now calls it Grok.
   bridgeMock.readPersonalAgents.mockResolvedValueOnce({ accounts: [account([{ ...GROK, name: "Grok" }, NOVA])] });
   renderList({ openAgent: { agentId: GROK_ID } });
   await waitFor(() => expect(screen.getByTestId("agent-page").getAttribute("aria-label")).toBe("Grok"));

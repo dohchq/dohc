@@ -231,9 +231,6 @@ describe("compareVersionFilesPage", () => {
   });
 
   it("walks through an all-identical window instead of returning an empty page", async () => {
-    // The listing may answer a window in which nothing differed: empty
-    // entries with a continuation. An empty page with a continuation would
-    // read as "no differences" on the surface and hide everything past it.
     const calls: Array<string | undefined> = [];
     const store = {
       compareVersionFilesPage: async (input: { afterPath?: string }) => {

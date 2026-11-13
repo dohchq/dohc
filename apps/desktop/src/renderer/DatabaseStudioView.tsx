@@ -207,11 +207,6 @@ export function DatabaseStudioView(props: {
     ? () => props.onSharePath?.(path)
     : undefined;
 
-  // One effect handles both path switches and activity refreshes. Switching
-  // paths blanks the view immediately — stale rows from the previous database
-  // must never stay visible (or editable) under the new header. A failed
-  // (re)load also clears the snapshot for the same reason. The cancelled flag
-  // drops slow responses that arrive after another switch.
   useEffect(() => {
     const switched =
       currentSnapshotRef.current.workspaceId !== workspaceId ||

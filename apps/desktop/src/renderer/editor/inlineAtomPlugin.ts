@@ -1,18 +1,4 @@
 import { documentChange, isCodeBlock, isCodeMark } from "./pmHelpers";
-// Inline-atom rendering — a ProseMirror decoration plugin.
-//
-// Deliberately a *decoration*, not a node/mark: the atom stays as
-// literal text in the document model, so the editor never transforms
-// it ("markdown stays the truth", UC-3). NOTE: this uses
-// `Decoration.inline` over sub-ranges of text nodes — a different and
-// offset-sensitive regime vs the ASCII-block plugin's node/widget
-// decorations, which is why the range math is a separately unit-tested
-// pure function (`computeAtomRanges`). Byte-level survival through
-// Tiptap's markdown serializer is a distinct concern still tracked by
-// the deferred Tiptap round-trip check.
-//
-// Additive + flag-gated per the locked re-foundation principle: off by
-// default ⇒ no user-facing change until explicitly enabled.
 
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey } from '@tiptap/pm/state'

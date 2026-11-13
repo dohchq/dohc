@@ -296,14 +296,6 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 13 adds the engine durability watermark to version 12's
-// run-scoped reversal receipts and kept-field Undo members. It plans
-// and saves each step beside the run's state, names each Collection by its
-// id, records when the run ended, qualifies formula-visible fields by
-// dataset and table, and keeps the deletes an Undo may use on each record
-// it added and the calls a dataset Undo saved. Only version 13 is readable.
-// A run in another format fails instead of starting over or reading
-// bare field ids as current reach.
 const StoredRunSchema = z.object({
   version: z.literal(13),
   durableEffects: z.number().int().nonnegative().default(0),
@@ -1216,9 +1208,6 @@ export function createAutomationRunStore(
   // saved when it ends.
   let schedule: Map<string, { until: number; recheck: string[] }> | null = null;
   const scheduleFile = async () => join(await base(), "expiry.json");
-  // The folder a pass is going through: the claims it weighs, grouped from
-  // one listing, and what it learned so far. A run saved there meanwhile
-  // joins its claim.
   let expiring: {
     folder: string;
     path: string;
@@ -1610,7 +1599,6 @@ export function createAutomationRunStore(
       const read = await readStoredJson("enabled.json");
       if (read === undefined) return null;
       const parsed = EnabledAutomationsSchema.safeParse(read);
-      // A damaged file counts as none: nothing is reported until the next save.
       return parsed.success ? new Map(parsed.data.collections.map((entry) => [entry.path, entry.enabled])) : null;
     },
     saveEnabledAutomations(enabled) {

@@ -107,14 +107,6 @@ export type LivePageRefused =
   // Several pages one move or delete could not change.
   | { paths: string[]; action: "move" | "delete" };
 
-// The explorer: a real nested tree over the flat (files, folders) lists with
-// inline create/rename editboxes, optimistic pending ops (rollback on error),
-// multi-select, drag-move, pins, keyboard nav (ported file-tree-nav), and the
-// context menu, drawn here from the entries main returns. The explorer is
-// never a privileged writer: every mutation is an IPC the watcher observes,
-// so each op lands in history as an ordinary change set, and a rename, move
-// or delete main recorded offers Undo on its notice.
-
 export interface ExplorerProps {
   workspaceId: string;
   // Which view the Explorer shows: Home, by kind, or Files, the folder tree.
@@ -376,10 +368,6 @@ function IndentGuides({ depth }: { depth: number }) {
   );
 }
 
-// The rendered Open Editors cap is additionally bounded to a fraction of the
-// viewport: a height saved in a tall window must never push the Files section
-// and the resize handle below the fold of a shorter one (the list is its own
-// overscroll-contained scroller — wheel scrolling would trap inside it).
 const OPEN_EDITORS_VIEWPORT_FRACTION = 0.6;
 const TREE_ROW_HEIGHT = 28;
 const TREE_VIRTUALIZATION_THRESHOLD = 200;
@@ -503,15 +491,6 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // The open file's row is active: the selected fill and medium weight.
-        // Picked rows, the ones Delete and drag would act on when they are
-        // not just the open file, take the text-selection tint instead. An
-        // open file among them keeps its weight and gains a 2px ink edge. The
-        // keyboard-focused row draws the 1px accent line inside its own
-        // rounded box, so the tree's scroller cannot clip it on a row
-        // scrolled to an edge. An allowed drop target is a success tint with
-        // no ring or bar, so it never reads as focus. A blocked target adds a
-        // danger ring and a danger bar. A drop preview hides the edge.
         style={{ height: TREE_ROW_HEIGHT }}
         className={`relative flex w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 dohc-focus-row ${
           props.dropPreview

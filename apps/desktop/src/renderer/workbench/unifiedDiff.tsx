@@ -1,13 +1,3 @@
-// Shared unified-diff building + rendering (extracted from the shell's
-// history diff page so the versions compare surface renders diffs the exact
-// same way). Pure functions plus one presentational component; no IPC.
-//
-// Both callers — the history diff page in DesktopWorkspaceShell and the
-// versions compare page in WorkspaceVersions — run on the UI thread, so the
-// bounds below are what keeps a hydrated 10 MiB body from freezing them.
-// computeTextDiff does the work once per pair of bodies (both callers memoize
-// it); buildUnifiedDiffLines and the counts only read the result.
-
 import type { ReactNode } from "react";
 
 type DiffLine = {
@@ -60,16 +50,6 @@ type TextDiff = {
 // so the cell count bounds memory: 250,000 cells is 1 MB.
 const HISTORY_LCS_DIFF_CELL_LIMIT = 250_000;
 
-// Each of those cells compares two whole lines, so the time is the cell count
-// times the line length, which the cell limit does not bound. This bounds it.
-// Measured by unifiedDiff.measure.test.ts (Windows 11, Node 22, the renderer's
-// V8): the largest body this limit admits (499 lines of 3,990 characters, 4 MB
-// across both sides) costs 50 ms for a full pass. `.length` counts UTF-16
-// code units, and a CJK comparison costs about twice an ASCII one of the same
-// unit count, so the limit is halved to hold for either script. The largest
-// healthy body measured (499 lines of 2,000-character paragraphs) is 500
-// million units, so this is twice the healthy maximum; a 10 MiB body degrades
-// to the contiguous diff.
 export const HISTORY_DIFF_WORK_LIMIT = 1_000_000_000;
 
 /// An upper bound on the characters the LCS inner loop must compare: one whole
@@ -382,13 +362,6 @@ function compactUnifiedDiffLines(
   ];
 }
 
-// Word marks are made only for the lines the page shows, so the display bound
-// already caps how many pairs there are. This caps their size. Past this many
-// characters across every paired line, the whole diff stays at line level:
-// one 10 MiB line would otherwise cost its whole length to split into words.
-// Measured on Windows 11 in Node 24: 602 marked lines of 240 characters add
-// 3 ms to the page's diff, and 11 ms when they also spend all of
-// WORD_DIFF_PAGE_CELLS below.
 export const WORD_DIFF_CHAR_LIMIT = 200_000;
 
 // Each pair compares only the words between its common start and end. Past
@@ -407,8 +380,6 @@ const WORD_DIFF_MIN_SHARED = 0.5;
 const WORD_TOKEN =
   /[\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}]|(?:(?![\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}])[\p{L}\p{M}\p{N}_])+|\s+|[^]/gu;
 
-// The changed tokens as ranges of `text`. Two changes one space apart read as
-// one change, so "quick brown" -> "slow red" marks both words together.
 function changedRanges(text: string, tokens: string[], changed: Uint8Array): WordRange[] {
   const ranges: [number, number][] = [];
   let offset = 0;
@@ -515,9 +486,6 @@ export function changedWords(
   return { before: beforeRanges, after: afterRanges };
 }
 
-// Pairs each change block's removed and added lines in order, and marks their
-// changed words. All or nothing: past WORD_DIFF_CHAR_LIMIT no line is marked,
-// so a page never mixes the two levels.
 function markChangedWords(lines: UnifiedDiffLine[]): UnifiedDiffLine[] {
   const pairs: [number, number][] = [];
   let chars = 0;

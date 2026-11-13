@@ -1063,13 +1063,6 @@ describe('desktop editor markdown import: indented code fences', () => {
 })
 
 describe('getDohcYDocSelectionSeed', () => {
-  // Structural proof, not a timing test: the walk touches only the first
-  // element on each level, never the rest of the document. A second
-  // top-level sibling with a node type unknown to the schema proves this —
-  // the old implementation (yDocBodyToJSON -> yXmlFragmentToProseMirrorRootNode)
-  // resolves every element through the schema and would throw building this
-  // one; the direct-walk seed never looks past the first element, so it
-  // must not throw even though the malformed sibling is present.
   it('walks only the first-node path, never a later sibling', () => {
     const ydoc = new Y.Doc()
     const bodyFragment = getDohcYDocBodyFragment(ydoc)

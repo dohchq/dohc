@@ -511,9 +511,6 @@ export function CsvView({
   });
   const rows = grid.rows;
   const rowsRef = useRef(rows);
-  // A cell edit keeps its column's alignment and width until the edit ends.
-  // An edit can widen the table only by writing past its last column; that,
-  // and any other change, finds every column again.
   const showRows = useCallback((nextRows: string[][], editedColumn?: number) => {
     rowsRef.current = nextRows;
     setGrid((shown) => ({

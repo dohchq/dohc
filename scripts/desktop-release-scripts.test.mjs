@@ -518,7 +518,6 @@ test("desktop releases start only by dispatch, use pinned GitHub images, and pre
   for (const found of [/== \*published\*/, /== \*draft\*/, /-n "\$tag"/]) assert.match(refuseUsedVersion, found);
   assert.ok([jobs.build.needs].flat().includes("unused-version"), "packaging waits for the version check");
 
-  // Updaters cannot see the release until the publish job's final step.
   const createRelease = releaseStep(jobs.publish, "softprops/action-gh-release@");
   assert.ok([jobs.publish.needs].flat().includes("build"), "publishing waits for packaging");
   assert.equal(createRelease.id, "draft");
@@ -588,7 +587,6 @@ test("the upgrade check opens the newest published nightly, and only legacy nigh
   const legacy = nightly(LEGACY_NIGHTLIES[0], "2026-06-22T09:42:56Z");
   assert.equal(selectUpgradeNightly([legacy]).tag, null, "a nightly from before the packaged engine skips the check");
   assert.equal(selectUpgradeNightly([legacy, older]).tag, older.tag_name, "a later nightly replaces the legacy one");
-  // A newer nightly without an AppImage must not hand the check to an older one.
   const windowsOnly = nightly("v0.1.2-nightly.20261019.43.1", "2026-10-19T06:00:00Z", ["dohc-setup.exe"]);
   assert.throws(() => selectUpgradeNightly([older, windowsOnly]), /v0\.1\.2-nightly\.20261019\.43\.1, the newest published nightly, has no Linux AppImage/u);
   assert.throws(() => selectUpgradeNightly([{ ...older, published_at: null }]), /no publication time/u);
@@ -1898,7 +1896,6 @@ test("the nightly LaunchAgent runs at 04:00 in the login session from a clean ch
   assert.match(definition, new RegExp(`<key>Label</key><string>${RegExp.escape(NIGHTLY_AGENT_LABEL)}</string>`));
   assert.match(definition, /<key>LimitLoadToSessionType<\/key><string>Aqua<\/string>/);
   assert.match(definition, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>0<\/integer>/);
-  // A failure is reported through gh, so no code from the checkout runs before main is in it.
   assert.match(definition, /git checkout --quiet --force --detach FETCH_HEAD &amp;&amp; git clean -ffdxq \|\| exec gh issue comment 2281 -R dohchq\/dohc --body "\$3"/);
   assert.match(definition, /if \[ "\$attempt" = 3 \]; then exec gh issue comment 2281 -R dohchq\/dohc --body "\$2"; fi/);
   assert.doesNotMatch(definition, /release-nightly\.mjs report/);

@@ -44,7 +44,6 @@ export function useTabTitles(workspaceId: string) {
     },
     [workspaceId],
   );
-  // What whoever opens a change's tab knows of its path, until its page answers.
   const rememberMomentDiffPath = useCallback(
     (momentId: string, filePath: string) => setTabTitle(momentDiffTabPath(momentId), filePath, false),
     [setTabTitle],

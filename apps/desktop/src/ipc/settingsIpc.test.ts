@@ -766,7 +766,6 @@ describe("registered workspace settings and UI state", () => {
     h.closeLocalState();
     await expect(h.invoke(settingsOperations.setWorkspaceUiState.channel, { ...uiPayload, state: { ...state, sidebarWidth: 300 } }))
       .rejects.toThrow("dohc has not finished opening this workspace.");
-    // On Windows nothing reads it until the next open holds the folder.
     expect(JSON.parse(await readFile(join(h.root, ".dohc", "local", "ui-state.json"), "utf8"))).toEqual(state);
   });
 

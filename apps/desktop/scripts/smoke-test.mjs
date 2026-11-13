@@ -48,7 +48,6 @@ const child = spawn(
 );
 
 let stderr = "";
-// dohc writes this line when its own shutdown ends, just before app.exit.
 const QUIT_LINE = /\[desktop\] quit: shutdown (?:finished in \d+ ms|ran past its \d+ ms budget)/;
 const SMOKE_DURATION_MS = 8000;
 // dohc's shutdown takes at most QUIT_ASK_TIMEOUT_MS plus WILL_QUIT_BUDGET_MS

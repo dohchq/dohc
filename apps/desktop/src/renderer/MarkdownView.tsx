@@ -337,8 +337,6 @@ export function MarkdownView(props: {
   // reread fail before the queued open answers — so an open owned here would be
   // cancelled by the very race its refusal exists to name.
   engine: UseEngineDoc;
-  // Whether the note is a lossy note. The inspector holds the engine open
-  // until this is "clear", so "checking" waits as an open does.
   lossyNote: LossyNoteCheck;
   // The engine holds a change to this note, which Edit anyway saves.
   changeHeld?: boolean;
@@ -919,7 +917,6 @@ export function MarkdownView(props: {
     accessEnded: readOnlyCopy !== null || engine.readOnlyCause === "access-ended",
     shared: !!props.forceReadOnly,
     transition: transitionReason(engine),
-    // Its set-aside row says why until the person dismisses it.
     notSaved: engine.permanentFailureWhileEditing &&
       !orphanedDrafts.some((draft) => draft.id === engine.permanentFailureDraftId),
     livePaused: props.liveEditingPaused,
@@ -938,15 +935,6 @@ export function MarkdownView(props: {
     if (engine.readOnlyWhileEditing) onLiveReadOnly.current?.();
   }, [engine.readOnlyWhileEditing]);
 
-  // Parse-once + visible-first: the memo stops re-parses on
-  // unrelated re-renders (collab status flips, save-state ticks), and the
-  // incremental document commits only the opening window up front, idle-
-  // backfilling the rest — a 250KB doc opens in tens of ms, not ~575ms.
-  // Strip YAML frontmatter before rendering the read view: the title/icon it
-  // encodes is already surfaced by <PageIdentity> above the document, so the
-  // raw `---`/`title:`/`icon:` block must not also render as body content (the
-  // WYSIWYG editor uses the same `markdownEditorBody` split — keep read mode in
-  // lockstep so both show the document body, not its metadata).
   const linkNavigationNonce = useRef(0);
   const openWikilinkRef = useRef<(target: string) => void>(() => undefined);
   const openWorkspaceLinkRef = useRef<(target: WorkspaceLinkTarget) => void>(
@@ -1031,7 +1019,6 @@ export function MarkdownView(props: {
   const recordButtons = props.onButtonError && props.onButtonNotice && props.onOpenRecordHistory ? (
     <RecordButtonsRow workspaceId={props.workspaceId} path={props.path} onError={props.onButtonError} onNotice={props.onButtonNotice} onOpenHistory={props.onOpenRecordHistory} onRecord={setRecord} />
   ) : null;
-  // Read-only properties and a refused title offer this file to open externally.
   const noteFile = { workspaceId: props.workspaceId, path: props.path, onError: props.onButtonError };
   useEffect(() => {
     // Set-aside drafts deliberately do not count: they are not

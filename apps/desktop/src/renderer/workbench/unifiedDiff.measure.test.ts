@@ -1,16 +1,3 @@
-// Measurement harness behind the history-diff work bound.
-//
-// It is not part of the normal suite: the numbers are wall-clock and
-// machine-specific, so running them on every `pnpm test` would make the gate
-// flaky. Run it deliberately to re-measure the bound:
-//
-//   DOHC_MEASURE_DIFF=1 pnpm --filter @dohc/desktop exec vitest run unifiedDiff.measure
-//
-// It prints one row per scenario: the estimated comparison work (the same
-// estimator computeTextDiff uses to choose LCS vs the contiguous fallback) and
-// the wall-clock cost of one full pass: diff the bodies, then build the lines
-// the page draws.
-
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";

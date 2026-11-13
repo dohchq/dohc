@@ -232,7 +232,7 @@ describe('MermaidRenderScheduler', () => {
     await vi.advanceTimersByTimeAsync(400) // the valid render is now in flight
     scheduler.schedule('a', 'a'.repeat(10_001)) // edit crosses the 10k guard → skipped
 
-    resolveFirst({ svg: '<svg>stale</svg>' }) // late resolution of the superseded render
+    resolveFirst({ svg: '<svg>stale</svg>' })
     await Promise.resolve()
     await Promise.resolve()
 

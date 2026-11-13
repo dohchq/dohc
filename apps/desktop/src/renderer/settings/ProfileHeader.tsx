@@ -68,7 +68,6 @@ export function ProfileHeader(props: {
 
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
-      {/* The avatar is your next chat message's, as chat will draw it. */}
       <span data-testid={`${prefix}-preview`} className="flex shrink-0">
         <ChatAvatar presentation={props.presentation ?? ownPresentation} name={preview} kind="human" size="post" />
         <span className="sr-only">Your messages appear as {preview}</span>

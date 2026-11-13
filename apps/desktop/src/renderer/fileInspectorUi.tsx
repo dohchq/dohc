@@ -99,11 +99,6 @@ export const OPENING_TITLE = "You can edit this document when it finishes openin
 // (styles.css, dohc-reveal-if-slow).
 export const OPENING_WORDS_DELAY_MS = 150;
 
-// A document still opening, as its save state slot says it. An open can last
-// (until the engine's retry deadline, or while a guest waits for the host),
-// and meanwhile the page shows the disk copy read-only, so a slow open says
-// "Opening…" in words. A quick one keeps them for screen readers only: it
-// draws nothing, and the actions stay where the ready document draws them.
 export function OpeningState() {
   const slow = useShownAfter(true, OPENING_WORDS_DELAY_MS);
   return (

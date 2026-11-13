@@ -629,9 +629,6 @@ export function LiveDocumentsDialog({
     focusStopRetry.current = null;
   }, [pendingStops, busy]);
 
-  // Brings the asked-for row into view and focuses its Stop live editing, or
-  // the row itself when it offers no Stop. A stopped row can be on a later
-  // page, so the list reads on, through the same guarded reads, until it shows.
   useEffect(() => {
     if (state.kind !== "ready" || reveal === undefined || revealed.current === `${workspaceId}\n${reveal}`) return;
     const matching = [...(listRef.current?.querySelectorAll<HTMLElement>("[data-live-document-path]") ?? [])]

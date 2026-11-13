@@ -563,9 +563,6 @@ async function runRenameRepro(kind: RenameReproCase, ca: Awaited<ReturnType<type
     const retired = await response.json() as { acceptedCursor?: number };
     return response.ok && typeof retired.acceptedCursor === "number" ? retired.acceptedCursor : null;
   };
-  // One pass of what the desktop runs: its owner delivery pass (Stop
-  // reconciliation, then a delivery of each ready page), then its relay sync
-  // pass (push until the engine has no more, then pull).
   const syncPass = async () => {
     const o = owner();
     const stops = await o.opened.sessions.run(o.opened.workspace, async ({ workspace }) => reconcileOwnerLiveStops({

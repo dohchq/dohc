@@ -2372,11 +2372,6 @@ function testNetworkShare(): boolean {
   return process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged && process.env.DOHC_TEST_NETWORK_SHARE === "1";
 }
 
-// Test-only settle seams for the crash spec. The debounce holds an edit
-// unsettled until the spec kills the app, instead of racing the kill. The
-// gate holds a reopened document's recovery settle while its file exists,
-// so the spec can watch the document before and after the write. Ignored
-// outside DOHC_DESKTOP_TEST like every other DOHC_TEST_* seam.
 function testCaptureSeams(): {
   capture: {settleDebounceMs?: number; openSettleGate?: () => Promise<void>};
   beforeTypingImport?: () => Promise<void>;

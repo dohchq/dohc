@@ -47,29 +47,9 @@ import {
   type ValidAutomationSummary,
 } from "./automationSentence";
 
-// The builder: When, Only if, and Do, with choices instead of formulas, and
-// a formula wherever a person wants one. A trigger watches a record, a
-// button, a schedule, or a Group's messages; in a dataset it watches one
-// table, whose fields Only if and Set fields offer.
-// An If holds a condition and its own Do and Otherwise steps, which edit
-// like the automation's. Messages go to a Group, to people, or to your
-// agent; another person's agent step stays theirs and reads as its
-// message. Steps the builder cannot edit stay as they are and read as
-// their sentence; the file edits them. A Find or an added record can name
-// its result, and a later Set fields step in the same list can change it.
-// Save runs the file contract's check through main first, so it never
-// writes what the parser would refuse, and the panel writes the whole list
-// over the content it read.
-
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 type Target = Extract<ListAutomationTargetsResult, { collections: unknown }>["collections"][number];
 type DatasetTarget = Extract<Target, { kind: "dataset" }>;
-/**
- * Where a step works: a document Collection, or a dataset whose tables load
- * once dohc describes it, null until then. `own` marks this Collection's
- * own dataset, whose trigger can name the table. A document Collection main
- * does not list is `missing`.
- */
 type Destination = { kind: "document"; missing: boolean } | { kind: "dataset"; tables: AutomationTable | null; own: boolean };
 type SetStep = Extract<AutomationStep, { kind: "set" }>;
 type AddStep = Extract<AutomationStep, { kind: "add-record" }>;
@@ -434,12 +414,6 @@ function inputKindOf(value: AutomationValue, number: boolean): InputKind {
   return Array.isArray(value.value) ? "list" : "text";
 }
 
-/**
- * An action input's value, as the kind the file wrote it: text, a number,
- * yes or no, empty, a list, or a formula. An action's input has no field
- * type, so the value keeps its kind until someone picks another. A number
- * stays the text typed until it reads as one.
- */
 function ActionValueInput(props: {
   label: string;
   value: AutomationValue;
@@ -736,7 +710,6 @@ interface StepEntry {
   key: number;
   step: AutomationStep;
   rows: Row[];
-  /** The saved automation's reach verdict for this step, until it is edited. */
   verdict: string | null;
   /** An If's Do and Otherwise steps, which the draft holds instead of the step's own lists; null for any other step. */
   branches: Record<Branch, StepEntry[]> | null;
@@ -1119,7 +1092,6 @@ export function AutomationBuilder(props: {
   const [attempted, setAttempted] = useState(false);
   const [checking, setChecking] = useState(false);
   const [saveChosen, setSaveChosen] = useState(false);
-  // The Collections a step can reach, as main lists them; null until it answers.
   const [targets, setTargets] = useState<Target[] | null>(null);
   // Each other dataset a step names, as dohc describes it, or "failed" when it could not.
   const [datasetTables, setDatasetTables] = useState(() => new Map<string, AutomationTable | "failed">());

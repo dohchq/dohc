@@ -5,20 +5,6 @@ import { IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
 import { BUTTON_CHECKING, type IrreversibleAction } from "@dohc/automation-executor/automation-buttons";
 import { useButtonView, type AutomationButtons } from "./useAutomationButtons";
 
-// One Button field on one record: a native button named for the field and
-// the record. A button that cannot run says why in its description, which a
-// pointer sees on hover and the keyboard sees on focus. The words sit in the
-// page's body, outside table rows that move by transform and cells that
-// clip, and stay inside the window.
-//
-// A button whose run changes what dohc cannot undo, such as a dataset action,
-// asks first in the same place: Run runs it, and Cancel or Escape returns to
-// the button (AGENTS.md: warn before an irreversible action runs).
-//
-// While main reads what a button does, or a shared view's host has not
-// answered, the button cannot run and says dohc is checking. When the host
-// could not answer, Check again beside the button asks it again.
-
 const BUTTON_NOT_CHECKED = "dohc could not check this button.";
 
 const EDGE = 8;

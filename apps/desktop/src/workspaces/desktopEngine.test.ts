@@ -428,7 +428,6 @@ describe("desktop engine construction", () => {
       const sessions = f.engine.sessions!;
       await sessions.run(workspace, async () => undefined);
       await sessions.closeWorkspace(workspace);
-      // A capture-free open is temporary and never asks.
       await sessions.run({ ...workspace, captureMode: "none" }, async () => undefined);
       const opens = f.client.requests
         .filter(request => request.method === "workspace.open" && workspaceIdOf(request) === "local-only")
@@ -528,7 +527,6 @@ describe("desktop engine construction", () => {
       const discover = ownerHostMock.start.mock.calls.at(-1)![0].bindings;
       const captured = await discover();
       expect(() => captured.assertCurrent()).not.toThrow();
-      // Temporary dispatch capture closes its store after the paused relay close.
       await f.engine.sessions!.closeWorkspace(workspace);
       if (mode === "reopened") await f.engine.sessions!.run(workspace, async () => undefined);
       expect(() => captured.assertCurrent()).toThrow();
@@ -1357,9 +1355,6 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
   });
 
-  // Proves: a pass asks the server to host a document the owner holds edits
-  // for at most once. After a terminal answer no pass asks again, until the
-  // owner opens the document here.
   it("asks the server once to host a document with owner edits, and again only when its owner opens it", async () => {
     const open = vi.fn(async (_path: string, _signal: AbortSignal): Promise<"hosted" | "refused"> => "refused");
     const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}], {open});
@@ -1575,7 +1570,6 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset(); quarantineMock.read.mockReset();}
   });
 
-  // The renderer keeps a paused note read-only until it reads the list again.
   it("tells the renderer when one paused note takes edits again while another still waits", async () => {
     const {f, credentials} = await quarantinedOwner([{path: "notes/plan.md", objectId: "object"}, {path: "notes/other.md", objectId: "other"}]);
     quarantineMock.read.mockResolvedValue([]);
@@ -2328,11 +2322,6 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
-  // Proves: the server's rows of two copies of the workspace that share an
-  // outbox ID stay two rows. Saving the earlier copy's row reads that copy's
-  // queue, writes its package and confirms that row alone, which then reads as
-  // copied and still earlier, so it offers no Try again; the current copy's
-  // row stays as it was until its own save.
   it("saves the earlier copy's row of two copies that share an outbox ID from that copy, and confirms only that row", async () => {
     const {both, first} = twoEditQueue(keptBinding);
     const served = new Map([[1, servedPages({...both, outboxId: "server-outbox"})], [2, servedPages({...first, outboxId: "server-outbox"})]]);
@@ -2371,11 +2360,6 @@ describe("server owner peer lifecycle", () => {
     } finally {credentials.abort(); await f.close(); ownerDeliveryMock.pass.mockReset();}
   });
 
-  // Proves: a document the server refused names the workspace's reason over
-  // every other, including a frozen document that clears on its own, and
-  // stops naming it once the server no longer reports it. Only a document the
-  // server cannot start until its owner opens it outranks a refusal, and a
-  // diverged server copy, which only the server's operator can continue, outranks both.
   it("reports a document the server refused ahead of every other reason but one it cannot start or whose server copy diverged", async () => {
     const f = fixture(), credentials = new AbortController();
     Object.setPrototypeOf(f.client, Object.defineProperties(Object.create(EngineClient.prototype), Object.getOwnPropertyDescriptors(Client.prototype)));
@@ -2421,7 +2405,6 @@ describe("server owner peer lifecycle", () => {
       rows = [ready, ...others, refused]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("session-host-refused"));
       expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("retrying");
-      // A document the server cannot start until its owner opens it goes first, with or without a frozen one.
       rows = [...others, refused, unopened]; f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryReason("owner")).toBe("live-document-without-lineage"));
       rows = [ready, refused]; f.engine.retryOwnerDelivery("owner");

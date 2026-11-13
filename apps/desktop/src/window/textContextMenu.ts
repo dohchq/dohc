@@ -29,7 +29,6 @@ function lookUpLabel(selection: string): string {
   return `Look up “${cutText(selection.replace(/\s+/g, " "), LOOK_UP_CHARS)}”`;
 }
 
-// The submenus of the same name in macOS's Edit menu.
 const SUBSTITUTIONS: MenuItemConstructorOptions = {
   label: "Substitutions",
   submenu: [

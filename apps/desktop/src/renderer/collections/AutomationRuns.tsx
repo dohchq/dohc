@@ -31,7 +31,6 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-/** What an Undo did, for its notice: "Undid 3 changes. 1 field changed since then." */
 export function undoSentence(undone: Undone, onServer = false): string {
   const parts: string[] = [];
   const saved = onServer ? "Reversal saved on your server." : "Reversal saved on this computer.";

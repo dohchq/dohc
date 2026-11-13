@@ -4083,12 +4083,6 @@ export const CloudJoinWorkspaceResult = z.object({
 });
 export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 
-// ---- Relay shares (PR 18, the engine-native cloud) ----
-// A share grant lives on the SYNC RELAY: an explicit path list and/or a
-// version snapshot, addressed to another relay account by email. The grant
-// side gets back a copyable share code (dohc-share:<shareId>:<relayUrl>);
-// the receive side opens it as a read-only shared view workspace.
-
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
   versionId: z.string().min(1).max(128).nullable(),
@@ -4988,17 +4982,6 @@ export const ListShareProposalsResult = z.object({
 });
 export type ListShareProposalsResult = z.infer<typeof ListShareProposalsResult>;
 
-// One read for the whole review, and it carries NO content.
-//
-// It used to carry both sides' text for every file, which made opening a
-// review cost one relay blob fetch and one local file read per file, all
-// before the first row appeared — about 19 MB over this channel for a
-// 500-file review, and the parse that would have refused an oversized body ran
-// only after all of that work was already done. A review of a repository-sized
-// folder was not openable at all.
-//
-// Now the read states what the rows say, and `readShareProposalFileContent`
-// fetches one file's text when the granter opens that file.
 export const ReadShareProposalChangesPayload = z.object({
   workspaceId: WORKSPACE_ID,
   proposalId: SHARE_PROPOSAL_ID,

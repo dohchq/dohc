@@ -10,7 +10,6 @@ const pages: LiveDocumentPath[] = [
   {path: "Plans/Trip.md", objectId: "trip"},
 ];
 
-// Each owner and relay call waits until the test settles it.
 function harness(options: {live?: readonly LiveDocumentPath[]; offline?: boolean} = {}) {
   vi.useFakeTimers();
   const owner: Array<{workspaceId: string; objectIds: readonly string[]; signal: AbortSignal; reply: Deferred<boolean>}> = [];

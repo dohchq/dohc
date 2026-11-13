@@ -64,8 +64,6 @@ describe.skipIf(engine.missing)("Quit while a save is in progress", () => {
     } finally { clearTimeout(timer); }
   }
 
-  // Quitting faster must never drop accepted work: a write the capture admitted
-  // before quit holds the close until it lands.
   it("holds quit for a local write admitted before it, and keeps the write", async () => {
     const workspaceId = "two-daemon-quit-held-write";
     const root = await createTestScratch("dohc-quit-held-write-");

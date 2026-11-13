@@ -1275,11 +1275,6 @@ describe("chatDispatchService", () => {
   });
 
   it("keeps workspace FIFO and the spawn contract through the live dispatch adapter", async () => {
-    // Pin command resolution to a no-op: with an empty host PATH the resolver
-    // can never find a claude binary or .cmd shim on the machine running the
-    // tests, so the spawn contract below (bare command, unwrapped args) is
-    // asserted identically everywhere. The runner env still prepends the
-    // fixture's CLI bin dir, which the PATH assertion below relies on.
     vi.stubEnv("PATH", "");
     vi.stubEnv("Path", "");
     const fixture = await createFixture({
@@ -1363,7 +1358,6 @@ describe("chatDispatchService", () => {
     await activate(fixture);
     const personRun = (await fixture.dispatch.openRuns(WORKSPACE_ID))[0]!;
     expect(personRun.chainDepth).toBe(0);
-    // The run's slot and its process get the same secret.
     await vi.waitFor(() => expect(fixture.spawnCalls).toHaveLength(1));
     const personSecret = fixture.spawnCalls[0]!.options.env.DOHC_RUN_SECRET;
     expect(personSecret).toMatch(/^[a-f0-9]{64}$/u);
@@ -2760,8 +2754,6 @@ describe("chatDispatchService", () => {
 
     expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(true);
 
-    // A recovery scan retries only the retained finalized run's teardown path;
-    // no second runner is spawned.
     await fixture.service.scanWorkspace(WORKSPACE_ID);
     expect(fixture.service.hasLiveRun(WORKSPACE_ID)).toBe(false);
     expect(fixture.spawnCalls).toHaveLength(1);
@@ -3151,7 +3143,6 @@ describe("chatDispatchService", () => {
       await utimes(file, lastWrite, lastWrite);
     }
     fixture.now.value = restarted;
-    // Recovery is slow: it waits until the test lets it read open runs.
     let recover!: () => void;
     const recovering = new Promise<void>((resolve) => { recover = resolve; });
     const dispatch = fixture.serviceOptions.dispatchStoreFor(fixture.workspace);
@@ -4601,7 +4592,6 @@ describe("chatDispatchService", () => {
     expect(prompt).not.toContain("dohc_read_chat");
   });
 
-  // An automation wakes the agent, and the run holds its slot until it exits.
   async function startAutomationRun(fixture: Fixture) {
     const channel = await fixture.chat.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
     const wake = await fixture.chat.startChannelThread({
@@ -5329,7 +5319,6 @@ describe("chatDispatchService", () => {
         expect(fixture.requeues).toEqual([expect.objectContaining({ triggerMessageId: trigger.messageId })]);
       }, { timeout: 10_000 });
       await vi.waitFor(() => expect(fixture.readDispatch(trigger.messageId, trigger.threadId).state).toBe("pending"));
-      // The notice owed until the requeue landed goes unseen.
       await vi.waitFor(async () => expect(await owedRuns(fixture)).toEqual([]));
       expect(fixture.notices).toEqual([]);
       await trustWorkspace(fixture);

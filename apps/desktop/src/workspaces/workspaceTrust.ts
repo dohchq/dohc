@@ -93,7 +93,6 @@ export function createWorkspaceTrust(dependencies: {
   // even when the file could not be written, until the person trusts them.
   const restricted = new Set<string>();
   const revocations = new Map<string, number>();
-  // A listener never interrupts a trust or a revoke.
   const changed = (workspaceId: string, trusted: boolean) => {
     try {
       dependencies.onChange?.(workspaceId, trusted);
@@ -109,9 +108,6 @@ export function createWorkspaceTrust(dependencies: {
     return result;
   };
 
-  // A missing file trusts nothing, and so does one dohc cannot parse; that
-  // file stays as it is until the person trusts or restricts a workspace.
-  // Any other failure is not kept, so the next call reads again.
   async function read(): Promise<TrustRecord[]> {
     let text: string;
     try {

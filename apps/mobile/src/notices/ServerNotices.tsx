@@ -7,8 +7,6 @@ import { useTheme } from "../theme";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
 
-// Notices in a signed-in build. The phone reads no notices from the server yet, so it lists what failed on this phone,
-// such as a read of Home or Chats, each with Try again, until it's retried, dismissed or succeeds.
 export function ServerNotices() {
   const theme = useTheme();
   const { notices, unread, dismiss, markAllRead } = useNotices();

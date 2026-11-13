@@ -117,17 +117,6 @@ function menuQueryAt(value: string, caret: number): boolean {
   return activeMentionQuery(value, caret) !== null || activeCatalogQuery(value, caret) !== null;
 }
 
-// A chat composer with @-mention autocomplete. Same send affordances as the
-// shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while
-// an @-mention menu is open Enter/Tab accept the highlighted candidate instead
-// of sending — so directing a message at an agent is one obvious gesture.
-//
-// The mention roster is the agents in the workspace plus the user; picking one
-// inserts "@handle " and the parent parses the sent body to decide who to
-// notify / invoke.
-//
-// A / at the start of a word opens the catalog in the same list: a poll, and
-// the @ menu's people and files.
 const BAR_BUTTON =
   "grid size-7 shrink-0 place-items-center rounded-md text-muted hover:bg-hover hover:text-ink disabled:opacity-40";
 // A person or agent's role, such as "your agent", reads as words, not a hint.

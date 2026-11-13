@@ -24,7 +24,6 @@ describe("chat watch", () => {
     expect(parseCliArguments(["chat", "post", "general", "Done"], {})).not.toHaveProperty("agentId");
     expect(() => parseCliArguments(["chat", "watch", "--agent-id", "Terminal"], {})).toThrow("--agent-id requires an agent's id from Settings › Agents");
     expect(() => parseCliArguments(["chat", "watch", "--agent-id"], {})).toThrow("--agent-id requires a value");
-    // After --, it is text.
     expect(parseCliArguments(["chat", "grep", "--", "--agent-id"], {})).toMatchObject({ pattern: "--agent-id" });
 
     const request = vi.fn(async () => ({ messages: [], cursor: "next" }));

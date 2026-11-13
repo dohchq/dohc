@@ -1,18 +1,5 @@
 import { documentChange, isCodeBlockNode, normalizeLanguage, stopEditorMouseEvent } from "./pmHelpers";
 import { throughEdit } from "./widgetOwnership";
-// Mermaid diagram rendering inside WYSIWYG code blocks — a ProseMirror
-// decoration layer, deliberately not a schema/nodeView change. Mermaid
-// fences are plain `codeBlock` nodes with `language: "mermaid"` (the same
-// contract-locked schema every other fence uses — see schema-parity.test.ts).
-// This plugin paints a
-// rendered diagram widget below the block without ever touching the node's
-// markdown round-trip — the fence text stays the single source of truth.
-//
-// Mirrors the wikilink source/preview toggle (wikilinkPlugin.ts): while the
-// cursor sits outside a mermaid block, the source collapses (CSS only) so
-// the diagram reads as the primary content; moving the cursor in (clicking
-// the diagram, or arrow-key navigation from a neighboring block) reveals
-// the raw fence again for editing.
 
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'

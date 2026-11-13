@@ -1749,9 +1749,6 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-owner-live-delivery")).toBeNull();
   });
 
-  // The title bar doesn't name the server, so live editing reports its own
-  // state: no server connection, an account dohc can't confirm, a failed
-  // save, or a required update.
   it.each([
     { label: "nobody is connected", status: { state: "not-connected" as const }, failedSaves: 0 },
     { label: "the account isn't confirmed", status: { state: "account-unconfirmed" as const }, failedSaves: 0 },

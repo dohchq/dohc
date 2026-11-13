@@ -269,7 +269,6 @@ export function IncrementalMarkdownDocument(props: {
   const visibleCount =
     renderWindow.chunks === chunks ? renderWindow.visibleCount : firstWindow;
 
-  // Idle backfill: append chunks until the whole document is committed.
   useEffect(() => {
     if (visibleCount >= chunks.length) return;
     return scheduleIdle(() => {

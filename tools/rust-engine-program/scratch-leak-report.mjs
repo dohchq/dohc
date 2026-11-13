@@ -47,13 +47,6 @@ export function testScratchParent({ platform = process.platform, uid = process.g
 // ignore the row.
 const LEAK_ENTRY_LIMIT = 32;
 
-// #605 was 196 GB, not 191,851 directories — the directories were the symptom
-// and the bytes were the outage. A row that bounds only the count would pass
-// one workspace whose engine.db grew without limit, which is the same failure
-// wearing a different shape. Measured healthy: a full `--workspace` run left
-// 7,612,907 bytes, then 4,201,818, and every single-package run left 0. The
-// ceiling is 256 MiB — about 35x the largest healthy run seen here, and still
-// three orders of magnitude below the incident.
 const LEAK_BYTE_LIMIT = 256 * 1024 * 1024;
 
 // Written into the run root before the tests start and required after they

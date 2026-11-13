@@ -325,7 +325,6 @@ describe("collection folders", () => {
   };
 
   beforeEach(() => {
-    // Give each collection test the same observer and viewport fixtures.
     vi.stubGlobal("ResizeObserver", ObserverStub);
     vi.stubGlobal("IntersectionObserver", ObserverStub);
     Object.defineProperty(HTMLElement.prototype, "offsetHeight", {

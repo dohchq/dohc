@@ -77,7 +77,6 @@ function fakeRelay(options: { lists?: RelayAutomationPress[][]; accept?: (ids: s
     if (url.pathname.endsWith("/automation-presses")) {
       const next = lists.shift();
       if (next) return ok({ presses: next, inspections: options.inspections ?? [] });
-      // Nothing more: the list waits until the host stops.
       return await new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       });

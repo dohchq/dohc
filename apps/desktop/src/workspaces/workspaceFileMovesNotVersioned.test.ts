@@ -11,10 +11,6 @@ import {
   prepareMoveWorkspacePathAs,
 } from "./workspaceFileMoves";
 
-// In a version, a file the version does not track has one copy for every
-// version, so a rename, move or delete of it also changes Main. Each route
-// refuses until the caller confirms; on Main nothing asks.
-
 const person = { kind: "human" as const, humanId: "local:installation" };
 const agent = { kind: "agent" as const, agentId: "test-agent", onBehalfOf: "local:installation" };
 

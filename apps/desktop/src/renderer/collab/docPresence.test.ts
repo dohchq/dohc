@@ -4,8 +4,6 @@ import * as Y from "yjs";
 import { bindDocPresence } from "./docPresence";
 import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "./presenceChannel";
 
-// A relay stand-in that fans publishes from all bound clients into one shared
-// scope, so two doc-presence bindings genuinely see each other's Yjs awareness.
 function sharedRelay() {
   const entries = new Map<string, PresencePeer>();
   let version = 0;

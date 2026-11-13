@@ -1462,8 +1462,6 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    // Until its saved state loads, the Explorer shows Home, which titles
-    // a.md "a".
     const row = await screen.findByText("a");
     await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
 
@@ -4207,7 +4205,6 @@ describe("ui-state merge-on-load", () => {
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     renderShell(bridge);
-    // Home, until the saved state loads, titles a.md "a".
     await screen.findByText("a");
 
     await act(async () => {

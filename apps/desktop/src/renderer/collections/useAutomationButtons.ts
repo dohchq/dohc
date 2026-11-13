@@ -40,7 +40,6 @@ export interface ButtonView {
    * state or an unchecked one. A button with any other state keeps it.
    */
   checking: boolean;
-  /** True from the press until its run settles. */
   running: boolean;
   /** Why the run waits, or what the last press found, for the button's description. */
   note: string | null;
@@ -376,7 +375,6 @@ export function disposeAutomationButtons(workspaceId: string): void {
 /** One Collection's button store, reporting through this surface's toasts while it shows. */
 export function useAutomationButtons(input: {
   workspaceId: string;
-  /** Null until the component knows which Collection, as for a record view still reading. */
   of: ButtonsOf | null;
   onError: ReportButtonError;
   onNotice: (message: string) => void;

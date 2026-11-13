@@ -289,10 +289,6 @@ type VersionedTextConflictResolution =
   | "kept-current";
 type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
-/**
- * A newer version of a conflict's file that another computer saved. dohc
- * holds it until the conflict is resolved.
- */
 interface VersionedTextConflictWaitingVersion {
   code: "resolve-existing-conflict";
   objectId: string;

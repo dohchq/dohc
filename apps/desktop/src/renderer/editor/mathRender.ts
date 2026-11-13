@@ -3,17 +3,6 @@ import type { EditorView, NodeView } from "@tiptap/pm/view";
 import { hasPrimaryModifier } from "../../shortcuts/shortcutRegistry";
 import { isComposingKey } from "../ui/keys";
 
-// Desktop-only KaTeX rendering for the `mathInline` / `mathBlock` atom nodes.
-//
-// The nodes themselves (the projection's dohc-markdown-extensions.ts) stay pure: they
-// only carry the raw TeX in a `tex` attr and re-emit `$`/`$$` losslessly. This
-// module is where the desktop editor turns that TeX into rendered math via a
-// ProseMirror NodeView, wired through editorProps.nodeViews in MarkdownEditor.
-// The projection package never imports this file, so it never pulls in KaTeX.
-//
-// KaTeX is loaded lazily (dynamic import, cached) so it stays out of the
-// editor's initial bundle — a document with no math never pays for it.
-
 type KatexModule = {
   render: (
     tex: string,
@@ -125,13 +114,6 @@ export function makeMathNodeView(
       view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { tex: value }));
     };
 
-    // `nextValue === null` cancels (keep currentTex); otherwise commit only if
-    // the user actually changed the field (`value !== baseline`). Opening the
-    // source editor and clicking away with no local edit must not dispatch —
-    // otherwise a concurrent remote tex change (which advanced currentTex but
-    // not the untouched field) would be silently overwritten. When the user
-    // did edit locally and a remote edit also landed, their text wins on
-    // commit: last-writer-wins.
     const exitEditing = (nextValue: string | null): void => {
       if (!editing) return;
       editing = false;

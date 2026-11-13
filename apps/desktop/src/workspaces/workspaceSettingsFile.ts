@@ -163,7 +163,6 @@ async function settingsIn(folder: string | null): Promise<WorkspaceSettingsOnDis
   };
 }
 
-// Why a settings file is not used. Reset writes a fresh one in its place.
 const FILE_REFUSALS: Record<Exclude<OwnedFileRead["status"], "read" | "missing">, string> = {
   "not-file": "Workspace settings are not a file dohc can read.",
   "other-owner": "Another user made the workspace settings file.",
@@ -240,14 +239,6 @@ export function resetWorkspaceSettingsFile(
   });
 }
 
-// The save path: the changed controls, applied to the file as it is NOW.
-//
-// A save over a file dohc cannot read is refused, and reset stays open as the
-// deliberate way to replace the file. After the user repairs the file, the
-// caller may still hold the resolved copy from before the repair: writing
-// that copy back would undo the repair. Merging the patch onto a fresh read
-// closes that, and every other stale-snapshot save with it. Only the changed
-// keys are written, so keys dohc does not use stay as the person left them.
 async function applyWorkspaceSettingsPatch(
   workspace: LocalStateWorkspace,
   patch: WorkspaceSettingsPatch,

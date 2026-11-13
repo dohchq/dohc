@@ -74,7 +74,6 @@ export interface RecordPanelProps {
    * first, which saves the name.
    */
   onNameAbandoned?: (text: string) => void;
-  /** What shows under the name, such as a change to it the host has not confirmed. */
   nameNote?: ReactNode;
   /** Opens the record as a page. Absent, the record has no page. */
   onOpenAsPage?: () => void;

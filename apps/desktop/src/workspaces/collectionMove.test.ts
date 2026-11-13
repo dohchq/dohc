@@ -18,7 +18,6 @@ it("says where a Collection is, and asks what the server runs only for one with 
     .resolves.toEqual({ kind: "here", server: { host: "sync.example.test", runs: "off", automations: 2, scheduledAutomations: 0 } });
 });
 
-// A transfer record that reads `before` until the move ends, then `after`.
 function moving(before: DatasetTransferStatus | null, options: { after?: FinishedTransfer; inFlight?: Promise<DatasetTransferStatus>; relayUrl?: string; noSession?: Error } = {}) {
   let current = before;
   const local = {

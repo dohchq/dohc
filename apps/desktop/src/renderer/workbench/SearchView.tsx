@@ -98,8 +98,6 @@ const FileGroup = memo(function FileGroup(props: {
         data-testid="search-group-toggle"
         aria-expanded={!props.collapsed}
         onClick={() => props.onToggle(group.path)}
-        // h-7 at 13px: the workbench list rhythm (Explorer rows, palette
-        // rows) — Search must not read denser than the tree one click away.
         className="dohc-focus-row flex h-7 w-full items-center gap-1 rounded-md px-1.5 text-left text-[13px] text-ink transition-colors duration-75 hover:bg-hover"
       >
         {props.collapsed ? (
@@ -210,8 +208,6 @@ export function SearchView(props: {
   // windowing, keyboard selection — is view-local and resets on reopen.
   const { model, criteria, setCriteria } = props.search;
   const { query, caseSensitive, wholeWord, regex, includeGlob, excludeGlob } = criteria;
-  // Open the filter boxes when a reopened panel carries a glob: a filter that
-  // narrows the visible results must never be invisible.
   const [filtersOpen, setFiltersOpen] = useState(
     () => includeGlob !== "" || excludeGlob !== "",
   );

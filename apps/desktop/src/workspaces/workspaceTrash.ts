@@ -7,12 +7,6 @@ import {
   type LocalStateWorkspace,
 } from "./workspaceLocalState";
 
-// The workspace trash keeps what a delete or a replacing move took when the
-// system trash did not, what a settings Reset moved aside, and each delete's
-// and move's recovery record. All of it describes what happened on this
-// computer, so it lives in `.dohc/local`, which iCloud Drive skips. dohc
-// neither reads nor moves an old `.dohc/trash`.
-
 /** The workspace trash as a person sees it, from the workspace's root. */
 export const WORKSPACE_TRASH = ".dohc/local/trash";
 

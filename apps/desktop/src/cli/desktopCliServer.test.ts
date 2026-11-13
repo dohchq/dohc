@@ -500,7 +500,6 @@ describe("desktop CLI workspace context", () => {
         id, workspaceId: "workspace", path, targetVersionId: "main", sourceVersionId: "draft", createdAtMs: 10, updatedAtMs: 10,
         base: side(path, "base"), current: side(path, "mine"), incoming: side(incomingPath, "theirs"),
         status: "open" as const, chosenFrom: "current" as const, metadata: { origin: "local-file" as const }, waitingVersion: null });
-      // c3's incoming side sits at a path History does not track.
       f.capture.listOpenConflictsPage.mockResolvedValue({ conflicts: [conflict("c1", "notes.md"),
         conflict("c2", "private/journal.md"), conflict("c3", "moved.md", "private/moved.md")], nextAfterConflictId: null });
       await f.create().startDesktopCliServer();
@@ -569,7 +568,6 @@ describe("desktop CLI workspace context", () => {
         stderr: "dohc: Conflicts are hidden because dohc can't read .dohc/files.toml\n" });
       expect((await cli("version", "list")).stdout).toBe("  Main · main\n* Draft · draft · made from Main\n");
 
-      // A shared view keeps no versions of its own.
       vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
       expect(await mcp("versionList")).toEqual({ ok: false, reason: "Versions belong to the owning workspace. Open it to continue." });
       // Nor the kept and old copies of files; those stay with the owning workspace.
@@ -903,8 +901,6 @@ describe("desktop CLI workspace context", () => {
       }
       const converted = await guarded.change(state, { keepBlocks: true, headSha256: sha("converted head") });
       expect(converted).toBeInstanceOf(Uint8Array);
-      // Until the head arrives, the source the note records can't show that
-      // the edit is safe, so the agent hears to try again.
       await expect(guarded.change(state, { keepBlocks: true })).rejects.toThrow(
         "dohc is still checking readme.md for parts it can't show, so nothing changed. Try again in a moment.",
       );

@@ -44,11 +44,6 @@ const common = {
   } },
   test: {
     css: { include: [/[?&]raw(?:&|$)/] },
-    // A loaded machine stretches honest work: on a 24-process load the slowest
-    // share-code test took 1.73 s and site-runner tests took up to 2.3 s.
-    // vitest.setup.ts gives Testing Library waits 10 s to match.
-    // In a full gate beside other work, the 100-tab-limit shell tests took over
-    // 15 s; each passes alone. 30 s matches the storage and service packages.
     testTimeout: 30_000,
     // expect.poll's own default is 1 s; waits get the same 10 s as vitest.setup.ts.
     expect: { poll: { timeout: 10_000 } },

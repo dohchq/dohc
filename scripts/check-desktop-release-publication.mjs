@@ -3,12 +3,6 @@
 import { readFile } from "node:fs/promises";
 import { desktopReleaseTargets } from "./resolve-desktop-release.mjs";
 
-// The rules a release must meet before it publishes. Dry runs skip them.
-// A nightly ships every platform this workflow builds, and at most one nightly
-// publishes per nightly day, counted by when each release published. Any
-// release keeps every platform its channel already publishes, so no
-// installation loses its update feed.
-
 // A nightly day starts at 18:00 UTC. The scheduled nightly starts at 20:00 UTC
 // (04:00 on the Mac mini), so a nightly published by hand earlier that UTC day
 // doesn't hold it back.

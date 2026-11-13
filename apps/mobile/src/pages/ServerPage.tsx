@@ -14,14 +14,6 @@ import { useKeptContentProblem, useProblemText, useView } from "../workspace/use
 import { editorFolderUri, editorHtmlUri, isOutOfSpace } from "./editorFile";
 import { explanationOf, labelOf, LoadingLines, Mark, pageStyles as styles, Strip, type MarkKey } from "./pageParts";
 
-// A page in a signed-in build, as the server's copy holds it, read-only: the phone can't save to the server yet. It
-// reads again when the feed reports a change to its file, and the editor shows the new text. A page that's deleted
-// while open keeps its last text, marked Deleted. A page the server can't send shows why in its place: it's gone, it's
-// too large for the phone, it's being restored, or the read failed. Its header has no "Chat about" yet: the phone
-// lists no file's chats.
-//
-// The screen starts afresh for each workspace store and path, so nothing it holds, the editor or the text it shows,
-// outlives the workspace it was read from.
 export function ServerPage() {
   const { data } = useAccount();
   const { path = "" } = useLocalSearchParams<{ path?: string }>();

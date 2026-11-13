@@ -1,13 +1,3 @@
-/* dohc drop-lobe brand mark and lockups.
- *
- * The mark is a single stroked lobe contour with a central datum dot.
- * Both stroke and dot use `currentColor`, so the mark inherits ink and
- * adapts to light/dark mode from the surrounding text color. No
- * gradient, no shadow, no automotive badge. See dohc-brand-bible.html
- * section 02 (logo system).
- *
- * This file is the brand source of truth. */
-
 import React, { type CSSProperties } from 'react'
 
 /** Master viewBox aspect ratio (96 x 104). */

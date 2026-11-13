@@ -1244,9 +1244,7 @@ export class CollectionAutomations {
   private groupSubscriptionsUncertain = true;
   /** The host generation the engine last took Group subscriptions at, from this executor. */
   private watchedGeneration: number | null = null;
-  /** A failed Group handover read waits at this generation until the next sync answer or open. */
   private handoverUnreadAt: number | null = null;
-  /** A failed reach read waits at this generation until the next sync answer or open. */
   private reachUnreadAt: number | null = null;
   // The newest Group message skip of each kind the owner was told about.
   private readonly groupSkipsTold: Record<GroupMessagesSkipped, number> = { ahead: 0, late: 0 };
@@ -1256,7 +1254,6 @@ export class CollectionAutomations {
   private indexReads = 0;
   /** Serializes reach verdict updates. */
   private verdictChain: Promise<unknown> = Promise.resolve();
-  /** Verdict changes remain unsaved until the store confirms the save. */
   private verdictsDirty = false;
   private opened: Promise<void> | null = null;
   private state: "closed" | "open" | "paused" | "disposed" = "closed";
@@ -1994,12 +1991,6 @@ export class CollectionAutomations {
     }
   }
 
-  /**
-   * The person a failed claim ran for, from the ledger that holds it: whose
-   * Group message or button press started it, or the named person whose
-   * edit did. Null when the claim names no person, as an app's or an agent's
-   * change does.
-   */
   private async failureContextOf(failure: AutomationFailure): Promise<{ startedBy: string | null; run: number | null }> {
     const unknown = { startedBy: null, run: null };
     if (failure.datasetInstance !== null) {
@@ -2566,11 +2557,6 @@ export class CollectionAutomations {
       await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`);
   }
 
-  /**
-   * Waits until the index has read the Collection an automation id names.
-   * Before the executor opens there is no index, and run history lists what
-   * the engine holds.
-   */
   private async indexAutomation(automationId: string): Promise<void> {
     if (parseCollectionAutomationId(automationId) === null || this.opened === null) return;
     await this.ready();
@@ -5415,10 +5401,6 @@ export class CollectionAutomations {
     }
   }
 
-  /**
-   * Counts a run that timed out, or clears the count, and returns it. The
-   * count stays until the automation is switched off.
-   */
   private async countTimeout(automationId: string, timedOut: boolean): Promise<number> {
     const count = timedOut ? (this.timeouts.get(automationId) ?? 0) + 1 : 0;
     if (count === (this.timeouts.get(automationId) ?? 0)) return count;

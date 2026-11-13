@@ -144,7 +144,6 @@ describe("callout header title staleness", () => {
     input.focus();
     input.value = "Uncommitted edit";
 
-    // Insert text at the very start of the document, before the callout.
     editor.view.dispatch(editor.state.tr.insertText("XYZ ", 1));
 
     // Same input element (no remint) and the uncommitted edit survives.

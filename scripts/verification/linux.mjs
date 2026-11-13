@@ -1,10 +1,3 @@
-// Rust on Linux. On the shared Windows host, a PR run that selects Rust also runs the gate's
-// clippy command in the host's WSL distro, so a change that breaks only the Linux build fails
-// before merge, then the app compiler owner's tests, which only Linux runs. A full run, such as the
-// nightly, runs the whole Rust job there, tests included.
-// A full Rust job on every PR would take as long as the Windows one, one at a time for every lane.
-// `verification-linux` beside the build slots names the distro. Without it, nothing runs on Linux.
-
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { freemem } from "node:os";

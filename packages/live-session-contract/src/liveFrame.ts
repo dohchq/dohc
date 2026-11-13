@@ -29,7 +29,6 @@ export interface LiveMembershipFrame {
   /** When true, omission does not establish that a peer left. */
   readonly overflow: boolean;
 }
-// RESULT success: header + string length/identifier + digest + tag + three u64 + bool.
 export const LIVE_FRAME_MINIMUM_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
 // BEGIN submit-update: fixed fields, delivery/account/agent identifiers, optional name and scope, and tags.
 export const LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 8 + 1 + 8 + 32 +

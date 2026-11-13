@@ -102,14 +102,6 @@ function anyWrapped(value: unknown): Json {
   return { type: "any", value: plainJson(value) };
 }
 
-// ---- normalization + comparison ---------------------------------------------
-//
-// Applied to both sides' trees before comparison:
-//  - deep-sort object keys (Rust already sorts; JS insertion order varies),
-//  - merge adjacent string delta runs whose attrs are identical (the two
-//    implementations may chunk one logical run differently),
-//  - drop empty attrs objects.
-
 export function normalize(value: Json): Json {
   if (Array.isArray(value)) return value.map(normalize);
   if (value !== null && typeof value === "object") {

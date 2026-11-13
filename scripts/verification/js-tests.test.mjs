@@ -251,7 +251,6 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
     mkdirSync(join(root, "packages", name), { recursive: true });
     writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
   }
-  // Running commands hold until the failure. A stop interrupts them as run() does; otherwise they finish.
   writeFileSync(join(root, "scripts/verification/process.mjs"), `
     import {existsSync,writeFileSync} from 'node:fs';
     import {resolve} from 'node:path';

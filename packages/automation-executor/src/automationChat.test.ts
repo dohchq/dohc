@@ -40,7 +40,6 @@ describe("where automations write", () => {
       dm("dm-ana"),
       // Ana and Bob together, and Cara with a pending invite beside her.
       dm("dm-pair"), dm("dm-cara"),
-      // Started by someone else, and not yet written to.
       dm("dm-joined", "wire-elsewhere"), dm("dm-empty", "dm-empty", null),
     ], {
       kind: "owner", ownerUserId: "user-owner", grants: [

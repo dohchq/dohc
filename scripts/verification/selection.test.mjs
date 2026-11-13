@@ -62,7 +62,6 @@ test("a change to a file that the repository tests read selects all of them, and
 
 test("canonical repository checks include every script contract except the Docker proofs", () => {
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  // A tooling change runs test:repo instead of test:repo:tree, so test:repo must run every test the tree set runs.
   const tree = manifest.scripts["test:repo:tree"];
   for (const script of ["test:repo", "test:repo:tree"]) assert.ok(manifest.scripts[script].startsWith("pnpm test:repo:source && "), `${script} runs the source checks first`);
   for (const [path] of tree.matchAll(/[^\s]+\.test\.mjs/gu)) assert.ok(manifest.scripts["test:repo"].split(/\s+/u).includes(path), `test:repo omits ${path}`);

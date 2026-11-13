@@ -700,7 +700,6 @@ describe("a settings file save", () => {
       onDisk = { settings, source: "stored" };
       const reads = getUserSettings.mock.calls.length;
       act(() => settingsChanged?.(onDisk));
-      // The broadcast is followed by a backstop read; wait until it lands.
       await waitFor(() => expect(getUserSettings.mock.calls.length).toBe(reads + 1));
       await act(async () => undefined);
     };
@@ -1110,7 +1109,6 @@ describe("opening a notice in another workspace", () => {
     expect(screen.getByTestId("active-workspace").textContent).toBe("b");
     expect(screen.getByTestId("open-on-ready").textContent).toBe("null");
 
-    // A switched-off automation's switch, asked for from another workspace.
     fireEvent.click(screen.getByRole("button", { name: "Switch to a" }));
     fireEvent.click(screen.getByRole("button", { name: "Open an automation in b" }));
     expect(screen.getByTestId("open-on-ready").textContent).toBe(JSON.stringify({ to: "automation-controls", automation: "collection:tasks#stamp" }));

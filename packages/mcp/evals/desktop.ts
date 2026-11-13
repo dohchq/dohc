@@ -21,7 +21,6 @@ async function writeText(root: string, path: string, content: string | Buffer): 
   await writeFile(join(root, path), content);
 }
 
-// The refusals quote the app's own wording, so an agent recovers here as it would in dohc.
 export const workspaceVerbs: Record<string, (root: string, args: Args) => Promise<unknown>> = {
   async documentRead(root, args) {
     const path = String(args.path);

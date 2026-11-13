@@ -136,8 +136,6 @@ export function SitePreviewPage(props: {
   onShowSource?: () => void;
   onShareSite?: (target: SiteShareTarget) => void;
   reportError?: (fallback: string, error: unknown, retry: (() => void) | null) => void;
-  // Opens an app of this workspace in a tab. A notice that outlives this page
-  // uses it to take the person back to the app it is about.
   onOpenApp?: (siteRoot: string) => void;
   // Notices by identity, so a later success takes back an app's failure.
   notices?: AppViewNotices;

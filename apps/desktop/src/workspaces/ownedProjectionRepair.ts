@@ -116,7 +116,6 @@ function repairChangedNothing(
     failedPaths,
     ...unnamed
   } = outcome;
-  // A field added to the repair outcome fails to compile here until it is named above.
   const unnamedFields: Record<string, never> = unnamed;
   return (
     Object.keys(unnamedFields).length === 0 &&

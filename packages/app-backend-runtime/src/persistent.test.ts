@@ -86,7 +86,6 @@ describe("persistent dataset worker",()=>{
         child.on("message",message=>{
           const reply=message as {id:number;ok:boolean};
           if(reply.id!==closeId||!reply.ok){options.onMessage(message);return;}
-          // The worker has closed SQLite and its lease, but still owns its process cwd until the parent kills it.
           expect(child.exitCode).toBeNull();
           void rm(directory,{recursive:true,force:true}).then(()=>{removed=true;options.onMessage(message);},error=>{removalError=error;options.onError(error);});
         });

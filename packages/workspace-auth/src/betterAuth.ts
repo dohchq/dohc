@@ -9,15 +9,6 @@ import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
 
-// dohc server auth: Better Auth mounted on the same Postgres the workspace
-// backend uses (self-host = one database, no auth vendor). Email/password for
-// accounts, the organization plugin for team workspaces, and the OAuth
-// device-authorization grant for desktop login (the desktop shows a code, the
-// browser approves, and the desktop polls).
-//
-// This package owns the auth surface. Its only application callbacks deliver
-// email and decide whether a new account may exist.
-
 /** Verification and reset links expire one hour after dohc sends them. */
 export const EMAIL_LINK_TTL_SECONDS = 3600;
 

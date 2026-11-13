@@ -91,8 +91,6 @@ export function applyBatch(model: SearchModel, batch: SearchResultsEvent): Searc
     limitHit: model.limitHit || batch.limitHit,
     groups,
     totalMatches: model.totalMatches + batch.entries.length,
-    // A later batch without a notice never clears an earlier one for the same
-    // search (the pause reason persists until the search is re-run).
     notice: batch.notice ?? model.notice,
   };
 }

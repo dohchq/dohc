@@ -45,14 +45,6 @@ vi.mock("../workspaces/workspaceTextLimits", async (importOriginal) => ({
 
 setupFileInspectorTests();
 
-// The engine open runs ON the capture chain, so a document clicked while
-// that chain is busy (startup reconciliation of a 1,000-file workspace, a
-// version switch) waits seconds before it knows whether it is engine-backed.
-// The surface used to read that wait as "not engine-backed" and render the
-// plain editor — writable, autosaving straight to disk — while the session
-// about to bind seeded from the engine head. A keystroke in that window went
-// somewhere the session never looks. The document is now READ-ONLY until the
-// open answers.
 describe("markdown document opening state", () => {
   const DOC_MARKDOWN = "# Plan\n\nBase paragraph.\n";
 
@@ -485,15 +477,6 @@ describe("markdown document opening state", () => {
     );
   });
 
-  // A save armed before a reopen must not land during it. The reachable
-  // arming: a document the engine answered "not engine-backed" for (plain
-  // editor, legitimately writable), a draft typed inside the 800ms autosave
-  // window, then a version switch that reopens the session on the same
-  // mounted component (the shell keys the inspector by path, so the switch is
-  // a prop change, not a remount). Three write paths reach disk from that
-  // state — the armed timer, the unmount flush, and the shell's draft-flush
-  // seam — and each gets its own test below, so killing any one path's gate
-  // fails the test that names it.
   async function armDraftThenReopen(
     user: ReturnType<typeof userEvent.setup>,
     bridge: ReturnType<typeof makeHeldOpenBridge>,
@@ -1705,11 +1688,6 @@ describe("markdown document opening state", () => {
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
   });
 
-  // #579 review r3, the last unguarded interleaving: an autosave that already
-  // passed the guards and is awaiting its IPC write. `unsavedDraft` clears at
-  // issue time, so a flush that only reads it would return at once, the
-  // version would switch, and the outstanding write would land the previous
-  // version's text on the new tree. The seam must hold until the write lands.
   it("holds the shell's flush until an in-flight autosave lands, so a switch cannot race the write", async () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
@@ -1862,7 +1840,6 @@ describe("markdown document opening state", () => {
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
     );
-    // The serialized second write carries the newest text.
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
       {
         workspaceId: "ws-1",

@@ -12,8 +12,6 @@ import { runProbeProcess } from "../src/agents/agentProbeProcess.ts";
 import { resolveSpawnCommand } from "../src/process/windowsSpawn.ts";
 import { compileOwner } from "./stage-agent-probe.mjs";
 
-// Liveness is a loopback listener, never a PID. The deadline case waits out
-// the probe's five-second budget; every other case waits for a real condition.
 const windows = { skip: process.platform !== "win32" || process.arch !== "x64", timeout: 30000 };
 const source = name => fileURLToPath(new URL(`../src/agents/${name}`, import.meta.url));
 const descendant = `import { createServer } from "node:net"; import { writeFileSync } from "node:fs";

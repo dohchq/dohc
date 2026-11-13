@@ -1284,13 +1284,6 @@ export class EngineClient implements EngineTransport {
     // nothing; the engine would ignore the flag anyway.
     const progress = onProgress !== undefined && this.reportsProgress();
     const envelope = requestEnvelope(request, wireId, progress);
-    // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
-    // a codec error, and every failure on the write path reads as
-    // `transport-error` — which is a lie twice over: nothing was transported,
-    // and the classification sends a healthy session into the reconnect
-    // machinery for a failure no reconnect can fix. A request that cannot be
-    // framed is the caller’s to fix, so it is refused here, by name, with the
-    // limit and the size that was asked for.
     const serializedEnvelope = JSON.stringify(envelope);
     const encodedRequest = Buffer.byteLength(serializedEnvelope, "utf8");
     if (encodedRequest > this.maxFrameBytes) {
@@ -1824,13 +1817,6 @@ export class EngineClient implements EngineTransport {
     this.fail(new EngineClientError("closed", "The engine client was closed."));
   }
 
-  // AUDIT-KILLREC again, for the supervisor's wedge kill. Killing a daemon that
-  // stopped answering is a replacement, not a shutdown, and this cause is the
-  // only one its in-flight callers will ever see: `notifyProcessExit` returns
-  // early once the client is closed, so the process exit that follows cannot
-  // re-cause these rejections. Reporting a bare `closed` here told every
-  // retry-enabled caller the daemon went away on purpose, and they stayed
-  // failed across a restart that was already under way.
   closeUnresponsive(): void {
     if (this.closed) return;
     // `force` because a wedged daemon must die now, not on a timer. The

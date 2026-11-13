@@ -329,13 +329,6 @@ export async function openEngineYdocProviderSession(
     return operation;
   }
 
-  // A settle refused by a transient condition retries on a doubling delay
-  // until the condition clears. Without this, the work sat
-  // undone until an unrelated future edit triggered another settle, while the
-  // document read as saved-or-failed with the on-disk artifact stale. A newer
-  // armed settle (an edit during the backoff) owns the timer instead — an
-  // edit is the strongest retry trigger there is. A terminal refusal never
-  // retries: a stale target cannot be helped by trying again.
   let transientRetryMs = settleDebounceMs;
 
   function armSettleTimer(ms: number): void {

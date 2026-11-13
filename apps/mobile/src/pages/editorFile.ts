@@ -32,7 +32,6 @@ export function editorHtmlUri(): Promise<string> {
   return pending;
 }
 
-/** Design review only: the page's font files, for the demo that removes them before a page opens. */
 export const editorFontFiles = fonts.map(font => font.file);
 
 /** The folder the web view may read from. */

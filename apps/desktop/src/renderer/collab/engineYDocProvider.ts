@@ -1,21 +1,5 @@
 import { registerYDocDelivery } from "../pendingYDocDeliveries";
 import type { SharedDocumentOpenState } from "../../ipc/sharedDocumentOpenState";
-// WS-G2-C-2 — the ENGINE Y.Doc provider (renderer half of the bridge).
-//
-// The live engine Y.Doc lives in MAIN (the engine driver is node-only). The
-// renderer's format editor binds to a mirror Y.Doc that this provider keeps
-// convergent with the main session over a transport (IPC in production, a mock
-// in tests). It exposes a Y.Doc that the Collaboration extension binds to via
-// its "body" XmlFragment. Solo editing runs purely on the
-// engine, and co-editing rides the same channel because main forwards remote
-// ydoc.update deltas through onRemoteUpdate.
-//
-// The echo guard mirrors the main core's origin contract. Every engine-sourced
-// update (the initial state + every forwarded remote delta) is applied to the
-// mirror doc under ENGINE_SOURCED_ORIGIN; the update observer that ships local
-// edits to main skips that origin, so an engine-applied update is never bounced
-// back to main (which would double-journal / echo-storm). A real editor edit
-// carries the editor's own (non-ENGINE) origin and IS shipped.
 
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";

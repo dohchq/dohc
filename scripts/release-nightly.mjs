@@ -1,13 +1,5 @@
 #!/usr/bin/env node
 
-// Publishes the day's nightly with nobody at the Mac. launchd runs it at 04:00
-// from a clean checkout of main. It waits for the verification queue, checks
-// that main changed and passed verification, then dispatches Desktop Release
-// for that commit and waits for it to publish. It adds the macOS files with
-// release-desktop-macos.mjs and reports each result on the release tracker.
-// docs/engineering/desktop-release.md describes it under "Publish nightlies
-// on a schedule".
-
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

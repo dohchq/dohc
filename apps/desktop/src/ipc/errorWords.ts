@@ -669,7 +669,6 @@ export function isWorkspaceRestricted(error: unknown): boolean {
   return parse(error).name === "WorkspaceRestrictedError";
 }
 
-/** An exclusive create found the path taken. */
 export function isPathTaken(error: unknown): boolean {
   return parse(error).code === "EEXIST";
 }

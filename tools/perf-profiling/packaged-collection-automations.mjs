@@ -4,12 +4,6 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { classifyProcess, recordId } from './packaged-surfaces.mjs';
 
-// The automation phase of the packaged `collection` scenario. It seeds one document Collection and one
-// generated dataset Collection with the same records, gives each Collection one Button field and one
-// automation per case, and presses each case's button on a trigger record in the running package.
-// Seeding creates no runs, because only a press starts one. Everything here except observeAutomationRun
-// runs in the harness; observeAutomationRun is serialized into the renderer.
-
 export const DOCUMENT_FOLDER = 'automation-bench';
 export const DATASET_FOLDER = 'automation-data';
 const DATASET_PATH = `${DATASET_FOLDER}/dataset.json`;

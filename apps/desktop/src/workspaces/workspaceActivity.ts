@@ -60,16 +60,11 @@ interface WatchedWorkspace {
   recoveryUnavailable: boolean;
   // Why protected files wait on the workspace secret key, or null.
   secretKeyUnavailable: string | null;
-  // Null until this capture first reads the list.
   outsideWriteCopies: readonly (readonly [string, string, string])[] | null;
   outsideWriteCopyReadError: string | null | undefined;
-  // A protected file's change a sync replaced, as [path, id, keptAtMs]. Null
-  // until this capture first reads the list.
   protectedCopies: readonly (readonly [string, string, number])[] | null;
   protectedCopyReadError: string | null | undefined;
   keptFiles: readonly (readonly [string, string])[];
-  // Old file copies the engine keeps on a drive that cannot tell it whether
-  // a program still uses one. Null until the engine first reports.
   retainedCopies: NonNullable<SyncStatusResult["retainedCopies"]> | null;
   heldFiles: NonNullable<SyncStatusResult["heldFiles"]>;
   // The engine's latest answer: Collection updates wait for an unfinished
@@ -308,7 +303,6 @@ export function createWorkspaceActivity(
       pendingChangeCount: snap?.pendingChangeCount ?? 0,
       inFlight: (w?.inFlight ?? false) || (snap?.syncing ?? false),
       hasConflict: conflictCount > 0,
-      // A retry someone asked for shows as syncing until it ends.
       syncFailed: (snap?.syncFailure ?? null) !== null && !(snap?.retrying ?? false),
       // An engine stopped on the relay API version names the side to update.
       // One whose sign-in the server refused stops too. Neither records a

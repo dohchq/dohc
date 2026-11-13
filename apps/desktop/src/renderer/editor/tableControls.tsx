@@ -488,15 +488,6 @@ function duplicateRow(view: EditorView, cellPos: number): void {
   view.focus();
 }
 
-// Duplicate the logical column containing `cellPos`, inserting the copy right
-// after it in every row (bottom-to-top so earlier insert positions stay
-// valid). Pasted/imported colspans follow prosemirror-tables' addColumn
-// convention: a spanning cell covering the selected column is widened at
-// that boundary, with its matching colwidth entry duplicated in place — so
-// every row gains the same logical column and merged headers remain aligned.
-// The dedup set guards pasted-in rowspan cells — a spanning cell appears at
-// several TableMap slots but must be copied or widened once; its operation
-// covers the same rows.
 function duplicateColumn(view: EditorView, cellPos: number): void {
   if (view.editable === false) return;
   const { state } = view;

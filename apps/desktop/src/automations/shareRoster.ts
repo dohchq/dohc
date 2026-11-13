@@ -12,17 +12,6 @@ import {
   type HistoryAccount,
 } from "@dohc/automation-executor/roster-listing";
 
-// The share roster: the grants the owner gave on one workspace, as the relay
-// last listed them. Grants live only on the relay, and the reach check
-// (automationReach.ts) must answer without a network round trip, so the
-// owner's computer keeps this copy under stateDir.
-//
-// The copy is never broader than the relay's last answer. A relay that
-// answers nothing leaves the copy in place, and it stands in until this
-// computer pulls from the relay. A relay that answers with anything dohc
-// cannot read replaces it with a problem, and the reach check stops every
-// step.
-
 export const SHARE_ROSTER_REFRESH_MS = 10 * 60_000;
 // Before a run, a roster listed longer ago than this is listed again if the
 // relay answers. Listings are also at most this frequent when they fail.
@@ -61,12 +50,6 @@ export function reachRosterFor(input: {
   const { entry } = input;
   if (entry.shareView) return { kind: "shared-view" };
   const remote = entry.remote ?? entry.pausedRemote;
-  // A workspace that synced keeps its grants on the relay even after it is
-  // forgotten and attached again, which drops its server connection from the
-  // registry. With no connection dohc cannot list them, so who can edit it
-  // is unknown until it syncs again. A record dohc cannot read may say it
-  // synced, so it counts the same. Only a folder with no record, as one made
-  // before dohc kept it, or one that says it never synced, is its owner's.
   if (!remote && (input.history === "synced" || input.history === "unknown")) {
     return { kind: "unknown", problem: { kind: "unchecked", next: SYNC_AGAIN } };
   }

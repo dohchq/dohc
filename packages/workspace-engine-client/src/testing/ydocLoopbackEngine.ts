@@ -401,16 +401,6 @@ export class YdocLoopbackEngine implements EngineTransport {
       : derived;
   }
 
-  // Mirrors `object_has_live_alias` (crates/dohc-engine-domain/src/store.rs):
-  // true when some path other than `excludingKey`, within `workspace`,
-  // currently holds this exact object id — the sign an object renamed
-  // away and is still referenced elsewhere. Scoped to the workspace like
-  // the daemon's query (`WHERE workspace_id = ?1 AND object_id = ?2`):
-  // object ids are unique only within a workspace, so a fixture in a
-  // different workspace reusing this exact string must never collide.
-  // Shared by capture's id resolution (above) and open's collision
-  // refusal (`open()`, actor.rs ydoc_open_state_on_store) — the same
-  // rule, at the two sites that mint an id from a bare path.
   private objectHasLiveAliasElsewhere(
     workspace: string,
     excludingKey: string,
@@ -910,10 +900,6 @@ export class YdocLoopbackEngine implements EngineTransport {
     return { closed: true };
   }
 
-  // The daemon drops the session and its lease and leaves the durable lineage
-  // exactly as it stands. So the session map loses its entry and `lineages`
-  // keeps its row — which is what makes the next open resurrect the document
-  // instead of finding it gone.
   private evict(value: JsonValue): JsonValue {
     const params = asObject(value, "ydoc.evict params");
     const sessionId = requiredString(params, "sessionId", "ydoc.evict params");

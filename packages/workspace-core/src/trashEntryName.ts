@@ -79,14 +79,6 @@ function utf16CutAt(value: string, budget: number): number {
   return splitsPair ? end - 1 : end;
 }
 
-// Where to cut a UTF-8 byte array so the cut does not split a multibyte
-// sequence: back up over continuation bytes to the start of the character the
-// cut landed inside.
-//
-// The old rule decoded first and stripped every trailing U+FFFD, which cannot
-// tell a sequence this cut broke from a U+FFFD that is genuinely IN the
-// filename -- and deleted the second. Backing up distinguishes them by
-// construction, so a real U+FFFD whose bytes fit is kept.
 function utf8CutAt(bytes: Uint8Array, budget: number): number {
   let end = Math.min(budget, bytes.length);
   while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1;
@@ -189,11 +181,6 @@ export function collisionVariantPlan(
   return rungs[0] === rungs[1] ? [rungs[0]!] : rungs;
 }
 
-// How many characters an entry name may use inside `directory` IF the legacy
-// composed-path limit turns out to apply. Only Windows has one worth
-// budgeting -- PATH_MAX is 4096 on Linux and 1024 on macOS, both far past
-// anything the component limit allows -- so every other platform answers
-// Infinity and the component rule alone governs.
 export function entryCharBudget(directory: string, platform: string): number {
   if (platform !== "win32") return Number.POSITIVE_INFINITY;
   return WINDOWS_MAX_PATH_CHARS - directory.length - 1; // 1 for the separator

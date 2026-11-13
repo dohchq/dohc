@@ -133,7 +133,6 @@ describe("blockForLine — the index", () => {
   });
 
   it("does not read a rule or a table divider as a setext underline", () => {
-    // No paragraph is open above either one, so both open their own block.
     expect(blockForLine("Para\n\n---\n\nAfter", 5).index).toBe(2);
     expect(blockForLine("| a |\n| --- |\n| b |\n\nAfter", 5).index).toBe(1);
   });

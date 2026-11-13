@@ -212,9 +212,6 @@ function within(path: string, folder: string): boolean {
   return path === folder || path.startsWith(`${folder}/`);
 }
 
-// One spelling for every way a filesystem may name the same path: Unicode
-// composed form, no Windows name endings, and case folded until it stops
-// changing, so "ſ" is "s" and "ẞ", "ß", and "ss" are one spelling.
 function looseKey(path: string): string {
   return path
     .normalize("NFC")

@@ -56,7 +56,6 @@ it("seals materialization chunks across I/O turns with no open transaction",asyn
   await yieldToIo();
   expect(settled).toBe(false);
   f.transaction(()=>f.db.exec("UPDATE quota SET bytes=bytes"));
-  // Caller-owned input cannot retarget the remaining chunk reads after yielding.
   staged.scope.datasetId="another";staged.stageId="another-stage";staged.sha256=hash("wrong");
   const sealed=await sealing;
   expect(sealed.scope).toEqual(scope);expect(sealed.sha256).toBe(hash(bytes));expect(sealed.sealed).toBe(true);

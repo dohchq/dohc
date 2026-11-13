@@ -260,8 +260,6 @@ describe("CSV view while typing", () => {
     expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Visited the pricing page");
     expect(widthText(0)).toBe("stageSigned up");
 
-    // Moving to the header ends the cell's edit; the header's own edit then
-    // keeps the width until it ends too.
     await user.type(screen.getByLabelText("Header column 1"), " name");
     expect(widthText(0)).toBe("stageVisited the pricing page");
     await user.tab();

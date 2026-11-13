@@ -9,21 +9,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Slash-menu flicker regression (engine editor). Two failure modes are pinned:
-//
-// 1. Remount churn — if typing a query ever closes+reopens the menu (state
-//    passing through closed, plugin re-registration, editor recreation), the
-//    element remounts and the dohc-pop-in entrance animation replays on every
-//    keystroke: visible flicker. The MutationObserver + animationstart
-//    counters must stay at exactly one mount / one entrance.
-//
-// 2. Above-placement detachment — a menu opened above the cursor (typing in
-//    the lower part of the window) used to be TOP-anchored at
-//    `cursorTop - gap - maxHeight`, assuming full maxHeight content. Filtering
-//    shrinks the list, so the box hung detached above the caret and its bottom
-//    edge leapt up/down (~180px) with every keystroke. It is now anchored by
-//    its bottom edge, which must stay glued next to the caret at any query.
-
 declare global {
   interface Window {
     __slashDiag?: {

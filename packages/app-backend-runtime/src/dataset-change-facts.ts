@@ -216,12 +216,6 @@ function columnIndex(columns: readonly string[], name: string): number {
   return columns.findIndex((column) => column.toLowerCase() === lower);
 }
 
-// Maps a changed table's columns, in the order the worker reported them, to
-// the approved definition's fields. The worker reads the order from the
-// database, because a migration can reorder columns. A record's id is its
-// approved primary key, so the changeset must key the table by that column
-// alone: another key would name other records, and a composite key could
-// fold several records into one id.
 function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: readonly string[] | undefined): TableMap {
   const { table } = row;
   const approved = definition.tables.find((candidate) => candidate.sqlName.toLowerCase() === table.toLowerCase());

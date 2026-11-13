@@ -4,17 +4,6 @@ import { withErrorWords } from "../../ipc/errorWords";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 import { PrimaryButton } from "./controls";
 
-// The one copy control. It says what happened in place, says it again to a
-// screen reader, and hands a failure to the shell's error hook, so the toast
-// and the Notices row still carry it after the surface that failed has closed.
-// `createCopy` is its behavior; `CopyButton` draws it in React, and the
-// editor's code-block toolbar draws it in the DOM ProseMirror owns.
-//
-// The caller owns the text. `getText` runs at the click, so the copy is of
-// what the surface holds then; null means there is nothing to copy. Text that
-// arrives after a newer click, or after the control is gone, is not written:
-// it may be stale, and the surface may have retired it, as it retires a share
-// link it has reset.
 export const COPY_FEEDBACK_MS = 2000;
 export const COPY_FAILURE = "dohc could not copy to the clipboard.";
 export type CopyFeedback = "copied" | "failed";

@@ -126,7 +126,6 @@ function SettingsScreen() {
               const name = workspaceName(workspace);
               return (
                 <Row key={workspace.workspaceId} title={name}>
-                  {/* Busy until the server answers its change. */}
                   <Switch value={workspace.showOnPhone} disabled={workspaces.pending.has(workspace.workspaceId)}
                     onValueChange={value => setShowOnPhone(workspace.workspaceId, value)}
                     accessibilityLabel={accountWords.showOnPhoneLabel(name)} />
@@ -177,7 +176,6 @@ function reachOf(agent: PersonalAgent, roster: PersonalRoster): string {
   return accountWords.agentReach(agent.reach.map(workspaceId => roster.workspaceNames.get(workspaceId) ?? accountWords.unnamedWorkspace));
 }
 
-// A list's place: blank while it loads, its failure with Try again, or its rows.
 function Loaded<T>({ load, server, onRetry, children }: { load: Load<T>; server: string; onRetry(): void; children: (value: T) => ReactNode }) {
   if (load.status === "loading") return null;
   if (load.status === "failed") return <ProblemLine text={accountWords.problem(load.problem, server)} onRetry={onRetry} />;

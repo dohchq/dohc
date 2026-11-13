@@ -23,11 +23,6 @@ const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
   "sign-in-expired": "Not syncing. Your sign-in expired.",
 };
 
-// The dot's shape says the kind of state before its color does: filled is
-// settled, a ring is still working or waiting, a crossed-out cloud is sync
-// off until the person connects, and a triangle needs the person. The cloud
-// and the triangle show their words; the rest keep them for the accessible
-// name and the tooltip.
 type DotKind = "saved" | "working" | "waiting" | "off" | "attention";
 
 const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {

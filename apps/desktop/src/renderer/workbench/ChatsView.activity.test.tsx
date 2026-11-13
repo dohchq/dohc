@@ -324,7 +324,6 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-channel-name").className).not.toContain("font-medium");
     expect(workspaceActivityCallbacks.size).toBeGreaterThan(0);
 
-    // An agent posts into a thread nobody opened.
     unreadCount = 3;
     act(() => emitWorkspaceActivity());
 
@@ -835,10 +834,6 @@ describe("ChatsView live activity refresh", () => {
     );
   });
 
-  // The initial load holds the surface at "loading" until its share lookup
-  // answers. A badge read that lands during that wait is newer than the
-  // snapshot that load is carrying, and dropping it leaves the stale counts on
-  // screen until the next event.
   it("keeps a badge result that lands while the first load is still waiting", async () => {
     let answerFirstShares!: (value: ReturnType<typeof shareListing>) => void;
     let shareReads = 0;
@@ -1364,10 +1359,6 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
   });
 
-  // The channel listing syncs joined shared channels before it reads, and that
-  // sync records a revoked or downgraded grant. Those joined rows are local, so
-  // they are answered even while the relay is down — and until they land, the
-  // composer stays enabled on a channel main will refuse to accept posts for.
   it("corrects a joined grant the listing's sync revoked, and keeps the cached invitation", async () => {
     const joinedRow = {
       shareId: "share-joined",

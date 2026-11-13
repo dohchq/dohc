@@ -21,7 +21,6 @@ export function reportsNoticeText(reports: ReportKinds): string {
  */
 export function useReportsNotice(input: {
   workspaceId: string;
-  // The saved switches, or null until the window has read them.
   privacy: PrivacySettings | null;
   // The notice's row and the reports it names, while the window holds one.
   notice: { id: string; reports: ReportKinds } | null;

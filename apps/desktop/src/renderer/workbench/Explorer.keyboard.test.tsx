@@ -635,7 +635,6 @@ describe("selecting several rows in Files", () => {
     fireEvent.keyDown(row("d.md"), { key: "Delete" });
     await waitFor(() => expect(deleted()).toEqual(["d.md"]));
 
-    // A delete clears the selection, so select the two rows again.
     fireEvent.click(row("b.md"));
     fireEvent.click(row("c.md"), { ctrlKey: true });
     act(() => row("c.md").focus());

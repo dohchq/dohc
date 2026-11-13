@@ -5,17 +5,6 @@ import * as Y from "yjs";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { useEngineDoc } from "./useEngineDoc";
 
-// `available: false` used to mean two different things — "this document
-// is not engine-backed" and "dohc has not found out yet" — and the editor
-// surface could only see the first. While the engine open waits behind the
-// capture chain (startup reconciliation of a 1,000-file workspace holds it for
-// seconds), the caller therefore offered its writable plain editor, whose
-// autosave writes straight to disk. The about-to-bind session seeds from the
-// engine head, so those keystrokes went somewhere it never looks.
-//
-// These tests own the distinguishing state: `opening` is true from the first
-// render until the open resolves, whichever way it resolves.
-
 // What every render pass reported, in order. The effect that issues an open
 // runs after the pass that scheduled it, so only a render log can see what
 // that pass told the caller — the settled DOM cannot.

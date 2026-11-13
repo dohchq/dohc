@@ -261,7 +261,6 @@ describe("crash report intake", () => {
     const { store } = memoryStore();
     const intake = createCrashReportIntake({ store });
     const declared = { "content-length": String(2 * CRASH_REPORT_MAX_BYTES) };
-    // Uploads that send nothing until the test ends them.
     const stalled = Array.from({ length: CRASH_REPORT_DRAINS_MAX }, () => {
       let end!: () => void;
       let reading!: () => void;

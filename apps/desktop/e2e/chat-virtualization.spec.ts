@@ -203,8 +203,6 @@ test.describe("chat list virtualization", () => {
     await expect(anchor).toBeInViewport({ ratio: 1 });
   });
 
-  // A long Markdown reply shows as plain text until the parse worker answers,
-  // then reflows into its formatted, usually taller, layout.
   test("stays at the newest message while a long reply is formatted", async ({ page }) => {
     await page.setViewportSize({ width: 650, height: 800 });
     await page.emulateMedia({ reducedMotion: "reduce" });

@@ -208,8 +208,6 @@ interface ThemeWatch {
   firstFrame: Promise<Record<string, string>>;
 }
 
-// Records the surfaces' colors in the first frame drawn after the next theme
-// change.
 async function watchNextThemeChange(page: Page): Promise<void> {
   await page.evaluate((surfaces) => {
     const colors = () => Object.fromEntries(Object.entries(surfaces).flatMap(([name, selector]) => {

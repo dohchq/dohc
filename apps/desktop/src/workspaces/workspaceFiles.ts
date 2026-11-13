@@ -108,7 +108,7 @@ export function extractFrontmatterIcon(head: string): string | undefined {
   if (lines[0]?.trim() !== "---") return undefined;
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
-    if (line.trim() === "---") return undefined; // block closed, no icon
+    if (line.trim() === "---") return undefined;
     const match = /^icon:[ \t]*(.*)$/.exec(line);
     if (!match) continue;
     let value = (match[1] ?? "").trim();
@@ -129,9 +129,6 @@ export function extractFrontmatterIcon(head: string): string | undefined {
   return undefined;
 }
 
-// Best-effort, failure-tolerant read of a markdown file's icon: this runs for
-// every markdown file on every listing, so it must never throw or read the
-// whole file.
 async function readMarkdownIcon(absolutePath: string): Promise<string | undefined> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -608,26 +605,6 @@ export function couldBeLengthRefusal(
   return code === "ENOENT" && candidate.length > maxEntryChars;
 }
 
-// The arithmetic above says an over-budget name could be refused for length.
-// It cannot say it WAS. On a long-path-aware Windows host the budget is not
-// the real limit -- a 300-character path works there -- so an ENOENT means
-// something that should exist does not: the source moved after the file dialog
-// validated it, or the destination folder went away. Predicting from the
-// budget silently counted that as `skipped`, and a user does not notice a
-// skipped line.
-//
-// So ask, exactly as `copyFile` asks: `stat`, which follows the source link,
-// because that is what the copy did. An earlier revision asked `lstat`, which
-// answers about the LINK -- so a source that was a symlink to a missing target
-// read as "still there", its ENOENT was charged to length, and the broken link
-// was skipped.
-//
-// `null` means both ends are there, so the ENOENT is about the composed path
-// and the ladder may try a shorter name. "danglingLink" is the one thing dohc
-// can say better than the copy's own error. "unexplained" is every other
-// answer -- a source that is plainly gone, a destination folder that went away,
-// a probe that could not look -- where the original ENOENT already names a
-// path and dohc has nothing to add, so the batch aborts on that error.
 type CopyEnoent = "danglingLink" | "unexplained";
 
 /**
@@ -751,15 +728,6 @@ function ladderStopReason(name: string, stop: LadderStop): string {
   }
 }
 
-// One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
-// through collision variants. Returns the basename that landed, or why the
-// source is skipped: "taken" when the rename budget ran out. Non-EEXIST
-// errors still throw — a permission or IO failure is a real error, not a
-// skip — with one exception: a name the filesystem cannot hold
-// (ENAMETOOLONG, e.g. an extension longer than the variant budget) skips
-// that source as "too-long" instead of aborting the whole batch.
-// A dropped folder lands through the same ladder with `place` making the
-// folder, so "Photos" collides into "Photos (2)" as a file would.
 async function copyWithoutOverwrite(
   source: string,
   absDir: string,
@@ -1502,7 +1470,6 @@ async function movePathsNest(
   const sourceKey = pathCollisionKey(relative(realRoot, source).replaceAll("\\", "/"));
   const parentKey = pathCollisionKey(relative(realRoot, parent).replaceAll("\\", "/"));
   if (parentKey !== sourceKey && !parentKey.startsWith(`${sourceKey}/`)) return false;
-  // Only lookup-case aliases need a listing after realpath's containment check.
   return compareStoredMovePaths(realRoot, source, parent, paths, "inside");
 }
 
@@ -1653,12 +1620,6 @@ export async function movePath(
   if (!isInside(realRoot, realDestParent)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
-  // Descendant guard, case-fold safe. The lexical self/descendant refusal at
-  // the top is case-SENSITIVE, so on a case-insensitive filesystem "Foo" ->
-  // "foo/bar" slips past it and would move a folder into its own (same-inode)
-  // subtree — corrupting it. Compare resolved paths: if the destination's parent
-  // resolves to the source itself or anywhere beneath it, refuse. (For a file
-  // source this is always false — a file has no descendants.)
   if (await movePathsNest(realRoot, realFrom, realDestParent, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
@@ -1668,11 +1629,6 @@ export async function movePath(
   );
   let renamesInPlace = false;
   if (destExists) {
-    // Case-only rename carve-out: on a case-insensitive filesystem the
-    // destination "exists" because it IS the source under another case.
-    // Compare resolved paths so a genuinely distinct file that
-    // case-collides still refuses — the carve-out must not reopen the
-    // overwrite hole.
     renamesInPlace = await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
     if (!renamesInPlace) {
       throw new Error(`Destination already exists: ${toPath}`);

@@ -1098,11 +1098,6 @@ describe("startSiteDevServer", () => {
       let callCount = 0;
       const descendantsReader = async (): Promise<number[]> => {
         callCount += 1;
-        // The first call — the immediate, post-spawn snapshot — is the
-        // slow one: it won't resolve until the test explicitly releases
-        // it, well after later, faster calls have already come and
-        // gone. Every call after it resolves immediately with nothing,
-        // the "later capture that finishes first" half of the race.
         if (callCount === 1) return slow;
         return [];
       };

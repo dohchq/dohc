@@ -15,7 +15,6 @@ it("moves the key once for each change main makes, whichever shell reads it firs
   expect(key.result.current).toBe(1);
   act(() => { observeLiveSessions("ws-observe", 2, true); observeLiveSessions("ws-observe", 2, true); });
   expect(key.result.current).toBe(2);
-  // The workspace closes, and main counts again from where its reopened state starts.
   shellA(); shellB();
   watchLiveSessions("ws-observe");
   act(() => observeLiveSessions("ws-observe", 1, false));

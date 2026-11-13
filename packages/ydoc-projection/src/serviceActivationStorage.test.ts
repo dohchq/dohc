@@ -2738,9 +2738,6 @@ it("admits only a retiring document's verified Y.Doc rows and source moment",asy
   }finally{f.close()}
 })
 
-// Proves: an application row and its authorless audit, in separate pushes,
-// retry until the retiring owner applied them, keeping their coordinates; then
-// publish as departed rows. Past F the same rows are refused.
 it('retries a retiring application until its owner applied it, confirms its authorless audit in a later push, and refuses both beyond F',async()=>{
   const f=fixture();try{
     const r=await retiringFeed(f)

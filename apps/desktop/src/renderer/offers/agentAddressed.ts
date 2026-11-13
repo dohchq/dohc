@@ -23,7 +23,6 @@ export interface AddressedAgentFacts {
   workspaceId: string;
   agentId: string;
   presentation: ActorPresentation;
-  // A run started outside chat holds the workspace's agent until it ends.
   runActive: boolean | null;
   paused: boolean | null;
   liveRun: boolean | null;

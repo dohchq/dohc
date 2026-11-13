@@ -13,14 +13,6 @@ import { ChatAvatar, LinkMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
 import { isPersonalAgentId } from "./chosenColors";
 
-// The History timeline: file moments, version markers and Collection
-// changes, newest first, in the order main merged them. File moments keep
-// their summaries ("Saved latest edits", "Merged version X into Main",
-// "Changed while dohc was closed", ...) and a multi-file pass (reconcile, switch,
-// merge, restore) groups into one expandable item via its correlationId.
-// One author's consecutive edits to one file fold into one row, a run.
-// Product vocabulary only, no git terms.
-
 interface EngineHistoryGroup {
   key: string;
   // A run lists one agent's edits to one file; a pass lists the files it changed.
@@ -431,12 +423,6 @@ export function missingSourcesWords(
   };
 }
 
-// One timeline row. A change is two lines, 48px, as Notion's page history
-// reads: when, then who made it and what changed, beside their face. A file
-// under a pass or an edit under a run is one line, 28px, its words starting
-// where the names above it do. Rows touch; hover and the open change take
-// the list ladder's fills. A mark takes an avatar's 18px slot, so every name
-// starts on one edge.
 export const MARK_BOX = "grid size-[18px] shrink-0 place-items-center";
 const TWO_LINES = `grid h-12 w-full min-w-0 grid-cols-[18px_minmax(0,1fr)] content-center gap-x-2 rounded-md px-2 text-left transition-colors duration-75 dohc-focus-row`;
 const WHEN = "col-span-2 min-w-0 truncate text-[13px] font-medium leading-5 tabular-nums text-ink";
@@ -522,8 +508,6 @@ export function engineMomentAuthorName(moment: SourcedMoment): string | undefine
   return (isCaptureRecoveryOrigin(moment.origin) && !isHeldChangeMoment(moment) ? undefined : moment.personAuthorName) ?? sourceName(moment);
 }
 
-// One author in words: an agent and an automation say what they are, so
-// they never read as a person.
 function authorWords(kind: "agent" | "connected agent" | "automation" | undefined, label: string): string {
   if (kind === "connected agent") return label === "Agent" ? "Connected agent" : `Connected agent ${label}`;
   if (kind === "agent") return label === "Agent" ? label : `Agent ${label}`;
@@ -910,13 +894,6 @@ function VersionMarkerRow(props: { version: VersionEntry["version"] }) {
   );
 }
 
-// One saved Collection change. Like a file's row opens its diff, it opens its
-// Collection's History, where the change and its Undo are, when this
-// computer can open that Collection. A Collection change has no face, so
-// what changed follows the time, beside the Collection's mark; who made it
-// and where come after. As the line runs short, an operation's name gives
-// way first; then who made it cuts to its floor; then what changed; the
-// Collection's name stays whole up to its own floor.
 function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; openHistory?: () => void }) {
   const { name, change } = props.entry;
   const agent = approvalAgentName(change);
@@ -990,14 +967,6 @@ function CollectionChangeRow(props: { entry: CollectionEntry; label?: string; op
   );
 }
 
-// What a partial timeline is missing, above its rows. Collections that did
-// not load take a warning row: its words in ink wrap rather than cut a
-// name, beside Try again; the full sentence is its tooltip and what a
-// screen reader hears. Collections left out by the limit take a filled
-// band, so the limit doesn't read as one more change, and its whole
-// sentence says how to see the rest. Try again starts a new source chain;
-// a source left out by the limit stays out, so only the Collections that
-// did not load offer it. Every mark sits where a row's face does.
 function HistorySourcesNotice(props: {
   words: ReturnType<typeof missingSourcesWords>;
   short: string | null;
@@ -1168,8 +1137,6 @@ export function EngineHistoryView(props: {
 
   return (
     <>
-      {/* Search reads as one more row until it is used: its mark in the
-          avatar slot, its words where the names start. */}
       <div className="relative shrink-0 px-1 pb-1">
         <span aria-hidden className={`${MARK_BOX} pointer-events-none absolute left-3 top-[5px] text-subtle`}>
           <Search size={14} />

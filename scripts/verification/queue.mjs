@@ -796,7 +796,6 @@ async function install(root, ref) {
     mkdirSync(paths.control, { recursive: true });
     writeFileSync(join(paths.control, "restart"), "");
   } else if (!serviceState(root).alive) spawnSync(...startCommand(), { windowsHide: true });
-  // Keep the active, the previous, and the running installation; older ones are removed.
   const runningInstall = serviceState(root).record?.commit?.slice(0, 12);
   for (const name of readdirSync(paths.installs).filter(name => ![short, previous, runningInstall].includes(name))) {
     try { git(["worktree", "remove", "--force", "--force", join(paths.installs, name)], repo); }

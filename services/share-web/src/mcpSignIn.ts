@@ -11,13 +11,6 @@ import { readsAccountEmail } from "./accountAuth";
 import { namedAccountCookie } from "./namedAccountCookie";
 import { DOHC_MARK } from "./workLinkPage";
 
-// The standard MCP sign-in (MCP 2025-06-18 authorization) for two kinds of
-// MCP address: a share link's, and a personal agent's, which names a
-// workspace and signs the agent in as an account's own. Both use the two
-// metadata documents, dynamic client registration and the token endpoint;
-// each has its own consent page. The relay keeps every durable part, so a
-// share-web restart changes nothing for a signed-in agent.
-
 export const MCP_PATH_PREFIX = "/mcp/s/";
 export const PERSONAL_MCP_PATH_PREFIX = "/mcp/agent/w/";
 const RESOURCE_METADATA = "/.well-known/oauth-protected-resource";
@@ -555,7 +548,6 @@ function consentContent(view: ConsentView, chosen: ChosenAgent, host: string): s
       `<span class="k"><bdi>${escapeHtml(entry.name)}</bdi> ` +
       `<span class="sub">@${escapeHtml(handleForName(entry.name))}${entry.signedOut ? " · Signed out" : ""}</span></span>`)).join("") +
     "</div>";
-  // Each workspace is a row of radios named as the form posts them; None posts "none".
   const reach = `<div role="group" aria-labelledby="reach-label"${errors.reach ? " aria-describedby=\"reach-error\"" : ""}>` +
     "<div class=\"sec\" id=\"reach-label\">What it can reach</div><div class=\"box\">" +
     consent.workspaces.map((workspace, index) => {
@@ -1161,7 +1153,6 @@ export function createMcpSignIn(options: {
     return token(request);
   }
 
-  /** Whether personal agents sign in on this origin. */
   function offersPersonal(origin: string): boolean {
     return personalAccount(origin) !== null;
   }

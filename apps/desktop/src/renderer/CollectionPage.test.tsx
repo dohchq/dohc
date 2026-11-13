@@ -615,7 +615,6 @@ describe("CollectionPage", () => {
     expect(screen.queryByRole("menu")).toBeNull();
     expect(screen.getByTestId("collection-record-count").textContent).toBe("0 records");
 
-    // Both start the one new row in place. Nothing is made until the row holds something and is saved.
     fireEvent.click(within(grid).getByRole("button", { name: "New record" }));
     fireEvent.click(screen.getByTestId("collection-new-record"));
     expect(document.querySelectorAll("[data-new-record]")).toHaveLength(1);

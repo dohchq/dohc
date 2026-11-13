@@ -340,20 +340,6 @@ async function ensureRecordable(ctx: ToolContext) {
   }
 }
 
-// The errno used to pass through whole, so an agent read
-// `EPERM: operation not permitted, lstat 'C:\Users\…\ws\.dohc'` — an absolute
-// host path it never supplied and cannot act on.
-//
-// The two failures are told apart by the errno, not by the message: a guard
-// refusal is an Error this code wrote (ensureGuardedDir) and carries no
-// `code`, so it is already workspace-relative and passes through whole. Only
-// a platform failure is translated. The code stays, as detail rather than as
-// the whole message — an agent can act on "EPERM".
-// A saturated resource is not a permission problem, and the permission
-// instruction sends an agent to widen access that was never the obstacle. Each
-// one names the resource that ran out and how to free it, per the backpressure
-// rule in AGENTS.md. Both descriptor limits are here because the per-process
-// one (EMFILE) and the system-wide one (ENFILE) are freed by different acts.
 const METADATA_CAPACITY_INSTRUCTIONS = new Map<string, string>([
   ["ENOSPC", "The disk holding this workspace is full. Free disk space. Then retry."],
   ["EDQUOT", "The disk quota for this workspace is used up. Free space, or raise the quota. Then retry."],
@@ -1172,13 +1158,6 @@ export async function workspaceStatus(ctx: ToolContext) {
 // workspace history is read through dohc_list_changes (engine moments) below.
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
-
-// The workspace engine records history, and desktop main is the sole owner
-// of its database. These tools read moments through the CLI
-// transport. The pre-flip legacy `.dohc/history` change-set relic was retired;
-// a moment carries path/operation/versionId (the legacy kind,
-// boundaryCrossings, and provenance fields no longer exist and are never
-// faked).
 
 const LIST_CHANGES_HARD_LIMIT = 500;
 

@@ -230,7 +230,6 @@ export function withAgentDohcStarts(
   return { ...settings, agents: { ...settings.agents, [id]: change(settings.agents[id] ?? null) } };
 }
 
-/** What a new agent starts with: the first free hue, and off until the person turns it on. */
 export function newAgentDefaults(
   settings: Pick<DesktopUserSettings, "agents">,
   yourHue: IdentityHue | null,

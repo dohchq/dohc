@@ -131,7 +131,6 @@ export function createAccount(options: {
     showForgetState();
   }
 
-  /** Revokes this token's own session through the sessions route. Each request waits at most REVOKE_TIMEOUT_MS. */
   async function revoke(origin: string, token: string): Promise<void> {
     const client = createServerClient({ origin, token, fetch, signal: new AbortController().signal, timeoutMs: REVOKE_TIMEOUT_MS });
     const mine = (await listSessions(client)).find(session => session.current);

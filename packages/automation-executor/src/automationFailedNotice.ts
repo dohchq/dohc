@@ -172,7 +172,6 @@ export function automationFailedNotice(input: {
   workspaceId: string;
   computer: FailureComputer;
   failure: AutomationFailure;
-  /** The automation's name in its automations.yaml, when dohc can read it. */
   name: string | null;
   /** Where its Collection is now, or null when this computer no longer has it. */
   collectionPath: string | null;

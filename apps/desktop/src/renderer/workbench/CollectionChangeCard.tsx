@@ -218,7 +218,6 @@ export function CollectionChangeCardView(props: {
   const testId = (part: string) => `${props.testIdPrefix}-change-${part}`;
   const state = change?.state ?? null;
   const busy = phase.kind === "applying";
-  // Folded until it's known to be applied. Its line says Waiting once that's known.
   if (props.notNow && !busy && state?.kind !== "applied") {
     return <button type="button" data-testid={testId("not-now")} onClick={props.onUnfold}
       className="mt-2 flex h-[38px] w-full max-w-[740px] items-center gap-2 rounded-lg border border-line bg-panel px-3.5 text-left text-[13px] text-muted transition-colors hover:bg-panel-2">

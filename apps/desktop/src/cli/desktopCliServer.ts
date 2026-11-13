@@ -689,7 +689,6 @@ export function createDesktopCliServer<State>(
               save: (id: number) => capture.saveKeptCopy(id),
               restoreProtected: async (id, restoredBy) => {
                 const restored = await capture.restoreProtectedCopy(id, restoredBy);
-                // As the window's Restore does: the other computer hears of it promptly.
                 activity.queueCloudSync(workspace.workspaceId);
                 notifyRenderer({ workspaceId: workspace.workspaceId });
                 return restored;

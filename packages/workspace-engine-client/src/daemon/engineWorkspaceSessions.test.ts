@@ -3272,7 +3272,6 @@ describe("EngineWorkspaceSessions", () => {
             },
             { retryTransportErrors: true },
           );
-          // Now the entry starts closing, and this run queues behind it.
           const closing = sessions.closeWorkspace(workspace.workspaceId);
           const queued = sessions.run(workspace, async () => {
             operations += 1;
@@ -3381,14 +3380,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("lets a settle armed during the open run after the region ends", async () => {
-      // codex r22, and the round-9 asymmetry wearing an async-context coat.
-      // A document open installs things that outlive it — the settle debounce
-      // timer, the remote-update subscription, the save-state reporter — and a
-      // Node timer keeps the async context it was created in. So the session's
-      // later work kept reading as work inside the abandonable open region,
-      // for the whole life of the session: a settle for an edit the engine had
-      // already accepted would be refused by a budget spent during the open.
-      // That is the one thing this class must never do to an accepted write.
       const workspace = await tempWorkspace("workspace-settle-after-region");
       const client = new MockClient("handle-settle-after");
       let nowMs = 5_000;
@@ -3827,13 +3818,6 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("keeps retrying work outside a bounded region at quit", async () => {
-      // `beginShutdown` is a global flag doing a scoped job. It must
-      // abandon a pending document open — which holds no edit — and it
-      // must not abandon an already-open document retrying a write the engine
-      // already accepted. That update lives only in the canonical in-memory
-      // Y.Doc, `closeAllEngineYDocSessions` swallows the failure, and
-      // `app.exit(0)` then discards it: silent data loss at exit, and the
-      // opposite obligation from the one the bound was aimed at.
       const workspace = await tempWorkspace("workspace-accepted-write-quit");
       const client = new MockClient("handle-accepted-write");
       let attempts = 0;

@@ -2,9 +2,6 @@ import { describe, expect, it } from "vitest";
 import { editorTitle } from "./Explorer";
 import { collectionTabPath, siteTabPath, versionCompareTabPath } from "./workbenchState";
 
-// Open-editor rows must show product names for virtual tabs, never internal
-// ids. The compare tab regressed to its raw `version_<id>` leaf until the
-// PR 0M manual drive caught it.
 describe("editorTitle", () => {
   it("keeps the Explorer title for a collection", () => {
     const path = collectionTabPath("notes/旅");

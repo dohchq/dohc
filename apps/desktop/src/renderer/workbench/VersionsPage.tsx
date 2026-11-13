@@ -145,7 +145,6 @@ export function VersionsPage(props: {
 
   const versionIds = snapshot?.versions.map((version) => version.id).join("\n") ?? null;
 
-  // Try again reads again each read that had failed.
   const notice = useReadsNotice(props, (reads) => {
     if (reads.includes("last-changes")) setLastChangesRetry((attempt) => attempt + 1);
     // Every failed count, even one whose failure has not reached the notice

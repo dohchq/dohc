@@ -274,12 +274,6 @@ const PLACEHOLDER_EXTENSION = Placeholder.configure({
     return "Type '/' for commands";
   },
 });
-// The projection's table parses and writes the row-height annotation, so a
-// source-view edit keeps resized rows. Column resizing is off by default in
-// Tiptap; it is turned on here so the grip/menu UI (tableControls.tsx) has
-// resizing to coexist with. These are runtime options: they do not change
-// the schema, so the projection's unconfigured table stays in parity. See
-// schema-parity.test.ts.
 const TABLE_EXTENSION = DohcMarkdownTable.configure({
   resizable: true,
   // A useful default column measure makes appended columns grow the table

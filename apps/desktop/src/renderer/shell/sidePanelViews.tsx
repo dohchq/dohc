@@ -3,10 +3,6 @@ import { Maximize2 } from "lucide-react";
 import { Suspense, type ReactNode } from "react";
 import type { CustomizePart } from "../settings/customize";
 import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
-// Eager on purpose. Behind lazy(), the search input did not exist until the
-// chunk resolved, and every character typed in that gap went to whatever the
-// user clicked to open the panel — queries arrived with their first letters
-// missing. The view carries no dependency the shell does not already load.
 import { SearchView } from "../workbench/SearchView";
 import { VIEW_IDENTITY, type ViewIdentity } from "../workbench/viewIdentity";
 import { setExplorerMode, type ViewId } from "../workbench/workbenchState";

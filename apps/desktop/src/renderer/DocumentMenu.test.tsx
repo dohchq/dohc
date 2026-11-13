@@ -625,12 +625,6 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).not.toBeNull();
   });
 
-  // A later action supersedes a standing refusal — its instruction describes
-  // an attempt that is over. WHEN it does is codex r3 on #684: the token
-  // decides who may speak next, and that is only half of it. Until the new
-  // attempt answers, and a clipboard write can sit behind an OS permission
-  // prompt, the menu still showed the last answer: an instruction to wait for
-  // a document the user is already retrying.
   it("retires a standing refusal when the retry starts, not when it answers", async () => {
     const user = userEvent.setup();
     stubClipboard();

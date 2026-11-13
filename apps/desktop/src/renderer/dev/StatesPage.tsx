@@ -131,25 +131,6 @@ import { WorkspaceSyncStatus } from "../workbench/WorkspaceSyncStatus";
 import { NewVersionCard } from "../workbench/NewVersionDialog";
 import { closeStatesPage } from "./statesRoute";
 
-// Every shared part in every state, light beside dark, on one development
-// page. It is the gallery for a person changing a part and the subject of the
-// pixel baselines in e2e/states-page.spec.ts. Nothing here is product.
-//
-// The parts are the real ones, so a change to a part changes the capture.
-// Each section is one part, named by `data-part`, and the capture takes one
-// baseline per part per theme: a PR that changes one part updates that
-// part's pair of PNGs and no other.
-//
-// A state a part reaches through a prop (selected, active, disabled) is
-// passed as that prop. A state the browser owns (hover, focus-visible,
-// focus) is marked with `data-force-state`, and the capture forces it on
-// that element through the browser's own pseudo-class forcing, so the
-// part's own rules apply. `data-force-target` names a descendant when the
-// part does not take the attribute itself. A state a part reaches by being
-// used (a menu open, a copy acknowledged) is reached that way: the capture
-// opens the menu or presses the button. On the page itself, hover and press
-// the parts.
-
 // Specimens ignore this installation and live account colour choices.
 const SAMPLE_ADA: ActorPresentation = { group: "states-ada", hue: "teal", self: false };
 const SAM_PALETTE_SLOT = 1;
@@ -159,12 +140,6 @@ const SAMPLE_ORBIT: ActorPresentation = { group: "states-orbit", hue: "plum", se
 
 const KBD = "rounded border border-line bg-bg px-1 font-sans text-[11px] text-subtle";
 
-// A floating part draws a shadow up to 41px below and 31px beside itself in
-// the dark theme, and its whole shadow must stay in its own capture, which
-// takes 16px around its part. So a part needs at least 25px of its own room
-// below a floating box and 15px beside it. The toasts get this 40px padding;
-// the shell's menus get the room from their taller boxes, and the editor's
-// menus from EDITOR_MENU_BOX's margin and their boxes' heights.
 const SHADOW_ROOM = "p-10";
 // The change review is 760px wide in the app, wider than a pane, so it is
 // drawn at the pane's width, as the Settings frame is, with the shadow's room.
@@ -484,9 +459,6 @@ function Row(props: {
   );
 }
 
-// A file of every kind in the registry, so each glyph is drawn the way the
-// Explorer draws it. A `Record` over the kinds, so a new kind is a compile
-// error here until the page shows it.
 const KIND_SAMPLES: Record<FileDisplayKind, string> = {
   markdown: "plan.md",
   drawing: "flow.excalidraw",
@@ -526,9 +498,6 @@ function KindRows(props: { label: string; selected: boolean }) {
   );
 }
 
-// Every object that is not a file, by the name its tab shows, each glyph in
-// a row the way a list draws it. A `Record` over the kinds, so a new kind is
-// a compile error here until the page shows it.
 const OBJECT_SAMPLES: Record<ObjectKind, string> = {
   app: "trip-planner",
   collection: "Registrations",
@@ -709,9 +678,6 @@ const REFUSED_RESTORE_TOAST = {
   seen: false,
 };
 
-// Typing capture kept when its file changed outside dohc: the toast and the
-// rows the shell builds for it, and its change in History. The time is
-// local, so the row reads the same in every time zone.
 const RECOVERY_PATH = "trip/plan.md";
 const RECOVERY_DETAILS = `Notice: ${captureRecoveryMessage(RECOVERY_PATH, false)}\nTitle: ${CAPTURE_RECOVERY_TITLE}\nFile: ${RECOVERY_PATH}`;
 const RECOVERY_TOAST = {
@@ -1674,8 +1640,6 @@ const EXPLORER_SCOPE: ExplorerMenuScope = {
   kind: "file", pinned: false, isMountPath: false, hasMountRecord: false, canShare: false, shareView: null,
 };
 
-// A finished delete offers Undo; a refused Undo says what is in the way, with
-// Try again, and Details keeps the engine's text.
 const DELETED_BUDGET = doneNotice([{
   change: { id: "budget", kind: "delete-file", path: "docs/budget.md" },
   operationId: "dohc-operation:33333333-3333-4333-8333-333333333333", undoable: true, trashed: true,

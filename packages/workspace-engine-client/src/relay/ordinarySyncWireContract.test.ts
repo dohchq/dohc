@@ -305,7 +305,6 @@ describe("held document inspection contract", () => {
 
   it("keeps a few examples of each reason with its exact total, and the worst reason's status even with none listed", () => {
     const eight = Array.from({ length: 8 }, (_, index) => at("relay-a", { ...outboxAt, sequence: index + 1 }));
-    // Of 50,000 missing sources eight are listed; the invalid authorship the budget left without an example still decides.
     const truncated = incomplete("invalid-evidence", reason("source-missing", "missing-evidence", 50_000, ...eight),
       reason("malformed-authorship", "invalid-evidence", 3));
     expect(decoded(truncated)).toEqual(truncated);
@@ -393,7 +392,6 @@ describe("held document contribution artifact", () => {
       coveredContributions: [{ namespace: "relay-a", contributions: [carried, outbox] }],
       mergedContributionIds: [outbox],
     });
-    // A binding whose tails do not read covers nothing, and nothing merged.
     const unread = Buffer.from(emptyArtifact.canonical, "utf8");
     const nothing = { ...inspected, objectId: "object-2", bindingDigest: vectors.valid[1]!.digest,
       preservation: { ...incomplete(), contributionsSha256: emptyArtifact.sha256, contributionsByteLength: unread.length } };

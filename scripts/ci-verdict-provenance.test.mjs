@@ -274,8 +274,6 @@ test("the verdict must name the commit its gate examined", () => {
     () => check(passVerdict.replace("head 1f47af31", "head zzzzzzzz")),
     /does not name the commit the run examined/,
   );
-  // A sha with no tree state does not say whether the commit describes what
-  // ran, which is half the claim.
   assert.throws(
     () => check(passVerdict.replace("1f47af31 clean,", "1f47af31,")),
     /does not name the commit the run examined/,
@@ -1243,12 +1241,6 @@ for (const detached of [false, true]) {
 }
 
 test("a HEAD that moved and came back inside one step is refused", () => {
-  // The residual the boundary readings cannot reach: another run checks out a
-  // second tree and restores it before `cargo test --workspace` returns. Both
-  // readings around that step name the same commit, their worktree status is
-  // identical, and the step ran against something else. Git wrote both moves
-  // into the HEAD reflog, so a reading that carries the log sees what the
-  // commit cannot show.
   const returned = classifyTreeProvenance([
     { step: "start", state: A },
     { step: "build daemon", state: A },

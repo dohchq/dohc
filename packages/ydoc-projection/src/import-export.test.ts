@@ -1282,9 +1282,6 @@ it('pins the markedReadings the engine repeats', () => {
     .toEqual(definitions.map(([, raw]) => raw))
 })
 
-// Text between two raw HTML runs is the file's Markdown, not a tag's content,
-// so its references read as they always have: a block escape as its
-// character, any other reference as the text it spells.
 it('reads references between separate raw HTML runs as it reads them outside raw HTML', () => {
   const document = parseRichdocMarkdown(
     '<b>x</b> &#42; &#123; &#92; &#58; &#32; &amp;#92; &amp;amp;#123; <i>y</i> and **real** {{atom:rate 150}} $m$.',
@@ -2707,7 +2704,6 @@ describe('Y.Doc markdown import/export', () => {
     const input = '![alt](assets/pic.png "t")\n'
     const once = yDocToMarkdown(markdownToYDoc(input))
     expect(once).toBe(input)
-    // And a second pass is stable.
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(input)
   })
 
@@ -2810,13 +2806,6 @@ describe('Y.Doc markdown import/export', () => {
     ).toBe('![backslash]()\n')
   })
 
-  // SHARED CONTRACT TABLE. sanitizeImageSrc lives once, in
-  // @dohc/ydoc-projection/image-src. This suite and apps/desktop's
-  // import-export test drive the same table through their own markdown
-  // adapters (this package's pipeline and the desktop editor's), so a change
-  // to the image-src contract shows up on both surfaces. Driven through the
-  // node attrs (not markdown source) so each input reaches the sanitizer
-  // exactly as written.
   const IMAGE_SRC_CONTRACT: ReadonlyArray<{ src: string; markdown: string }> = [
     // Kept — relative asset paths (the ordinary case).
     { src: 'assets/pic.png', markdown: '![x](assets/pic.png)' },

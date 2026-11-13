@@ -182,11 +182,6 @@ export function debInstallFailure(error: Error, installer: string): InstallFailu
 // newest release; GenericProvider sets it for a custom feed.
 const CHANNEL_FILE_NOT_FOUND = "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND";
 
-// What a failed check means for the person. The Mac files join a GitHub
-// release after the workflow publishes it (docs/engineering/desktop-release.md),
-// so until then a Mac finds no channel file there: no update yet, not a
-// failure. Windows and Linux files ship with the release, and a custom feed
-// has no such gap, so for them it means a broken feed.
 function checkFailure(error: unknown, macReleaseFeed: boolean): UpdateEvent {
   if (macReleaseFeed && error instanceof Error && "code" in error && error.code === CHANNEL_FILE_NOT_FOUND) {
     return { type: "not-available" };

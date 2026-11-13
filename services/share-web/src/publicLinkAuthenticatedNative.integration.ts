@@ -126,7 +126,6 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   let captureCount = 0;
   const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
     const remove = sharedChanges.subscribe(...args);
-    // Each capture has one standing listener plus temporary document wake listeners.
     const standing = args[1] === undefined;
     if (standing) captureCount++;
     let removed = false;

@@ -86,7 +86,6 @@ export function DesktopRoot() {
   const accountDeletion = useAccountDeletion();
   // Forget can leave this window showing a workspace it can no longer edit.
   const { oldWindow, recheck: recheckOldWindow } = useOldWindowState(isManagerWindow ? null : workspace?.workspaceId ?? null);
-  // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
     open: NoticeTarget;

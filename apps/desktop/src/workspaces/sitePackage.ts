@@ -2294,20 +2294,6 @@ function htmlReferencesFromDocument(
   const nestedReferences: BrowserTextReference[] = [];
   const cspPolicyContents: string[] = [];
   const formIds = collectFormIds(document);
-  // Grows as visit() encounters each <meta> CSP in DOCUMENT order — a real
-  // browser only starts enforcing a policy once it's actually parsed a
-  // meta tag declaring it, so a reference collected before that point
-  // (e.g. <script src="early.js"></script> ahead of the policy that would
-  // otherwise block script-src) was already requested and must not be
-  // retroactively removed. Markup references (attributeReferences,
-  // nestedReferences) are filtered AT PUSH TIME against this running
-  // state below. CSS/JS TEXT content is collected as raw strings during
-  // the walk and only turned into references after it finishes — applying
-  // per-block document-order precision there would mean tracking a
-  // snapshot per <style>/<script> block instead of one joined string per
-  // kind; the far more common case in practice (a page with a meta CSP
-  // has it in <head>, before any meaningful inline block) is captured by
-  // applying the final state to all of those collectively.
   let blockedSoFar: ReadonlySet<CspClass> = new Set();
   // A separate running snapshot of the raw policy strings collected so far
   // in document order, for isInlineBlockPermitted's own per-block nonce/

@@ -5617,12 +5617,6 @@ describe("workspaceEngineCapture agent attribution", () => {
             request.method === "capture.setAuthor",
         )
         .map((request) => request.method);
-      // The guarantee is that authorship is never cleared behind an unsettled
-      // flush — not how many times the flush was asked. flushCapture now polls
-      // for quiescence, as the daemon documents and every Rust consumer does,
-      // so pinning the exact call count would fail on the retries while proving
-      // nothing extra. Pin the guarantee instead: the run was stamped once, the
-      // clear never happened, and nothing but flushes ran in between.
       expect(methods[0]).toBe("capture.setAuthor");
       expect(methods.filter((method) => method === "capture.setAuthor")).toEqual([
         "capture.setAuthor",

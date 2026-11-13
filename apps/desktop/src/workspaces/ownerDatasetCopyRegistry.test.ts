@@ -362,7 +362,6 @@ it("removes only the copies of accounts that left in a look still owed, never th
   // Account A's copies from an earlier run in another workspace: one with its tag, and one from before tags.
   const copies=join(earlier,".dohc","local","dataset-copies"),tagged=join(copies,`${basename(first).slice(0,16)}-${"1".repeat(16)}`),untagged=join(copies,"2".repeat(64));
   for(const copy of [tagged,untagged]){await mkdir(copy,{recursive:true});await writeFile(join(copy,"replica.sqlite"),"A's data");}
-  // A signs out while dohc can't list the workspaces, and B signs in while it still can't, then opens a copy in each.
   await expect(f.registry.credentialsChanged(null)).rejects.toThrow("workspace list");
   const b=datasetCopyOwnerKey({serverUrl:"https://account",userId:"b"});
   await expect(f.registry.credentialsChanged(b)).rejects.toThrow("workspace list");

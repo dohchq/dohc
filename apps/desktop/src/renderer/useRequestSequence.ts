@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, type DependencyList } from "react";
 
 export function useRequestSequence(identity: DependencyList = []) {
   const sequence = useRef(0);
-  // The newest request when the owner last unmounted or changed identity.
   const cutOff = useRef(0);
   const requests = useMemo(() => ({
     next: () => ++sequence.current,

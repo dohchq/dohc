@@ -45,15 +45,6 @@ export interface WorkspaceSearchRequest {
   excludeGlob?: string;
 }
 
-// The include glob for the mount-scoped rg pass that completes an
-// engine-backed search (the engine index deliberately excludes
-// shared-with-me). Three-way, following rg's gitignore-style semantics:
-// - a glob already targeting the projection is used as-is;
-// - a basename-style glob (no "/") floats to any depth, so it intersects
-//   mounts — scope it: "*.md" -> "shared-with-me/**/*.md";
-// - any other path-style glob is anchored at the workspace root and cannot
-//   match under shared-with-me/ — the intersection is empty, so the pass
-//   is skipped (null).
 export function mountScopedIncludeGlob(
   userGlob: string | undefined,
 ): string | null {
@@ -179,16 +170,10 @@ export function parseRipgrepLine(line: string): RgMatchData | null {
 function byteToCharOffset(line: string, bytes: Buffer, byteOffset: number): number {
   if (byteOffset <= 0) return 0;
   if (byteOffset >= bytes.length) return line.length;
-  // All-ASCII fast path: byte offsets are char offsets.
   if (bytes.length === line.length) return byteOffset;
   return bytes.subarray(0, byteOffset).toString("utf8").length;
 }
 
-// Converts one rg match event into bounded result entries (one per submatch).
-// Every path must pass validateUserReadPath — rg runs rooted at the real
-// workspace root and emits relative paths, but the validator is the same
-// containment rule every other IPC surface enforces, applied before the path
-// crosses toward the renderer. Pure; unit tests cover the windowing math.
 export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   const rawPath = data.path?.text;
   const rawLine = data.lines?.text;

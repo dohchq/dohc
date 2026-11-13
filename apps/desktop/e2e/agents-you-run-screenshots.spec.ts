@@ -88,8 +88,6 @@ test("@ui-audit agents you run in Settings › Agents and in their chat", async 
     // Add agent with Another agent chosen shows the MCP config it will use.
     await section.getByTestId("agent-add").click();
     const sheet = page.getByTestId("agent-add-sheet");
-    // Both themes show the same settled sheet: it has looked for each tool,
-    // and its Copy MCP config is ready.
     await expect(sheet.getByLabel(/^Looking for /)).toHaveCount(0);
     await sheet.getByTestId("agent-runs-with-mcp").click();
     await expect(sheet.locator('[data-testid="agent-add-config-copy"]:enabled')).toHaveCount(1);

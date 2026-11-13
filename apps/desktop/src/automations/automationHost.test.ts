@@ -494,7 +494,6 @@ describe("automation hosts", () => {
     expect(w.errors).toEqual([]);
     expect(w.hostChanges(), "host work hears nothing").toBe(hostChanges);
 
-    // A read the open started still runs, and admit stops waiting for it.
     const joined = world();
     joined.setHung(true);
     joined.hosts.open("ws");

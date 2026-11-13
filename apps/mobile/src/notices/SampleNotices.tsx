@@ -92,10 +92,6 @@ export function SampleNotices() {
       ) : null}
     </>
   );
-  // One list in every state, so nothing remounts when the band comes or goes. The band reports the whole workspace
-  // and never scrolls away, so it's drawn over the list at the bar's bottom. On iOS the native host covers the band's
-  // strip, so iOS keeps rows, focus and the indicator below it. On Android the list's first row is an empty space of
-  // the band's height instead, arriving and leaving in the band's commit.
   restingCover.current = coverHeight;
   const items: Item[] = band.spacer
     ? [{ kind: "band" as const }, ...notices.map(notice => ({ kind: "notice" as const, notice }))]

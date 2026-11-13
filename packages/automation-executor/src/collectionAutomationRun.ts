@@ -91,7 +91,6 @@ export const UNFINISHED_UNDO_ERROR = "dohc has not finished undoing this run.";
 export const LOST_COLLECTION_ERROR = "A Collection this run changes is no longer in this workspace, so the run stopped.";
 export const RULES_CHANGED_ERROR = "Collection rules changed after this run started.";
 
-/** The engine reads a run makes. VersionedLiveAdapter satisfies it. */
 export interface CollectionAutomationReads {
   getCollectionRecord(input: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
   queryCollectionRecords(input: CollectionQueryParams): Promise<CollectionQueryResult>;

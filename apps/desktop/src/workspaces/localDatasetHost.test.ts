@@ -943,8 +943,6 @@ describe("this computer's Collection folders", () => {
     }
   });
 
-  // A `.dohc/local` that was missing when dohc looked has no open behind it,
-  // so a store found there afterwards is neither read nor adopted.
   it("on Windows, neither reads nor adopts a store in .dohc/local that the read found missing", async () => {
     const storeId = "5b2c6c1e-2f4a-4c1b-9d7e-0a1b2c3d4e5f", otherId = "0f1e2d3c-4b5a-4968-8776-655443322110";
     const made = await open();

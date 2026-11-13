@@ -32,15 +32,6 @@ import {
 } from "./chatMarkdownParse";
 import { parseChatInWorker } from "./chatMarkdownWorker";
 
-// A chat message's body, rendered as Markdown. Chat text comes from other
-// people, agents and link holders, so it renders no raw HTML (it reads as
-// text), loads no remote image, and opens only http, https and mailto links,
-// through the same path a read-only document uses.
-//
-// A short body parses where it is drawn. A longer one parses in the chat's
-// worker and shows as its words without Markdown syntax until the tree
-// arrives. A body the parser gives up on keeps that look.
-
 interface ChatTextScope {
   chips: readonly Chip[];
   testId?: string;
@@ -289,7 +280,6 @@ interface Drawn {
   content: ReactNode;
   chips: readonly Chip[];
   copiesSource: boolean;
-  // What its tree costs the cache to hold.
   weight: number;
 }
 

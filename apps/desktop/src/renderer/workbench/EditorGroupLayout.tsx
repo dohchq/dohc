@@ -3,12 +3,6 @@ import { clampEditorGroupPairLeftSize } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 0.05;
-// The group takes focus when its last tab closes. The global halo would
-// paint outside the group, where the window edge and its neighbours cut off
-// all but its top edge, and an inset outline would sit under the tab strip.
-// So the keyboard's focus draws a row's 1px accent line inside the group, on
-// a layer above its contents. Forced colors give every other focus mark the
-// system Highlight color, and this one takes it too.
 const GROUP_FOCUS_RING =
   "focus-visible:outline-none keyboard:focus-visible:after:pointer-events-none keyboard:focus-visible:after:absolute keyboard:focus-visible:after:inset-0 keyboard:focus-visible:after:z-20 keyboard:focus-visible:after:outline-1 keyboard:focus-visible:after:-outline-offset-1 keyboard:focus-visible:after:outline-accent forced-colors:keyboard:focus-visible:after:outline-[Highlight]";
 

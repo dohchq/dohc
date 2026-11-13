@@ -10,8 +10,6 @@ type AutomationAuthor = {
   automation?: { automationId: string; collectionPath: string | null };
 };
 
-// Until the Automations panel can open one automation, its Collection's
-// automations file is where the automation is defined.
 function automationsFile(collectionPath: string): string {
   return `${collectionPath}/automations.yaml`;
 }

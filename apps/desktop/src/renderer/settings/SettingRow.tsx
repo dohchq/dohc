@@ -218,7 +218,6 @@ export function StepperControl(props: {
 }) {
   const [hovered, setHovered] = useState<StepperPartName | null>(null);
   const [focused, setFocused] = useState<StepperPartName | null>(null);
-  // The part whose tooltip Escape put away, until the pointer or focus moves.
   const [dismissed, setDismissed] = useState<StepperPartName | null>(null);
   const shown = hovered ?? focused;
   const tip = shown === dismissed ? null : shown;

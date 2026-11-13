@@ -149,12 +149,6 @@ export function SettingsDialog(props: {
    * shared view never has.
    */
   sharedView?: boolean;
-  /**
-   * Main's open-time recorder decision for this workspace, undefined
-   * until its status arrives. The engine setting lives here, so this surface
-   * owes the recovery that actually works — and the two off states have
-   * different ones. See `runnerEngineNote` in `AgentList`.
-   */
   sessionRecorderOn?: boolean;
   initialSection?: SettingsSectionId;
   // The part a Customize… command opened Settings for: its row is marked and

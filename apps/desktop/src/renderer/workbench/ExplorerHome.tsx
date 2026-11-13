@@ -39,13 +39,6 @@ import { NOT_VERSIONED, NOT_VERSIONED_TITLE, useNotVersionedMark } from "./notVe
 import { TabGlyph } from "./tabGlyph";
 import { parseTab, siteTabPath } from "./workbenchState";
 
-// Home: the workspace by kind, as one keyboard list. Arrows move through
-// every section, Left and Right fold a section or a folder, and Enter opens.
-// Each row's menu is the Files menu for the same file or folder, so a
-// rename, move or delete here is the same change Files makes. Rows select as
-// Files' rows do, by their workspace path, so a page pinned and in Pages is
-// one selected path.
-
 const ROW_HEIGHT = 28;
 const GLYPH_SIZE = 14;
 const VIRTUALIZE_ABOVE = 200;

@@ -164,10 +164,6 @@ const WRITE_OPTIONAL_STRINGS = [
 const REQUIRED_SECRET_METADATA = ["workspaceId", "origin"] as const;
 const OPTIONAL_SECRET_METADATA = ["summary", "correlationId"] as const;
 
-// One executable inventory of every method this loopback dispatches. Rust
-// deserializes these deny_unknown_fields structs before it resolves a workspace
-// handle; keeping the inventory exhaustive makes a new method fail typecheck
-// until its wire shape is stated here too.
 const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.textCaptureSources]: {
     requiredStrings: ["versionId"],

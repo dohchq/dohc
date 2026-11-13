@@ -1,31 +1,6 @@
 import { cursorText } from "./cursorText";
 import { makeTriggerPlugin } from "./triggerPlugin";
 import { documentChange, isCodeBlock, isCodeMark } from "./pmHelpers";
-// D4.8 (extended in D4.8b) — Wikilink rendering + autocomplete.
-//
-// Two coupled responsibilities in one plugin:
-//
-//   1. Pill RENDERING. Each `[[path]]` (or `\[\[path]]`) in the doc
-//      gets visually replaced by a styled chip showing the linked
-//      page's title with an icon prefix. The underlying text stays
-//      as literal markdown (no schema change) so a path rename can
-//      rewrite `[[path]]` directly in the file body and the body
-//      roundtrips cleanly through Tiptap's markdown serializer.
-//      Mechanism: emit a Decoration.widget at the start of the
-//      range with the pill DOM, plus a Decoration.inline over the
-//      full range with `class: dohc-wikilink-hidden` that
-//      collapses the original text via `font-size:0`. The text is
-//      still in the document for the cursor + serialization; it
-//      just renders invisibly.
-//
-//   2. Autocomplete STATE. When the user types `[[` and starts a
-//      query before the closing `]]`, the plugin notifies a
-//      callback with `{active, from, query}` describing the
-//      incomplete wikilink. A parent React component subscribes
-//      via the callback + renders a popover with filtered files.
-//      Mouse / keyboard selection dispatches a transaction back
-//      to the editor to replace the `[[query` with the chosen
-//      path + close brackets.
 
 import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
 import { PluginKey, type Transaction } from '@tiptap/pm/state'

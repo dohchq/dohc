@@ -746,7 +746,6 @@ describe("AutomationScheduler with closed workspaces", () => {
     expect(time.timerAt(), "wakes at the recorded due time").toBe(NINE);
     expect(scheduler.runningSchedules()).toBe(1);
 
-    // The workspace's executor exists but is closed until the background open.
     open = false;
     scheduler.add("ws", source, here);
     await idle(scheduler);

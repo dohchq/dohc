@@ -25,7 +25,6 @@ async function cleanupOperationDirectory(directory: string, retry = 0): Promise<
   } catch (error) {
     const delay = CLEANUP_RETRY_DELAYS_MS[retry];
     if (delay !== undefined) {
-      // Keep only this operation's path until its bounded cleanup attempts finish.
       setTimeout(() => { void cleanupOperationDirectory(directory, retry + 1); }, delay).unref();
     } else {
       // Host diagnostics must not replace an operation result or reject a timer task.

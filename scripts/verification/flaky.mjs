@@ -1,12 +1,3 @@
-// Tests that passed only on retry, tests that failed on their last try, and the
-// slowest tests. The gate retries a failing test once, and a package or node:test
-// step's test that fails both tries once more alone, so a flaky test no longer
-// fails a change it has nothing to do with, and records each one here so it gets
-// fixed instead of hidden. Failed tests use the same names, so the queue can tell
-// when other branches fail the same test, and the gate can print the command that
-// reruns each one. It also records the slowest tests, so the suites' time can be
-// kept in budget.
-
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { readerTests } from "../../tools/rust-engine-program/reader-tests.mjs";

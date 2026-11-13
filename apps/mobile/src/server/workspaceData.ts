@@ -131,8 +131,6 @@ export function viewOf(id: string): View<unknown> | null {
   return null;
 }
 
-// --- the cache ----------------------------------------------------------------------------------------------------
-
 export interface Cached {
   readonly view: View<unknown>;
   readonly value: unknown;
@@ -270,8 +268,6 @@ export function createReadCache(files?: CacheFiles): ReadCache {
 
 const isListing = (view: View<unknown>) => view.id === views.files.id || view.id === views.chats.id;
 
-// --- one workspace ------------------------------------------------------------------------------------------------
-
 export interface WorkspaceData {
   readonly workspaceId: string;
   /** This store's number, different for each one made, so a screen can start afresh with a new store. */
@@ -404,7 +400,6 @@ export function createWorkspaceData(options: {
   function entry(view: View<unknown>): Entry {
     let found = entries.get(view.id);
     if (!found) {
-      // A view first opened after the workspace has gone can't read, so it shows the same failed read and Try again.
       const state: ViewState<unknown> = hasGone
         ? { value: null, loading: false, problem: "refused", failures: 1 }
         : { value: null, loading: restoring, problem: null, failures: 0 };

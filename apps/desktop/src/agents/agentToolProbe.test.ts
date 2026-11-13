@@ -241,7 +241,6 @@ function observe<T>(promise: Promise<T>) {
   return { seen, done };
 }
 
-// Each run stays pending until its test settles it, which stands in for subprocess drainage.
 function controlledProbes(executables: readonly string[]) {
   const controller = new AbortController();
   const calls: Array<{ executable: string; output: Deferred<ProbeOutput> }> = [];

@@ -181,7 +181,6 @@ describe("local document Collection apps", () => {
     expect(all.map(record => record.fields)).toEqual([{ destination: "Tokyo" }, { destination: "Manila" }, { destination: "Manila" }, { destination: "Tokyo" }]);
     await expect(f.list({ limit: 2, afterPath: "trip/other.md" })).rejects.toThrow(/Invalid collection page/);
     await expect(f.list({ limit: 101 })).rejects.toThrow(/Invalid collection page/);
-    // A schema edit after approval stops reads until the app is prepared again.
     files.set("trip/responses/collection.yaml", schema + "  extra:\n    type: text\n");
     await expect(f.list()).rejects.toThrow(/schema changed/);
   });

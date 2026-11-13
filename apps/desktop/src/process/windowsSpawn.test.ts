@@ -154,9 +154,6 @@ describe("resolveSpawnCommand", () => {
 // part). This module now exports only readProcessTableWithPowershell, the
 // Windows-specific text source.
 
-// Real shim topology: the unit fakes elsewhere spawn process.execPath
-// directly, so the cmd.exe wrapper path (quoting round-trip, exit-code
-// propagation, tree kill) is only exercised here, with a genuine .cmd.
 const describeWin32 = process.platform === "win32" ? describe : describe.skip;
 
 describeWin32("real .cmd shim topology (win32)", () => {
@@ -193,8 +190,6 @@ describeWin32("real .cmd shim topology (win32)", () => {
       },
     );
 
-    // The metacharacter token arrives intact (no second command ran) and the
-    // shim's real exit code survives the cmd.exe wrapper.
     expect(JSON.parse(stdout.trim())).toEqual(args);
     expect(code).toBe(7);
   });

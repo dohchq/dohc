@@ -35,7 +35,6 @@ export interface PhoneWorkspace {
   readonly color: string;
   /** False for a server's workspace whose sync isn't set up yet, which the phone can't open. */
   readonly canOpen?: boolean;
-  /** Its chats. The server's workspaces have none until the phone reads chats from the server. */
   readonly sections: readonly ChatSection[];
 }
 export const sampleMe = { initials: "IV", hue: "#3f7f86" };
