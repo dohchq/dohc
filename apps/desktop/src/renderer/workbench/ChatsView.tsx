@@ -5384,6 +5384,7 @@ export function ChatsView(props: {
     // work, not here.
     const shareGrantsBlocked = grantedLaneIsOverLimit(shareReadFailure);
     const canShare =
+      postingClosed === undefined &&
       nav.channel.kind !== "agent" &&
       channelShares !== null &&
       channelJoined === null &&

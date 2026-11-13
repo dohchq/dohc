@@ -152,7 +152,7 @@ describe("ChatsView channels", () => {
     expect(view.dataset.groupType).toBe("both");
     expect(screen.getByTestId("chats-group-lane-chat")).toBeTruthy();
   });
-  it("shows a joined workspace's Groups with no way to post or add a Group", async () => {
+  it("shows a joined workspace's Groups with no way to post, add people or add a Group", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [channel({ name: "Launch team" })],
       fileThreads: [],
@@ -166,6 +166,7 @@ describe("ChatsView channels", () => {
       "Only people who can comment post here.",
     );
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
     await user.click(screen.getByTestId("chats-channel-back"));
     await screen.findByTestId("chats-channels-heading");
     expect(screen.queryByTestId("chats-new-channel")).toBeNull();
