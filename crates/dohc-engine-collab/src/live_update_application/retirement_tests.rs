@@ -496,6 +496,27 @@ fn an_absent_pending_native_update_is_refused_without_writes() {
     assert_eq!((native_entries(&f), pending_bytes(&f)), before);
 }
 
+/// Native updates carry their own source and authors, so they never join a
+/// delivery group: however many wait behind the head, each is delivered
+/// alone under its own delivery id.
+#[test]
+fn native_updates_waiting_behind_the_head_are_each_delivered_alone() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let waiting = [
+        native_tail_edit(&mut f, "# First\n", 11),
+        native_tail_edit(&mut f, "# Second\n", 12),
+        native_tail_edit(&mut f, "# Third\n", 13),
+    ];
+    let outbox = outbox_of(&f, &waiting[0].delivery_id);
+    let pending = owner_outbox::read_pending(&f.store, "workspace", &outbox).unwrap();
+    assert!(
+        pending.entries.ends_with(&waiting),
+        "each native update is its own entry: {:?}",
+        pending.entries.iter().map(|entry| &entry.delivery_id).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn a_seed_the_journal_never_accepted_is_abandoned_once_and_recognized_after() {
     let (mut f, seed, _) = seeded();

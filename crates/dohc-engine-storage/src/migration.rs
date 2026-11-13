@@ -3717,6 +3717,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("chat_account_thread_reads.sql"),
         sets_user_version: None,
     },
+    // Owner drafts typed behind the delivery in flight go as one delivery.
+    // The value is the group's first sequence; NULL is a row delivered alone.
+    // An acknowledged group is found by the digest its rows' receipt keeps.
+    Migration {
+        ordinal: 100,
+        id: "v2-owner-outbox-delivery-group",
+        sql: V2_OWNER_OUTBOX_DELIVERY_GROUP_DDL,
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -4808,6 +4817,13 @@ END;
 
 ";
 
+const V2_OWNER_OUTBOX_DELIVERY_GROUP_DDL: &str = "\
+ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN delivery_group INTEGER;
+CREATE INDEX owner_ydoc_outbox_entries_group_receipt ON owner_ydoc_outbox_entries\
+(json_extract(accepted_receipt_json,'$.updateDigest')) \
+WHERE delivery_group IS NOT NULL AND accepted_receipt_json IS NOT NULL;
+";
+
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
 pub(crate) fn migration_checksum(sql: &str) -> String {
@@ -5768,6 +5784,10 @@ mod tests {
             (
                 "v2-chat-account-thread-reads",
                 "70a3f6bf42961a6c1be343690179dca7395d926d923859677869173bbed73777",
+            ),
+            (
+                "v2-owner-outbox-delivery-group",
+                "9dfc69b2f8a0a97cad3070f8281445eb2e8208f4a82e6a7bdd861119779227ce",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -10193,6 +10213,66 @@ mod tests {
             conn.execute("UPDATE owner_ydoc_outbox_entries SET person_edit=0", [])
                 .is_err()
         );
+    }
+
+    /// Rows waiting when the owner outbox gains delivery groups belong to no
+    /// group, so each is still delivered alone under the id it already had.
+    /// A rerun applies nothing.
+    #[test]
+    fn owner_delivery_group_migration_leaves_waiting_rows_ungrouped_and_reruns_as_a_no_op() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-owner-outbox-delivery-group");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 100);
+        assert_eq!(
+            BASELINE_MIGRATIONS[before - 1].id,
+            "v2-chat-account-thread-reads"
+        );
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO binary_blobs VALUES ('base',1,X'58'); \
+            INSERT INTO owner_ydoc_outboxes(outbox_id,workspace_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,base_update_digest,base_blob_digest,base_byte_length,state,pending_bytes,oldest_entry_at_ms,next_sequence,created_at_ms) \
+            VALUES ('outbox','ws','main','doc','base','doc.md','[\"doc.md\"]',0,'base','base',1,'active',3,1,4,1);").unwrap();
+        let entry = "INSERT INTO owner_ydoc_outbox_entries(outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,pending,result_pending_bytes,result_oldest_entry_at_ms,result_state) \
+            VALUES ('outbox',?1,?2,?3,'base','base',1,1,1,?1,1,'active')";
+        for sequence in 1..=3 {
+            let (key, delivery) = (format!("append-{sequence}"), format!("delivery-{sequence}"));
+            conn.execute(entry, rusqlite::params![sequence, key, delivery])
+                .unwrap();
+        }
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let waiting = |conn: &Connection| -> Vec<(i64, String, i64, Option<i64>)> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT sequence,delivery_id,pending,delivery_group FROM owner_ydoc_outbox_entries ORDER BY sequence",
+                )
+                .unwrap();
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let expected: Vec<(i64, String, i64, Option<i64>)> = (1..=3)
+            .map(|sequence| (sequence, format!("delivery-{sequence}"), 1, None))
+            .collect();
+        assert_eq!(waiting(&conn), expected, "no waiting row joins a group");
+        let index: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' \
+                 AND name='owner_ydoc_outbox_entries_group_receipt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(index.contains("json_extract(accepted_receipt_json,'$.updateDigest')"));
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 0 }
+        );
+        assert_eq!(waiting(&conn), expected);
     }
 
     #[test]

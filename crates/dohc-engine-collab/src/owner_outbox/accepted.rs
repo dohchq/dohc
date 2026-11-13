@@ -324,27 +324,29 @@ pub fn is_receipt_applied_in(
     {
         return Err(OwnerOutboxError::Frozen);
     }
-    let row: Option<(String, i64, Option<String>)> = conn.query_row(
-        "SELECT update_digest,pending,accepted_receipt_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
-        params![parent.outbox_id, receipt.delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-    ).optional().map_err(read_sql)?;
-    let (digest, pending, saved) = row.ok_or(OwnerOutboxError::ReceiptMismatch)?;
-    if digest != receipt.update_digest {
+    let found = delivery_group::find_in(
+        conn,
+        &parent.outbox_id,
+        &receipt.delivery_id,
+        &receipt.update_digest,
+    )?
+    .ok_or(OwnerOutboxError::ReceiptMismatch)?;
+    if found.update_digest != receipt.update_digest {
         return Err(OwnerOutboxError::ReceiptMismatch);
     }
-    if pending == 0 {
-        return Ok(saved.as_deref()
+    let Some(delivery) = found.pending else {
+        return Ok(found.receipt_json.as_deref()
             == Some(
                 serde_json::to_string(receipt)
                     .map_err(|_| OwnerOutboxError::Corrupt)?
                     .as_str(),
             ));
-    }
+    };
     if receipt.journal_cursor > observed.accepted_cursor {
         return Ok(false);
     }
     let checkpoint = super::draft::bounded_blob(conn, &observed.checkpoint_digest)?;
-    let update = super::draft::bounded_blob(conn, &digest)?;
+    let update = delivery.update(conn)?;
     let accepted = crate::Ydoc::wire();
     accepted.apply(&checkpoint).map_err(collab)?;
     if accepted.has_pending_dependencies() {
@@ -367,14 +369,18 @@ pub(super) fn check_release_in(
     let observed = current(conn, &parent.binding)?;
     let mut replayed = 0;
     for receipt in receipts {
-        let row:Option<(String,i64,Option<String>)>=conn.query_row("SELECT update_digest,pending,accepted_receipt_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
-            params![parent.outbox_id,receipt.delivery_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(read_sql)?;
-        let (digest, pending, saved) = row.ok_or(OwnerOutboxError::ReceiptMismatch)?;
-        if digest != receipt.update_digest {
+        let found = delivery_group::find_in(
+            conn,
+            &parent.outbox_id,
+            &receipt.delivery_id,
+            &receipt.update_digest,
+        )?
+        .ok_or(OwnerOutboxError::ReceiptMismatch)?;
+        if found.update_digest != receipt.update_digest {
             return Err(OwnerOutboxError::ReceiptMismatch);
         }
-        if pending == 0 {
-            if saved.as_deref()
+        if found.pending.is_none() {
+            if found.receipt_json.as_deref()
                 != Some(
                     serde_json::to_string(receipt)
                         .map_err(|_| OwnerOutboxError::Corrupt)?

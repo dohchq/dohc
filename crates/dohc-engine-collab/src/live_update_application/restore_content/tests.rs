@@ -2040,6 +2040,165 @@ fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
     );
 }
 
+/// A waiting group the relay accepted before this computer saved its receipt
+/// is restored row by row under each row's own delivery id, the id the relay's
+/// restore check derives. Neither side finds an acceptance under a grouped
+/// row's id, so each carries none, and the relay subtracts what the group
+/// delivered. The head, delivered alone, keeps its acceptance as before.
+#[test]
+fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
+    use crate::owner_outbox::draft::{ObservedOwnerBinding, OwnerDraftAppendInput};
+    let mut f = Fixture::new("# Before the group\n");
+    let checkpoint = f.doc.encode_full_state();
+    let observed = ObservedOwnerBinding {
+        binding: f.binding.clone(),
+        relay_database_namespace: "namespace".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: 0,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: crate::owner_outbox::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 1_000_000,
+        },
+    };
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::owner_outbox::draft::install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &observed,
+                &checkpoint,
+            )
+        })
+        .unwrap();
+    let typed: Vec<_> = ["head", "second", "third"]
+        .iter()
+        .map(|text| {
+            let update = f.doc.richdoc_append_paragraph(text);
+            crate::owner_outbox::draft::append_draft_cached(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                "workspace",
+                OwnerDraftAppendInput {
+                    person_edit: false,
+                    binding: f.binding.clone(),
+                    expected_revision: 1,
+                    append_key: format!("typed-{text}"),
+                    update,
+                    now_ms: 10,
+                    agent_declaration: None,
+                    agent_run_id: None,
+                    automation_declaration: None,
+                },
+                &NoFaults,
+            )
+            .unwrap()
+        })
+        .collect();
+    let accept = |f: &mut Fixture, receipt: &LiveUpdateReceipt, update: Vec<u8>| {
+        let event = AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: receipt.clone(),
+                    binding: f.binding.clone(),
+                    authority: ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "owner".into(),
+                    },
+                    received_at_ms: 11,
+                },
+                first_seen: vec![],
+                canonical_version: Some(2),
+                author_snapshot: Some(vec![
+                    crate::live_update_application::LiveAuthorEntry::Human {
+                        human_id: "owner".into(),
+                        human_name: "Owner".into(),
+                    },
+                ]),
+                first_seen_deletes: Some(vec![]),
+                checkpoint_coverage: None,
+            },
+            update_bytes: update,
+        };
+        let applied = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+        let ApplicationResult::Applied(ack, _) = applied else {
+            panic!("the owner's own delivery was refused")
+        };
+        f.sequence = ack.local_ydoc_sequence;
+        f.terminal = Some(receipt.clone());
+    };
+    let outbox = typed[0].outbox_id.clone();
+    let pending = |f: &Fixture| {
+        crate::owner_outbox::read_pending(&f.store, "workspace", &outbox)
+            .unwrap()
+            .entries
+    };
+    let mut waiting = pending(&f);
+    assert_eq!(
+        waiting.len(),
+        2,
+        "the head goes alone and the two edits behind it as one delivery"
+    );
+    let (group, head) = (waiting.pop().unwrap(), waiting.pop().unwrap());
+    assert_ne!(group.delivery_id, typed[1].delivery_id);
+    // The relay accepts both; this computer saved neither receipt.
+    let head_receipt = LiveUpdateReceipt {
+        delivery_id: head.delivery_id.clone(),
+        update_digest: head.update_digest.clone(),
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    accept(&mut f, &head_receipt, head.update);
+    let group_receipt = LiveUpdateReceipt {
+        delivery_id: group.delivery_id.clone(),
+        update_digest: group.update_digest.clone(),
+        journal_cursor: 2,
+        accepting_host_epoch: 1,
+    };
+    accept(&mut f, &group_receipt, group.update);
+    let input = f.freeze(f.baseline_point.clone());
+    let proposal = f.prepare(input).unwrap();
+    let sources = &proposal.receipt().native_sources;
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| (source.outbox_sequence, source.delivery_id.as_str()))
+            .collect::<Vec<_>>(),
+        typed
+            .iter()
+            .map(|row| (row.sequence, row.delivery_id.as_str()))
+            .collect::<Vec<_>>()
+    );
+    for (source, row) in sources.iter().zip(&typed) {
+        assert_eq!(
+            source.delivery_id,
+            crate::owner_outbox::delivery_id(&outbox, row.sequence, &row.update_digest)
+        );
+    }
+    // The head is found under its own id; a grouped row is not.
+    assert_eq!(sources[0].accepted_receipt.as_ref(), Some(&head_receipt));
+    assert!(sources[1..]
+        .iter()
+        .all(|source| source.accepted_receipt.is_none()));
+    let restored = Ydoc::wire();
+    restored.apply(proposal.frozen_state_bytes()).unwrap();
+    restored.apply(proposal.candidate_bytes()).unwrap();
+    let projection = restored.project(ContentKind::Richdoc).unwrap().content;
+    assert_eq!(
+        restored.preserved_markdown_source(&projection).unwrap(),
+        "# Before the group\n"
+    );
+}
+
 #[test]
 fn prepares_one_forward_restore_of_an_exact_source_point_and_replays_after_restart() {
     let mut f = Fixture::new("# Baseline\n");
