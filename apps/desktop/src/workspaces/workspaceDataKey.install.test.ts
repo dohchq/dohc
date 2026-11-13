@@ -8,7 +8,11 @@ import { createTestScratch } from "./testTemp";
 // A drive's hard links, and the rename that replaces them where it has none.
 // `events` records each read and each flush of a file or folder, in order.
 const drive = vi.hoisted(() => ({
-  link: null as null | { code: string; errno: number; before?: (source: string, destination: string) => Promise<void> },
+  link: null as null | {
+    code: string;
+    errno: number;
+    before?: (source: string, destination: string) => Promise<void>;
+  },
   renameFails: false,
   afterFlush: null as null | (() => Promise<void>),
   events: [] as string[],
@@ -20,10 +24,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     link: async (source: string, destination: string) => {
       if (!drive.link) return fs.link(source, destination);
       await drive.link.before?.(source, destination);
-      throw Object.assign(new Error("link failed"), { code: drive.link.code, errno: drive.link.errno, syscall: "link" });
+      throw Object.assign(new Error("link failed"), {
+        code: drive.link.code,
+        errno: drive.link.errno,
+        syscall: "link",
+      });
     },
     rename: async (source: string, destination: string) => {
-      if (drive.renameFails) throw Object.assign(new Error("rename failed"), { code: "EIO", syscall: "rename" });
+      if (drive.renameFails)
+        throw Object.assign(new Error("rename failed"), { code: "EIO", syscall: "rename" });
       return fs.rename(source, destination);
     },
     readFile: async (...args: Parameters<typeof fs.readFile>) => {
@@ -61,7 +70,8 @@ afterEach(() => {
 const unsupportedWords =
   "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
 const generalWords = "The workspace secret key file could not be installed.";
-const keyFile = (fill: number) => `dohc-secret-key-v1:${Buffer.alloc(32, fill).toString("base64")}\n`;
+const keyFile = (fill: number) =>
+  `dohc-secret-key-v1:${Buffer.alloc(32, fill).toString("base64")}\n`;
 
 async function keyFolder(): Promise<{ root: string; path: string }> {
   const root = await createTestScratch("dohc-key-install-");
@@ -81,8 +91,9 @@ async function onPlatform<T>(platform: NodeJS.Platform, run: () => Promise<T>): 
 }
 
 // Faking another Unix on Windows would still meet Windows file modes and folders.
-const platforms: NodeJS.Platform[] = process.platform === "win32" ? ["win32"] : ["win32", process.platform];
-describe.each(platforms)("key publication on %s", platform => {
+const platforms: NodeJS.Platform[] =
+  process.platform === "win32" ? ["win32"] : ["win32", process.platform];
+describe.each(platforms)("key publication on %s", (platform) => {
   it.each([
     ["ENOTSUP", -4049, true],
     ["ENOSYS", -4054, true],
@@ -95,7 +106,9 @@ describe.each(platforms)("key publication on %s", platform => {
   ] as const)("handles a failed hard link: %s", async (code, errno, unsupported) => {
     const { root, path } = await keyFolder();
     drive.link = { code, errno };
-    const installed = onPlatform(platform, () => installWorkspaceDataKey(root, Buffer.alloc(32, 7)));
+    const installed = onPlatform(platform, () =>
+      installWorkspaceDataKey(root, Buffer.alloc(32, 7)),
+    );
     if (unsupported && platform !== "win32") {
       await installed;
       expect(await readFile(path, "utf8")).toBe(keyFile(7));
@@ -123,10 +136,15 @@ describe.runIf(process.platform !== "win32")("on a drive without hard links", ()
 
   it("keeps a different key that claims the name first", async () => {
     const { root, path } = await keyFolder();
-    drive.link = { code: "ENOTSUP", errno: -4049, before: (_, destination) => writeFile(destination, keyFile(9)) };
+    drive.link = {
+      code: "ENOTSUP",
+      errno: -4049,
+      before: (_, destination) => writeFile(destination, keyFile(9)),
+    };
     await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({
       code: "key-corrupt",
-      message: "A different workspace secret key already exists locally; refusing to overwrite protected state.",
+      message:
+        "A different workspace secret key already exists locally; refusing to overwrite protected state.",
     });
     expect(await readFile(path, "utf8")).toBe(keyFile(9));
     expect(await readdir(dirname(path))).toEqual(["secret.key"]);
@@ -134,7 +152,7 @@ describe.runIf(process.platform !== "win32")("on a drive without hard links", ()
 
   it("refuses a drive that lets other users read the key", async () => {
     const { root, path } = await keyFolder();
-    drive.link = { code: "ENOTSUP", errno: -4049, before: source => chmod(source, 0o644) };
+    drive.link = { code: "ENOTSUP", errno: -4049, before: (source) => chmod(source, 0o644) };
     await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({
       code: "key-install-unsupported",
       message: unsupportedWords,
@@ -145,17 +163,28 @@ describe.runIf(process.platform !== "win32")("on a drive without hard links", ()
   it("flushes the folder after reading a key renamed over the claim it lost", async () => {
     const { root, path } = await keyFolder();
     // Another creator holds the claim, and renames the same key over it after this one's flush.
-    drive.link = { code: "ENOTSUP", errno: -4049, before: (_, destination) => writeFile(destination, "") };
+    drive.link = {
+      code: "ENOTSUP",
+      errno: -4049,
+      before: (_, destination) => writeFile(destination, ""),
+    };
     drive.afterFlush = () => writeFile(path, keyFile(7));
     await installWorkspaceDataKey(root, Buffer.alloc(32, 7));
-    expect(drive.events.slice(drive.events.lastIndexOf("read"))).toEqual(["read", "flush secret.key", "flush engine"]);
+    expect(drive.events.slice(drive.events.lastIndexOf("read"))).toEqual([
+      "read",
+      "flush secret.key",
+      "flush engine",
+    ]);
   });
 
   it("removes its empty claim when the rename over it fails", async () => {
     const { root, path } = await keyFolder();
     drive.link = { code: "ENOTSUP", errno: -4049 };
     drive.renameFails = true;
-    await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({ code: "key-corrupt", message: generalWords });
+    await expect(installWorkspaceDataKey(root, Buffer.alloc(32, 7))).rejects.toMatchObject({
+      code: "key-corrupt",
+      message: generalWords,
+    });
     expect(await readdir(dirname(path))).toEqual([]);
   });
 });

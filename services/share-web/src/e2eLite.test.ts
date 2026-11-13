@@ -4,10 +4,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSyncRelayHandler } from "@dohc/sync-relay";
-import {
-  openSyncRelayStorage,
-  type SyncRelayStorage,
-} from "@dohc/sync-relay/storage";
+import { openSyncRelayStorage, type SyncRelayStorage } from "@dohc/sync-relay/storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createShareWebApplication } from "./server";
 
@@ -18,12 +15,10 @@ const storages: SyncRelayStorage[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    servers.splice(0).map(
-      (server) => {
-        server.closeIdleConnections();
-        return new Promise<void>((resolve) => server.close(() => resolve()));
-      },
-    ),
+    servers.splice(0).map((server) => {
+      server.closeIdleConnections();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    }),
   );
   for (const storage of storages.splice(0)) storage.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -186,11 +181,7 @@ describe("share-web e2e-lite", () => {
     const cookie = exchanged.headers
       .getSetCookie()
       .map((setCookie) => setCookie.split(";", 1)[0]!)
-      .find(
-        (pair) =>
-          pair.startsWith("dohc_share_") &&
-          !pair.startsWith("dohc_share_profile_"),
-      );
+      .find((pair) => pair.startsWith("dohc_share_") && !pair.startsWith("dohc_share_profile_"));
     expect(cookie).toBeDefined();
     const sessionHeaders = {
       cookie: cookie!,
@@ -214,12 +205,7 @@ describe("share-web e2e-lite", () => {
     });
     expect(handedOff.status).toBe(200);
     const handoff = await body(handedOff);
-    expect(Object.keys(handoff).sort()).toEqual([
-      "code",
-      "expiresAtMs",
-      "ok",
-      "relayUrl",
-    ]);
+    expect(Object.keys(handoff).sort()).toEqual(["code", "expiresAtMs", "ok", "relayUrl"]);
     expect(handoff.ok).toBe(true);
     expect(String(handoff.code)).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(handoff.relayUrl).toBe(relayUrl.replace(/\/$/u, ""));
@@ -281,7 +267,9 @@ describe("share-web e2e-lite", () => {
     expect(log.ops).toEqual([
       expect.objectContaining({
         opKind: "file.current",
-        payload: expect.objectContaining({ file: expect.objectContaining({ path: "docs/readme.md", blobSha256: blobSha }) }),
+        payload: expect.objectContaining({
+          file: expect.objectContaining({ path: "docs/readme.md", blobSha256: blobSha }),
+        }),
       }),
     ]);
     const file = await fetch(`${shareWebUrl}/api/view/blob/${blobSha}`, {

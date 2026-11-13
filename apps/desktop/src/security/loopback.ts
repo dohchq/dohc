@@ -1,9 +1,7 @@
 function normalizeLoopbackHostname(hostname: string): string {
   // Node's WHATWG URL implementation currently returns "[::1]" for hostname,
   // so normalize both bracketed and unbracketed forms before comparison.
-  return hostname.startsWith("[") && hostname.endsWith("]")
-    ? hostname.slice(1, -1)
-    : hostname;
+  return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
 }
 
 export function isLoopbackHostname(hostname: string): boolean {
@@ -19,17 +17,12 @@ export function isLoopbackHostname(hostname: string): boolean {
 function isIpv4MappedLoopback(suffix: string): boolean {
   if (isIpv4Loopback(suffix)) return true;
   const hextets = suffix.split(":");
-  if (
-    hextets.length !== 2 ||
-    !hextets.every((part) => /^[0-9a-f]{1,4}$/i.test(part))
-  ) {
+  if (hextets.length !== 2 || !hextets.every((part) => /^[0-9a-f]{1,4}$/i.test(part))) {
     return false;
   }
   const high = Number.parseInt(hextets[0], 16);
   const low = Number.parseInt(hextets[1], 16);
-  return isIpv4Loopback(
-    [high >> 8, high & 0xff, low >> 8, low & 0xff].join("."),
-  );
+  return isIpv4Loopback([high >> 8, high & 0xff, low >> 8, low & 0xff].join("."));
 }
 
 function isIpv4Loopback(hostname: string): boolean {

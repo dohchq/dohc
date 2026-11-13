@@ -1,7 +1,18 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { isInsideOrUnknown } from "../security/pathContainment";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
@@ -53,10 +64,16 @@ export async function markAsDownloaded(path: string, platform: NodeJS.Platform):
     // Bit 0x0001 is QTN_FLAG_DOWNLOAD in WebKit's
     // Source/WebCore/PAL/pal/spi/mac/QuarantineSPI.h. Then seconds since 1970
     // in hex, and the name of the app that wrote the file.
-    const seconds = Math.floor(Date.now() / 1000).toString(16).padStart(8, "0");
+    const seconds = Math.floor(Date.now() / 1000)
+      .toString(16)
+      .padStart(8, "0");
     await new Promise<void>((resolve, reject) => {
-      execFile("/usr/bin/xattr", ["-w", "com.apple.quarantine", `0081;${seconds};dohc;`, path],
-        { timeout: 10_000 }, (error) => (error ? reject(error) : resolve()));
+      execFile(
+        "/usr/bin/xattr",
+        ["-w", "com.apple.quarantine", `0081;${seconds};dohc;`, path],
+        { timeout: 10_000 },
+        (error) => (error ? reject(error) : resolve()),
+      );
     });
   }
   // Linux has no download mark.
@@ -90,10 +107,14 @@ export async function fileOrigin(
   };
   const elsewhere = registered
     .filter((entry) => entry.workspaceId !== workspace.workspaceId)
-    .map((entry) => shareViewIsPresent(entry.shareView) ? entry.rootPath : join(entry.rootPath, SHARED_WITH_ME_FOLDER));
+    .map((entry) =>
+      shareViewIsPresent(entry.shareView)
+        ? entry.rootPath
+        : join(entry.rootPath, SHARED_WITH_ME_FOLDER),
+    );
   const answers = await Promise.all([
     holds(join(workspace.rootPath, SHARED_WITH_ME_FOLDER)),
-    ...elsewhere.map(async (place) => await isInsideOrUnknown(place, realTarget) && holds(place)),
+    ...elsewhere.map(async (place) => (await isInsideOrUnknown(place, realTarget)) && holds(place)),
   ]);
   return answers.includes(true) ? "received" : "own";
 }
@@ -121,7 +142,7 @@ export async function markedCopyOf(copies: MarkedCopies, source: string): Promis
 
 /** At quit: this run's folder only. A copy another program holds open stays for the next start. */
 export async function removeMarkedCopies(copies: MarkedCopies): Promise<void> {
-  if (await isRealFolder(dirname(copies.folder)) && await isRealFolder(copies.folder)) {
+  if ((await isRealFolder(dirname(copies.folder))) && (await isRealFolder(copies.folder))) {
     await rm(copies.folder, { recursive: true, force: true });
   }
 }
@@ -131,11 +152,15 @@ export async function removeEarlierMarkedCopies(copies: MarkedCopies): Promise<v
   const root = dirname(copies.folder);
   if (!(await isRealFolder(root))) return;
   const names = await readdir(root).catch(() => []);
-  await Promise.all(names.filter((name) => name !== basename(copies.folder)).map(async (name) => {
-    const path = join(root, name);
-    // Only a real folder is emptied. A link is removed itself.
-    await rm(path, { recursive: await isRealFolder(path), force: true }).catch(() => undefined);
-  }));
+  await Promise.all(
+    names
+      .filter((name) => name !== basename(copies.folder))
+      .map(async (name) => {
+        const path = join(root, name);
+        // Only a real folder is emptied. A link is removed itself.
+        await rm(path, { recursive: await isRealFolder(path), force: true }).catch(() => undefined);
+      }),
+  );
 }
 
 // A link here would lead outside, so dohc works only through a real folder.

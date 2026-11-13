@@ -4,7 +4,11 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { playwrightCliPath, playwrightRunEnv, runPlaywright } from "../../scripts/run-playwright.mjs";
+import {
+  playwrightCliPath,
+  playwrightRunEnv,
+  runPlaywright,
+} from "../../scripts/run-playwright.mjs";
 
 // The wrapper that gives every Playwright run its own transform cache
 // directory, so concurrent runs cannot delete or tear each other's compiled
@@ -74,10 +78,7 @@ async function drive({
 
 describe("playwrightRunEnv", () => {
   it("overrides an inherited PWTEST_CACHE_DIR — isolation is unconditional", () => {
-    const env = playwrightRunEnv(
-      { PWTEST_CACHE_DIR: "/machine/shared-cache" },
-      "/runs/cache-2",
-    );
+    const env = playwrightRunEnv({ PWTEST_CACHE_DIR: "/machine/shared-cache" }, "/runs/cache-2");
     expect(env.PWTEST_CACHE_DIR).toBe("/runs/cache-2");
   });
 });

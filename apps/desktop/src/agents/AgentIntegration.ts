@@ -91,12 +91,15 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
     record.id.length > 0 &&
     typeof record.startedAt === "number" &&
     Number.isFinite(record.startedAt) &&
-    (record.endedAt === undefined || (typeof record.endedAt === "number" && Number.isFinite(record.endedAt))) &&
+    (record.endedAt === undefined ||
+      (typeof record.endedAt === "number" && Number.isFinite(record.endedAt))) &&
     typeof record.agentId === "string" &&
     record.agentId.length > 0 &&
     typeof record.onBehalfOf === "string" &&
     record.onBehalfOf.length > 0 &&
-    (record.status === "running" || record.status === "complete" || record.status === "failed" ||
+    (record.status === "running" ||
+      record.status === "complete" ||
+      record.status === "failed" ||
       record.status === "interrupted") &&
     typeof record.incarnation === "string" &&
     record.incarnation.length > 0
@@ -160,7 +163,11 @@ async function readRuns(rootPath: string, installId: string): Promise<AgentRunRe
   return parsed;
 }
 
-async function writeRuns(rootPath: string, installId: string, runs: AgentRunRecord[]): Promise<void> {
+async function writeRuns(
+  rootPath: string,
+  installId: string,
+  runs: AgentRunRecord[],
+): Promise<void> {
   const file = await runsFile(rootPath, installId, true);
   // Atomic temp+rename so a crash never truncates the run log. A unique suffix
   // (not just pid) means a leftover temp from a crashed run can never be
@@ -173,12 +180,10 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
   const createId = options.createId ?? (() => randomUUID());
   const incarnation = options.incarnation ?? randomUUID();
   const ownRuns = (root: string) => readRuns(root, options.installId());
-  const saveOwnRuns = (root: string, runs: AgentRunRecord[]) => writeRuns(root, options.installId(), runs);
+  const saveOwnRuns = (root: string, runs: AgentRunRecord[]) =>
+    writeRuns(root, options.installId(), runs);
 
-  function serialize<T>(
-    state: AgentIntegrationState,
-    task: () => Promise<T>,
-  ): Promise<T> {
+  function serialize<T>(state: AgentIntegrationState, task: () => Promise<T>): Promise<T> {
     const run = state.chain.then(task, task);
     state.chain = run.then(
       () => undefined,
@@ -248,9 +253,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
         try {
           await serialize(state, async () => {
             const runs = await ownRuns(root);
-            const persisted = runs.find(
-              (candidate) => candidate.id === record.id,
-            );
+            const persisted = runs.find((candidate) => candidate.id === record.id);
             if (persisted) {
               persisted.status = record.status;
               persisted.endedAt = record.endedAt;

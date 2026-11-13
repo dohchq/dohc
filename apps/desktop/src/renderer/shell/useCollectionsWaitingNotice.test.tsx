@@ -27,7 +27,10 @@ const HEALTHY: SyncStatusResult = {
 
 // A retry whose answer the test sends when it chooses.
 function pendingRetry() {
-  let settle: { resolve: (status: SyncStatusResult) => void; reject: (error: unknown) => void } | null = null;
+  let settle: {
+    resolve: (status: SyncStatusResult) => void;
+    reject: (error: unknown) => void;
+  } | null = null;
   const retryCloudSync = vi.fn(
     (_id: string, _reason: "person") =>
       new Promise<SyncStatusResult>((resolve, reject) => {
@@ -45,7 +48,9 @@ function pendingRetry() {
 // The shell's error hook and the notice together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; waiting: Waiting | undefined },
-  retryCloudSync = vi.fn(async (_id: string, _reason: "person"): Promise<SyncStatusResult> => HEALTHY),
+  retryCloudSync = vi.fn(
+    async (_id: string, _reason: "person"): Promise<SyncStatusResult> => HEALTHY,
+  ),
 ) {
   const openSyncSettings = vi.fn();
   const view = renderHook(
@@ -76,7 +81,9 @@ describe("useCollectionsWaitingNotice", () => {
     expect(view.toasts()).toHaveLength(1);
     const row = view.rows()[0]!;
     expect(row.title).toBe("Collection updates are waiting");
-    expect(row.message).toBe("They continue once sync finishes. To work offline, pause sync in Settings.");
+    expect(row.message).toBe(
+      "They continue once sync finishes. To work offline, pause sync in Settings.",
+    );
     expect(row.tone).toBe("warning");
     expect(row.kind).toBe("collections-waiting");
     expect(row.action?.label).toBe("Sync settings");

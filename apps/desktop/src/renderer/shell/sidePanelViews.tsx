@@ -62,7 +62,11 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
     customize: "chats",
     actions: (context) =>
       context.captureAvailable && !(parseTab(context.focusedTabPath)?.kind === "chat") ? (
-        <HeaderButton testId="chats-open-tab" label="Open chats in tab" onClick={context.openChatsTab}>
+        <HeaderButton
+          testId="chats-open-tab"
+          label="Open chats in tab"
+          onClick={context.openChatsTab}
+        >
           {openInTabIcon}
         </HeaderButton>
       ) : null,
@@ -104,7 +108,11 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
   graph: {
     ...VIEW_IDENTITY.graph,
     actions: (context) => (
-      <HeaderButton testId="graph-open-tab" label="Open graph in tab" onClick={context.openGraphTab}>
+      <HeaderButton
+        testId="graph-open-tab"
+        label="Open graph in tab"
+        onClick={context.openGraphTab}
+      >
         {openInTabIcon}
       </HeaderButton>
     ),
@@ -126,7 +134,11 @@ export const SIDE_PANEL_VIEWS: Readonly<Record<ViewId, SidePanelView>> = {
   history: {
     ...VIEW_IDENTITY.history,
     actions: (context) => (
-      <HeaderButton testId="history-open-tab" label="Open history in tab" onClick={context.openHistoryTab}>
+      <HeaderButton
+        testId="history-open-tab"
+        label="Open history in tab"
+        onClick={context.openHistoryTab}
+      >
         {openInTabIcon}
       </HeaderButton>
     ),

@@ -1,20 +1,39 @@
-import {isDeepStrictEqual} from "node:util";
-import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
-import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
-import type {LiveHostConnectionCoordinate} from "./storage";
-import type {LiveCommittedDeliveryStore, StopRestoreCutCapture} from "./storage/liveCommittedDelivery";
-import {StopRestoreCancellationRefused, type StopRestoreLookup} from "./storage/liveRestoreOperation";
-import {parseNativeRestoreCancellationAnswer, parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
-import {configRecord} from "./deviceLiveHostConfig";
-import {authorityInteger} from "./storage/liveDocumentAuthority";
-import {settlementResponse,settlementPending} from "./liveSettlement";
+import { isDeepStrictEqual } from "node:util";
+import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import type { LiveHostConnectionCoordinate } from "./storage";
+import type {
+  LiveCommittedDeliveryStore,
+  StopRestoreCutCapture,
+} from "./storage/liveCommittedDelivery";
+import {
+  StopRestoreCancellationRefused,
+  type StopRestoreLookup,
+} from "./storage/liveRestoreOperation";
+import {
+  parseNativeRestoreCancellationAnswer,
+  parseNativeRestoreFenceReceipt,
+  type NativeRestoreFenceReceipt,
+} from "./liveRestoreFence";
+import { configRecord } from "./deviceLiveHostConfig";
+import { authorityInteger } from "./storage/liveDocumentAuthority";
+import { settlementResponse, settlementPending } from "./liveSettlement";
 
-export type StopRestoreOutcome = {kind: "pending"; reason: string} | {kind: "done"; receipt: NativeRestoreFenceReceipt};
+export type StopRestoreOutcome =
+  | { kind: "pending"; reason: string }
+  | { kind: "done"; receipt: NativeRestoreFenceReceipt };
 export function snapshotStopRestoreLookup(input: StopRestoreLookup): StopRestoreLookup {
-  return {operationId: parseLiveUpdateIdentifier(input.operationId), workspaceId: parseLiveUpdateIdentifier(input.workspaceId), ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId)};
+  return {
+    operationId: parseLiveUpdateIdentifier(input.operationId),
+    workspaceId: parseLiveUpdateIdentifier(input.workspaceId),
+    ownerUserId: parseLiveUpdateIdentifier(input.ownerUserId),
+  };
 }
 
-export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} | {kind: "refused"; reason: string} | {kind: "declined"};
+export type StopRestoreCancellationOutcome =
+  | { kind: "pending"; reason: string }
+  | { kind: "refused"; reason: string }
+  | { kind: "declined" };
 
 /**
  * Asks the fencing host to end a restore whose Decline the relay recorded,
@@ -28,85 +47,161 @@ export type StopRestoreCancellationOutcome = {kind: "pending"; reason: string} |
 export async function cancelStopRestore(options: {
   store: LiveCommittedDeliveryStore;
   lookup: StopRestoreLookup;
-  connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number};
+  connection: {
+    client: EngineClient;
+    workspace: string;
+    host: LiveHostConnectionCoordinate;
+    deadlineMs: number;
+    nextRequestId(): number;
+  };
   signal?: AbortSignal;
 }): Promise<StopRestoreCancellationOutcome> {
-  const {store, connection: c, signal} = options, input = {...snapshotStopRestoreLookup(options.lookup), host: c.host};
+  const { store, connection: c, signal } = options,
+    input = { ...snapshotStopRestoreLookup(options.lookup), host: c.host };
   signal?.throwIfAborted();
   const params = store.pendingStopRestoreCancellation(input);
-  if (!params) return {kind: "declined"};
-  const response = await c.client.sendRequest({id: c.nextRequestId(), workspace: c.workspace, deadlineMs: c.deadlineMs,
-    method: "liveApplication.cancelRestoreFence", params: {...params}}, signal);
+  if (!params) return { kind: "declined" };
+  const response = await c.client.sendRequest(
+    {
+      id: c.nextRequestId(),
+      workspace: c.workspace,
+      deadlineMs: c.deadlineMs,
+      method: "liveApplication.cancelRestoreFence",
+      params: { ...params },
+    },
+    signal,
+  );
   signal?.throwIfAborted();
   const answer = parseNativeRestoreCancellationAnswer(response.result);
   // The host holds no binding at that generation now, so its answer proves nothing about this restore.
-  if (answer.status === "cancelled" && answer.binding === null) return {kind: "pending", reason: "The host holds no binding at the restore's generation."};
-  try {store.acknowledgeStopRestoreCancellation(input, answer, Date.now());}
-  catch (error) {
-    if (error instanceof StopRestoreCancellationRefused) return {kind: "refused", reason: error.message};
+  if (answer.status === "cancelled" && answer.binding === null)
+    return { kind: "pending", reason: "The host holds no binding at the restore's generation." };
+  try {
+    store.acknowledgeStopRestoreCancellation(input, answer, Date.now());
+  } catch (error) {
+    if (error instanceof StopRestoreCancellationRefused)
+      return { kind: "refused", reason: error.message };
     console.error("[sync-relay] restore cancellation not recorded:", error);
-    return {kind: "pending", reason: "The host's cancellation answer was not recorded."};
+    return { kind: "pending", reason: "The host's cancellation answer was not recorded." };
   }
-  return {kind: "declined"};
+  return { kind: "declined" };
 }
 
 /** The consumer holds its normal document exclusion for this entire call. */
 export async function deliverStopRestore(options: {
   store: LiveCommittedDeliveryStore;
   lookup: StopRestoreLookup;
-  connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
+  connection: {
+    client: EngineClient;
+    workspace: string;
+    host: LiveHostConnectionCoordinate;
+    deadlineMs: number;
+    nextRequestId(): number;
     /** Publishes this host's replica journal; absent where the host has none to drive. */
-    publish?(signal?: AbortSignal): Promise<unknown>};
+    publish?(signal?: AbortSignal): Promise<unknown>;
+  };
   deliveryKind: "bootstrap" | "owner";
   signal?: AbortSignal;
 }): Promise<StopRestoreOutcome> {
-  const {store, connection: c, signal} = options, input = {...snapshotStopRestoreLookup(options.lookup), host: c.host};
-  const check = () => {if (signal?.aborted) throw signal.reason;};
-  const request = () => ({id: c.nextRequestId(), workspace: c.workspace, deadlineMs: c.deadlineMs});
+  const { store, connection: c, signal } = options,
+    input = { ...snapshotStopRestoreLookup(options.lookup), host: c.host };
+  const check = () => {
+    if (signal?.aborted) throw signal.reason;
+  };
+  const request = () => ({
+    id: c.nextRequestId(),
+    workspace: c.workspace,
+    deadlineMs: c.deadlineMs,
+  });
   let capture: StopRestoreCutCapture | undefined;
   try {
     check();
     const opened = store.openStopRestoreCut(input);
-    if (opened.kind === "waiting") return {kind: "pending", reason: "The saved owner adoption is unavailable."};
+    if (opened.kind === "waiting")
+      return { kind: "pending", reason: "The saved owner adoption is unavailable." };
     if (opened.kind === "ready") {
       capture = opened.capture;
-      if (capture.deliveryKind !== options.deliveryKind) throw new Error("Restore delivery kind does not match its configured host.");
+      if (capture.deliveryKind !== options.deliveryKind)
+        throw new Error("Restore delivery kind does not match its configured host.");
       const binding = capture.binding;
-      const registered = await c.client.sendRequest({...request(), method: "liveApplication.register", params: {
-        binding: {...binding, selectorPaths: [...binding.selectorPaths]},
-        ...(capture.resumeAdoptionId === null ? {} : {resumeAdoptionId: capture.resumeAdoptionId}),
-      }}, signal);
+      const registered = await c.client.sendRequest(
+        {
+          ...request(),
+          method: "liveApplication.register",
+          params: {
+            binding: { ...binding, selectorPaths: [...binding.selectorPaths] },
+            ...(capture.resumeAdoptionId === null
+              ? {}
+              : { resumeAdoptionId: capture.resumeAdoptionId }),
+          },
+        },
+        signal,
+      );
       check();
-      const registrationResult = configRecord(registered.result, [], ["registrationId", "status", "reason"]);
-      if (registrationResult.status === "pending" && typeof registrationResult.reason === "string") return {kind: "pending", reason: registrationResult.reason};
-      const registrationId = authorityInteger(configRecord(registered.result, ["registrationId"]).registrationId, 1);
+      const registrationResult = configRecord(
+        registered.result,
+        [],
+        ["registrationId", "status", "reason"],
+      );
+      if (registrationResult.status === "pending" && typeof registrationResult.reason === "string")
+        return { kind: "pending", reason: registrationResult.reason };
+      const registrationId = authorityInteger(
+        configRecord(registered.result, ["registrationId"]).registrationId,
+        1,
+      );
       // A materialized settlement released the host's author coverage, and nothing applied since.
       let settledSinceApply = false;
       for (;;) {
         check();
         const next = store.nextStopRestoreCut(capture);
-        if (next.kind === "done") {store.completeStopRestoreCut(capture); break;}
-        const native = {...request(), registrationId};
-        const response = next.kind === "bootstrap"
-          ? await c.client.sendLiveBootstrap(native, next.baseline, signal)
-          : await c.client.sendLiveApplication(native, next.admitted, signal);
+        if (next.kind === "done") {
+          store.completeStopRestoreCut(capture);
+          break;
+        }
+        const native = { ...request(), registrationId };
+        const response =
+          next.kind === "bootstrap"
+            ? await c.client.sendLiveBootstrap(native, next.baseline, signal)
+            : await c.client.sendLiveApplication(native, next.admitted, signal);
         check();
         const result = configRecord(response.result, ["status"], ["ack", "reason"]);
-        if (result.status === "pending" && result.reason === "settlement-required" && next.kind !== "bootstrap") {
+        if (
+          result.status === "pending" &&
+          result.reason === "settlement-required" &&
+          next.kind !== "bootstrap"
+        ) {
           // The host's author coverage is full. Settle once through what the
           // old cut applied, then offer the identical event again.
-          if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
-          const settled = await settlementResponse(c.client.sendRequest({...request(), method: "liveApplication.settle",
-            params: {registrationId, terminalReceipt: next.predecessor ? {...next.predecessor} : null}}, signal), next.predecessor);
+          if (settledSinceApply)
+            throw new Error(
+              "The host still requires settlement after settling everything it applied.",
+            );
+          const settled = await settlementResponse(
+            c.client.sendRequest(
+              {
+                ...request(),
+                method: "liveApplication.settle",
+                params: {
+                  registrationId,
+                  terminalReceipt: next.predecessor ? { ...next.predecessor } : null,
+                },
+              },
+              signal,
+            ),
+            next.predecessor,
+          );
           check();
           if (settlementPending(settled)) return settled;
-          if (!settled.materialized) return {kind: "pending", reason: "settlement-materialization-pending"};
+          if (!settled.materialized)
+            return { kind: "pending", reason: "settlement-materialization-pending" };
           settledSinceApply = true;
           continue;
         }
-        if (result.status === "pending" && typeof result.reason === "string") return {kind: "pending", reason: result.reason};
+        if (result.status === "pending" && typeof result.reason === "string")
+          return { kind: "pending", reason: result.reason };
         if (next.kind === "bootstrap") {
-          if (result.status !== "bootstrapped") throw new Error("Restore bootstrap did not commit.");
+          if (result.status !== "bootstrapped")
+            throw new Error("Restore bootstrap did not commit.");
           store.acknowledgeStopRestoreBootstrap(capture, result.ack);
         } else {
           if (result.status !== "applied") throw new Error("Restore application did not commit.");
@@ -114,27 +209,48 @@ export async function deliverStopRestore(options: {
         }
         settledSinceApply = false;
       }
-    } else if (opened.receipt.kind !== options.deliveryKind) throw new Error("Restore delivery kind does not match its configured host.");
+    } else if (opened.receipt.kind !== options.deliveryKind)
+      throw new Error("Restore delivery kind does not match its configured host.");
     check();
     const pending = store.pendingStopRestoreFence(input);
-    if (pending.receipt) return {kind: "done", receipt: pending.receipt};
+    if (pending.receipt) return { kind: "done", receipt: pending.receipt };
     // A refused fence commits nothing. Publishing once, under this same document
     // exclusion, lets the old generation's settlement moments reach the relay first.
-    let response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
+    let response = await c.client.sendRequest(
+      {
+        ...request(),
+        method: "liveApplication.fenceRestore",
+        params: { operation: pending.operation as never },
+      },
+      signal,
+    );
     check();
     let result = configRecord(response.result, ["status"], ["receipt", "reason"]);
     if (result.status === "pending" && typeof result.reason === "string") {
-      if (!c.publish) return {kind: "pending", reason: result.reason};
+      if (!c.publish) return { kind: "pending", reason: result.reason };
       await c.publish(signal);
       check();
-      response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
+      response = await c.client.sendRequest(
+        {
+          ...request(),
+          method: "liveApplication.fenceRestore",
+          params: { operation: pending.operation as never },
+        },
+        signal,
+      );
       check();
       result = configRecord(response.result, ["status"], ["receipt", "reason"]);
-      if (result.status === "pending" && typeof result.reason === "string") return {kind: "pending", reason: result.reason};
+      if (result.status === "pending" && typeof result.reason === "string")
+        return { kind: "pending", reason: result.reason };
     }
     if (result.status !== "fenced") throw new Error("Native restore fence did not commit.");
-    const receipt = parseNativeRestoreFenceReceipt(configRecord(response.result, ["status", "receipt"]).receipt);
-    if (!isDeepStrictEqual(receipt.operation, pending.operation)) throw new Error("Native restore fence acknowledgement changed the operation.");
-    return {kind: "done", receipt: store.acknowledgeStopRestoreFence(input, receipt)};
-  } finally {if (capture) store.closeStopRestoreCut(capture);}
+    const receipt = parseNativeRestoreFenceReceipt(
+      configRecord(response.result, ["status", "receipt"]).receipt,
+    );
+    if (!isDeepStrictEqual(receipt.operation, pending.operation))
+      throw new Error("Native restore fence acknowledgement changed the operation.");
+    return { kind: "done", receipt: store.acknowledgeStopRestoreFence(input, receipt) };
+  } finally {
+    if (capture) store.closeStopRestoreCut(capture);
+  }
 }

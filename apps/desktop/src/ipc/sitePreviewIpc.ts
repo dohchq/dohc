@@ -1,9 +1,6 @@
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import type { OwnedSiteCatalog } from "../workspaces/ownedSiteCatalog";
-import {
-  requireExactSiteRoot,
-  type SitePackageInfo,
-} from "../workspaces/sitePackage";
+import { requireExactSiteRoot, type SitePackageInfo } from "../workspaces/sitePackage";
 import type {
   SitePreviewExecution,
   createSitePreviewLifecycle,
@@ -16,10 +13,7 @@ import {
   type SitePreviewMode,
 } from "./bridgeContract";
 
-export type SitePreviewResultBody = Omit<
-  StartSitePreviewResult,
-  "url" | "exited" | "generation"
->;
+export type SitePreviewResultBody = Omit<StartSitePreviewResult, "url" | "exited" | "generation">;
 
 export type SitePreviewExecutionInput = {
   workspaceId: string;
@@ -54,16 +48,11 @@ export interface StartSitePreviewDependencies<
     ): Promise<Result>;
   };
   catalog: OwnedSiteCatalog<Workspace>;
-  lifecycle: Pick<
-    ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>,
-    "acquire"
-  >;
+  lifecycle: Pick<ReturnType<typeof createSitePreviewLifecycle<SitePreviewResultBody>>, "acquire">;
   isSharedView(workspaceId: string): boolean;
   // Throws unless this computer trusts the workspace to run its apps' code.
   assertMayRunAppCode(workspace: Workspace): Promise<unknown>;
-  execute(
-    input: SitePreviewExecutionInput,
-  ): Promise<SitePreviewExecution<SitePreviewResultBody>>;
+  execute(input: SitePreviewExecutionInput): Promise<SitePreviewExecution<SitePreviewResultBody>>;
 }
 
 function assertPreviewModeAllowed(
@@ -115,11 +104,7 @@ export function createStartSitePreviewHandler<
               const sharedView = dependencies.isSharedView(workspace.workspaceId);
               assertPreviewModeAllowed(sharedView, payload.siteRoot, payload.mode);
               const site = requireExactSiteRoot(
-                await dependencies.catalog.get(
-                  workspace,
-                  payload.siteRoot,
-                  payload.mode,
-                ),
+                await dependencies.catalog.get(workspace, payload.siteRoot, payload.mode),
                 payload.siteRoot,
               );
               // Before the start replaces the preview that shows now.

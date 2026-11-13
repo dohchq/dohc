@@ -1,4 +1,7 @@
-import { CHAT_RUNNER_INSTALL_ID_MAX_CHARS, isChatWakeLine } from "@dohc/workspace-contracts/chat-wakes";
+import {
+  CHAT_RUNNER_INSTALL_ID_MAX_CHARS,
+  isChatWakeLine,
+} from "@dohc/workspace-contracts/chat-wakes";
 import { RelayUnauthorizedError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
 import {
@@ -8,7 +11,11 @@ import {
   type ChatWakeStuck,
   type ChatWakeWorkspace,
 } from "./chatWakeConsumer";
-import { ChatWakeIntentsUnreadableError, type ChatWakeIntent, type ChatWakeIntents } from "./chatWakeIntents";
+import {
+  ChatWakeIntentsUnreadableError,
+  type ChatWakeIntent,
+  type ChatWakeIntents,
+} from "./chatWakeIntents";
 import type { ChatRunnerRoster } from "./chatRunnerRoster";
 
 // Runs one chat wake consumer for each credential lifetime, from startup
@@ -125,16 +132,24 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
 
   // Shown rows, one per workspace and problem, with the wakes each stands for.
   // They belong to one account; another account's lifetime takes them back.
-  const rows = new Map<string, { workspaceId: string | null; problem: ChatWakeProblem; wakes: Set<string> }>();
+  const rows = new Map<
+    string,
+    { workspaceId: string | null; problem: ChatWakeProblem; wakes: Set<string> }
+  >();
   let rowsScope: string | null = null;
-  function report(workspaceId: string | null, problem: ChatWakeProblem, intent: ChatWakeIntent | null): void {
+  function report(
+    workspaceId: string | null,
+    problem: ChatWakeProblem,
+    intent: ChatWakeIntent | null,
+  ): void {
     const key = JSON.stringify([workspaceId, problem]);
     const row = rows.get(key);
     const wake = intent?.wakeId ?? "";
     if (problem !== "unreadable" && row?.wakes.has(wake)) return;
     // A row counts as shown only once its report went through; a failed one is offered again next time.
-    try { deps.report(workspaceId, problem, intent); }
-    catch (error) {
+    try {
+      deps.report(workspaceId, problem, intent);
+    } catch (error) {
       deps.log(error);
       return;
     }
@@ -143,13 +158,17 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
   }
   // Taking a row back never fails the read or step that ended it.
   function takeBack(row: { workspaceId: string | null; problem: ChatWakeProblem }): void {
-    try { deps.clear(row.workspaceId, row.problem); }
-    catch (error) { deps.log(error); }
+    try {
+      deps.clear(row.workspaceId, row.problem);
+    } catch (error) {
+      deps.log(error);
+    }
   }
   // A wake moved on: its rows of these problems go once they stand for no other wake.
   function moved(wake: string, problems: readonly ChatWakeProblem[]): void {
     for (const [key, row] of rows) {
-      if (!problems.includes(row.problem) || !row.wakes.delete(wake) || row.wakes.size > 0) continue;
+      if (!problems.includes(row.problem) || !row.wakes.delete(wake) || row.wakes.size > 0)
+        continue;
       rows.delete(key);
       takeBack(row);
     }
@@ -199,54 +218,67 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
         if (error instanceof RelayUnauthorizedError) return session.unauthorized();
         // Busy, or a server without wake routes: the backoff answers both, and neither is the person's to fix.
         // An unreadable file has its own row.
-        if (error instanceof ChatWakeBusyError || error instanceof ChatWakeMissingError ||
-          error instanceof ChatWakeIntentsUnreadableError) return;
+        if (
+          error instanceof ChatWakeBusyError ||
+          error instanceof ChatWakeMissingError ||
+          error instanceof ChatWakeIntentsUnreadableError
+        )
+          return;
         deps.log(error);
       },
       // A workspace looks gone to a session that is no longer current; that is not the person's to fix.
-      onStuck: (intent, reason) => { if (session.isCurrent()) report(intent.workspaceId, reason, intent); },
+      onStuck: (intent, reason) => {
+        if (session.isCurrent()) report(intent.workspaceId, reason, intent);
+      },
     });
   }
 
   // Stops the running consumer when it isn't the current snapshot's, or when `again`, then starts the current one.
   function cycle(again: boolean): void {
-    transitions = transitions.then(async () => {
-      if (again) retryQueued = false;
-      if (running && (again || stopped || running.session !== latest)) {
-        const ended = running;
-        running = null;
-        await ended.consumer.stop();
-        leaving = ended.session;
-      }
-      // A dropped wake's row is over, and a fresh start can't change it.
-      if (again) clearRows(["unreadable", "parked", "unconfirmed"]);
-      const next = latest;
-      // Its account signed out, or another one signed in: withdraw with its own token, queued before the next publish.
-      // A credential load's placeholder decides nothing, and quit keeps the declarations.
-      if (leaving && !stopped && (next === null ? latestSettled : next.account.scope !== leaving.account.scope)) {
-        void deps.roster.withdraw(leaving);
-        leaving = null;
-      } else if (leaving && next !== null && next.account.scope === leaving.account.scope) {
-        leaving = null;
-      }
-      if (next === null && latestSettled) {
-        clearRows();
-        rowsScope = null;
-      }
-      if (running || stopped || !started || !deps.on || next === null || !next.isCurrent()) return;
-      if (!isChatWakeLine(next.account.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS)) {
-        deps.log(new Error("This computer's install ID can't be sent with chat wakes."));
-        return;
-      }
-      if (rowsScope !== next.account.scope) {
-        clearRows();
-        rowsScope = next.account.scope;
-      }
-      const consumer = consumerFor(next);
-      running = { session: next, consumer };
-      consumer.start();
-      void deps.roster.reconcile(next);
-    }).catch(deps.log);
+    transitions = transitions
+      .then(async () => {
+        if (again) retryQueued = false;
+        if (running && (again || stopped || running.session !== latest)) {
+          const ended = running;
+          running = null;
+          await ended.consumer.stop();
+          leaving = ended.session;
+        }
+        // A dropped wake's row is over, and a fresh start can't change it.
+        if (again) clearRows(["unreadable", "parked", "unconfirmed"]);
+        const next = latest;
+        // Its account signed out, or another one signed in: withdraw with its own token, queued before the next publish.
+        // A credential load's placeholder decides nothing, and quit keeps the declarations.
+        if (
+          leaving &&
+          !stopped &&
+          (next === null ? latestSettled : next.account.scope !== leaving.account.scope)
+        ) {
+          void deps.roster.withdraw(leaving);
+          leaving = null;
+        } else if (leaving && next !== null && next.account.scope === leaving.account.scope) {
+          leaving = null;
+        }
+        if (next === null && latestSettled) {
+          clearRows();
+          rowsScope = null;
+        }
+        if (running || stopped || !started || !deps.on || next === null || !next.isCurrent())
+          return;
+        if (!isChatWakeLine(next.account.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS)) {
+          deps.log(new Error("This computer's install ID can't be sent with chat wakes."));
+          return;
+        }
+        if (rowsScope !== next.account.scope) {
+          clearRows();
+          rowsScope = next.account.scope;
+        }
+        const consumer = consumerFor(next);
+        running = { session: next, consumer };
+        consumer.start();
+        void deps.roster.reconcile(next);
+      })
+      .catch(deps.log);
   }
 
   return {
@@ -267,7 +299,9 @@ export function createChatWakeLifetime(deps: ChatWakeLifetimeDeps): ChatWakeLife
     pulled({ applied, recovered }) {
       // Reaching the relay again is also when a declaration that failed can go out.
       if (recovered && running) void deps.roster.reconcile(running.session);
-      return applied || recovered ? running?.consumer.resume() ?? Promise.resolve() : Promise.resolve();
+      return applied || recovered
+        ? (running?.consumer.resume() ?? Promise.resolve())
+        : Promise.resolve();
     },
     runnersChanged() {
       return running ? deps.roster.reconcile(running.session) : Promise.resolve();

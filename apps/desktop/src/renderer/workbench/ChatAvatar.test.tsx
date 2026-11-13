@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { neutralPresentation, ownPresentation, setOwnPresentation, bindAgentColorUpdates, clearAgentColorOverrides } from "./actorPresentation";
+import {
+  neutralPresentation,
+  ownPresentation,
+  setOwnPresentation,
+  bindAgentColorUpdates,
+  clearAgentColorOverrides,
+} from "./actorPresentation";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import { AgentName, ChatAvatar } from "./ChatAvatar";
 import { AgentBadge } from "./AgentBadge";
@@ -28,8 +34,17 @@ describe("ChatAvatar initial", () => {
   });
 
   it("shows one initial at every size", () => {
-    render(<ChatAvatar presentation={neutralPresentation} name="William White" kind="human" size="strip" />);
-    render(<ChatAvatar presentation={neutralPresentation} name="Wren Webb" kind="link" size="post" />);
+    render(
+      <ChatAvatar
+        presentation={neutralPresentation}
+        name="William White"
+        kind="human"
+        size="strip"
+      />,
+    );
+    render(
+      <ChatAvatar presentation={neutralPresentation} name="Wren Webb" kind="link" size="post" />,
+    );
     expect(screen.getByTitle("William White").textContent).toBe("W");
     expect(screen.getByTitle("Wren Webb").textContent).toBe("W");
   });
@@ -48,7 +63,9 @@ describe("ChatAvatar presentation", () => {
     const presentation = { group: "opaque", hue: "teal" as const, self: false };
     const { rerender } = render(<ChatAvatar name="Ada" kind="human" presentation={presentation} />);
     expect(screen.getByTitle("Ada").className).toContain("text-hue-teal");
-    rerender(<ChatAvatar name="A😀" kind="human" presentation={{ ...presentation, group: "other" }} />);
+    rerender(
+      <ChatAvatar name="A😀" kind="human" presentation={{ ...presentation, group: "other" }} />,
+    );
     expect(screen.getByTitle("A😀").className).toContain("text-hue-teal");
   });
   it("keeps an unknown person neutral and agents in the default voice", () => {
@@ -57,40 +74,83 @@ describe("ChatAvatar presentation", () => {
     expect(screen.getByTitle("Ada").className).toContain("text-muted");
     expect(screen.getByTitle("Agent").className).toContain("text-agent");
   });
-  it.each(["post", "row", "comment", "strip"] as const)("draws an agent square and a person round at %s size, whatever the color", (size) => {
-    render(<ChatAvatar name="Ada" kind="human" size={size} presentation={{ ...neutralPresentation, hue: "teal" }} />);
-    render(<ChatAvatar name="Nova" kind="agent" size={size} presentation={neutralPresentation} />);
-    render(<ChatAvatar name="Orbit" kind="agent" size={size} presentation={{ group: "orbit", hue: "plum", self: false }} />);
-    expect(screen.getByTitle("Ada").className).toMatch(/\brounded-full\b/u);
-    for (const agent of ["Nova", "Orbit"]) {
-      expect(screen.getByTitle(agent).className).not.toContain("rounded-full");
-      expect(screen.getByTitle(agent).className).toMatch(/\brounded(-lg)?\b/u);
-    }
-  });
-  it.each(["post", "row", "comment", "strip"] as const)("draws an agent that joined with a link as an olive square with a link holder's dashed edge at %s size", (size) => {
-    render(<ChatAvatar name="Claude Code" kind="link" linkAgent size={size} presentation={{ group: "7", hue: "plum", self: false }} />);
-    render(<ChatAvatar name="Wren" kind="link" size={size} presentation={neutralPresentation} />);
-    const agent = screen.getByTitle("Claude Code");
-    expect(agent.className).toMatch(/\brounded(-lg)?\b/u);
-    expect(agent.className).not.toContain("rounded-full");
-    expect(agent.className).toContain("border-dashed");
-    expect(agent.className).toContain("border-agent");
-    expect(agent.className).toContain("text-agent");
-    expect(agent.className).not.toMatch(/hue/u);
-    const person = screen.getByTitle("Wren");
-    expect(person.className).toMatch(/\brounded-full\b/u);
-    expect(person.className).toContain("border-dashed");
-  });
+  it.each(["post", "row", "comment", "strip"] as const)(
+    "draws an agent square and a person round at %s size, whatever the color",
+    (size) => {
+      render(
+        <ChatAvatar
+          name="Ada"
+          kind="human"
+          size={size}
+          presentation={{ ...neutralPresentation, hue: "teal" }}
+        />,
+      );
+      render(
+        <ChatAvatar name="Nova" kind="agent" size={size} presentation={neutralPresentation} />,
+      );
+      render(
+        <ChatAvatar
+          name="Orbit"
+          kind="agent"
+          size={size}
+          presentation={{ group: "orbit", hue: "plum", self: false }}
+        />,
+      );
+      expect(screen.getByTitle("Ada").className).toMatch(/\brounded-full\b/u);
+      for (const agent of ["Nova", "Orbit"]) {
+        expect(screen.getByTitle(agent).className).not.toContain("rounded-full");
+        expect(screen.getByTitle(agent).className).toMatch(/\brounded(-lg)?\b/u);
+      }
+    },
+  );
+  it.each(["post", "row", "comment", "strip"] as const)(
+    "draws an agent that joined with a link as an olive square with a link holder's dashed edge at %s size",
+    (size) => {
+      render(
+        <ChatAvatar
+          name="Claude Code"
+          kind="link"
+          linkAgent
+          size={size}
+          presentation={{ group: "7", hue: "plum", self: false }}
+        />,
+      );
+      render(<ChatAvatar name="Wren" kind="link" size={size} presentation={neutralPresentation} />);
+      const agent = screen.getByTitle("Claude Code");
+      expect(agent.className).toMatch(/\brounded(-lg)?\b/u);
+      expect(agent.className).not.toContain("rounded-full");
+      expect(agent.className).toContain("border-dashed");
+      expect(agent.className).toContain("border-agent");
+      expect(agent.className).toContain("text-agent");
+      expect(agent.className).not.toMatch(/hue/u);
+      const person = screen.getByTitle("Wren");
+      expect(person.className).toMatch(/\brounded-full\b/u);
+      expect(person.className).toContain("border-dashed");
+    },
+  );
   it("keeps automation marks bare", () => {
     render(<ChatAvatar name="Job" kind="automation" presentation={neutralPresentation} />);
     expect(screen.getByTitle("Job").className).not.toMatch(/\b(border|hue|agent|rounded)/u);
     expect(screen.getByTitle("Job").querySelector("svg.lucide-zap")).not.toBeNull();
   });
   it("applies chosen colours only to self, and repaints", () => {
-    render(<ChatAvatar name="You" kind="human" presentation={{ ...ownPresentation, hue: "teal" }} />);
-    render(<ChatAvatar name="Someone" kind="human" presentation={{ ...neutralPresentation, hue: "teal" }} />);
+    render(
+      <ChatAvatar name="You" kind="human" presentation={{ ...ownPresentation, hue: "teal" }} />,
+    );
+    render(
+      <ChatAvatar
+        name="Someone"
+        kind="human"
+        presentation={{ ...neutralPresentation, hue: "teal" }}
+      />,
+    );
     render(<ChatAvatar name="Agent" kind="agent" presentation={ownPresentation} />);
-    act(() => setChosenColors({ ...settingsWithAgent({ hue: "rose" }), appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" } }));
+    act(() =>
+      setChosenColors({
+        ...settingsWithAgent({ hue: "rose" }),
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, yourColor: "rose" },
+      }),
+    );
     expect(screen.getByTitle("You").className).toContain("text-hue-rose");
     expect(screen.getByTitle("Someone").className).toContain("text-hue-teal");
     expect(screen.getByTitle("Agent").className).toContain("text-hue-rose");
@@ -101,21 +161,52 @@ describe("ChatAvatar presentation", () => {
 });
 
 it("paints an agent's name and sparkle in its avatar's hue, olive by default, and repaints them together", () => {
-  let changed: Parameters<import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]>[0] = () => undefined;
-  const stop = bindAgentColorUpdates({ onAgentColorChanged: listener => { changed = listener; return () => undefined; } }, () => "w");
+  let changed: Parameters<
+    import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]
+  >[0] = () => undefined;
+  const stop = bindAgentColorUpdates(
+    {
+      onAgentColorChanged: (listener) => {
+        changed = listener;
+        return () => undefined;
+      },
+    },
+    () => "w",
+  );
   const orbit = { group: "orbit", hue: "plum" as const, self: false };
   const nova = { group: "nova", hue: null, self: false };
-  render(<>
-    <ChatAvatar name="Orbit" kind="agent" presentation={orbit} />
-    <AgentName kind="agent" presentation={orbit}>Orbit name</AgentName>
-    <AgentBadge testIdPrefix="orbit" author={{ authorDisplayName: "Orbit" }} presentation={orbit} />
-    <AgentName kind="agent" presentation={nova}>Nova name</AgentName>
-    <AgentBadge testIdPrefix="nova" author={{ authorDisplayName: "Nova" }} presentation={nova} />
-    <p><AgentName kind="human" presentation={{ ...neutralPresentation, hue: "teal" }}>Sam name</AgentName></p>
-    <AgentName kind="link" linkAgent presentation={orbit}>Link agent name</AgentName>
-    <p><AgentName kind="link" presentation={orbit}>Link holder name</AgentName></p>
-  </>);
-  const badge = (prefix: string) => screen.getByTestId(`${prefix}-agent-badge`).parentElement!.className;
+  render(
+    <>
+      <ChatAvatar name="Orbit" kind="agent" presentation={orbit} />
+      <AgentName kind="agent" presentation={orbit}>
+        Orbit name
+      </AgentName>
+      <AgentBadge
+        testIdPrefix="orbit"
+        author={{ authorDisplayName: "Orbit" }}
+        presentation={orbit}
+      />
+      <AgentName kind="agent" presentation={nova}>
+        Nova name
+      </AgentName>
+      <AgentBadge testIdPrefix="nova" author={{ authorDisplayName: "Nova" }} presentation={nova} />
+      <p>
+        <AgentName kind="human" presentation={{ ...neutralPresentation, hue: "teal" }}>
+          Sam name
+        </AgentName>
+      </p>
+      <AgentName kind="link" linkAgent presentation={orbit}>
+        Link agent name
+      </AgentName>
+      <p>
+        <AgentName kind="link" presentation={orbit}>
+          Link holder name
+        </AgentName>
+      </p>
+    </>,
+  );
+  const badge = (prefix: string) =>
+    screen.getByTestId(`${prefix}-agent-badge`).parentElement!.className;
   expect(screen.getByText("Orbit name").className).toBe("text-hue-plum");
   expect(badge("orbit")).toContain("text-hue-plum");
   expect(screen.getByText("Nova name").className).toBe("text-agent");
@@ -142,15 +233,38 @@ it("repaints an own avatar when main supplies its default hue", () => {
   act(() => setOwnPresentation(undefined));
 });
 
-
 it("repaints every avatar of the changed agent without reading or rerendering its parent", () => {
-  let changed: Parameters<import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]>[0] = () => undefined;
-  const stop = bindAgentColorUpdates({ onAgentColorChanged: listener => { changed = listener; return () => undefined; } }, () => "w");
-  const parent = vi.fn(() => <>
-    <ChatAvatar name="Chat agent" kind="agent" presentation={{ group: "same", hue: null, self: false }} />
-    <ChatAvatar name="History agent" kind="agent" presentation={{ group: "same", hue: null, self: false }} />
-    <ChatAvatar name="Another agent" kind="agent" presentation={{ group: "other", hue: null, self: false }} />
-  </>);
+  let changed: Parameters<
+    import("../../ipc/bridgeContract").DohcDesktopBridge["onAgentColorChanged"]
+  >[0] = () => undefined;
+  const stop = bindAgentColorUpdates(
+    {
+      onAgentColorChanged: (listener) => {
+        changed = listener;
+        return () => undefined;
+      },
+    },
+    () => "w",
+  );
+  const parent = vi.fn(() => (
+    <>
+      <ChatAvatar
+        name="Chat agent"
+        kind="agent"
+        presentation={{ group: "same", hue: null, self: false }}
+      />
+      <ChatAvatar
+        name="History agent"
+        kind="agent"
+        presentation={{ group: "same", hue: null, self: false }}
+      />
+      <ChatAvatar
+        name="Another agent"
+        kind="agent"
+        presentation={{ group: "other", hue: null, self: false }}
+      />
+    </>
+  ));
   const Parent = parent;
   render(<Parent />);
   expect(parent).toHaveBeenCalledOnce();
@@ -167,13 +281,31 @@ it("repaints every avatar of the changed agent without reading or rerendering it
 
 describe("ChatAvatar mark", () => {
   it("draws a connected agent's plug, a share's agent post's plug, and your agent's sparkle for the same name", () => {
-    const { container } = render(<>
-      <ChatAvatar name="Claude" kind="agent" presentation={{ ...neutralPresentation, connected: true }} />
-      <ChatAvatar name="Claude" kind="agent" presentation={{ ...neutralPresentation, connected: "unknown" }} />
-      <ChatAvatar name="Claude" kind="agent" presentation={neutralPresentation} />
-    </>);
+    const { container } = render(
+      <>
+        <ChatAvatar
+          name="Claude"
+          kind="agent"
+          presentation={{ ...neutralPresentation, connected: true }}
+        />
+        <ChatAvatar
+          name="Claude"
+          kind="agent"
+          presentation={{ ...neutralPresentation, connected: "unknown" }}
+        />
+        <ChatAvatar name="Claude" kind="agent" presentation={neutralPresentation} />
+      </>,
+    );
     const marks = [...container.querySelectorAll("[data-agent-mark]")];
-    expect(marks.map((mark) => mark.getAttribute("data-agent-mark"))).toEqual(["connected", "unknown", "agent"]);
-    expect(marks.map((mark) => mark.querySelector(".lucide-plug") !== null)).toEqual([true, true, false]);
+    expect(marks.map((mark) => mark.getAttribute("data-agent-mark"))).toEqual([
+      "connected",
+      "unknown",
+      "agent",
+    ]);
+    expect(marks.map((mark) => mark.querySelector(".lucide-plug") !== null)).toEqual([
+      true,
+      true,
+      false,
+    ]);
   });
 });

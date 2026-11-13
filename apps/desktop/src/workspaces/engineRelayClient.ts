@@ -134,19 +134,15 @@ export class RelayTransportRouteGuard {
         "already belongs to a different relay origin",
       );
     }
-    const route =
-      existing ??
-      {
-        baseUrl,
-        locations: new Map<string, RelayOpenConfiguration>(),
-      };
+    const route = existing ?? {
+      baseUrl,
+      locations: new Map<string, RelayOpenConfiguration>(),
+    };
     if (!existing) this.routes.set(input.workspaceId, route);
     route.locations.set(input.rootPath, {
       baseUrl,
       bearerToken: input.relay.token,
-      ...(input.allowInsecureLoopbackForTests
-        ? { allowInsecureLoopbackForTests: true }
-        : {}),
+      ...(input.allowInsecureLoopbackForTests ? { allowInsecureLoopbackForTests: true } : {}),
     });
   }
 
@@ -169,10 +165,7 @@ export class RelayTransportRouteGuard {
     return [...this.routes.keys()];
   }
 
-  relayForOpen(
-    workspaceId: string,
-    rootPath: string,
-  ): RelayOpenConfiguration | null {
+  relayForOpen(workspaceId: string, rootPath: string): RelayOpenConfiguration | null {
     return this.routes.get(workspaceId)?.locations.get(rootPath) ?? null;
   }
 }
@@ -195,20 +188,26 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     if (client.onEvent) this.onEvent = client.onEvent.bind(client);
   }
 
-  async sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response> {
+  async sendRequest(
+    request: Request,
+    signal?: AbortSignal,
+    onProgress?: () => void,
+    cancelSignal?: AbortSignal,
+  ): Promise<Response> {
     if (request.method !== "workspace.open") {
       return await this.client.sendRequest(request, signal, onProgress, cancelSignal);
     }
     const params = resultRecord(request.params, "workspace.open params");
     const rootPath = stringField(params, "rootDir", "workspace.open params");
-    const workspaceId = stringField(
-      params,
-      "workspaceId",
-      "workspace.open params",
-    );
+    const workspaceId = stringField(params, "workspaceId", "workspace.open params");
     const relay = this.routes.relayForOpen(workspaceId, rootPath);
     if (relay) {
-      return await this.client.sendRequest({ ...request, params: { ...params, relay } }, signal, onProgress, cancelSignal);
+      return await this.client.sendRequest(
+        { ...request, params: { ...params, relay } },
+        signal,
+        onProgress,
+        cancelSignal,
+      );
     }
     // A full owner open of a workspace with no ordinary sync makes what an
     // unfinished pull applied local truth. Capture-free and read-only opens
@@ -218,10 +217,15 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
       params.storeMode === undefined &&
       params.skipStartupMaintenance !== true &&
       this.hasNoOrdinarySync(workspaceId);
-    return await this.client.sendRequest({
-      ...request,
-      params: abandonOrdinaryPull ? { ...params, abandonOrdinaryPull } : params,
-    }, signal, onProgress, cancelSignal);
+    return await this.client.sendRequest(
+      {
+        ...request,
+        params: abandonOrdinaryPull ? { ...params, abandonOrdinaryPull } : params,
+      },
+      signal,
+      onProgress,
+      cancelSignal,
+    );
   }
 
   close(): void {
@@ -234,14 +238,9 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
  * client object identity to detect sidecar restarts, so wrapping on every read
  * would force a needless re-open for every operation.
  */
-export class RelayConfiguredDaemonClientSource
-  implements EngineDaemonClientSource
-{
+export class RelayConfiguredDaemonClientSource implements EngineDaemonClientSource {
   readonly onClientChanged?: EngineDaemonClientSource["onClientChanged"];
-  private readonly wrappers = new WeakMap<
-    EngineDaemonClient,
-    RelayConfiguredDaemonClient
-  >();
+  private readonly wrappers = new WeakMap<EngineDaemonClient, RelayConfiguredDaemonClient>();
 
   /**
    * `hasNoOrdinarySync` answers from the workspace's saved sync setting, never
@@ -265,10 +264,7 @@ export class RelayConfiguredDaemonClientSource
   }
 }
 
-function resultRecord(
-  value: JsonValue,
-  label: string,
-): Record<string, JsonValue | undefined> {
+function resultRecord(value: JsonValue, label: string): Record<string, JsonValue | undefined> {
   if (value === null || Array.isArray(value) || typeof value !== "object") {
     throw new Error(`Rust engine ${label} must be an object.`);
   }
@@ -390,7 +386,7 @@ function changedPaths(
     if (contentKind !== "text" && contentKind !== "binary") {
       throw new Error(`Rust engine ${label}.changedPaths[${index}].contentKind is invalid.`);
     }
-    return {path, operation, contentKind};
+    return { path, operation, contentKind };
   });
 }
 
@@ -449,15 +445,23 @@ function translateRelayError(method: string, error: unknown): never {
   }
   if (method === "sync.claim" || savedClaimRefusal) {
     const refusals: Readonly<Record<string, string>> = {
-      EPOCH_SUPERSEDED: "Sync stopped. The server has a newer copy of this workspace. Join that copy to continue.",
-      IDENTITY_NOT_RECOGNIZED: "Sync stopped. The server does not recognize this workspace. Check your account and try again.",
-      STREAM_IDENTITY_MISMATCH: "Sync stopped. This workspace does not match the server's copy. Join that copy to continue.",
+      EPOCH_SUPERSEDED:
+        "Sync stopped. The server has a newer copy of this workspace. Join that copy to continue.",
+      IDENTITY_NOT_RECOGNIZED:
+        "Sync stopped. The server does not recognize this workspace. Check your account and try again.",
+      STREAM_IDENTITY_MISMATCH:
+        "Sync stopped. This workspace does not match the server's copy. Join that copy to continue.",
       IDENTITY_REQUIRED: "Sync is not set up for this workspace. Try again.",
     };
     const refusal = refusals[error.wireCode];
     if (refusal) throw new RelayClaimRefusedError(refusal);
-    if (error.wireCode === "WORKSPACE_UNAVAILABLE" && (error.message === "relay-workspace-unavailable" || savedClaimRefusal)) {
-      throw new RelayClaimRefusedError("Sync stopped. Another account already claimed this workspace. Sign in with that account and try again.");
+    if (
+      error.wireCode === "WORKSPACE_UNAVAILABLE" &&
+      (error.message === "relay-workspace-unavailable" || savedClaimRefusal)
+    ) {
+      throw new RelayClaimRefusedError(
+        "Sync stopped. Another account already claimed this workspace. Sign in with that account and try again.",
+      );
     }
   }
   if (error.wireCode === "AUTH_FAILED") throw new RelayUnauthorizedError();
@@ -468,7 +472,11 @@ function translateRelayError(method: string, error: unknown): never {
   if (error.wireCode === "SHARE_UNAVAILABLE") {
     throw new ShareUnavailableError();
   }
-  if (SYNC_PASS_METHODS.has(method) && error.wireCode === "OVERLOADED" && error.message === "settlement-proof-budget") {
+  if (
+    SYNC_PASS_METHODS.has(method) &&
+    error.wireCode === "OVERLOADED" &&
+    error.message === "settlement-proof-budget"
+  ) {
     throw new RelayBusyError();
   }
   if (error.wireCode === "CONFLICT") throw new RelayConflictError();
@@ -478,7 +486,10 @@ function translateRelayError(method: string, error: unknown): never {
   if (error.wireCode === "WORKSPACE_UNAVAILABLE") {
     if (method.startsWith("share.")) throw new ShareUnavailableError();
     // Claim setup must distinguish a network outage from a refused claim.
-    if ((SYNC_PASS_METHODS.has(method) || method === "sync.claim") && error.message === "relay-unreachable") {
+    if (
+      (SYNC_PASS_METHODS.has(method) || method === "sync.claim") &&
+      error.message === "relay-unreachable"
+    ) {
       throw new RelayUnreachableError();
     }
     throw new RelayWorkspaceUnavailableError();
@@ -513,12 +524,8 @@ function translateRelayError(method: string, error: unknown): never {
 
 export interface EngineRelayWorkspaceClient {
   push(): Promise<PushWorkspaceToRelayResult>;
-  pull(
-    runBatch: RunRelayPullBatch,
-  ): Promise<PullWorkspaceFromRelayResult>;
-  commitCursor(
-    cursor: Record<string, JsonValue | undefined>,
-  ): Promise<CommitRelayCursorResult>;
+  pull(runBatch: RunRelayPullBatch): Promise<PullWorkspaceFromRelayResult>;
+  commitCursor(cursor: Record<string, JsonValue | undefined>): Promise<CommitRelayCursorResult>;
   // Collections updates wait for a pull that has not committed its last page.
   collectionsWaiting(): Promise<boolean>;
   recoverOrigin(): Promise<RecoverRelayOriginResult>;
@@ -648,12 +655,11 @@ export class EngineRelayClient {
     this.onRefusalsChanged = options.onRefusalsChanged;
     this.sessions = options.sessions;
     this.routes = options.routes;
-    this.closeWorkspaceBinding = options.closeWorkspaceBinding ??
-      (workspace => this.sessions.closeWorkspaceBinding(workspace).catch(() => undefined));
-    this.allowInsecureLoopbackForTests =
-      options.allowInsecureLoopbackForTests === true;
-    this.requestDeadlineMs =
-      options.requestDeadlineMs ?? DEFAULT_RELAY_REQUEST_DEADLINE_MS;
+    this.closeWorkspaceBinding =
+      options.closeWorkspaceBinding ??
+      ((workspace) => this.sessions.closeWorkspaceBinding(workspace).catch(() => undefined));
+    this.allowInsecureLoopbackForTests = options.allowInsecureLoopbackForTests === true;
+    this.requestDeadlineMs = options.requestDeadlineMs ?? DEFAULT_RELAY_REQUEST_DEADLINE_MS;
   }
 
   bind(input: {
@@ -667,9 +673,7 @@ export class EngineRelayClient {
     const workspace: EngineWorkspace = {
       workspaceId: input.workspaceId,
       rootPath: input.rootPath,
-      ...(input.attachmentId !== undefined
-        ? { attachmentId: input.attachmentId }
-        : {}),
+      ...(input.attachmentId !== undefined ? { attachmentId: input.attachmentId } : {}),
       ...(input.shareMount === true ? { shareMount: true } : {}),
     };
     this.routes.bind({
@@ -702,10 +706,14 @@ export class EngineRelayClient {
               this.retainBoundWorkspace(workspaceKey, workspace);
               const requester = new WorkspaceDaemonRequester(client);
               if (!accountChecked && input.accountId !== undefined) {
-                await requester.request("sync.resetClaimRefusal", {
-                  workspaceId: workspace.workspaceId,
-                  accountId: input.accountId,
-                }, { workspace: handle, deadlineMs: this.requestDeadlineMs });
+                await requester.request(
+                  "sync.resetClaimRefusal",
+                  {
+                    workspaceId: workspace.workspaceId,
+                    accountId: input.accountId,
+                  },
+                  { workspace: handle, deadlineMs: this.requestDeadlineMs },
+                );
                 accountChecked = true;
               }
               return await requester.request(method, params, {
@@ -727,16 +735,13 @@ export class EngineRelayClient {
       method: string,
       params: Record<string, JsonValue | undefined>,
     ): Promise<JsonValue> =>
-      await requestFor(
-        { ...workspace, captureMode: "none" },
-        method,
-        params,
-      );
+      await requestFor({ ...workspace, captureMode: "none" }, method, params);
 
     const commitCursor = async (
       cursor: Record<string, JsonValue | undefined>,
     ): Promise<CommitRelayCursorResult> => {
-      const result = decodeOrdinarySyncResult("sync.commitCursor",
+      const result = decodeOrdinarySyncResult(
+        "sync.commitCursor",
         await request("sync.commitCursor", {
           workspaceId: workspace.workspaceId,
           pendingCursor: cursor,
@@ -750,17 +755,15 @@ export class EngineRelayClient {
       source: readonly SharingDeclined[],
     ): void => {
       for (const declined of source) {
-        const index = target.findIndex((item) =>
-          item.versionId === declined.versionId && item.objectId === declined.objectId,
+        const index = target.findIndex(
+          (item) => item.versionId === declined.versionId && item.objectId === declined.objectId,
         );
         if (index >= 0) target[index] = declined;
         else if (target.length < MAX_REPORTED_REFUSALS) target.push(declined);
       }
     };
 
-    const claimWith = async (
-      requester: typeof request,
-    ): Promise<void> => {
+    const claimWith = async (requester: typeof request): Promise<void> => {
       const result = resultRecord(
         await requester("sync.claim", {
           workspaceId: workspace.workspaceId,
@@ -787,15 +790,14 @@ export class EngineRelayClient {
         "sync.adoptJoinIdentity",
       );
       if (!booleanField(result, "adopted", "sync.adoptJoinIdentity")) {
-        throw new Error(
-          "Rust engine sync.adoptJoinIdentity did not adopt the relay identity.",
-        );
+        throw new Error("Rust engine sync.adoptJoinIdentity did not adopt the relay identity.");
       }
     };
 
     return {
       push: async () => {
-        const result = decodeOrdinarySyncResult("sync.push",
+        const result = decodeOrdinarySyncResult(
+          "sync.push",
           await request("sync.push", { workspaceId: workspace.workspaceId }),
         );
         return {
@@ -826,15 +828,22 @@ export class EngineRelayClient {
           }
         >();
         for (;;) {
-          const { pageToken } = decodeOrdinarySyncResult("sync.fetchPull",
+          const { pageToken } = decodeOrdinarySyncResult(
+            "sync.fetchPull",
             await request("sync.fetchPull", { workspaceId: workspace.workspaceId }),
           );
           const result = await runBatch(async (materializePage) => {
-            const page = decodeOrdinarySyncResult("sync.applyPull",
+            const page = decodeOrdinarySyncResult(
+              "sync.applyPull",
               await request("sync.applyPull", { workspaceId: workspace.workspaceId, pageToken }),
             );
             if (page.status === "retry") return page;
-            assertRelayPullProgress("sync.applyPull", previousCursor, page.nextCursor, page.hasMore);
+            assertRelayPullProgress(
+              "sync.applyPull",
+              previousCursor,
+              page.nextCursor,
+              page.hasMore,
+            );
             try {
               await materializePage(page.changedPaths);
               appendDeclines(declines, (await commitCursor(page.pendingCursor)).sharingDeclined);
@@ -872,7 +881,9 @@ export class EngineRelayClient {
       collectionsWaiting: async () =>
         decodeWorkspaceResult(
           WORKSPACE_METHOD.syncCollectionsWaiting,
-          await request(WORKSPACE_METHOD.syncCollectionsWaiting, { workspaceId: workspace.workspaceId }),
+          await request(WORKSPACE_METHOD.syncCollectionsWaiting, {
+            workspaceId: workspace.workspaceId,
+          }),
         ).waiting,
       recoverOrigin: async () => {
         const result = resultRecord(
@@ -882,26 +893,10 @@ export class EngineRelayClient {
           "sync.recoverOrigin",
         );
         return {
-          oldOriginId: stringField(
-            result,
-            "oldOriginId",
-            "sync.recoverOrigin",
-          ),
-          newOriginId: stringField(
-            result,
-            "newOriginId",
-            "sync.recoverOrigin",
-          ),
-          sharedPrefixLength: numberField(
-            result,
-            "sharedPrefixLength",
-            "sync.recoverOrigin",
-          ),
-          preservedOps: numberField(
-            result,
-            "preservedOps",
-            "sync.recoverOrigin",
-          ),
+          oldOriginId: stringField(result, "oldOriginId", "sync.recoverOrigin"),
+          newOriginId: stringField(result, "newOriginId", "sync.recoverOrigin"),
+          sharedPrefixLength: numberField(result, "sharedPrefixLength", "sync.recoverOrigin"),
+          preservedOps: numberField(result, "preservedOps", "sync.recoverOrigin"),
         };
       },
       claim,
@@ -964,22 +959,9 @@ export class EngineRelayClient {
             }),
             "share.channel.pull",
           );
-          const pageCursor = numberField(
-            result,
-            "nextCursor",
-            "share.channel.pull",
-          );
-          const hasMore = booleanField(
-            result,
-            "hasMore",
-            "share.channel.pull",
-          );
-          assertRelayPullProgress(
-            "share.channel.pull",
-            previousCursor,
-            pageCursor,
-            hasMore,
-          );
+          const pageCursor = numberField(result, "nextCursor", "share.channel.pull");
+          const hasMore = booleanField(result, "hasMore", "share.channel.pull");
+          assertRelayPullProgress("share.channel.pull", previousCursor, pageCursor, hasMore);
           previousCursor = pageCursor;
           nextCursor = pageCursor;
           const pageApplied = numberField(result, "applied", "share.channel.pull");
@@ -1050,16 +1032,8 @@ export class EngineRelayClient {
           }),
           "share.proposal.submit",
         );
-        const submitted = numberField(
-          result,
-          "submitted",
-          "share.proposal.submit",
-        );
-        const proposalId = nullableStringField(
-          result,
-          "proposalId",
-          "share.proposal.submit",
-        );
+        const submitted = numberField(result, "submitted", "share.proposal.submit");
+        const proposalId = nullableStringField(result, "proposalId", "share.proposal.submit");
         // The two fields state one fact between them: a proposal exists, and
         // it holds these changes. Either half alone is a result no caller can
         // act on — an id with nothing in it, or changes with nothing to show
@@ -1073,11 +1047,7 @@ export class EngineRelayClient {
         return {
           submitted,
           proposalId,
-          skippedOutsideShare: numberField(
-            result,
-            "skippedOutsideShare",
-            "share.proposal.submit",
-          ),
+          skippedOutsideShare: numberField(result, "skippedOutsideShare", "share.proposal.submit"),
           morePending: booleanField(result, "morePending", "share.proposal.submit"),
         };
       },
@@ -1149,26 +1119,10 @@ export class EngineRelayClient {
             }),
             "share.view.pull",
           );
-          const cursor = pendingCursor(
-            result.pendingCursor,
-            "share.view.pull",
-          );
-          const pageCursor = numberField(
-            result,
-            "nextCursor",
-            "share.view.pull",
-          );
-          const hasMore = booleanField(
-            result,
-            "hasMore",
-            "share.view.pull",
-          );
-          assertRelayPullProgress(
-            "share.view.pull",
-            previousCursor,
-            pageCursor,
-            hasMore,
-          );
+          const cursor = pendingCursor(result.pendingCursor, "share.view.pull");
+          const pageCursor = numberField(result, "nextCursor", "share.view.pull");
+          const hasMore = booleanField(result, "hasMore", "share.view.pull");
+          assertRelayPullProgress("share.view.pull", previousCursor, pageCursor, hasMore);
           previousCursor = pageCursor;
           nextCursor = pageCursor;
           fetched += numberField(result, "fetched", "share.view.pull");
@@ -1176,10 +1130,7 @@ export class EngineRelayClient {
           skipped += numberField(result, "skipped", "share.view.pull");
           // Every page's refusals, not just the last: a share can go stale on
           // a page the caller never sees the end of.
-          const pageRefusals = shareViewRefusals(
-            result.refusals,
-            "share.view.pull",
-          );
+          const pageRefusals = shareViewRefusals(result.refusals, "share.view.pull");
           refusalCount += pageRefusals.length;
           // Bounded: the durable record holds every reason (it is written
           // below, before this page's cursor commits), so this aggregate only
@@ -1193,10 +1144,7 @@ export class EngineRelayClient {
           // pull never offers these ops again, so a throw on a later page must
           // not be able to take the reason with it.
           if (pageRefusals.length > 0) await recordRefusals?.(pageRefusals);
-          const pageChangedPaths = changedPaths(
-            result.changedPaths,
-            "share.view.pull",
-          );
+          const pageChangedPaths = changedPaths(result.changedPaths, "share.view.pull");
           if (pageChangedPaths.length > 0) {
             const paths = pageChangedPaths.map((path) => path.path);
             await recordChangedPaths?.(paths);
@@ -1212,9 +1160,7 @@ export class EngineRelayClient {
           await commitCursor(cursor);
         }
         if (!finalCursor) {
-          throw new Error(
-            "Rust engine share.view.pull returned no final cursor.",
-          );
+          throw new Error("Rust engine share.view.pull returned no final cursor.");
         }
         return {
           fetched,
@@ -1236,22 +1182,17 @@ export class EngineRelayClient {
   }
 
   async closeWorkspace(workspace: string | EngineWorkspace): Promise<void> {
-    const workspaceId =
-      typeof workspace === "string" ? workspace : workspace.workspaceId;
+    const workspaceId = typeof workspace === "string" ? workspace : workspace.workspaceId;
     const workspaceKey = this.workspaceKey(workspace);
     await runInKeyedLane(this.lanes, workspaceKey, async () => {
       const registered = this.boundWorkspaces.get(workspaceKey);
-      const descriptor =
-        registered ?? (typeof workspace === "string" ? null : workspace);
+      const descriptor = registered ?? (typeof workspace === "string" ? null : workspace);
       await this.sessions.closeWorkspace(descriptor ?? workspace);
       this.activeLocations.delete(workspaceKey);
       if (this.boundWorkspaces.get(workspaceKey) === registered) {
         this.boundWorkspaces.delete(workspaceKey);
       }
-      if (
-        descriptor !== null &&
-        !this.hasBoundLocation(workspaceId, descriptor.rootPath)
-      ) {
+      if (descriptor !== null && !this.hasBoundLocation(workspaceId, descriptor.rootPath)) {
         this.routes.releaseLocation(workspaceId, descriptor.rootPath);
       }
       if (!this.hasBoundWorkspace(workspaceId)) {
@@ -1268,7 +1209,8 @@ export class EngineRelayClient {
             await runInKeyedLane(this.lanes, this.workspaceKey(workspace), async () => {
               await this.sessions.run(workspace, async ({ client, workspace: handle }) => {
                 await new WorkspaceDaemonRequester(client).request(
-                  "sync.resetClaimRefusal", { workspaceId: workspace.workspaceId },
+                  "sync.resetClaimRefusal",
+                  { workspaceId: workspace.workspaceId },
                   { workspace: handle, deadlineMs: this.requestDeadlineMs },
                 );
               });
@@ -1280,8 +1222,7 @@ export class EngineRelayClient {
       }),
     );
     const failures = results.filter(
-      (result): result is PromiseRejectedResult =>
-        result.status === "rejected",
+      (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failures.length > 0) {
       throw new AggregateError(
@@ -1303,16 +1244,10 @@ export class EngineRelayClient {
     );
   }
 
-  private retainBoundWorkspace(
-    workspaceKey: string | symbol,
-    workspace: EngineWorkspace,
-  ): void {
+  private retainBoundWorkspace(workspaceKey: string | symbol, workspace: EngineWorkspace): void {
     this.boundWorkspaces.set(workspaceKey, workspace);
     for (const [candidateKey, candidate] of this.boundWorkspaces) {
-      if (
-        candidateKey === workspaceKey ||
-        candidate.workspaceId !== workspace.workspaceId
-      ) {
+      if (candidateKey === workspaceKey || candidate.workspaceId !== workspace.workspaceId) {
         continue;
       }
       this.boundWorkspaces.delete(candidateKey);
@@ -1325,9 +1260,7 @@ export class EngineRelayClient {
 
   private hasBoundLocation(workspaceId: string, rootPath: string): boolean {
     return [...this.boundWorkspaces.values()].some(
-      (workspace) =>
-        workspace.workspaceId === workspaceId &&
-        workspace.rootPath === rootPath,
+      (workspace) => workspace.workspaceId === workspaceId && workspace.rootPath === rootPath,
     );
   }
 }

@@ -62,7 +62,10 @@ export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
       <button
         ref={ref}
         type={type ?? "button"}
-        className={cx(size === "compact" ? compactPrimaryButtonClass : primaryButtonClass, className)}
+        className={cx(
+          size === "compact" ? compactPrimaryButtonClass : primaryButtonClass,
+          className,
+        )}
         {...rest}
       />
     );
@@ -71,46 +74,59 @@ export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
 
 /** Filled danger confirm for an action that removes or revokes something.
  * Ordinary confirms keep PrimaryButton. */
-export const DangerButton = forwardRef<HTMLButtonElement, DangerButtonProps>(
-  function DangerButton({ className, type, size, ...rest }, ref) {
-    const sized = size === "compact" ? compactDangerButtonClass : size === "row" ? rowDangerButtonClass : dangerButtonClass;
-    return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
-  },
-);
+export const DangerButton = forwardRef<HTMLButtonElement, DangerButtonProps>(function DangerButton(
+  { className, type, size, ...rest },
+  ref,
+) {
+  const sized =
+    size === "compact"
+      ? compactDangerButtonClass
+      : size === "row"
+        ? rowDangerButtonClass
+        : dangerButtonClass;
+  return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
+});
 
 /** Quiet bordered action — the default button. */
 export const SecondaryButton = forwardRef<HTMLButtonElement, SecondaryButtonProps>(
   function SecondaryButton({ className, type, size, ...rest }, ref) {
-    const sized = size === "compact" ? compactSecondaryButtonClass : size === "row" ? rowSecondaryButtonClass : secondaryButtonClass;
+    const sized =
+      size === "compact"
+        ? compactSecondaryButtonClass
+        : size === "row"
+          ? rowSecondaryButtonClass
+          : secondaryButtonClass;
     return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
   },
 );
 
 /** Quiet action with no border and no fill until hover, such as Change beside
  * a path. An icon can lead its label. */
-export const GhostButton = forwardRef<HTMLButtonElement, NativeButtonProps & { size?: "default" | "toolbar" }>(
-  function GhostButton({ className, type, size, ...rest }, ref) {
-    const sized = size === "toolbar" ? toolbarGhostButtonClass : ghostButtonClass;
-    return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
-  },
-);
+export const GhostButton = forwardRef<
+  HTMLButtonElement,
+  NativeButtonProps & { size?: "default" | "toolbar" }
+>(function GhostButton({ className, type, size, ...rest }, ref) {
+  const sized = size === "toolbar" ? toolbarGhostButtonClass : ghostButtonClass;
+  return <button ref={ref} type={type ?? "button"} className={cx(sized, className)} {...rest} />;
+});
 
 /** Ghost icon affordance for toolbars and row actions. Pass the icon as
  * children; size stays 24px unless a `size-*` class overrides it. Forwards its
  * ref so callers can restore focus to the trigger (e.g. a menu returning focus
  * on Escape/dismiss). */
-export const IconButton = forwardRef<HTMLButtonElement, NativeButtonProps>(
-  function IconButton({ className, type, ...rest }, ref) {
-    return (
-      <button
-        ref={ref}
-        type={type ?? "button"}
-        className={cx(iconButtonClass, className)}
-        {...rest}
-      />
-    );
-  },
-);
+export const IconButton = forwardRef<HTMLButtonElement, NativeButtonProps>(function IconButton(
+  { className, type, ...rest },
+  ref,
+) {
+  return (
+    <button
+      ref={ref}
+      type={type ?? "button"}
+      className={cx(iconButtonClass, className)}
+      {...rest}
+    />
+  );
+});
 
 const pillToneClass = {
   muted: "text-muted",
@@ -129,7 +145,12 @@ export function Pill({
   children: ReactNode;
 }) {
   return (
-    <span className={cx("rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px]", pillToneClass[tone])}>
+    <span
+      className={cx(
+        "rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px]",
+        pillToneClass[tone],
+      )}
+    >
       {children}
     </span>
   );
@@ -146,13 +167,7 @@ export function SectionLabel({
   children: ReactNode;
 } & HTMLAttributes<HTMLElement>) {
   return (
-    <Element
-      {...rest}
-      className={cx(
-        "dohc-section-label",
-        className,
-      )}
-    >
+    <Element {...rest} className={cx("dohc-section-label", className)}>
       {children}
     </Element>
   );
@@ -193,15 +208,25 @@ export function EmptyState({
       <div {...rest} className="flex flex-1 flex-col items-center justify-center px-6 text-center">
         {/* The fade's mask gets its own layer: in the page's layer, software
             rendering drops subpixel text across the page. */}
-        <span aria-hidden className="relative h-19 w-30 shrink-0 mask-b-from-58% will-change-transform">{picture}</span>
-        <span className="mt-3 max-w-60 text-[13px] text-balance text-muted wrap-anywhere">{title}</span>
+        <span
+          aria-hidden
+          className="relative h-19 w-30 shrink-0 mask-b-from-58% will-change-transform"
+        >
+          {picture}
+        </span>
+        <span className="mt-3 max-w-60 text-[13px] text-balance text-muted wrap-anywhere">
+          {title}
+        </span>
         {children ? <div className="mt-4 flex items-center gap-2">{children}</div> : null}
       </div>
     );
   }
   const toneClass = emptyGlyphToneClass[tone];
   return (
-    <div {...rest} className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+    <div
+      {...rest}
+      className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
+    >
       {Icon ? (
         <Icon size={20} strokeWidth={1.9} aria-hidden className={toneClass.glyph} />
       ) : (
@@ -216,9 +241,19 @@ export function EmptyState({
 /** The error under a field: what is wrong and how to fix it. Give the field
  * `aria-invalid` and point its `aria-describedby` at `id`. The icon sits on
  * the first line, so a sentence that wraps keeps it beside its start. */
-export function FieldError(props: { id: string; children: ReactNode; className?: string; testId?: string }) {
+export function FieldError(props: {
+  id: string;
+  children: ReactNode;
+  className?: string;
+  testId?: string;
+}) {
   return (
-    <p id={props.id} data-testid={props.testId} role="alert" className={cx("m-0 flex items-start gap-1 text-[12px] text-danger", props.className)}>
+    <p
+      id={props.id}
+      data-testid={props.testId}
+      role="alert"
+      className={cx("m-0 flex items-start gap-1 text-[12px] text-danger", props.className)}
+    >
       <span aria-hidden className="flex h-lh shrink-0 items-center">
         <CircleAlert size={12} />
       </span>
@@ -233,9 +268,17 @@ export function FieldError(props: { id: string; children: ReactNode; className?:
  * that sentence beside the mark. It wraps, and Try again follows it on the same
  * line when both fit. `disabled` holds Try again while another read of the
  * same list is in flight. */
-export function RetryRow(props: { testId: string; onRetry: () => void; disabled?: boolean; children?: ReactNode }) {
+export function RetryRow(props: {
+  testId: string;
+  onRetry: () => void;
+  disabled?: boolean;
+  children?: ReactNode;
+}) {
   return (
-    <div data-testid={props.testId} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1">
+    <div
+      data-testid={props.testId}
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1"
+    >
       {props.children ? (
         <p className="m-0 flex min-w-0 items-start gap-1.5 text-[12px] leading-4 text-muted">
           <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />

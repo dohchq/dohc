@@ -29,9 +29,7 @@ export function requireWorkspaceEngine(
 ) {
   const binary = join(resourceDir, engineBinaryName(platform));
   if (!isFile(binary)) {
-    throw new Error(
-      `Refusing to package without the Rust workspace engine binary: ${binary}`,
-    );
+    throw new Error(`Refusing to package without the Rust workspace engine binary: ${binary}`);
   }
 }
 
@@ -41,7 +39,14 @@ export default async function requireWorkspaceEngineBeforePack(context) {
   // electron-builder's architecture enum: x64=1, arm64=3. Reject mismatched
   // cross-packaging instead of shipping a compiler or probe owner that cannot start.
   const platform = context?.electronPlatformName ?? process.platform;
-  const arch = context?.arch === undefined ? process.arch : context.arch === 1 ? "x64" : context.arch === 3 ? "arm64" : "unsupported";
+  const arch =
+    context?.arch === undefined
+      ? process.arch
+      : context.arch === 1
+        ? "x64"
+        : context.arch === 3
+          ? "arm64"
+          : "unsupported";
   await requireAppCompiler(undefined, platform, arch);
   await requireEngineReader(undefined, platform, arch);
   await requireAgentProbe(undefined, undefined, platform, arch);

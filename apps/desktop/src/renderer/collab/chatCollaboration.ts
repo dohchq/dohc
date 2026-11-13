@@ -24,8 +24,7 @@ export function buildChatCollaboration(
   if (!input.connected || !input.relayUrl) return null;
   const displayName = input.email && input.email.trim() ? input.email.trim() : "You";
   return {
-    transportForScope: (scope: PresenceScopeInput) =>
-      createIpcPresenceTransport(scope),
+    transportForScope: (scope: PresenceScopeInput) => createIpcPresenceTransport(scope),
     clientId: input.clientId,
     displayName,
   };

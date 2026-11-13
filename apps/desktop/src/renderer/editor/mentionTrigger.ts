@@ -19,13 +19,11 @@ import { makeTriggerPlugin } from "./triggerPlugin";
 // in prose (emails, handles), so it must not fire mid-word (e.g.
 // `user@example`).
 
-import type { Node as ProseMirrorNode, ResolvedPos } from '@tiptap/pm/model'
-import { PluginKey } from '@tiptap/pm/state'
-import {
-  type AutocompleteState,
-} from './wikilinkPlugin'
+import type { Node as ProseMirrorNode, ResolvedPos } from "@tiptap/pm/model";
+import { PluginKey } from "@tiptap/pm/state";
+import { type AutocompleteState } from "./wikilinkPlugin";
 
-export const mentionPluginKey = new PluginKey('dohc-mention')
+export const mentionPluginKey = new PluginKey("dohc-mention");
 
 // `(?<=^|\s)` — the `@` must be the first character of the text run
 // (start-of-block, approximated the same way wikilinkPlugin does: by
@@ -34,7 +32,7 @@ export const mentionPluginKey = new PluginKey('dohc-mention')
 // `@` starts a fresh trigger instead of extending the query) and `[`
 // (so typing a `[[` wikilink trigger mid-query cleanly hands off
 // instead of being swallowed as mention text).
-const MENTION_RE = /(?<=^|\s)@([^\s@[]*)$/
+const MENTION_RE = /(?<=^|\s)@([^\s@[]*)$/;
 
 /** Pure: detect an incomplete `@mention` at the cursor. Same shape
  *  and strategy as wikilinkPlugin's `detectAutocomplete` — reused
@@ -45,16 +43,16 @@ export function detectMentionAutocomplete(
   cursorPos: number,
   position?: ResolvedPos,
 ): AutocompleteState {
-  const run = cursorText(doc, cursorPos, position)
-  if (!run) return { active: false }
-  const before = run.text
-  const m = MENTION_RE.exec(before)
-  if (!m) return { active: false }
+  const run = cursorText(doc, cursorPos, position);
+  if (!run) return { active: false };
+  const before = run.text;
+  const m = MENTION_RE.exec(before);
+  if (!m) return { active: false };
   return {
     active: true,
     from: run.from + before.length - m[0].length,
-    query: m[1] ?? '',
-  }
+    query: m[1] ?? "",
+  };
 }
 
 /** Build the mention-trigger plugin. Detection-only — no
@@ -63,11 +61,12 @@ export function detectMentionAutocomplete(
  *  while the query is still being typed the raw `@query` text is
  *  just plain text (nothing to hide/replace). Mirrors
  *  makeWikilinkPlugin's `view()` + change-notify pattern. */
-export function makeMentionPlugin(
-  onAutocompleteChange: (s: AutocompleteState) => void,
-) {
-  return makeTriggerPlugin({
-    key: mentionPluginKey,
-
-  }, detectMentionAutocomplete, onAutocompleteChange)
+export function makeMentionPlugin(onAutocompleteChange: (s: AutocompleteState) => void) {
+  return makeTriggerPlugin(
+    {
+      key: mentionPluginKey,
+    },
+    detectMentionAutocomplete,
+    onAutocompleteChange,
+  );
 }

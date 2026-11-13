@@ -1,6 +1,6 @@
-import type {SqliteDb} from "./types";
-import {currentShareGrantSql} from "./currentShareGrant";
-import {replicaTextCleanupSql} from "./replicaTextStorage";
+import type { SqliteDb } from "./types";
+import { currentShareGrantSql } from "./currentShareGrant";
+import { replicaTextCleanupSql } from "./replicaTextStorage";
 
 const migration = "replica-history-pins-v1";
 const captureFloor = `INSERT OR REPLACE INTO sync_relay_history_grant_floors SELECT NEW.grant_id,w.workspace_id,w.replication_epoch,w.stream_identity,
@@ -8,9 +8,13 @@ const captureFloor = `INSERT OR REPLACE INTO sync_relay_history_grant_floors SEL
   coalesce((SELECT max(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0)
   FROM sync_relay_workspaces w JOIN sync_relay_shares s ON s.workspace_id=w.workspace_id WHERE s.share_id=NEW.share_id;`;
 export const HISTORY_JOURNAL_POSITION_INDEX = "replica_history_journal_position";
-const standing = (workspace: string) => `EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
-  WHERE s.workspace_id=${workspace} AND ${currentShareGrantSql("g","s")})`;
-const cleanup = (workspace: string) => `DELETE FROM sync_relay_history_pins WHERE workspace_id=${workspace} AND NOT ${standing(workspace)};
+const standing = (
+  workspace: string,
+) => `EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
+  WHERE s.workspace_id=${workspace} AND ${currentShareGrantSql("g", "s")})`;
+const cleanup = (
+  workspace: string,
+) => `DELETE FROM sync_relay_history_pins WHERE workspace_id=${workspace} AND NOT ${standing(workspace)};
   DELETE FROM sync_relay_history_clocks WHERE workspace_id=${workspace} AND NOT ${standing(workspace)};
   ${replicaTextCleanupSql(workspace).join("; ")};`;
 
@@ -77,18 +81,33 @@ export function initializeReplicaHistorySchema(db: SqliteDb) {
       ${cleanup("OLD.workspace_id")} ${cleanup("NEW.workspace_id")}
     END;`);
     // 6a discards the view when one grant ends. Other grants must keep their History texts.
-    for (const name of ["replica_current_view_grant_update","replica_current_view_grant_delete","replica_current_view_share_update","replica_current_view_share_delete"]) {
+    for (const name of [
+      "replica_current_view_grant_update",
+      "replica_current_view_grant_delete",
+      "replica_current_view_share_update",
+      "replica_current_view_share_delete",
+    ]) {
       const sql = String(db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(name)!.sql);
-      const rewritten=sql.replaceAll("DELETE FROM sync_relay_replica_cut_texts WHERE workspace_id", `DELETE FROM sync_relay_replica_cut_texts WHERE (workspace_id,sha256) IN
-        (SELECT workspace_id,sha256 FROM sync_relay_replica_cut_text_refs WHERE ref_count=0) AND workspace_id`);
+      const rewritten = sql.replaceAll(
+        "DELETE FROM sync_relay_replica_cut_texts WHERE workspace_id",
+        `DELETE FROM sync_relay_replica_cut_texts WHERE (workspace_id,sha256) IN
+        (SELECT workspace_id,sha256 FROM sync_relay_replica_cut_text_refs WHERE ref_count=0) AND workspace_id`,
+      );
       if (rewritten === sql) throw new Error(`History text cleanup rewrite did not match ${name}`);
       db.exec(`DROP TRIGGER ${name}`);
       db.exec(rewritten);
     }
-    db.prepare("INSERT INTO sync_relay_migrations VALUES (?,?)").run(migration,Date.now());
+    db.prepare("INSERT INTO sync_relay_migrations VALUES (?,?)").run(migration, Date.now());
   }
-  if (JSON.stringify(db.prepare(`PRAGMA index_info(${HISTORY_JOURNAL_POSITION_INDEX})`).all().map(r=>r.name)) !==
-      JSON.stringify(["workspace_id","main_version_id","object_id","journal_cursor"])) throw new Error("History journal position index is missing or damaged");
+  if (
+    JSON.stringify(
+      db
+        .prepare(`PRAGMA index_info(${HISTORY_JOURNAL_POSITION_INDEX})`)
+        .all()
+        .map((r) => r.name),
+    ) !== JSON.stringify(["workspace_id", "main_version_id", "object_id", "journal_cursor"])
+  )
+    throw new Error("History journal position index is missing or damaged");
   db.exec(`DELETE FROM sync_relay_history_pins WHERE NOT ${standing("sync_relay_history_pins.workspace_id")};
     DELETE FROM sync_relay_history_clocks WHERE NOT ${standing("sync_relay_history_clocks.workspace_id")};
     ${replicaTextCleanupSql().join("; ")}`);

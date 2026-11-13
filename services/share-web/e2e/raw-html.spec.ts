@@ -1,9 +1,5 @@
 import { type Page } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const HTML_DOM_MARKER = "RAW_HTML_BYTES_MUST_NOT_ENTER_VIEWER_DOM";
 const ATTACK_SENTINELS = [
@@ -89,10 +85,12 @@ test("keeps shared raw HTML inert in Markdown and in HTML source", async ({
     await navigation.getByRole("button", { name: "raw-html.md", exact: true }).click();
     const article = page.locator("article.markdown");
     await expect(article).toContainText(markdownText);
-    await expect(article.locator("script, iframe, object, form, svg, embed, link, meta, img"))
-      .toHaveCount(0);
-    await expect(article.locator("[onerror], [onload], [onclick], [onfocus], [onsubmit]"))
-      .toHaveCount(0);
+    await expect(
+      article.locator("script, iframe, object, form, svg, embed, link, meta, img"),
+    ).toHaveCount(0);
+    await expect(
+      article.locator("[onerror], [onload], [onclick], [onfocus], [onsubmit]"),
+    ).toHaveCount(0);
     await expect(
       article.locator(
         '[href^="javascript:" i], [src^="javascript:" i], [action^="javascript:" i], [data^="javascript:" i]',
@@ -102,9 +100,10 @@ test("keeps shared raw HTML inert in Markdown and in HTML source", async ({
     expect(probe.requests).toEqual([]);
 
     const [sourceResponse] = await Promise.all([
-      page.waitForResponse((response) =>
-        response.request().method() === "GET" &&
-        new URL(response.url()).pathname === `/api/view/blob/${htmlFile.blobSha256}`
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          new URL(response.url()).pathname === `/api/view/blob/${htmlFile.blobSha256}`,
       ),
       navigation.getByRole("button", { name: "raw.html", exact: true }).click(),
     ]);
@@ -117,10 +116,12 @@ test("keeps shared raw HTML inert in Markdown and in HTML source", async ({
     const source = content.locator("pre.source-text");
     await expect(source).toHaveText(rawHtml);
     await expect(content.locator(".download-card, article.markdown")).toHaveCount(0);
-    await expect(content.locator("script, iframe, object, form, svg, embed, link, meta, img, a, p"))
-      .toHaveCount(0);
-    await expect(content.locator("[onerror], [onload], [onclick], [onfocus], [onsubmit]"))
-      .toHaveCount(0);
+    await expect(
+      content.locator("script, iframe, object, form, svg, embed, link, meta, img, a, p"),
+    ).toHaveCount(0);
+    await expect(
+      content.locator("[onerror], [onload], [onclick], [onfocus], [onsubmit]"),
+    ).toHaveCount(0);
     expect(await source.evaluate((element) => element.childElementCount)).toBe(1);
     expect(await source.locator("code").evaluate((element) => element.childElementCount)).toBe(0);
     await expectNoAttackSentinel(page);

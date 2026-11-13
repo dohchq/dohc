@@ -27,6 +27,9 @@ export function reportRendererError(origin: RendererErrorPayload["origin"], erro
 
 function thrown(error: unknown): RendererThrown {
   if (!(error instanceof Error)) return { type: error === null ? "object" : typeof error };
-  const stack = (error.stack ?? "").split("\n").filter((line) => /^\s*at\s/.test(line)).join("\n");
+  const stack = (error.stack ?? "")
+    .split("\n")
+    .filter((line) => /^\s*at\s/.test(line))
+    .join("\n");
   return { name: error.name.slice(0, 100), stack: stack.slice(0, 16_000) };
 }

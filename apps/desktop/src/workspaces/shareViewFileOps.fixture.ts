@@ -3,18 +3,41 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { afterEach, expect } from "vitest";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import type { EngineDaemonLifecycle, EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import type {
+  EngineDaemonLifecycle,
+  EngineWorkspace,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions, REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
-import { EngineRelayClient, type EngineRelayWorkspaceClient, RelayConfiguredDaemonClientSource, RelayTransportRouteGuard } from "./engineRelayClient";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
+} from "../testing/realDaemonWorkspaceSessions";
+import {
+  EngineRelayClient,
+  type EngineRelayWorkspaceClient,
+  RelayConfiguredDaemonClientSource,
+  RelayTransportRouteGuard,
+} from "./engineRelayClient";
 import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import { createDesktopLinkedChatStore } from "./liveLinkedChatStore";
-import { createCaptureLiveStores, type CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
+import {
+  createCaptureLiveStores,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
-import { createShareViewFiles, type ResolvedShareViewFilesTarget, type ShareViewFileChange, type ShareViewFileChangeValue } from "./shareViewFiles";
-import { withStaleSensitiveWorkspaceOperation, type WorkspaceTextWriteResult } from "./workspaceAssets";
-
+import {
+  createShareViewFiles,
+  type ResolvedShareViewFilesTarget,
+  type ShareViewFileChange,
+  type ShareViewFileChangeValue,
+} from "./shareViewFiles";
+import {
+  withStaleSensitiveWorkspaceOperation,
+  type WorkspaceTextWriteResult,
+} from "./workspaceAssets";
 
 // The four remaining writes a share view admits, driven the way
 // `shareViewTextWrite.e2e.test.ts` drives the text save.
@@ -44,18 +67,12 @@ export const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    sessionSets
-      .splice(0)
-      .map((sessions) => sessions.closeAll().catch(() => undefined)),
+    sessionSets.splice(0).map((sessions) => sessions.closeAll().catch(() => undefined)),
   );
   await Promise.all(
-    lifecycles
-      .splice(0)
-      .map((lifecycle) => lifecycle.stop().catch(() => undefined)),
+    lifecycles.splice(0).map((lifecycle) => lifecycle.stop().catch(() => undefined)),
   );
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 /**
@@ -197,8 +214,7 @@ export function shareViewFilesOwner(
     requested,
     files: createShareViewFiles({
       resolveTarget: (candidate) =>
-        candidate.kind === requested.kind &&
-        candidate.workspaceId === requested.workspaceId
+        candidate.kind === requested.kind && candidate.workspaceId === requested.workspaceId
           ? resolved
           : null,
       openStore: () => store,
@@ -207,7 +223,9 @@ export function shareViewFilesOwner(
         throw new Error("Unexpected pull");
       },
       recordRefusals: async () => undefined,
-      updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
+      updateUnsavedPaths: async () => {
+        throw new Error("Mounted shares have no unsaved paths");
+      },
       markEnded: async () => undefined,
       retireTarget: async () => undefined,
       assertProjectionRoot: async () => undefined,
@@ -222,9 +240,8 @@ export async function settleShareViewThroughOwner(
   store: CaptureVersionedTextStore,
 ) {
   const owner = shareViewFilesOwner(harnessed, store);
-  const outcome = await withStaleSensitiveWorkspaceOperation(
-    harnessed.rootPath,
-    (lease) => owner.files.reconcile(lease, owner.requested, "settle"),
+  const outcome = await withStaleSensitiveWorkspaceOperation(harnessed.rootPath, (lease) =>
+    owner.files.reconcile(lease, owner.requested, "settle"),
   );
   if (outcome.kind !== "settle") {
     throw new Error("Share-view settlement returned another operation kind.");
@@ -234,9 +251,7 @@ export async function settleShareViewThroughOwner(
 }
 
 export interface StoreMutationBoundaryObservation {
-  events: Array<
-    "ensure-main" | "list-file-metadata" | "read-text-file" | "replace"
-  >;
+  events: Array<"ensure-main" | "list-file-metadata" | "read-text-file" | "replace">;
   replacement: {
     afterEventIndex: number;
     lastContentReadEventIndex: number;
@@ -270,9 +285,7 @@ export function storeReplacingLeafAtMutationBoundary(
       if (property === "ensureMainVersion") {
         return async (...args: unknown[]) => {
           mutationPass =
-            sawContentRead &&
-            currentPassLastMetadataEventIndex !== null &&
-            !currentPassReadContent;
+            sawContentRead && currentPassLastMetadataEventIndex !== null && !currentPassReadContent;
           if (mutationPass && currentPassLastMetadataEventIndex !== null) {
             metadataOnlyPassEventIndex = currentPassLastMetadataEventIndex;
           }
@@ -284,9 +297,10 @@ export function storeReplacingLeafAtMutationBoundary(
       }
       if (property === "readTextFile") {
         return async (...args: unknown[]) => {
-          const result = await (
-            value as (...inner: unknown[]) => Promise<unknown>
-          ).apply(target, args);
+          const result = await (value as (...inner: unknown[]) => Promise<unknown>).apply(
+            target,
+            args,
+          );
           currentPassReadContent = true;
           sawContentRead = true;
           observation.events.push("read-text-file");
@@ -295,18 +309,16 @@ export function storeReplacingLeafAtMutationBoundary(
       }
       if (property === "listTextFileMetadata") {
         return async (...args: unknown[]) => {
-          const result = await (
-            value as (...inner: unknown[]) => Promise<unknown>
-          ).apply(target, args);
-          const afterEventIndex = observation.events.push(
-            "list-file-metadata",
-          ) - 1;
+          const result = await (value as (...inner: unknown[]) => Promise<unknown>).apply(
+            target,
+            args,
+          );
+          const afterEventIndex = observation.events.push("list-file-metadata") - 1;
           currentPassLastMetadataEventIndex = afterEventIndex;
           if (mutationPass && observation.replacement === null) {
             observation.replacement = {
               afterEventIndex,
-              lastContentReadEventIndex:
-                observation.events.lastIndexOf("read-text-file"),
+              lastContentReadEventIndex: observation.events.lastIndexOf("read-text-file"),
               metadataOnlyPassEventIndex,
             };
             observation.events.push("replace");
@@ -331,14 +343,10 @@ export function expectLeafReplacementAtMutationBoundary(
   expect(replacement.lastContentReadEventIndex).toBeLessThan(
     replacement.metadataOnlyPassEventIndex,
   );
-  expect(replacement.metadataOnlyPassEventIndex).toBeLessThan(
-    replacement.afterEventIndex,
-  );
+  expect(replacement.metadataOnlyPassEventIndex).toBeLessThan(replacement.afterEventIndex);
   expect({
-    contentRead:
-      observation.events[replacement.lastContentReadEventIndex],
-    metadataOnlyPass:
-      observation.events[replacement.metadataOnlyPassEventIndex],
+    contentRead: observation.events[replacement.lastContentReadEventIndex],
+    metadataOnlyPass: observation.events[replacement.metadataOnlyPassEventIndex],
     mutationMetadata: observation.events[replacement.afterEventIndex],
     replacement: observation.events[replacement.afterEventIndex + 1],
   }).toEqual({
@@ -354,9 +362,8 @@ export async function applyOwnedShareViewChange(
   change: ShareViewFileChange,
 ): Promise<ShareViewFileChangeValue> {
   const owner = shareViewFilesOwner(input, input.shareViewStore());
-  const outcome = await withStaleSensitiveWorkspaceOperation(
-    input.rootPath,
-    (lease) => owner.files.change(lease, owner.requested, change),
+  const outcome = await withStaleSensitiveWorkspaceOperation(input.rootPath, (lease) =>
+    owner.files.change(lease, owner.requested, change),
   );
   if (outcome.status !== "committed") throw new Error(outcome.message);
   return outcome.value;
@@ -444,9 +451,7 @@ export function storeFailingAt(
       return (...args: unknown[]) => {
         seen += 1;
         if (calls.includes(seen)) {
-          return Promise.reject(
-            new Error(`engine refused ${method} call ${seen}`),
-          );
+          return Promise.reject(new Error(`engine refused ${method} call ${seen}`));
         }
         return (value as (...inner: unknown[]) => unknown).apply(target, args);
       };
@@ -496,16 +501,11 @@ export function replicationLogRows(rootPath: string): number {
       close(): void;
     };
   };
-  const database = new DatabaseSync(
-    join(rootPath, ".dohc", "engine", "engine.db"),
-    {
+  const database = new DatabaseSync(join(rootPath, ".dohc", "engine", "engine.db"), {
     readOnly: true,
-    },
-  );
+  });
   try {
-    const row = database
-      .prepare("SELECT COUNT(*) AS rows FROM replication_log")
-      .get();
+    const row = database.prepare("SELECT COUNT(*) AS rows FROM replication_log").get();
     return Number(row?.rows ?? 0);
   } finally {
     database.close();
@@ -521,4 +521,3 @@ export async function exists(path: string): Promise<boolean> {
     () => false,
   );
 }
-

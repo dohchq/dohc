@@ -2,11 +2,7 @@ import { desktopPins } from "../../testPins";
 import { useRef, type ReactNode } from "react";
 import { useFocusReturn } from "../ui/focusReturn";
 import { useCommitOnRelease } from "./useCommitOnRelease";
-import {
-  ABOUT_MAX_WIDTH,
-  ABOUT_MIN_WIDTH,
-  clampAboutWidth,
-} from "./workbenchState";
+import { ABOUT_MAX_WIDTH, ABOUT_MIN_WIDTH, clampAboutWidth } from "./workbenchState";
 
 const ABOUT_KEYBOARD_RESIZE_STEP = 16;
 const ABOUT_KEYBOARD_RESIZE_PAGE_STEP = ABOUT_KEYBOARD_RESIZE_STEP * 8;
@@ -65,8 +61,7 @@ export function AboutRail(props: {
         }}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
-          dragRight.current =
-            panelRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+          dragRight.current = panelRef.current?.getBoundingClientRect().right ?? window.innerWidth;
           resize.begin(event.pointerId, width);
           event.currentTarget.setPointerCapture(event.pointerId);
         }}

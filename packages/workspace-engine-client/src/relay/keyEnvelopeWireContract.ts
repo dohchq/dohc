@@ -11,8 +11,7 @@ export const KEY_ENVELOPE_METHOD = {
   download: "keys.download",
 } as const;
 
-export type KeyEnvelopeMethod =
-  (typeof KEY_ENVELOPE_METHOD)[keyof typeof KEY_ENVELOPE_METHOD];
+export type KeyEnvelopeMethod = (typeof KEY_ENVELOPE_METHOD)[keyof typeof KEY_ENVELOPE_METHOD];
 
 export type KeyEnvelopeMethodResultMap = {
   [KEY_ENVELOPE_METHOD.upload]: KeyEnvelopeUploadResult;
@@ -35,15 +34,11 @@ export function decodeKeyEnvelopeResult<M extends KeyEnvelopeMethod>(
 ): KeyEnvelopeMethodResultMap[M] {
   const schema = KeyEnvelopeResultSchemas[method];
   if (schema === undefined) {
-    throw new ProtocolShapeError(
-      `Unsupported key-envelope method: ${method}`,
-    );
+    throw new ProtocolShapeError(`Unsupported key-envelope method: ${method}`);
   }
   const decoded = Schema.decodeUnknownResult(schema)(value);
   if (Result.isFailure(decoded)) {
-    throw new ProtocolShapeError(
-      `${method} result: ${decoded.failure.message}`,
-    );
+    throw new ProtocolShapeError(`${method} result: ${decoded.failure.message}`);
   }
   return decoded.success as KeyEnvelopeMethodResultMap[M];
 }

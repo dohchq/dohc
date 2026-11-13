@@ -6,10 +6,7 @@ import type { PendingTextUndo } from "./fileEditorUndo";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
-import {
-  useAutosavedTextDraft,
-  type DraftFlush,
-} from "./useAutosavedTextDraft";
+import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
 
 // A text, code or JSON file's actions in its tab row: the save state and
 // Share. The tab's icon already says what the file is.
@@ -108,10 +105,7 @@ export function TextEditorView({
     localBuffer,
   });
   return (
-    <div
-      data-testid={testId}
-      className="flex min-h-0 flex-1 flex-col"
-    >
+    <div data-testid={testId} className="flex min-h-0 flex-1 flex-col">
       <TextViewActions
         testId={testId}
         onShare={onShare}

@@ -15,20 +15,43 @@ async function evaluateDebugger(url, expression) {
   try {
     return await new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(new Error(`Debugger evaluation timed out: ${url}`)), 5000);
-      socket.addEventListener("error", () => reject(new Error(`Debugger connection failed: ${url}`)), { once: true });
-      socket.addEventListener("close", () => reject(new Error(`Debugger connection closed: ${url}`)), { once: true });
-      socket.addEventListener("open", () => {
-        try {
-          socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } }));
-        } catch (error) { reject(error); }
-      }, { once: true });
+      socket.addEventListener(
+        "error",
+        () => reject(new Error(`Debugger connection failed: ${url}`)),
+        { once: true },
+      );
+      socket.addEventListener(
+        "close",
+        () => reject(new Error(`Debugger connection closed: ${url}`)),
+        { once: true },
+      );
+      socket.addEventListener(
+        "open",
+        () => {
+          try {
+            socket.send(
+              JSON.stringify({
+                id: 1,
+                method: "Runtime.evaluate",
+                params: { expression, returnByValue: true },
+              }),
+            );
+          } catch (error) {
+            reject(error);
+          }
+        },
+        { once: true },
+      );
       socket.addEventListener("message", (event) => {
         try {
           const message = JSON.parse(String(event.data));
           if (message.id !== 1) return;
-          if (message.error || message.result?.exceptionDetails) reject(new Error(JSON.stringify(message)));
+          if (message.error || message.result?.exceptionDetails)
+            reject(new Error(JSON.stringify(message)));
           else resolve(message.result.result.value);
-        } catch (error) { reject(error); }
+        } catch (error) {
+          reject(error);
+        }
       });
     });
   } finally {
@@ -61,50 +84,105 @@ try {
   process.once("exit", forgetLink);
   // Until Electron starts launching, a signal ends the launcher at once, as it always has.
   leaveStartup = (signal) => process.exit(signal === "SIGTERM" ? 143 : 130);
-  process.once("SIGINT", leaveStartup); process.once("SIGTERM", leaveStartup);
+  process.once("SIGINT", leaveStartup);
+  process.once("SIGTERM", leaveStartup);
   const { home } = session;
   for (const path of [profile, workspace]) await mkdir(path, { recursive: true });
-  await writeFile(join(workspace, "debug.md"), "# Debug workspace\n\nThis workspace belongs to this debug session.\n");
+  await writeFile(
+    join(workspace, "debug.md"),
+    "# Debug workspace\n\nThis workspace belongs to this debug session.\n",
+  );
   // The session folder stands for the person's home, so a new workspace goes beside dohc's state.
-  const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_USER_HOME: directory, DOHC_TEST_PICK_PATH: workspace };
+  const env = {
+    ...process.env,
+    DOHC_DESKTOP_TEST: "1",
+    DOHC_TEST_HOME: home,
+    DOHC_TEST_USER_HOME: directory,
+    DOHC_TEST_PICK_PATH: workspace,
+  };
   if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
   const commit = git(["rev-parse", "HEAD"]);
   // Once Electron may be starting, a signal waits for the launch and then
   // stops the session the usual way, which closes the app before the link goes.
-  launching = () => { interrupted = true; };
-  process.off("SIGINT", leaveStartup); process.off("SIGTERM", leaveStartup);
-  process.on("SIGINT", launching); process.on("SIGTERM", launching);
-  app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
-    args: [`--user-data-dir=${profile}`, "--dohc-isolated-test", "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
+  launching = () => {
+    interrupted = true;
+  };
+  process.off("SIGINT", leaveStartup);
+  process.off("SIGTERM", leaveStartup);
+  process.on("SIGINT", launching);
+  process.on("SIGTERM", launching);
+  app = await electron.launch({
+    executablePath: require("electron"),
+    cwd: join(repoRoot, "apps/desktop"),
+    args: [
+      `--user-data-dir=${profile}`,
+      "--dohc-isolated-test",
+      "--remote-debugging-address=127.0.0.1",
+      "--remote-debugging-port=0",
+      join(repoRoot, "apps/desktop/dist/main/main.js"),
+    ],
+    env,
+    artifactsDir: directory,
+  });
   processHandle = app.process();
   const stopped = new Promise((done) => {
     stop = () => {
-      app.off("close", stop); processHandle.off("exit", stop);
+      app.off("close", stop);
+      processHandle.off("exit", stop);
       done();
     };
-    app.once("close", stop); processHandle.once("exit", stop);
-    process.off("SIGINT", launching); process.off("SIGTERM", launching);
-    process.on("SIGINT", stop); process.on("SIGTERM", stop);
+    app.once("close", stop);
+    processHandle.once("exit", stop);
+    process.off("SIGINT", launching);
+    process.off("SIGTERM", launching);
+    process.on("SIGINT", stop);
+    process.on("SIGTERM", stop);
     if (interrupted || processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
   });
-  const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
-  app.process().stdout?.setEncoding("utf8").on("data", (text) => record("main.stdout", text));
-  app.process().stderr?.setEncoding("utf8").on("data", (text) => record("main.stderr", text));
+  const record = (source, text) =>
+    logs.push({ at: new Date().toISOString(), source, text: String(text) });
+  app
+    .process()
+    .stdout?.setEncoding("utf8")
+    .on("data", (text) => record("main.stdout", text));
+  app
+    .process()
+    .stderr?.setEncoding("utf8")
+    .on("data", (text) => record("main.stderr", text));
   const page = await app.firstWindow();
   page.on("console", (entry) => record(`renderer.${entry.type()}`, entry.text()));
   page.on("pageerror", (error) => record("renderer.error", error.message));
   await app.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
   const mainPort = await app.evaluate(() => process.debugPort);
-  const rendererPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/)[0];
-  const instance = { root: repoRoot, commit, supervisorPid: process.pid, launcherPid: app.process().pid,
-    electronPid: await app.evaluate(() => process.pid), workspace, profile, home, homeFiles: session.files,
-    mainInspector: `http://127.0.0.1:${mainPort}/json/list`, rendererInspector: `http://127.0.0.1:${rendererPort}/json/list`, build: assertPrepared(), directory };
+  const rendererPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split(
+    /\r?\n/,
+  )[0];
+  const instance = {
+    root: repoRoot,
+    commit,
+    supervisorPid: process.pid,
+    launcherPid: app.process().pid,
+    electronPid: await app.evaluate(() => process.pid),
+    workspace,
+    profile,
+    home,
+    homeFiles: session.files,
+    mainInspector: `http://127.0.0.1:${mainPort}/json/list`,
+    rendererInspector: `http://127.0.0.1:${rendererPort}/json/list`,
+    build: assertPrepared(),
+    directory,
+  };
   const debuggerTargets = {};
-  for (const [kind, address] of [["main", instance.mainInspector], ["renderer", instance.rendererInspector]]) {
+  for (const [kind, address] of [
+    ["main", instance.mainInspector],
+    ["renderer", instance.rendererInspector],
+  ]) {
     const response = await fetch(address, { signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new Error(`Debugger endpoint is unavailable: ${address}`);
-    const target = (await response.json()).find((target) => target.webSocketDebuggerUrl && (kind === "main" || target.type === "page"));
+    const target = (await response.json()).find(
+      (target) => target.webSocketDebuggerUrl && (kind === "main" || target.type === "page"),
+    );
     if (!target) throw new Error(`Debugger endpoint is unavailable: ${address}`);
     debuggerTargets[kind] = target.webSocketDebuggerUrl;
   }
@@ -113,16 +191,24 @@ try {
   if (process.argv.includes("--probe")) {
     assert.equal(await evaluateDebugger(debuggerTargets.main, "process.pid"), instance.electronPid);
     assert.equal(await evaluateDebugger(debuggerTargets.renderer, "typeof document"), "object");
-    console.log("[debug] Independent debugger connections verified the Electron PID and renderer context.");
+    console.log(
+      "[debug] Independent debugger connections verified the Electron PID and renderer context.",
+    );
   }
   console.log("Close the debug app or press Ctrl+C to stop this session and save its evidence.");
   if (process.argv.includes("--probe")) stop();
   await stopped;
-} catch (error) { console.error(error.message); logs.push({ source: "launcher", text: String(error) }); process.exitCode = 1; }
-finally {
+} catch (error) {
+  console.error(error.message);
+  logs.push({ source: "launcher", text: String(error) });
+  process.exitCode = 1;
+} finally {
   stop?.();
   try {
-    if (app && processHandle) await closeDebugApplication(app, processHandle, directory, { closeTimeoutMs: DESKTOP_CLOSE_GRACE_MS });
+    if (app && processHandle)
+      await closeDebugApplication(app, processHandle, directory, {
+        closeTimeoutMs: DESKTOP_CLOSE_GRACE_MS,
+      });
   } catch (error) {
     console.error(error.message);
     logs.push({ source: "cleanup", text: String(error) });
@@ -130,16 +216,29 @@ finally {
   } finally {
     try {
       await mkdir(directory, { recursive: true });
-      await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+      await writeFile(
+        join(directory, "desktop.jsonl"),
+        logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+      );
       console.log(`[debug] Evidence retained at ${directory}`);
     } finally {
-      for (const handler of [leaveStartup, launching]) if (handler) { process.off("SIGINT", handler); process.off("SIGTERM", handler); }
+      for (const handler of [leaveStartup, launching])
+        if (handler) {
+          process.off("SIGINT", handler);
+          process.off("SIGTERM", handler);
+        }
       // The app may still use the link if its process did not exit.
       if (forgetLink) process.off("exit", forgetLink);
       if (processHandle && processHandle.exitCode === null && processHandle.signalCode === null) {
-        if (session?.link) console.error(`[debug] Left ${session.link} in place, because the app may still be running. Remove it once the app has stopped.`);
+        if (session?.link)
+          console.error(
+            `[debug] Left ${session.link} in place, because the app may still be running. Remove it once the app has stopped.`,
+          );
       } else removeDebugHome(session);
-      if (stop) { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+      if (stop) {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
     }
   }
 }

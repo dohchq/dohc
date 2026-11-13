@@ -37,8 +37,16 @@ function Harness(props: {
 }
 
 const radio = (name: string) => screen.getByRole("radio", { name });
-const checked = () => screen.getAllByRole("radio").filter((it) => it.getAttribute("aria-checked") === "true").map((it) => it.textContent);
-const tabbable = () => screen.getAllByRole("radio").filter((it) => it.tabIndex === 0).map((it) => it.textContent);
+const checked = () =>
+  screen
+    .getAllByRole("radio")
+    .filter((it) => it.getAttribute("aria-checked") === "true")
+    .map((it) => it.textContent);
+const tabbable = () =>
+  screen
+    .getAllByRole("radio")
+    .filter((it) => it.tabIndex === 0)
+    .map((it) => it.textContent);
 
 describe("SegmentedControl", () => {
   it("draws an icon option as a named 24px square with its label as tooltip", () => {
@@ -105,7 +113,9 @@ describe("SegmentedControl", () => {
   it("skips a disabled option from the keyboard and ignores its click", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    const options = SIZES.map((option) => (option.value === "medium" ? { ...option, disabled: true } : option));
+    const options = SIZES.map((option) =>
+      option.value === "medium" ? { ...option, disabled: true } : option,
+    );
     render(<Harness options={options} onChange={onChange} />);
     expect(radio("Medium").hasAttribute("disabled")).toBe(true);
 
@@ -122,7 +132,9 @@ describe("SegmentedControl", () => {
 
   it("puts the first enabled option in the tab order when the chosen one is disabled", async () => {
     const user = userEvent.setup();
-    const options = SIZES.map((option) => (option.value === "small" ? { ...option, disabled: true } : option));
+    const options = SIZES.map((option) =>
+      option.value === "small" ? { ...option, disabled: true } : option,
+    );
     render(<Harness options={options} initial="small" />);
     expect(checked()).toEqual(["Small"]);
     expect(tabbable()).toEqual(["Medium"]);
@@ -136,7 +148,9 @@ describe("SegmentedControl", () => {
 
   it("moves from the focused radio when the chosen one is disabled", async () => {
     const user = userEvent.setup();
-    const options = SIZES.map((option) => (option.value === "small" ? { ...option, disabled: true } : option));
+    const options = SIZES.map((option) =>
+      option.value === "small" ? { ...option, disabled: true } : option,
+    );
     render(<Harness options={options} initial="small" />);
 
     radio("Medium").focus();
@@ -154,7 +168,9 @@ describe("SegmentedControl", () => {
   it("moves from the focused radio when no option matches the value", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
-    render(<SegmentedControl<string> label="Size" value="huge" options={SIZES} onChange={onChange} />);
+    render(
+      <SegmentedControl<string> label="Size" value="huge" options={SIZES} onChange={onChange} />,
+    );
     expect(checked()).toEqual([]);
     expect(tabbable()).toEqual(["Small"]);
 

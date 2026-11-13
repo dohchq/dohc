@@ -1,11 +1,5 @@
 #!/usr/bin/env node
-import {
-  chmodSync,
-  copyFileSync,
-  mkdirSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run as runProcess } from "../../../scripts/verification/process.mjs";
@@ -29,9 +23,7 @@ export function parseTargetArgument(args) {
     args[0] !== "--target" ||
     !/^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+$/.test(args[1])
   ) {
-    throw new Error(
-      "Usage: build-workspace-engine.mjs [--target <Rust target triple>]",
-    );
+    throw new Error("Usage: build-workspace-engine.mjs [--target <Rust target triple>]");
   }
   return args[1];
 }
@@ -45,9 +37,7 @@ export async function buildWorkspaceEngine({
   runCargo = runProcess,
 } = {}) {
   const binaryName = `dohc-workspace-engine${
-    target?.includes("-windows-") || (!target && platform === "win32")
-      ? ".exe"
-      : ""
+    target?.includes("-windows-") || (!target && platform === "win32") ? ".exe" : ""
   }`;
   const builtBinary = target
     ? join(repoRoot, "target", target, "release", binaryName)
@@ -73,18 +63,11 @@ export async function buildWorkspaceEngine({
 
   copyFileSync(builtBinary, stagedBinary);
   if (!binaryName.endsWith(".exe")) chmodSync(stagedBinary, 0o755);
-  console.log(
-    `[workspace-engine] staged ${stagedBinary}${
-      target ? ` from target ${target}` : ""
-    }`,
-  );
+  console.log(`[workspace-engine] staged ${stagedBinary}${target ? ` from target ${target}` : ""}`);
   return { builtBinary, stagedBinary, target };
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { withBuildBudget } = await import("../../../scripts/verification/build.mjs");
   await withBuildBudget((env) =>
     buildWorkspaceEngine({

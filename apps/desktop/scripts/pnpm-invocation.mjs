@@ -2,10 +2,7 @@ import { basename } from "node:path";
 
 export function pnpmInvocation(
   args,
-  {
-    nodeExecutable = process.execPath,
-    pnpmCli = process.env.npm_execpath,
-  } = {},
+  { nodeExecutable = process.execPath, pnpmCli = process.env.npm_execpath } = {},
 ) {
   const cliPath = pnpmCli?.trim();
   if (!cliPath || !basename(cliPath).toLowerCase().startsWith("pnpm")) {

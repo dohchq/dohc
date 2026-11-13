@@ -13,50 +13,72 @@ afterEach(async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   vi.mocked(rm).mockReset().mockImplementation(actual.rm);
   vi.mocked(mkdtemp).mockReset().mockImplementation(actual.mkdtemp);
-  await Promise.all(roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })),
+  );
 });
 
-it.each([false, true])("reports temporary cleanup failure without replacing the health verdict (unhealthy=%s)", async (unhealthy) => {
-  const cleanupError = Object.assign(new Error("temporary SQLite file is busy"), { code: "EBUSY" });
-  const healthError = new Error("versions.active integrity check failed");
-  vi.mocked(rm).mockImplementationOnce(async (root) => {
-    roots.push(String(root));
-    throw cleanupError;
-  });
-  const failures: Error[] = [];
-  const client = {
-    close: vi.fn(),
-    closeUnresponsive: vi.fn(),
-    async sendRequest(request: Request) {
-      if (request.method === "versions.active" && unhealthy) throw healthError;
-      return { id: request.id, result: request.method === "workspace.open" ? { workspace: "smoke" } : null };
-    },
-  };
-  const lifecycle = new EngineDaemonLifecycle({
-    command: "unused-test-engine", fileExists: () => true,
-    launch: async () => client,
-    onFailure: (error) => { failures.push(error); },
-  });
-  try {
-    await lifecycle.start();
-    // The smoke works in a real temporary directory, which a loaded gate host can slow.
-    await vi.waitFor(() => expect(failures).toHaveLength(unhealthy ? 2 : 1), { timeout: 10_000 });
-    expect(failures.some((error) => error.cause === cleanupError &&
-      error.message === "Could not delete the engine startup smoke directory.")).toBe(true);
-    if (unhealthy) {
-      expect(failures).toContain(healthError);
-      expect(client.closeUnresponsive).toHaveBeenCalledOnce();
-    } else {
-      expect(client.closeUnresponsive).not.toHaveBeenCalled();
-      expect(lifecycle.currentClient()).toBe(client);
-      await expect(lifecycle.currentClient()!.sendRequest({
-        id: 99, method: "engine.ping", params: {},
-      })).resolves.toEqual({ id: 99, result: null });
+it.each([false, true])(
+  "reports temporary cleanup failure without replacing the health verdict (unhealthy=%s)",
+  async (unhealthy) => {
+    const cleanupError = Object.assign(new Error("temporary SQLite file is busy"), {
+      code: "EBUSY",
+    });
+    const healthError = new Error("versions.active integrity check failed");
+    vi.mocked(rm).mockImplementationOnce(async (root) => {
+      roots.push(String(root));
+      throw cleanupError;
+    });
+    const failures: Error[] = [];
+    const client = {
+      close: vi.fn(),
+      closeUnresponsive: vi.fn(),
+      async sendRequest(request: Request) {
+        if (request.method === "versions.active" && unhealthy) throw healthError;
+        return {
+          id: request.id,
+          result: request.method === "workspace.open" ? { workspace: "smoke" } : null,
+        };
+      },
+    };
+    const lifecycle = new EngineDaemonLifecycle({
+      command: "unused-test-engine",
+      fileExists: () => true,
+      launch: async () => client,
+      onFailure: (error) => {
+        failures.push(error);
+      },
+    });
+    try {
+      await lifecycle.start();
+      // The smoke works in a real temporary directory, which a loaded gate host can slow.
+      await vi.waitFor(() => expect(failures).toHaveLength(unhealthy ? 2 : 1), { timeout: 10_000 });
+      expect(
+        failures.some(
+          (error) =>
+            error.cause === cleanupError &&
+            error.message === "Could not delete the engine startup smoke directory.",
+        ),
+      ).toBe(true);
+      if (unhealthy) {
+        expect(failures).toContain(healthError);
+        expect(client.closeUnresponsive).toHaveBeenCalledOnce();
+      } else {
+        expect(client.closeUnresponsive).not.toHaveBeenCalled();
+        expect(lifecycle.currentClient()).toBe(client);
+        await expect(
+          lifecycle.currentClient()!.sendRequest({
+            id: 99,
+            method: "engine.ping",
+            params: {},
+          }),
+        ).resolves.toEqual({ id: 99, result: null });
+      }
+    } finally {
+      await lifecycle.stop();
     }
-  } finally {
-    await lifecycle.stop();
-  }
-});
+  },
+);
 
 // The smoke's first step is making its directory, so the mkdtemp spy shows
 // whether it started. It takes the engine's one open lock, and sent at the
@@ -68,39 +90,58 @@ function smokeClient() {
     close: vi.fn(),
     async sendRequest(request: Request) {
       requests.push(request.method);
-      return { id: request.id, result: request.method === "workspace.open" ? { workspace: "smoke" } : null };
+      return {
+        id: request.id,
+        result: request.method === "workspace.open" ? { workspace: "smoke" } : null,
+      };
     },
   };
 }
-const smokeStarted = () => vi.mocked(mkdtemp).mock.calls.some(([prefix]) => String(prefix).includes("dohc-rust-engine-smoke-"));
+const smokeStarted = () =>
+  vi
+    .mocked(mkdtemp)
+    .mock.calls.some(([prefix]) => String(prefix).includes("dohc-rust-engine-smoke-"));
 
-it.each(["run", "skip"] as const)("holds the first launch's smoke until it is told to %s", async (decision) => {
-  const client = smokeClient();
-  const startupSmoke = Promise.withResolvers<"run" | "skip">();
-  const lifecycle = new EngineDaemonLifecycle({
-    command: "unused-test-engine", fileExists: () => true,
-    launch: async () => client,
-    startupSmoke: startupSmoke.promise,
-  });
-  try {
-    // An ungated smoke calls mkdtemp before start() resolves.
-    await lifecycle.start();
-    expect(smokeStarted()).toBe(false);
-    startupSmoke.resolve(decision);
-    if (decision === "run") {
-      await vi.waitFor(() => expect(client.requests).toEqual(["workspace.open", "versions.active", "workspace.close"]), { timeout: 10_000 });
+it.each(["run", "skip"] as const)(
+  "holds the first launch's smoke until it is told to %s",
+  async (decision) => {
+    const client = smokeClient();
+    const startupSmoke = Promise.withResolvers<"run" | "skip">();
+    const lifecycle = new EngineDaemonLifecycle({
+      command: "unused-test-engine",
+      fileExists: () => true,
+      launch: async () => client,
+      startupSmoke: startupSmoke.promise,
+    });
+    try {
+      // An ungated smoke calls mkdtemp before start() resolves.
+      await lifecycle.start();
+      expect(smokeStarted()).toBe(false);
+      startupSmoke.resolve(decision);
+      if (decision === "run") {
+        await vi.waitFor(
+          () =>
+            expect(client.requests).toEqual([
+              "workspace.open",
+              "versions.active",
+              "workspace.close",
+            ]),
+          { timeout: 10_000 },
+        );
+      }
+    } finally {
+      // stop() joins the smoke, so a skipped one has finished deciding by now.
+      await lifecycle.stop();
     }
-  } finally {
-    // stop() joins the smoke, so a skipped one has finished deciding by now.
-    await lifecycle.stop();
-  }
-  expect(smokeStarted()).toBe(decision === "run");
-});
+    expect(smokeStarted()).toBe(decision === "run");
+  },
+);
 
 it("stops without waiting for a held smoke", async () => {
   const client = smokeClient();
   const lifecycle = new EngineDaemonLifecycle({
-    command: "unused-test-engine", fileExists: () => true,
+    command: "unused-test-engine",
+    fileExists: () => true,
     launch: async () => client,
     startupSmoke: new Promise<"run" | "skip">(() => undefined),
   });

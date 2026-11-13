@@ -1,4 +1,12 @@
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type Ref,
+} from "react";
 import type { LucideIcon } from "lucide-react";
 import { Overlay } from "../Overlay";
 import { modalFocusableElements } from "../modalFocus";
@@ -35,7 +43,13 @@ export const FOCUS_RING = "focus-visible:outline-2 focus-visible:outline-focus";
 // dialog opens, so it is the dialog: a screen reader reads the title and the
 // sentences there. It also takes the dialog's keys.
 export function confirmPanel(titleId: string, bodyId?: string) {
-  return { role: "dialog", "aria-modal": true, "aria-labelledby": titleId, "aria-describedby": bodyId, onKeyDown: onDialogKeyDown } as const;
+  return {
+    role: "dialog",
+    "aria-modal": true,
+    "aria-labelledby": titleId,
+    "aria-describedby": bodyId,
+    onKeyDown: onDialogKeyDown,
+  } as const;
 }
 
 // Every confirmation: a tile tinted by intent beside one text column. The
@@ -66,13 +80,20 @@ export function ConfirmationCard(props: {
 }
 
 /** The title and the sentences read after it. */
-export function ConfirmationHead(props: { titleId: string; bodyId: string; title: ReactNode; children: ReactNode }) {
+export function ConfirmationHead(props: {
+  titleId: string;
+  bodyId: string;
+  title: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div className="flex flex-col gap-1">
       <h2 id={props.titleId} className="m-0 break-words text-base font-semibold text-ink">
         {props.title}
       </h2>
-      <div id={props.bodyId} className="flex flex-col gap-1 text-[13px] text-muted">{props.children}</div>
+      <div id={props.bodyId} className="flex flex-col gap-1 text-[13px] text-muted">
+        {props.children}
+      </div>
     </div>
   );
 }
@@ -91,12 +112,18 @@ export function ConfirmEscape(props: { children: ReactNode; action: ReactNode })
 
 /** Cancel and the confirm, at the end of the column. Nothing else sits here. */
 export function ConfirmActions(props: { children: ReactNode }) {
-  return <div data-confirm-actions className="flex justify-end gap-2">{props.children}</div>;
+  return (
+    <div data-confirm-actions className="flex justify-end gap-2">
+      {props.children}
+    </div>
+  );
 }
 
 // The card alone. ConfirmDialog puts it in an Overlay; the states page
 // renders it over a frame with no keyboard behavior.
-export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref<HTMLButtonElement>; idBase?: string }) {
+export function ConfirmDialogCard(
+  props: ConfirmDialogProps & { confirmRef?: Ref<HTMLButtonElement>; idBase?: string },
+) {
   // The states page shows one card in each theme, so ids come from useId.
   const ownId = useId();
   const id = props.idBase ?? ownId;
@@ -110,7 +137,11 @@ export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref
       </ConfirmationHead>
       {props.details}
       <ConfirmActions>
-        <SecondaryButton data-testid={props.cancelTestId} className={FOCUS_RING} onClick={props.onCancel}>
+        <SecondaryButton
+          data-testid={props.cancelTestId}
+          className={FOCUS_RING}
+          onClick={props.onCancel}
+        >
           Cancel
         </SecondaryButton>
         <Confirm
@@ -127,7 +158,12 @@ export function ConfirmDialogCard(props: ConfirmDialogProps & { confirmRef?: Ref
   );
 }
 
-const ARROW_STEP: Partial<Record<string, -1 | 1>> = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
+const ARROW_STEP: Partial<Record<string, -1 | 1>> = {
+  ArrowLeft: -1,
+  ArrowUp: -1,
+  ArrowRight: 1,
+  ArrowDown: 1,
+};
 
 // A held Enter never confirms: it may be the key that opened the dialog,
 // repeating. The arrow keys move between the dialog's buttons, as in a native
@@ -139,12 +175,25 @@ export function onDialogKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
   }
   const step = ARROW_STEP[event.key];
   if (!step || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-  const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-confirm-actions] button:enabled")];
-  const from = event.target === event.currentTarget ? null : buttons.indexOf(event.target as HTMLButtonElement);
+  const buttons = [
+    ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
+      "[data-confirm-actions] button:enabled",
+    ),
+  ];
+  const from =
+    event.target === event.currentTarget
+      ? null
+      : buttons.indexOf(event.target as HTMLButtonElement);
   if (from === -1 || buttons.length === 0) return;
   event.preventDefault();
   event.stopPropagation();
-  buttons[from === null ? (step === 1 ? 0 : buttons.length - 1) : (from + step + buttons.length) % buttons.length]!.focus();
+  buttons[
+    from === null
+      ? step === 1
+        ? 0
+        : buttons.length - 1
+      : (from + step + buttons.length) % buttons.length
+  ]!.focus();
 }
 
 // Where someone may be typing: a text field, editable text, or an app's
@@ -176,7 +225,11 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     return props.confirmDisabled ? panel && modalFocusableElements(panel)[0] : confirmRef.current;
   });
   return (
-    <Overlay onClose={props.onCancel} panelRef={panelRef} panelProps={confirmPanel(`${id}-title`, `${id}-body`)}>
+    <Overlay
+      onClose={props.onCancel}
+      panelRef={panelRef}
+      panelProps={confirmPanel(`${id}-title`, `${id}-body`)}
+    >
       <ConfirmDialogCard {...props} idBase={id} confirmRef={confirmRef} />
     </Overlay>
   );

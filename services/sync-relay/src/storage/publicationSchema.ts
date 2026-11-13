@@ -37,8 +37,21 @@ export function initializeAppPublicationSchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_publication_discovery
       ON sync_relay_app_publications(workspace_id, grant_id, grant_generation, active, publication_id);
   `);
-  initializeMarkedTable(db, TAKEDOWN_MIGRATION, TAKEDOWN_TABLE, TAKEDOWN_SQL, "Publication takedown");
-  initializeMarkedTable(db, HOLD_MIGRATION, HOLD_TABLE, HOLD_SQL, "App publishing hold", HOLD_BACKFILL);
+  initializeMarkedTable(
+    db,
+    TAKEDOWN_MIGRATION,
+    TAKEDOWN_TABLE,
+    TAKEDOWN_SQL,
+    "Publication takedown",
+  );
+  initializeMarkedTable(
+    db,
+    HOLD_MIGRATION,
+    HOLD_TABLE,
+    HOLD_SQL,
+    "App publishing hold",
+    HOLD_BACKFILL,
+  );
 }
 
 const TAKEDOWN_MIGRATION = "app-publication-operator-takedowns-v1";
@@ -62,16 +75,31 @@ const HOLD_BACKFILL = `INSERT INTO sync_relay_app_publishing_holds(publication_i
   SELECT t.publication_id,p.owner_user_id,t.disabled_at_ms FROM sync_relay_app_publication_takedowns t
   JOIN sync_relay_app_publications p USING(publication_id)`;
 
-function initializeMarkedTable(db: SqliteDb, migration: string, table: string, sql: string, label: string, backfill?: string): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration);
-  const existing = db.prepare("SELECT sql FROM sqlite_schema WHERE name=? AND type='table'").get(table);
+function initializeMarkedTable(
+  db: SqliteDb,
+  migration: string,
+  table: string,
+  sql: string,
+  label: string,
+  backfill?: string,
+): void {
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(migration);
+  const existing = db
+    .prepare("SELECT sql FROM sqlite_schema WHERE name=? AND type='table'")
+    .get(table);
   const normalize = (sql: string) => sql.trim().replace(/\s+/g, " ");
   if (marked) {
-    if (!existing || normalize(String(existing.sql)) !== normalize(sql)) throw new Error(`${label} schema is missing or damaged.`);
+    if (!existing || normalize(String(existing.sql)) !== normalize(sql))
+      throw new Error(`${label} schema is missing or damaged.`);
     return;
   }
   if (existing) throw new Error(`Unmarked ${label.toLowerCase()} schema already exists.`);
   db.exec(sql);
   if (backfill) db.exec(backfill);
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES(?,?)").run(migration, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES(?,?)").run(
+    migration,
+    Date.now(),
+  );
 }

@@ -82,9 +82,9 @@ describe("ProposalReviewDialog", () => {
     expect(file.dataset.proposalPath).toBe("docs/plan.md");
     expect(file.textContent).toContain("Changed");
     await openFile(user);
-    expect(
-      (await screen.findByTestId("proposal-review-diff-lines")).textContent,
-    ).toContain("three");
+    expect((await screen.findByTestId("proposal-review-diff-lines")).textContent).toContain(
+      "three",
+    );
   });
 
   // The whole review is one read. It used to be a listing plus one read per
@@ -92,9 +92,7 @@ describe("ProposalReviewDialog", () => {
   it("reads the whole review once, however many files it holds", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
-        files: [0, 1, 2, 3, 4].map((opIndex) =>
-          fileRow({ opIndex, path: `docs/f-${opIndex}.md` }),
-        ),
+        files: [0, 1, 2, 3, 4].map((opIndex) => fileRow({ opIndex, path: `docs/f-${opIndex}.md` })),
       }),
     );
     renderDialog();
@@ -134,9 +132,7 @@ describe("ProposalReviewDialog", () => {
     expect(screen.getAllByTestId("proposal-review-file-toggle")[0]!.textContent).toContain(
       "docs/f-0.md",
     );
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
   });
 
   // Opening one file fetches that file, and only that file.
@@ -144,9 +140,7 @@ describe("ProposalReviewDialog", () => {
     const user = userEvent.setup();
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
-        files: [0, 1, 2].map((opIndex) =>
-          fileRow({ opIndex, path: `docs/f-${opIndex}.md` }),
-        ),
+        files: [0, 1, 2].map((opIndex) => fileRow({ opIndex, path: `docs/f-${opIndex}.md` })),
       }),
     );
     renderDialog();
@@ -154,9 +148,7 @@ describe("ProposalReviewDialog", () => {
 
     await openFile(user, 1);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("proposal-review-diff-lines")).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByTestId("proposal-review-diff-lines")).toBeTruthy());
     expect(
       bridgeMock.readShareProposalFileContent.mock.calls,
       "opening one file must not fetch the ones the granter did not open",
@@ -200,16 +192,14 @@ describe("ProposalReviewDialog", () => {
 
     await openFile(user);
 
-    expect(
-      (await screen.findByTestId("proposal-review-file-error")).textContent,
-    ).toContain("dohc could not read that file.");
+    expect((await screen.findByTestId("proposal-review-file-error")).textContent).toContain(
+      "dohc could not read that file.",
+    );
     expect(
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
       "one unreadable file that disables Decline leaves the granter unable to answer the rest",
     ).toBe(false);
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
 
     // A failure is not a permanent verdict on that file. Reopening tries again.
     bridgeMock.readShareProposalFileContent.mockResolvedValue({
@@ -227,9 +217,7 @@ describe("ProposalReviewDialog", () => {
   // The relay could not state who sent them. The review still works, and the
   // dialog names an unknown account the way the share banner does.
   it("names an unknown sender the way the share surfaces already do", async () => {
-    bridgeMock.readShareProposalChanges.mockResolvedValue(
-      changes({ proposedByEmail: null }),
-    );
+    bridgeMock.readShareProposalChanges.mockResolvedValue(changes({ proposedByEmail: null }));
     renderDialog();
     expect((await screen.findByRole("dialog")).textContent).toContain(
       "Changes from another dohc user",
@@ -283,9 +271,7 @@ describe("ProposalReviewDialog", () => {
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
       "failing the read on unpreviewable content leaves the granter unable to decline it",
     ).toBe(false);
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
   });
 
   // Decline is the safe exit: it moves nothing into this workspace. A granter
@@ -308,9 +294,7 @@ describe("ProposalReviewDialog", () => {
       "a read failure that disables Decline leaves the granter holding a proposal they can neither see nor answer",
     ).toBe(false);
     // Accept is the opposite: it writes, so it stays disabled.
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      true,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(true);
 
     await user.click(screen.getByTestId("proposal-review-decline"));
     await waitFor(() =>
@@ -382,9 +366,7 @@ describe("ProposalReviewDialog", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "dohc could not find those changes. Refresh, then try again.",
     );
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      true,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(true);
     await user.click(screen.getByTestId("proposal-review-later"));
     expect(onClose).toHaveBeenCalled();
   });
@@ -397,8 +379,7 @@ describe("ProposalReviewDialog", () => {
       async () =>
         await new Promise((resolve) => {
           if (releaseFirst === null) {
-            releaseFirst = () =>
-              resolve(changes({ proposedByEmail: "stale@dohc.test" }));
+            releaseFirst = () => resolve(changes({ proposedByEmail: "stale@dohc.test" }));
             return;
           }
           resolve(changes({ proposedByEmail: "current@dohc.test" }));
@@ -429,8 +410,6 @@ describe("ProposalReviewDialog", () => {
       screen.getByRole("dialog").textContent,
       "dropping the liveness token repaints a replaced window",
     ).not.toContain("stale@dohc.test");
-    expect(screen.getByRole("dialog").textContent).toContain(
-      "Changes from current@dohc.test",
-    );
+    expect(screen.getByRole("dialog").textContent).toContain("Changes from current@dohc.test");
   });
 });

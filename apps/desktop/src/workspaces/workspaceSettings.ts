@@ -7,26 +7,24 @@ import {
 import { IgnoredSettings } from "../settings/settingsFile";
 import { SETTINGS_READ_SOURCES } from "../settings/userSettings";
 
-export {
-  ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
-  DEFAULT_WORKSPACE_SETTINGS,
-  WorkspaceSettings,
-};
+export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH, DEFAULT_WORKSPACE_SETTINGS, WorkspaceSettings };
 
-export const WorkspaceSettingsResult = z.object({
-  settings: WorkspaceSettings,
-  source: z.enum(SETTINGS_READ_SOURCES),
-  // Bounded above a full path, not above a sentence: an unreadable settings
-  // file names its own path in the warning, and the IPC contract bounds a path
-  // at 4096. A shorter bound would reject the warning and fail the whole read.
-  warning: z.string().min(1).max(4600).optional(),
-  // Set when a save was refused because the file on disk cannot be read.
-  // Same bound as the warning, and for the same reason: it names the path.
-  refusal: z.string().min(1).max(4600).optional(),
-  ignored: IgnoredSettings.optional(),
-  // Set when the workspace had not finished opening, so dohc read no file.
-  notOpened: z.literal(true).optional(),
-}).strict();
+export const WorkspaceSettingsResult = z
+  .object({
+    settings: WorkspaceSettings,
+    source: z.enum(SETTINGS_READ_SOURCES),
+    // Bounded above a full path, not above a sentence: an unreadable settings
+    // file names its own path in the warning, and the IPC contract bounds a path
+    // at 4096. A shorter bound would reject the warning and fail the whole read.
+    warning: z.string().min(1).max(4600).optional(),
+    // Set when a save was refused because the file on disk cannot be read.
+    // Same bound as the warning, and for the same reason: it names the path.
+    refusal: z.string().min(1).max(4600).optional(),
+    ignored: IgnoredSettings.optional(),
+    // Set when the workspace had not finished opening, so dohc read no file.
+    notOpened: z.literal(true).optional(),
+  })
+  .strict();
 export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 
 // What a save carries: the controls the user actually changed, never the whole
@@ -34,11 +32,13 @@ export type WorkspaceSettingsResult = z.infer<typeof WorkspaceSettingsResult>;
 // so a caller holding a stale copy of the file (a Settings dialog opened
 // before an external edit, or before the user repaired an unreadable file)
 // can no longer write its stale copy back over fields it never touched.
-export const WorkspaceSettingsPatch = z.object({
-  sites: WorkspaceSettings.shape.sites.partial().optional(),
-  privacy: WorkspaceSettings.shape.privacy.partial().optional(),
-  files: WorkspaceSettings.shape.files.removeDefault().partial().optional(),
-}).strict();
+export const WorkspaceSettingsPatch = z
+  .object({
+    sites: WorkspaceSettings.shape.sites.partial().optional(),
+    privacy: WorkspaceSettings.shape.privacy.partial().optional(),
+    files: WorkspaceSettings.shape.files.removeDefault().partial().optional(),
+  })
+  .strict();
 export type WorkspaceSettingsPatch = z.infer<typeof WorkspaceSettingsPatch>;
 
 export function mergeWorkspaceSettings(

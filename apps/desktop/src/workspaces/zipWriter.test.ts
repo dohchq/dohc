@@ -46,11 +46,7 @@ describe("buildStoreZip", () => {
       { path: "empty.md", data: Buffer.alloc(0) },
     ]);
     const entries = readZip(zip);
-    expect(entries.map((entry) => entry.path)).toEqual([
-      "notes/today.md",
-      "b.md",
-      "empty.md",
-    ]);
+    expect(entries.map((entry) => entry.path)).toEqual(["notes/today.md", "b.md", "empty.md"]);
     expect(entries[0]!.data.toString("utf8")).toBe("# Today\n");
     expect(entries[2]!.data.length).toBe(0);
     for (const entry of entries) {

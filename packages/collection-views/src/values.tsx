@@ -24,10 +24,18 @@ import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presen
 const TONES: Record<OptionColor, { pill: string; dot: string; column: string }> = {
   gray: { pill: "bg-muted/12 text-muted", dot: "bg-muted", column: "bg-muted/[0.06]" },
   rust: { pill: "bg-hue-rust/15 text-hue-rust", dot: "bg-hue-rust", column: "bg-hue-rust/[0.06]" },
-  amber: { pill: "bg-hue-amber/15 text-hue-amber", dot: "bg-hue-amber", column: "bg-hue-amber/[0.06]" },
+  amber: {
+    pill: "bg-hue-amber/15 text-hue-amber",
+    dot: "bg-hue-amber",
+    column: "bg-hue-amber/[0.06]",
+  },
   teal: { pill: "bg-hue-teal/15 text-hue-teal", dot: "bg-hue-teal", column: "bg-hue-teal/[0.06]" },
   blue: { pill: "bg-hue-blue/15 text-hue-blue", dot: "bg-hue-blue", column: "bg-hue-blue/[0.06]" },
-  indigo: { pill: "bg-hue-indigo/15 text-hue-indigo", dot: "bg-hue-indigo", column: "bg-hue-indigo/[0.06]" },
+  indigo: {
+    pill: "bg-hue-indigo/15 text-hue-indigo",
+    dot: "bg-hue-indigo",
+    column: "bg-hue-indigo/[0.06]",
+  },
   plum: { pill: "bg-hue-plum/15 text-hue-plum", dot: "bg-hue-plum", column: "bg-hue-plum/[0.06]" },
   rose: { pill: "bg-hue-rose/15 text-hue-rose", dot: "bg-hue-rose", column: "bg-hue-rose/[0.06]" },
 };
@@ -41,9 +49,10 @@ export function optionTone(color: OptionColor) {
  * its name, so it holds when options are reordered.
  */
 export function optionColor(field: FieldDefinition, option: string): OptionColor {
-  const chosen = field.type === "select" || field.type === "multi-select"
-    ? chosenOptionColor(field.colors, option)
-    : undefined;
+  const chosen =
+    field.type === "select" || field.type === "multi-select"
+      ? chosenOptionColor(field.colors, option)
+      : undefined;
   return chosen ?? ACTOR_HUES[actorHueSlot(option)]!;
 }
 
@@ -126,15 +135,25 @@ export function FieldTypeIcon({
   type: string;
   className?: string;
 }) {
-  const Icon = type === "number" ? Hash
-    : type === "date" ? CalendarDays
-    : type === "checkbox" ? CheckSquare
-    : type === "select" ? List
-    : type === "multi-select" ? ListChecks
-    : type === "attachment" ? Paperclip
-    : type === "relation" || type === "url" ? Link
-    : type === "person" ? User
-    : type === "button" ? MousePointerClick
-    : Type;
+  const Icon =
+    type === "number"
+      ? Hash
+      : type === "date"
+        ? CalendarDays
+        : type === "checkbox"
+          ? CheckSquare
+          : type === "select"
+            ? List
+            : type === "multi-select"
+              ? ListChecks
+              : type === "attachment"
+                ? Paperclip
+                : type === "relation" || type === "url"
+                  ? Link
+                  : type === "person"
+                    ? User
+                    : type === "button"
+                      ? MousePointerClick
+                      : Type;
   return <Icon size={14} strokeWidth={1.9} aria-hidden className={className} />;
 }

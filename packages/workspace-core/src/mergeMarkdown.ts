@@ -9,19 +9,13 @@
 // workspace-core barrel, which pulls in node:fs modules (databases.ts) that
 // would blank the renderer's module graph at load if dragged in un-tree-shaken.
 
-type MergeResult =
-  | { kind: "merged"; content: string }
-  | { kind: "conflict" };
+type MergeResult = { kind: "merged"; content: string } | { kind: "conflict" };
 
 // Three-way line merge, deliberately conservative: each side's changes apply
 // only when the other side left that region of the BASE untouched. Anything
 // overlapping is a conflict — silent loss is never acceptable, so we'd rather
 // surface a conflict than guess.
-export function mergeMarkdown(input: {
-  base: string;
-  local: string;
-  remote: string;
-}): MergeResult {
+export function mergeMarkdown(input: { base: string; local: string; remote: string }): MergeResult {
   const { base, local, remote } = input;
   if (local === remote) return { kind: "merged", content: local };
   if (local === base) return { kind: "merged", content: remote };
@@ -51,12 +45,9 @@ export function mergeMarkdown(input: {
   for (const l of localHunks) {
     for (const r of remoteHunks) {
       const bothInsertAtSameOffset =
-        l.baseStart === l.baseEnd &&
-        r.baseStart === r.baseEnd &&
-        l.baseStart === r.baseStart;
+        l.baseStart === l.baseEnd && r.baseStart === r.baseEnd && l.baseStart === r.baseStart;
       const sameStartWithInsertion =
-        l.baseStart === r.baseStart &&
-        ((l.baseStart === l.baseEnd) !== (r.baseStart === r.baseEnd));
+        l.baseStart === r.baseStart && (l.baseStart === l.baseEnd) !== (r.baseStart === r.baseEnd);
       if (
         bothInsertAtSameOffset ||
         sameStartWithInsertion ||
@@ -67,8 +58,10 @@ export function mergeMarkdown(input: {
     }
   }
 
-  const all = [...localHunks.map((h) => ({ ...h, side: "local" as const })), ...remoteHunks.map((h) => ({ ...h, side: "remote" as const }))]
-    .sort((a, b) => a.baseStart - b.baseStart);
+  const all = [
+    ...localHunks.map((h) => ({ ...h, side: "local" as const })),
+    ...remoteHunks.map((h) => ({ ...h, side: "remote" as const })),
+  ].sort((a, b) => a.baseStart - b.baseStart);
   const out: string[] = [];
   let cursor = 0;
   for (const hunk of all) {
@@ -93,7 +86,8 @@ function diffHunks(base: string[], side: string[]): Hunk[] {
   const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
-      lcs[i][j] = base[i] === side[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      lcs[i][j] =
+        base[i] === side[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
     }
   }
   const hunks: Hunk[] = [];

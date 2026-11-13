@@ -12,7 +12,13 @@ export function deleteConfirmText(
   shareView: { granterEmail: string | null },
   fileByPath?: ReadonlyMap<string, WorkspaceFileEntry>,
   isFolderPath?: (path: string) => boolean,
-): { title: string; confirmLabel: string; intent: "danger"; details: ReactNode; children: ReactNode } {
+): {
+  title: string;
+  confirmLabel: string;
+  intent: "danger";
+  details: ReactNode;
+  children: ReactNode;
+} {
   return {
     title: `Delete ${paths.length === 1 ? basenameOf(paths[0]!) : `${paths.length} items`}?`,
     confirmLabel: "Delete",
@@ -33,8 +39,12 @@ export function deleteConfirmText(
                   className="text-subtle"
                 />
               )}
-              <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{basenameOf(path)}</span>
-              <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">{dirnameOf(path)}</span>
+              <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
+                {basenameOf(path)}
+              </span>
+              <span className="max-w-[45%] shrink-0 truncate text-[12px] text-subtle">
+                {dirnameOf(path)}
+              </span>
             </li>
           ))}
         </ul>

@@ -12,7 +12,14 @@ const API_HOST = "us.i.posthog.com";
 const ASSET_HOST = "us-assets.i.posthog.com";
 // Only what the SDK's requests need. Cookies, credentials, and the headers
 // Cloudflare adds, such as the visitor's country, stay here.
-const FORWARDED = ["accept", "accept-language", "content-encoding", "content-type", "origin", "user-agent"];
+const FORWARDED = [
+  "accept",
+  "accept-language",
+  "content-encoding",
+  "content-type",
+  "origin",
+  "user-agent",
+];
 
 async function forward(request: Request, path: string): Promise<Response> {
   const host = /^\/(static|array)\//.test(path) ? ASSET_HOST : API_HOST;
@@ -24,7 +31,8 @@ async function forward(request: Request, path: string): Promise<Response> {
   }
   // PostHog's cookieless mode hashes the visitor's address, not the Worker's.
   headers.set("x-forwarded-for", request.headers.get("cf-connecting-ip") ?? "");
-  const body = request.method === "GET" || request.method === "HEAD" ? null : await request.arrayBuffer();
+  const body =
+    request.method === "GET" || request.method === "HEAD" ? null : await request.arrayBuffer();
   const response = await fetch(`https://${host}${path}${url.search}`, {
     method: request.method,
     headers,

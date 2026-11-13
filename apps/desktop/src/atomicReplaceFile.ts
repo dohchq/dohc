@@ -6,16 +6,22 @@ import { dirname } from "node:path";
 const WINDOWS_BUSY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 /** Windows refused a file, as it does for a moment while another program, such as a virus scanner, holds it. */
-export function isWindowsBusy(error: unknown, platform: NodeJS.Platform = process.platform): boolean {
-  const code = typeof error === "object" && error !== null && "code" in error
-    ? error.code
-    : undefined;
+export function isWindowsBusy(
+  error: unknown,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const code =
+    typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
   return platform === "win32" && typeof code === "string" && WINDOWS_BUSY_CODES.has(code);
 }
 
 // Six attempts, with 8 + 16 + 32 + 64 + 128 = 248 ms of requested waits.
 // The success path never waits or allocates a wait buffer.
-function retryDelay(error: unknown, attempt: number, platform: NodeJS.Platform): number | undefined {
+function retryDelay(
+  error: unknown,
+  attempt: number,
+  platform: NodeJS.Platform,
+): number | undefined {
   return attempt < 5 && isWindowsBusy(error, platform) ? 8 * 2 ** attempt : undefined;
 }
 
@@ -40,9 +46,15 @@ interface SyncHandle {
 }
 
 export interface DurableFileOperations extends AsyncReplaceDependencies {
-  open?: (path: string, flags: string, mode?: number) => Promise<SyncHandle & {
-    writeFile(data: string): Promise<void>;
-  }>;
+  open?: (
+    path: string,
+    flags: string,
+    mode?: number,
+  ) => Promise<
+    SyncHandle & {
+      writeFile(data: string): Promise<void>;
+    }
+  >;
 }
 
 async function syncAndClose(handle: SyncHandle): Promise<void> {
@@ -61,16 +73,20 @@ export async function atomicWriteFile(
   data: string,
   { open: openFile = open, ...dependencies }: DurableFileOperations = {},
 ): Promise<void> {
-  await atomicReplaceFile(destination, async (temporary) => {
-    const handle = await openFile(temporary, "w", 0o600);
-    try {
-      await handle.writeFile(data);
-    } catch (error) {
-      await handle.close().catch(() => undefined);
-      throw error;
-    }
-    await syncAndClose(handle);
-  }, { ...dependencies, open: openFile, syncDirectory: true });
+  await atomicReplaceFile(
+    destination,
+    async (temporary) => {
+      const handle = await openFile(temporary, "w", 0o600);
+      try {
+        await handle.writeFile(data);
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        throw error;
+      }
+      await syncAndClose(handle);
+    },
+    { ...dependencies, open: openFile, syncDirectory: true },
+  );
 }
 
 /** The writer must close its temp file, including any required fsync, before returning. */
@@ -81,7 +97,10 @@ export function atomicReplaceFileSync(
     rename: replace = renameSync,
     wait = waitSync,
     platform = process.platform,
-  }: ReplaceDependencies<(source: string, destination: string) => void, (milliseconds: number) => void> = {},
+  }: ReplaceDependencies<
+    (source: string, destination: string) => void,
+    (milliseconds: number) => void
+  > = {},
 ): void {
   const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
   try {

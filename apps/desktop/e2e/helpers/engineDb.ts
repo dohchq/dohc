@@ -1,8 +1,14 @@
-import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import {
+  parseLiveAuthorSnapshot,
+  type LiveAuthorSnapshot,
+} from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import {
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+} from "@dohc/live-session-contract/live-object-binding";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 
 // WS-G2-C-2 — the one source of truth for the e2e SQLite helpers that read the
@@ -67,15 +73,50 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ],
   ["blobs", ["sha256", "text"]],
   ["snapshots", ["workspace_id", "version_id", "object_id", "path"]],
-  ["ydoc_updates", ["workspace_id", "version_id", "object_id", "seq", "actor_origin_id", "actor_kind"]],
+  [
+    "ydoc_updates",
+    ["workspace_id", "version_id", "object_id", "seq", "actor_origin_id", "actor_kind"],
+  ],
   ["replication_log", ["op_kind", "payload_json"]],
-  ["ydoc_docs", ["workspace_id", "version_id", "object_id", "path", "regime", "head_update_seq", "head_snapshot_seq",
-    "lineage_claim_status"]],
+  [
+    "ydoc_docs",
+    [
+      "workspace_id",
+      "version_id",
+      "object_id",
+      "path",
+      "regime",
+      "head_update_seq",
+      "head_snapshot_seq",
+      "lineage_claim_status",
+    ],
+  ],
   ["ydoc_snapshots", ["workspace_id", "version_id", "object_id", "up_to_seq"]],
-  ["ydoc_owner_bindings", ["workspace_id", "main_version_id", "object_id", "lineage_claim_id",
-    "binding_json", "relay_database_namespace", "binding_revision", "accepted_cursor"]],
-  ["live_audit_events", ["relay_database_namespace", "event_count", "evidence_digest", "journal_cursor", "delivery_id",
-    "accepting_host_epoch", "record_digest"]],
+  [
+    "ydoc_owner_bindings",
+    [
+      "workspace_id",
+      "main_version_id",
+      "object_id",
+      "lineage_claim_id",
+      "binding_json",
+      "relay_database_namespace",
+      "binding_revision",
+      "accepted_cursor",
+    ],
+  ],
+  [
+    "live_audit_events",
+    [
+      "relay_database_namespace",
+      "event_count",
+      "evidence_digest",
+      "journal_cursor",
+      "delivery_id",
+      "accepting_host_epoch",
+      "record_digest",
+    ],
+  ],
   ["live_audit_record_manifests", ["record_digest", "manifest_json"]],
   ["live_audit_record_chunks", ["record_digest", "ordinal", "chunk_sha256"]],
   ["binary_blobs", ["sha256", "bytes"]],
@@ -90,9 +131,7 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
 const BASELINE_MIGRATION_ID = "v2-baseline";
 
 function schemaSettled(db: EngineDb): boolean {
-  const ledger = db
-    .prepare("SELECT name FROM pragma_table_info('engine_migrations')")
-    .all();
+  const ledger = db.prepare("SELECT name FROM pragma_table_info('engine_migrations')").all();
   if (ledger.length === 0) return false;
   const row = db
     .prepare(
@@ -170,23 +209,41 @@ export interface OwnerEnrollment {
 }
 
 /** The owner's persisted row for this exact object and lineage, including an older restore fence while enrollment catches up. */
-export function ownerEnrollment(rootPath: string, expected: LiveObjectBinding): OwnerEnrollment | null {
+export function ownerEnrollment(
+  rootPath: string,
+  expected: LiveObjectBinding,
+): OwnerEnrollment | null {
   return withEngineDb(rootPath, (db) => {
-    const row = db.prepare(
-      `SELECT binding_json, relay_database_namespace, binding_revision, accepted_cursor
+    const row = db
+      .prepare(
+        `SELECT binding_json, relay_database_namespace, binding_revision, accepted_cursor
        FROM ydoc_owner_bindings
        WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`,
-    ).get(expected.workspaceId, expected.mainVersionId, expected.objectId, expected.lineageClaimId);
+      )
+      .get(
+        expected.workspaceId,
+        expected.mainVersionId,
+        expected.objectId,
+        expected.lineageClaimId,
+      );
     if (!row) return null;
-    if (typeof row.binding_json !== "string") throw new Error("Owner enrollment binding is not JSON text.");
+    if (typeof row.binding_json !== "string")
+      throw new Error("Owner enrollment binding is not JSON text.");
     const binding = parseLiveObjectBinding(JSON.parse(row.binding_json));
-    const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
+    const relayDatabaseNamespace = parseLiveUpdateIdentifier(
+      row.relay_database_namespace,
+      "relayDatabaseNamespace",
+    );
     const revision = row.binding_revision;
     const acceptedCursor = row.accepted_cursor;
     if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) {
       throw new Error("Owner enrollment revision must be a positive safe integer.");
     }
-    if (typeof acceptedCursor !== "number" || !Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) {
+    if (
+      typeof acceptedCursor !== "number" ||
+      !Number.isSafeInteger(acceptedCursor) ||
+      acceptedCursor < 0
+    ) {
       throw new Error("Owner enrollment cursor must be a nonnegative safe integer.");
     }
     return { binding, relayDatabaseNamespace, revision, acceptedCursor };
@@ -229,8 +286,13 @@ export function ownerSettlementState(rootPath: string) {
            ORDER BY cursor`,
         )
         .all()
-        .map((row) => ({ terminalCursor: Number(row.cursor), momentHere: Number(row.moment_here) === 1 })),
-      acceptedCursor: count("SELECT COALESCE(MAX(accepted_cursor),-1) AS n FROM ydoc_owner_bindings"),
+        .map((row) => ({
+          terminalCursor: Number(row.cursor),
+          momentHere: Number(row.moment_here) === 1,
+        })),
+      acceptedCursor: count(
+        "SELECT COALESCE(MAX(accepted_cursor),-1) AS n FROM ydoc_owner_bindings",
+      ),
       settlementMoments: db
         .prepare(
           `SELECT apply_disposition AS disposition, COUNT(*) AS n FROM replication_log
@@ -295,9 +357,7 @@ export function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
 // history) — moment payloads reference text by blob sha, so the moment→blob
 // join is how the content is read.
 export function momentTextsForPath(rootPath: string, path: string): string[] {
-  return (
-    withEngineDb(rootPath, (db) => readMoments(db, path).map((moment) => moment.text)) ?? []
-  );
+  return withEngineDb(rootPath, (db) => readMoments(db, path).map((moment) => moment.text)) ?? [];
 }
 
 // Does the engine still hold a HEAD for this path in the active version? A
@@ -309,9 +369,9 @@ export function textFileTrackedByEngine(rootPath: string, path: string): boolean
       // No join on active_versions: that table only gains a row once a
       // version is explicitly switched, so joining it reports "untracked"
       // for every ordinary single-version workspace.
-      const row = db
-        .prepare("SELECT COUNT(*) AS n FROM snapshots WHERE path = ?")
-        .get(path) as { n: number } | undefined;
+      const row = db.prepare("SELECT COUNT(*) AS n FROM snapshots WHERE path = ?").get(path) as
+        | { n: number }
+        | undefined;
       return Number(row?.n ?? 0) > 0;
     }) ?? false
   );
@@ -363,18 +423,27 @@ export interface LiveDocumentFold {
 // it and prunes every update it folded (durable.rs `maybe_compact`).
 export function liveDocumentFold(rootPath: string, path: string): LiveDocumentFold | null {
   return withEngineDb(rootPath, (db) => {
-    const rows = db.prepare(`SELECT workspace_id, version_id, object_id, regime, head_update_seq AS head, head_snapshot_seq AS snapshot
-      FROM ydoc_docs WHERE path = ?`).all(path);
-    if (rows.length > 1) throw new Error(`engine.db holds ${rows.length} live documents at ${path}.`);
+    const rows = db
+      .prepare(`SELECT workspace_id, version_id, object_id, regime, head_update_seq AS head, head_snapshot_seq AS snapshot
+      FROM ydoc_docs WHERE path = ?`)
+      .all(path);
+    if (rows.length > 1)
+      throw new Error(`engine.db holds ${rows.length} live documents at ${path}.`);
     const row = rows[0];
     if (!row) return null;
     const key = [row.workspace_id, row.version_id, row.object_id];
-    const snapshotRow = db.prepare(`SELECT MAX(up_to_seq) AS seq FROM ydoc_snapshots
-      WHERE workspace_id = ? AND version_id = ? AND object_id = ?`).get(...key)?.seq;
-    const folded = db.prepare(`SELECT COUNT(*) AS n FROM ydoc_updates
-      WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND seq <= ?`).get(...key, row.snapshot)?.n;
+    const snapshotRow = db
+      .prepare(`SELECT MAX(up_to_seq) AS seq FROM ydoc_snapshots
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ?`)
+      .get(...key)?.seq;
+    const folded = db
+      .prepare(`SELECT COUNT(*) AS n FROM ydoc_updates
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND seq <= ?`)
+      .get(...key, row.snapshot)?.n;
     return {
-      regime: String(row.regime), head: Number(row.head), snapshot: Number(row.snapshot),
+      regime: String(row.regime),
+      head: Number(row.head),
+      snapshot: Number(row.snapshot),
       snapshotRow: snapshotRow === null || snapshotRow === undefined ? null : Number(snapshotRow),
       updatesAtOrBelowSnapshot: Number(folded ?? 0),
     };
@@ -396,59 +465,112 @@ export interface LiveAuditRecord {
   recordDigest: string;
   authorSnapshot: LiveAuthorSnapshot;
   accepted: {
-    receipt: { deliveryId: string; updateDigest: string; journalCursor: number; acceptingHostEpoch: number };
+    receipt: {
+      deliveryId: string;
+      updateDigest: string;
+      journalCursor: number;
+      acceptingHostEpoch: number;
+    };
     binding: { restoreFenceGeneration: number; currentPath: string };
     authority: { principalKind: string; principalId: string };
   };
 }
 
 /** Reads from an owner's imported audit or the service host's own. Read-only; it never repairs a record. */
-export function readLiveAuditRecord(db: Pick<EngineDb, "prepare">, deliveryId: string): LiveAuditRecord | null {
-  const events = db.prepare(`SELECT relay_database_namespace AS namespace, event_count, evidence_digest, journal_cursor,
-      delivery_id, accepting_host_epoch, record_digest FROM live_audit_events WHERE delivery_id = ?`).all(deliveryId);
-  if (events.length > 1) throw new Error(`Audit holds ${events.length} events for delivery ${deliveryId}.`);
+export function readLiveAuditRecord(
+  db: Pick<EngineDb, "prepare">,
+  deliveryId: string,
+): LiveAuditRecord | null {
+  const events = db
+    .prepare(`SELECT relay_database_namespace AS namespace, event_count, evidence_digest, journal_cursor,
+      delivery_id, accepting_host_epoch, record_digest FROM live_audit_events WHERE delivery_id = ?`)
+    .all(deliveryId);
+  if (events.length > 1)
+    throw new Error(`Audit holds ${events.length} events for delivery ${deliveryId}.`);
   const event = events[0];
   if (!event) return null;
   const recordDigest = String(event.record_digest);
-  const manifestRow = db.prepare("SELECT manifest_json FROM live_audit_record_manifests WHERE record_digest = ?").get(recordDigest);
+  const manifestRow = db
+    .prepare("SELECT manifest_json FROM live_audit_record_manifests WHERE record_digest = ?")
+    .get(recordDigest);
   if (!manifestRow) throw new Error(`Audit event ${deliveryId} has no record manifest.`);
   const manifest = JSON.parse(String(manifestRow.manifest_json)) as {
-    formatVersion: number; recordDigest: string; byteLength: number; chunks: { sha256: string; byteLength: number }[];
+    formatVersion: number;
+    recordDigest: string;
+    byteLength: number;
+    chunks: { sha256: string; byteLength: number }[];
   };
-  if (manifest.formatVersion !== 1 || manifest.recordDigest !== recordDigest || manifest.byteLength > MAX_AUDIT_RECORD_BYTES) {
+  if (
+    manifest.formatVersion !== 1 ||
+    manifest.recordDigest !== recordDigest ||
+    manifest.byteLength > MAX_AUDIT_RECORD_BYTES
+  ) {
     throw new Error(`Audit record ${recordDigest} is not a bounded version 1 record.`);
   }
-  const stored = db.prepare("SELECT ordinal, chunk_sha256 FROM live_audit_record_chunks WHERE record_digest = ? ORDER BY ordinal").all(recordDigest);
-  if (stored.length !== manifest.chunks.length) throw new Error(`Audit record ${recordDigest} has ${stored.length} of ${manifest.chunks.length} chunks.`);
+  const stored = db
+    .prepare(
+      "SELECT ordinal, chunk_sha256 FROM live_audit_record_chunks WHERE record_digest = ? ORDER BY ordinal",
+    )
+    .all(recordDigest);
+  if (stored.length !== manifest.chunks.length)
+    throw new Error(
+      `Audit record ${recordDigest} has ${stored.length} of ${manifest.chunks.length} chunks.`,
+    );
   const parts = manifest.chunks.map((chunk, ordinal) => {
     const row = stored[ordinal]!;
-    if (Number(row.ordinal) !== ordinal || row.chunk_sha256 !== chunk.sha256) throw new Error(`Audit chunk ${ordinal} of ${recordDigest} differs from its manifest.`);
-    const blob = db.prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?").get(chunk.sha256)?.bytes;
-    if (!(blob instanceof Uint8Array) || blob.byteLength !== chunk.byteLength || sha256(blob) !== chunk.sha256) {
+    if (Number(row.ordinal) !== ordinal || row.chunk_sha256 !== chunk.sha256)
+      throw new Error(`Audit chunk ${ordinal} of ${recordDigest} differs from its manifest.`);
+    const blob = db
+      .prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?")
+      .get(chunk.sha256)?.bytes;
+    if (
+      !(blob instanceof Uint8Array) ||
+      blob.byteLength !== chunk.byteLength ||
+      sha256(blob) !== chunk.sha256
+    ) {
       throw new Error(`Audit chunk ${ordinal} of ${recordDigest} is missing or damaged.`);
     }
     return blob;
   });
   const bytes = Buffer.concat(parts);
-  if (bytes.byteLength !== manifest.byteLength || sha256(bytes) !== recordDigest) throw new Error(`Audit record ${recordDigest} does not match its digest.`);
-  const record = JSON.parse(bytes.toString("utf8")) as { metadata?: { accepted?: LiveAuditRecord["accepted"]; authorSnapshot?: LiveAuthorSnapshot } };
+  if (bytes.byteLength !== manifest.byteLength || sha256(bytes) !== recordDigest)
+    throw new Error(`Audit record ${recordDigest} does not match its digest.`);
+  const record = JSON.parse(bytes.toString("utf8")) as {
+    metadata?: { accepted?: LiveAuditRecord["accepted"]; authorSnapshot?: LiveAuthorSnapshot };
+  };
   const accepted = record.metadata?.accepted;
-  if (!accepted || accepted.receipt.deliveryId !== deliveryId) throw new Error(`Audit record ${recordDigest} names another delivery.`);
+  if (!accepted || accepted.receipt.deliveryId !== deliveryId)
+    throw new Error(`Audit record ${recordDigest} names another delivery.`);
   return {
-    namespace: String(event.namespace), eventCount: Number(event.event_count), evidenceDigest: String(event.evidence_digest),
-    journalCursor: Number(event.journal_cursor), deliveryId, acceptingHostEpoch: Number(event.accepting_host_epoch), recordDigest, accepted, authorSnapshot: parseLiveAuthorSnapshot(record.metadata?.authorSnapshot ?? []),
+    namespace: String(event.namespace),
+    eventCount: Number(event.event_count),
+    evidenceDigest: String(event.evidence_digest),
+    journalCursor: Number(event.journal_cursor),
+    deliveryId,
+    acceptingHostEpoch: Number(event.accepting_host_epoch),
+    recordDigest,
+    accepted,
+    authorSnapshot: parseLiveAuthorSnapshot(record.metadata?.authorSnapshot ?? []),
   };
 }
 
 // Failure evidence only: how many changes this owner queued for the server,
 // how many still wait, and how many declared an agent. Its columns are newer
 // than the read gate above, so a store without them reports the error instead.
-export function ownerOutboxDeclarations(rootPath: string): { entries: number; pending: number; declared: number } | { error: string } | null {
+export function ownerOutboxDeclarations(
+  rootPath: string,
+): { entries: number; pending: number; declared: number } | { error: string } | null {
   try {
     return withEngineDb(rootPath, (db) => {
-      const row = db.prepare(`SELECT COUNT(*) AS entries, COALESCE(SUM(pending), 0) AS pending,
-        COUNT(agent_declaration_json) AS declared FROM owner_ydoc_outbox_entries`).get();
-      return { entries: Number(row?.entries ?? 0), pending: Number(row?.pending ?? 0), declared: Number(row?.declared ?? 0) };
+      const row = db
+        .prepare(`SELECT COUNT(*) AS entries, COALESCE(SUM(pending), 0) AS pending,
+        COUNT(agent_declaration_json) AS declared FROM owner_ydoc_outbox_entries`)
+        .get();
+      return {
+        entries: Number(row?.entries ?? 0),
+        pending: Number(row?.pending ?? 0),
+        declared: Number(row?.declared ?? 0),
+      };
     });
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
@@ -461,20 +583,44 @@ export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAudi
 }
 
 // The last operation this engine applied from each service host origin of the workspace.
-export function appliedServiceHostSeqs(rootPath: string, workspaceId: string): Record<string, number> {
-  return withEngineDb(rootPath, (db) => Object.fromEntries(db
-    .prepare("SELECT origin_id, acked_seq FROM replication_peers WHERE workspace_id=? AND origin_id LIKE 'service-host:%'")
-    .all(workspaceId)
-    .map((row) => [String(row.origin_id), Number(row.acked_seq)]))) ?? {};
+export function appliedServiceHostSeqs(
+  rootPath: string,
+  workspaceId: string,
+): Record<string, number> {
+  return (
+    withEngineDb(rootPath, (db) =>
+      Object.fromEntries(
+        db
+          .prepare(
+            "SELECT origin_id, acked_seq FROM replication_peers WHERE workspace_id=? AND origin_id LIKE 'service-host:%'",
+          )
+          .all(workspaceId)
+          .map((row) => [String(row.origin_id), Number(row.acked_seq)]),
+      ),
+    ) ?? {}
+  );
 }
 
 // Each update the engine refused for the workspace's Notices, with its own reason.
 // A Notices row shows only one reason for all the refusals it folds together.
-export function noticedRefusals(rootPath: string, workspaceId: string): { originId: string; originSeq: number; reason: string }[] {
-  return withEngineDb(rootPath, (db) => db
-    .prepare("SELECT origin_id, origin_seq, reason_message FROM replication_pending_refusals WHERE workspace_id=? AND COALESCE(report_id,'') != 'direct-rpc'")
-    .all(workspaceId)
-    .map((row) => ({ originId: String(row.origin_id), originSeq: Number(row.origin_seq), reason: String(row.reason_message) }))) ?? [];
+export function noticedRefusals(
+  rootPath: string,
+  workspaceId: string,
+): { originId: string; originSeq: number; reason: string }[] {
+  return (
+    withEngineDb(rootPath, (db) =>
+      db
+        .prepare(
+          "SELECT origin_id, origin_seq, reason_message FROM replication_pending_refusals WHERE workspace_id=? AND COALESCE(report_id,'') != 'direct-rpc'",
+        )
+        .all(workspaceId)
+        .map((row) => ({
+          originId: String(row.origin_id),
+          originSeq: Number(row.origin_seq),
+          reason: String(row.reason_message),
+        })),
+    ) ?? []
+  );
 }
 
 export function replicationOpKindCount(rootPath: string, opKind: string): number {
@@ -490,19 +636,27 @@ export function replicationOpKindCount(rootPath: string, opKind: string): number
 
 /** The committed ordinary pull position and native kept-copy records. Read-only. */
 export function outsideWriteRecoveryState(rootPath: string, workspaceId: string) {
-  return withEngineDb(rootPath, db => ({
+  return withEngineDb(rootPath, (db) => ({
     pull: db.prepare("SELECT * FROM sync_relay_cursors WHERE workspace_id = ?").all(workspaceId),
-    displacements: db.prepare("SELECT * FROM materialization_displacements WHERE workspace_id = ?").all(workspaceId),
-    retained: db.prepare("SELECT * FROM materialization_retained WHERE workspace_id = ?").all(workspaceId),
+    displacements: db
+      .prepare("SELECT * FROM materialization_displacements WHERE workspace_id = ?")
+      .all(workspaceId),
+    retained: db
+      .prepare("SELECT * FROM materialization_retained WHERE workspace_id = ?")
+      .all(workspaceId),
   }));
 }
 
 export function outsideCopyPushed(rootPath: string, workspaceId: string, path: string): boolean {
-  return withEngineDb(rootPath, db => {
-    const row = db.prepare(`SELECT EXISTS(SELECT 1 FROM replication_log l
+  return (
+    withEngineDb(rootPath, (db) => {
+      const row = db
+        .prepare(`SELECT EXISTS(SELECT 1 FROM replication_log l
       JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
       WHERE l.workspace_id=? AND l.imported=0 AND l.op_kind='moment.append'
-      AND json_extract(l.payload_json,'$.path')=? AND p.pushed_seq >= l.origin_seq) AS pushed`).get(workspaceId, path);
-    return Number(row?.pushed) === 1;
-  }) ?? false;
+      AND json_extract(l.payload_json,'$.path')=? AND p.pushed_seq >= l.origin_seq) AS pushed`)
+        .get(workspaceId, path);
+      return Number(row?.pushed) === 1;
+    }) ?? false
+  );
 }

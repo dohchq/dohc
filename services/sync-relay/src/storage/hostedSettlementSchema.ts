@@ -71,29 +71,17 @@ const schema: Record<string, string> = {
       WHERE workspace_id=OLD.workspace_id;
     END`,
 };
-const normalize = (sql: string) =>
-  sql.trim().replace(/;$/, " ").replace(/\s+/g, " ").trim();
+const normalize = (sql: string) => sql.trim().replace(/;$/, " ").replace(/\s+/g, " ").trim();
 function require(value: unknown): asserts value {
-  if (!value)
-    throw new Error("Hosted settlement schema is missing or damaged.");
+  if (!value) throw new Error("Hosted settlement schema is missing or damaged.");
 }
 function assertSchema(db: SqliteDb) {
   for (const [name, sql] of Object.entries(schema)) {
-    const actual = db
-      .prepare("SELECT sql FROM sqlite_schema WHERE name=?")
-      .get(name);
-    require(
-      typeof actual?.sql === "string" &&
-        normalize(actual.sql) === normalize(sql),
-    );
+    const actual = db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").get(name);
+    require(typeof actual?.sql === "string" && normalize(actual.sql) === normalize(sql));
   }
-  const log = db
-    .prepare("SELECT sql FROM sqlite_schema WHERE name='sync_relay_log'")
-    .get();
-  require(
-    typeof log?.sql === "string" &&
-      normalize(log.sql).includes(admissionColumn),
-  );
+  const log = db.prepare("SELECT sql FROM sqlite_schema WHERE name='sync_relay_log'").get();
+  require(typeof log?.sql === "string" && normalize(log.sql).includes(admissionColumn));
   const column = db
     .prepare("PRAGMA table_info(sync_relay_log)")
     .all()
@@ -134,7 +122,8 @@ export function initializeHostedSettlementSchema(db: SqliteDb) {
   db.exec("ALTER TABLE sync_relay_log ADD COLUMN " + admissionColumn);
   for (const sql of Object.values(schema)) db.exec(sql);
   assertSchema(db);
-  db.prepare(
-    "INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES(?,?)",
-  ).run(SETTLEMENT_SCHEMA_MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES(?,?)").run(
+    SETTLEMENT_SCHEMA_MARKER,
+    Date.now(),
+  );
 }

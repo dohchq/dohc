@@ -1,8 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import type {
-  EngineMomentRecord,
-  WorkspaceFileEntry,
-} from "../../desktop/src/ipc/bridgeContract";
+import type { EngineMomentRecord, WorkspaceFileEntry } from "../../desktop/src/ipc/bridgeContract";
 import { ChatsView } from "../../desktop/src/renderer/workbench/ChatsView";
 import { ReactionStoreProvider } from "../../desktop/src/renderer/workbench/reactionStore";
 import { EngineHistoryView } from "../../desktop/src/renderer/workbench/EngineHistory";
@@ -116,11 +113,7 @@ export function DemoSidebar(props: {
     });
   }, []);
   const clearSearchError = useCallback(() => setSearchError(null), []);
-  const search = useWorkspaceSearch(
-    "marketing-demo",
-    reportSearchError,
-    clearSearchError,
-  );
+  const search = useWorkspaceSearch("marketing-demo", reportSearchError, clearSearchError);
   const files = useMemo<WorkspaceFileEntry[]>(
     () =>
       props.documents.map((document) => ({
@@ -131,16 +124,20 @@ export function DemoSidebar(props: {
     [props.documents],
   );
   const folders = useMemo(
-    () => [
-      ...new Set([
-        ...parentFolders(props.documents.map((document) => document.path)),
-        ...(props.folders ?? []),
-      ]),
-    ].sort(),
+    () =>
+      [
+        ...new Set([
+          ...parentFolders(props.documents.map((document) => document.path)),
+          ...(props.folders ?? []),
+        ]),
+      ].sort(),
     [props.documents, props.folders],
   );
   const moments = useMemo(() => demoMoments(props.documents), [props.documents]);
-  const historyEntries = useMemo(() => moments.map((moment) => ({ kind: "file" as const, moment })), [moments]);
+  const historyEntries = useMemo(
+    () => moments.map((moment) => ({ kind: "file" as const, moment })),
+    [moments],
+  );
   const refreshKey = props.documents.map((document) => document.path).join("|");
 
   function reprojectPaths(changes: PendingTreeChange[]) {
@@ -162,7 +159,9 @@ export function DemoSidebar(props: {
     <SidePanel
       title={VIEW_IDENTITY[props.activePanel].label}
       heading={
-        props.activePanel === "explorer" ? <ExplorerModeSwitch mode={explorerMode} onChange={setExplorerMode} /> : undefined
+        props.activePanel === "explorer" ? (
+          <ExplorerModeSwitch mode={explorerMode} onChange={setExplorerMode} />
+        ) : undefined
       }
       width={width}
       onWidthChange={setWidth}
@@ -261,29 +260,29 @@ export function DemoSidebar(props: {
         </div>
       ) : props.activePanel === "chats" ? (
         <ReactionStoreProvider workspaceId="marketing-demo">
-        <ChatsView
-          workspaceId="marketing-demo"
-          workspaces={[{ workspaceId: "marketing-demo", label: "Marketing" }]}
-          onOpenFileChat={(thread) => thread.path && props.onOpenDocument(thread.path)}
-          onOpenPath={props.onOpenDocument}
-          onError={() => undefined}
-          mentionCandidates={[
-            {
-              id: "agent:default",
-              kind: "agent",
-              handle: "Nova",
-              label: "Nova",
-              description: "your agent",
-            },
-            {
-              id: "user:you",
-              kind: "user",
-              handle: "you",
-              label: "You",
-              description: "you",
-            },
-          ]}
-        />
+          <ChatsView
+            workspaceId="marketing-demo"
+            workspaces={[{ workspaceId: "marketing-demo", label: "Marketing" }]}
+            onOpenFileChat={(thread) => thread.path && props.onOpenDocument(thread.path)}
+            onOpenPath={props.onOpenDocument}
+            onError={() => undefined}
+            mentionCandidates={[
+              {
+                id: "agent:default",
+                kind: "agent",
+                handle: "Nova",
+                label: "Nova",
+                description: "your agent",
+              },
+              {
+                id: "user:you",
+                kind: "user",
+                handle: "you",
+                label: "You",
+                description: "you",
+              },
+            ]}
+          />
         </ReactionStoreProvider>
       ) : props.activePanel === "graph" ? (
         <GraphView
@@ -304,7 +303,7 @@ export function DemoSidebar(props: {
           }}
         />
       ) : (
-        props.activePanel satisfies never
+        (props.activePanel satisfies never)
       )}
     </SidePanel>
   );

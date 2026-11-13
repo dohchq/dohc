@@ -19,62 +19,155 @@ const editLinkOptions = {
   publicEditRelease: { version: 1 as const },
   linkLive: {
     publicOrigin: sharedDatasetViewerOrigin,
-    requests: { maxPendingRequests: 4, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000 },
-    editor: { provider: { frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },
-      maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384 },
-      maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4 },
-      maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10 },
+    requests: {
+      maxPendingRequests: 4,
+      maxRequestBytes: 2048,
+      maxResponseBytes: 8192,
+      timeoutMs: 1000,
+    },
+    editor: {
+      provider: {
+        frames: {
+          receive: {
+            maxFrameBytes: 1024,
+            maxStateVectorBytes: 4096,
+            maxUpdateBytes: 8192,
+            maxSyncBytes: 16384,
+          },
+          maxQueuedBytes: 16384,
+          maxQueuedFrames: 64,
+          maxControlBytes: 4096,
+          maxControlFrames: 8,
+          maxAssemblyBytes: 16384,
+        },
+        maxPendingUpdateBytes: 16384,
+        maxPendingUpdates: 8,
+        maxDeliveryAttempts: 4,
+      },
+      maxHttpResponseBytes: 16384,
+      maxSocketBufferedBytes: 16384,
+      connectTimeoutMs: 2000,
+      sendTimeoutMs: 500,
+      drainPollMs: 10,
+    },
   },
 };
 
-export async function startSharedDatasetBrowser(input: { relayUrl: string; exchangeKey: string; editLinks?: boolean }) {
+export async function startSharedDatasetBrowser(input: {
+  relayUrl: string;
+  exchangeKey: string;
+  editLinks?: boolean;
+}) {
   const viewerAssetsDir = join(desktopRoot, "../../services/share-web/viewer/dist");
   if (!existsSync(join(viewerAssetsDir, "index.html"))) {
-    throw new Error(`Missing share-web viewer build at ${viewerAssetsDir}. Run pnpm --filter @dohc/share-web build (or pnpm qa:prepare) before desktop e2e tests.`);
+    throw new Error(
+      `Missing share-web viewer build at ${viewerAssetsDir}. Run pnpm --filter @dohc/share-web build (or pnpm qa:prepare) before desktop e2e tests.`,
+    );
   }
   const { tls, cert } = testCertificate();
-  const spki = createHash("sha256").update(cert.publicKey.export({ type: "spki", format: "der" })).digest("base64");
+  const spki = createHash("sha256")
+    .update(cert.publicKey.export({ type: "spki", format: "der" }))
+    .digest("base64");
   const failures: string[] = [];
-  const createApplication = () => createShareWebApplication({ relayUrl: input.relayUrl, publicRelayUrl: input.relayUrl,
-    relayExchangeKey: input.exchangeKey, publicHosts: new Set(["viewer.example.com"]),
-    viewerAssetsDir,
-    appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
-    ...(input.editLinks ? editLinkOptions : {}) });
+  const createApplication = () =>
+    createShareWebApplication({
+      relayUrl: input.relayUrl,
+      publicRelayUrl: input.relayUrl,
+      relayExchangeKey: input.exchangeKey,
+      publicHosts: new Set(["viewer.example.com"]),
+      viewerAssetsDir,
+      appLaunch: { viewerOrigin: sharedDatasetViewerOrigin, appDomain: "example.net" },
+      ...(input.editLinks ? editLinkOptions : {}),
+    });
   let application = createApplication();
   const server = https.createServer(tls, async (request, response) => {
     try {
-      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(",") : value);
-      const result = await application.handle(new Request(`https://${request.headers.host}${request.url}`, {
-        method: request.method, headers, ...(["GET", "HEAD"].includes(request.method!) ? {} : { body: Buffer.concat(chunks) }),
-      }));
-      response.writeHead(result.status, { ...Object.fromEntries(result.headers), ...(result.headers.has("set-cookie") ? { "set-cookie": result.headers.getSetCookie() } : {}) });
+      for (const [name, value] of Object.entries(request.headers))
+        if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(",") : value);
+      const result = await application.handle(
+        new Request(`https://${request.headers.host}${request.url}`, {
+          method: request.method,
+          headers,
+          ...(["GET", "HEAD"].includes(request.method!) ? {} : { body: Buffer.concat(chunks) }),
+        }),
+      );
+      response.writeHead(result.status, {
+        ...Object.fromEntries(result.headers),
+        ...(result.headers.has("set-cookie")
+          ? { "set-cookie": result.headers.getSetCookie() }
+          : {}),
+      });
       response.end(Buffer.from(await result.arrayBuffer()));
-    } catch (error) { failures.push(String(error)); response.writeHead(500); response.end(); }
+    } catch (error) {
+      failures.push(String(error));
+      response.writeHead(500);
+      response.end();
+    }
   });
   // The live editor's socket, built as share-web's main.ts builds it, with a self-hosted server's limits.
   const limits = selfHostLiveProfile().gateway;
-  const createLinkGateway = () => application.linkLive ? createLiveGateway({ bufferBudget: createLiveBufferBudget(limits.maxBufferedBytes),
-    publicHosts: new Set(["viewer.example.com"]), publicOrigin: sharedDatasetViewerOrigin, path: "/api/live/link", limits,
-    resolveSession: application.linkLive.resolveSession, openHostRoute: application.linkLive.openHostRoute }) : undefined;
+  const createLinkGateway = () =>
+    application.linkLive
+      ? createLiveGateway({
+          bufferBudget: createLiveBufferBudget(limits.maxBufferedBytes),
+          publicHosts: new Set(["viewer.example.com"]),
+          publicOrigin: sharedDatasetViewerOrigin,
+          path: "/api/live/link",
+          limits,
+          resolveSession: application.linkLive.resolveSession,
+          openHostRoute: application.linkLive.openHostRoute,
+        })
+      : undefined;
   let linkGateway = createLinkGateway();
-  if (linkGateway) server.on("upgrade", (request, socket, head) => {
-    if (request.url?.startsWith("/api/live/link?") && linkGateway) void linkGateway.handleUpgrade(request, socket, head); else socket.destroy();
-  });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address(); if (!address || typeof address === "string") throw Error("No TLS listener.");
-  const closeServer = async () => { linkGateway?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
+  if (linkGateway)
+    server.on("upgrade", (request, socket, head) => {
+      if (request.url?.startsWith("/api/live/link?") && linkGateway)
+        void linkGateway.handleUpgrade(request, socket, head);
+      else socket.destroy();
+    });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("No TLS listener.");
+  const closeServer = async () => {
+    linkGateway?.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
   try {
-    const browser = await chromium.launch({ headless: true, args: [`--ignore-certificate-errors-spki-list=${spki}`,
-      `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`, "--no-proxy-server"] });
-    return { browser, failures,
+    const browser = await chromium.launch({
+      headless: true,
+      args: [
+        `--ignore-certificate-errors-spki-list=${spki}`,
+        `--host-resolver-rules=MAP viewer.example.com 127.0.0.1:${address.port},MAP *.example.net 127.0.0.1:${address.port}`,
+        "--no-proxy-server",
+      ],
+    });
+    return {
+      browser,
+      failures,
       // Always the running share-web, so a handle taken before restart() reaches the new one.
       handle: (request: Request) => application.handle(request),
       // A share-web restart: a new process's memory behind the same address. The relay keeps what lasts.
-      restart() { linkGateway?.close(); application = createApplication(); linkGateway = createLinkGateway(); },
-      async close() { try { await browser.close(); } finally { await closeServer(); } } };
-  } catch (error) { await closeServer(); throw error; }
+      restart() {
+        linkGateway?.close();
+        application = createApplication();
+        linkGateway = createLinkGateway();
+      },
+      async close() {
+        try {
+          await browser.close();
+        } finally {
+          await closeServer();
+        }
+      },
+    };
+  } catch (error) {
+    await closeServer();
+    throw error;
+  }
 }
 
 /** A certificate for the viewer and app hosts. Windows makes it with PowerShell, other hosts with OpenSSL. */
@@ -83,13 +176,40 @@ function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } 
     // Files, not /dev/stdin and /dev/stdout: on Linux a child's stdio is a socket, which those can't open.
     const dir = mkdtempSync(join(tmpdir(), "dohc-dataset-cert-"));
     try {
-      const [config, keyPath, certPath] = [join(dir, "req.cnf"), join(dir, "key.pem"), join(dir, "cert.pem")];
-      writeFileSync(config, "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
-        "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n");
-      execFileSync("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-        "-config", config, "-keyout", keyPath, "-out", certPath], { stdio: ["ignore", "pipe", "pipe"] });
+      const [config, keyPath, certPath] = [
+        join(dir, "req.cnf"),
+        join(dir, "key.pem"),
+        join(dir, "cert.pem"),
+      ];
+      writeFileSync(
+        config,
+        "[req]\ndistinguished_name=dn\nx509_extensions=leaf\nprompt=no\n[dn]\nCN=dohc-dataset-test\n" +
+          "[leaf]\nsubjectAltName=DNS:viewer.example.com,DNS:*.example.net\n",
+      );
+      execFileSync(
+        "/usr/bin/openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-days",
+          "1",
+          "-config",
+          config,
+          "-keyout",
+          keyPath,
+          "-out",
+          certPath,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
       const certPem = readFileSync(certPath, "utf8");
-      return { tls: { key: readFileSync(keyPath, "utf8"), cert: certPem }, cert: new X509Certificate(certPem) };
+      return {
+        tls: { key: readFileSync(keyPath, "utf8"), cert: certPem },
+        cert: new X509Certificate(certPem),
+      };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -103,6 +223,15 @@ $cert=$req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddMinutes(-5),[DateTimeOff
 [Convert]::ToBase64String($cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,''))
 [Convert]::ToBase64String($cert.RawData)
 $cert.Dispose();$rsa.Dispose()`;
-  const [pfxText, certText] = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", certificateScript], { encoding: "utf8", windowsHide: true }).trim().split(/\r?\n/);
-  return { tls: { pfx: Buffer.from(pfxText!, "base64"), passphrase: "" }, cert: new X509Certificate(Buffer.from(certText!, "base64")) };
+  const [pfxText, certText] = execFileSync(
+    "pwsh.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", certificateScript],
+    { encoding: "utf8", windowsHide: true },
+  )
+    .trim()
+    .split(/\r?\n/);
+  return {
+    tls: { pfx: Buffer.from(pfxText!, "base64"), passphrase: "" },
+    cert: new X509Certificate(Buffer.from(certText!, "base64")),
+  };
 }

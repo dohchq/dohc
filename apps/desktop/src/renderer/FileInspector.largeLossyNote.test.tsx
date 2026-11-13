@@ -22,7 +22,11 @@ setupFileInspectorTests();
 
 // The check's worker answers only when a test says so. The module keeps one
 // worker for the file, so it is this one from the start.
-const pending: Array<{ worker: { onmessage: ((event: { data: unknown }) => void) | null }; id: number; markdown: string }> = [];
+const pending: Array<{
+  worker: { onmessage: ((event: { data: unknown }) => void) | null };
+  id: number;
+  markdown: string;
+}> = [];
 class HeldWorker {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
@@ -31,12 +35,18 @@ class HeldWorker {
   }
   terminate() {}
 }
-const answerChecks = () => act(() => {
-  for (const check of pending.splice(0)) check.worker.onmessage?.({ data: { id: check.id, lossy: isLossyMarkdown(check.markdown) } });
-});
+const answerChecks = () =>
+  act(() => {
+    for (const check of pending.splice(0))
+      check.worker.onmessage?.({ data: { id: check.id, lossy: isLossyMarkdown(check.markdown) } });
+  });
 
 beforeAll(async () => {
-  Object.defineProperty(globalThis, "Worker", { configurable: true, writable: true, value: HeldWorker });
+  Object.defineProperty(globalThis, "Worker", {
+    configurable: true,
+    writable: true,
+    value: HeldWorker,
+  });
   await import("./markdown/IncrementalMarkdownDocument");
 }, 60_000);
 
@@ -48,7 +58,10 @@ afterEach(async () => {
 });
 
 // Past read mode's size, with a raw HTML block near the top.
-const FILLER = Array.from({ length: 8 }, (_, index) => `Paragraph ${index + 1} of plain text, long enough to fill the note.`).join("\n\n");
+const FILLER = Array.from(
+  { length: 8 },
+  (_, index) => `Paragraph ${index + 1} of plain text, long enough to fill the note.`,
+).join("\n\n");
 const LARGE_LOSSY = `# Notes\n\n<details>\n<summary>More</summary>\n\nHidden.\n</details>\n\n${FILLER}\n`;
 
 function bridgeFor(text: string, engine: "record" | "no-record") {
@@ -58,16 +71,35 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
     // A lossy note's band asks the engine whether it holds a change.
     readHeldChange: vi.fn(async () => ({ change: null })),
     onNoticesChanged: vi.fn(() => () => undefined),
-    readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({ text, truncated: false, contentHash: "a".repeat(64) })),
-    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(async () => ({ status: "written", contentHash: "f".repeat(64) })),
+    readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
+      text,
+      truncated: false,
+      contentHash: "a".repeat(64),
+    })),
+    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(async () => ({
+      status: "written",
+      contentHash: "f".repeat(64),
+    })),
     openFileExternally: vi.fn(async () => undefined),
-    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
+    listWorkspaceFiles: vi.fn(async () => ({
+      files: [{ path: "a.md", kind: "file" }],
+      folders: [],
+    })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
     // With no record, the engine refuses the seed and the note has no session.
-    openEngineYDocSession: vi.fn(async () => engine === "no-record"
-      ? { available: false }
-      : { available: true, initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(text)), lineageGeneration: 1 }),
+    openEngineYDocSession: vi.fn(async () =>
+      engine === "no-record"
+        ? { available: false }
+        : {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(markdownToYDoc(text)),
+            lineageGeneration: 1,
+          },
+    ),
     applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     closeEngineYDocSession: vi.fn(async () => undefined),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
@@ -82,15 +114,17 @@ function bridgeFor(text: string, engine: "record" | "no-record") {
 
 // The wait: the note's text in read mode, Edit held, and the opening state.
 async function expectWaiting() {
-  await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("Paragraph 1 of plain text"));
+  await waitFor(() =>
+    expect(screen.getByTestId("view-markdown").textContent).toContain("Paragraph 1 of plain text"),
+  );
   expect(screen.queryByTestId("markdown-editor")).toBeNull();
   expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
-  expect(screen.getByTestId("markdown-open-state").getAttribute("title"))
-    .toBe("You can edit this document when it finishes opening.");
+  expect(screen.getByTestId("markdown-open-state").getAttribute("title")).toBe(
+    "You can edit this document when it finishes opening.",
+  );
 }
 
 describe("a note past read mode's size", () => {
-
   it("with an engine record shows its content read-only while the check runs, then closes the session if it is lossy", async () => {
     const bridge = bridgeFor(LARGE_LOSSY, "record");
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
@@ -128,7 +162,9 @@ describe("a note past read mode's size", () => {
     expect(notice.textContent).not.toContain("This note has parts dohc can't show.");
     expect(within(notice).getByTestId("lossy-note-open-externally")).toBeTruthy();
     expect(within(notice).queryByTestId("lossy-note-edit-anyway")).toBeNull();
-    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("title")).toBe("This file is too large to edit in dohc.");
+    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("title")).toBe(
+      "This file is too large to edit in dohc.",
+    );
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   }, 30_000);
 
@@ -140,7 +176,9 @@ describe("a note past read mode's size", () => {
     await waitFor(() => expect(pending).toHaveLength(1));
     await expectWaiting();
     await answerChecks();
-    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"),
+    );
     expect(bridge.closeEngineYDocSession).not.toHaveBeenCalled();
     expect(screen.queryByTestId("markdown-open-state")).toBeNull();
   });

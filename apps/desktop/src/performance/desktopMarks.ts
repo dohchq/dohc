@@ -72,8 +72,7 @@ export function createMarkRecorder(
   const measures = new Map<string, number>();
   const switchNow = options.switchNow ?? monotonicNow;
   const performanceMark = options.performanceMark ?? markPerformanceEntry;
-  const clearPerformanceMark =
-    options.clearPerformanceMark ?? clearPerformanceEntry;
+  const clearPerformanceMark = options.clearPerformanceMark ?? clearPerformanceEntry;
   const switchTimeline: StoredSwitchTimeline[] = [];
   let nextSwitchOrdinal = 0;
   let activeSwitch: StoredSwitchTimeline | null = null;
@@ -152,15 +151,10 @@ export function createMarkRecorder(
       ) {
         return false;
       }
-      const offsetMs = Math.max(
-        activeSwitch.lastOffsetMs,
-        switchNow() - activeSwitch.startMs,
-        0,
-      );
+      const offsetMs = Math.max(activeSwitch.lastOffsetMs, switchNow() - activeSwitch.startMs, 0);
       activeSwitch.lastOffsetMs = offsetMs;
       activeSwitch.entry.phases[phase] = offsetMs;
-      const listingSource =
-        phase === "files-painted" ? details.listingSource : undefined;
+      const listingSource = phase === "files-painted" ? details.listingSource : undefined;
       if (listingSource) activeSwitch.entry.listingSource = listingSource;
       addPerformanceMark(activeSwitch, phase, listingSource);
       return true;

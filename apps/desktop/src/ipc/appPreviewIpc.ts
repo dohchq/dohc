@@ -1,5 +1,7 @@
 import {
-  GetSitePreviewLogsPayload, GetSitePreviewLogsResult, StopSitePreviewPayload,
+  GetSitePreviewLogsPayload,
+  GetSitePreviewLogsResult,
+  StopSitePreviewPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { createStartSitePreviewHandler, type StartSitePreviewDependencies } from "./sitePreviewIpc";
@@ -11,27 +13,44 @@ export function registerAppPreviewIpcHandlers<
   Workspace extends { workspaceId: string; rootPath: string },
   Operation extends {
     readonly workspace: Workspace;
-    readonly state: { sitePreviews: Pick<ReturnType<typeof createSitePreviewLifecycle>, "status" | "release"> };
+    readonly state: {
+      sitePreviews: Pick<ReturnType<typeof createSitePreviewLifecycle>, "status" | "release">;
+    };
     isCurrent(): boolean;
     assertCurrent(): void;
   },
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
-  senderWorkspaceAuthority: Pick<StartSitePreviewDependencies<Event, Sender, Workspace>["authority"], "requireTrustedSender">;
+  senderWorkspaceAuthority: Pick<
+    StartSitePreviewDependencies<Event, Sender, Workspace>["authority"],
+    "requireTrustedSender"
+  >;
   appCatalog: StartSitePreviewDependencies<Event, Sender, Workspace>["catalog"];
   appPreviews: StartSitePreviewDependencies<Event, Sender, Workspace>["lifecycle"];
   isSharedView: StartSitePreviewDependencies<Event, Sender, Workspace>["isSharedView"];
-  assertMayRunAppCode: StartSitePreviewDependencies<Event, Sender, Workspace>["assertMayRunAppCode"];
+  assertMayRunAppCode: StartSitePreviewDependencies<
+    Event,
+    Sender,
+    Workspace
+  >["assertMayRunAppCode"];
   executeAppPreview: StartSitePreviewDependencies<Event, Sender, Workspace>["execute"];
   withRendererWorkspaceOperation<Result>(
-    sender: Sender, workspaceId: string, message: string,
+    sender: Sender,
+    workspaceId: string,
+    message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
 }): void {
   const {
-    registerHandler, assertTrustedSender, senderWorkspaceAuthority,
-    appCatalog, appPreviews, isSharedView, assertMayRunAppCode, executeAppPreview,
+    registerHandler,
+    assertTrustedSender,
+    senderWorkspaceAuthority,
+    appCatalog,
+    appPreviews,
+    isSharedView,
+    assertMayRunAppCode,
+    executeAppPreview,
     withRendererWorkspaceOperation,
   } = dependencies;
 
@@ -42,10 +61,7 @@ export function registerAppPreviewIpcHandlers<
       workspaceId: string,
       subject: string,
       action: string,
-      work: (input: {
-        workspace: Workspace;
-        session: { isCurrent(): boolean };
-      }) => Promise<Result>,
+      work: (input: { workspace: Workspace; session: { isCurrent(): boolean } }) => Promise<Result>,
     ): Promise<Result> {
       return withRendererWorkspaceOperation(
         sender,
@@ -81,10 +97,7 @@ export function registerAppPreviewIpcHandlers<
       "The app preview logs request does not target the active workspace. Open the workspace and try again.",
       (operation) =>
         GetSitePreviewLogsResult.parse(
-          operation.state.sitePreviews.status(
-            operation.workspace.workspaceId,
-            input.siteRoot,
-          ),
+          operation.state.sitePreviews.status(operation.workspace.workspaceId, input.siteRoot),
         ),
     );
   });

@@ -17,10 +17,7 @@ export interface OwnedWorkspaceReadPortInput {
   searchSources: readonly OwnedWorkspaceSearchSource[];
   // Resolves with the share-relative paths held back from the folder.
   repairProjection(target: ShareViewFilesTarget): Promise<ReadonlySet<string>>;
-  onSearchSourceFailure?: (
-    source: OwnedWorkspaceSearchSource,
-    error: unknown,
-  ) => void;
+  onSearchSourceFailure?: (source: OwnedWorkspaceSearchSource, error: unknown) => void;
 }
 
 /** What a search over the owned workspace may read and return. */
@@ -48,10 +45,7 @@ export interface OwnedWorkspaceReadPort {
 function isAtOrBelowPrefix(path: string, prefix: string): boolean {
   const comparedPath = workspacePathKey(path);
   const comparedPrefix = workspacePathKey(prefix);
-  return (
-    comparedPath === comparedPrefix ||
-    comparedPath.startsWith(`${comparedPrefix}/`)
-  );
+  return comparedPath === comparedPrefix || comparedPath.startsWith(`${comparedPrefix}/`);
 }
 
 function literalGlob(path: string): string {
@@ -64,9 +58,7 @@ function includeGlobForOwnerListing(
 ): string | undefined {
   if (requestedPath === undefined) return undefined;
   const requestedKey = workspacePathKey(requestedPath);
-  const file = listed.files.find(
-    (entry) => workspacePathKey(entry.path) === requestedKey,
-  );
+  const file = listed.files.find((entry) => workspacePathKey(entry.path) === requestedKey);
   if (file) return literalGlob(file.path);
   const folder = (listed.folders ?? []).find(
     (candidate) => workspacePathKey(candidate) === requestedKey,
@@ -94,14 +86,14 @@ export function createOwnedWorkspaceReadPort(
       }
     }
     const allowed = (path: string) =>
-      !held.has(path) && !failedPrefixes.some(prefix => isAtOrBelowPrefix(path, prefix));
+      !held.has(path) && !failedPrefixes.some((prefix) => isAtOrBelowPrefix(path, prefix));
     const visible = (listed: WorkspacePathListing): WorkspacePathListing => ({
-      files: listed.files.filter(file => allowed(file.path)),
+      files: listed.files.filter((file) => allowed(file.path)),
       folders: (listed.folders ?? []).filter(allowed),
     });
     return {
-      listFiles: async scope => visible(await input.listFiles(scope)),
-      lookupFiles: async paths => visible(await input.lookupFiles(paths.filter(allowed))),
+      listFiles: async (scope) => visible(await input.listFiles(scope)),
+      lookupFiles: async (paths) => visible(await input.lookupFiles(paths.filter(allowed))),
     };
   }
 
@@ -113,12 +105,12 @@ export function createOwnedWorkspaceReadPort(
         return { listing: null, allowPath: () => true };
       }
       const listed = await (await prepareLookup()).listFiles();
-      const allowed = new Set(listed.files.map(file => workspacePathKey(file.path)));
+      const allowed = new Set(listed.files.map((file) => workspacePathKey(file.path)));
       const includeGlob = includeGlobForOwnerListing(listed, requestedPath);
       return {
         listing: listed,
         ...(includeGlob !== undefined ? { includeGlob } : {}),
-        allowPath: path => allowed.has(workspacePathKey(path)),
+        allowPath: (path) => allowed.has(workspacePathKey(path)),
       };
     },
   };

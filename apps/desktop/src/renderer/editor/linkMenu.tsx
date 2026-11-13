@@ -64,7 +64,11 @@ function isViewEditable(view: EditorView): boolean {
 }
 
 function linkHrefAt(
-  doc: { nodeAt(pos: number): { marks: ReadonlyArray<{ type: { name: string }; attrs: Record<string, unknown> }> } | null },
+  doc: {
+    nodeAt(
+      pos: number,
+    ): { marks: ReadonlyArray<{ type: { name: string }; attrs: Record<string, unknown> }> } | null;
+  },
   pos: number,
 ): string | null {
   const node = doc.nodeAt(pos);
@@ -140,11 +144,7 @@ type OpenLinkMenuState = Extract<LinkMenuState, { open: true }>;
  *  existing range, or — for a collapsed Cmd+K-with-no-selection case —
  *  inserts the URL itself as new linked text. Returns false (without
  *  mutating the doc) when the input doesn't normalize to a safe URL. */
-export function applyLinkMenu(
-  editor: Editor,
-  state: OpenLinkMenuState,
-  rawUrl: string,
-): boolean {
+export function applyLinkMenu(editor: Editor, state: OpenLinkMenuState, rawUrl: string): boolean {
   const normalized = normalizeLinkUrl(rawUrl);
   if (!normalized) return false;
 
@@ -253,8 +253,7 @@ export function makeLinkMenuPlugin({
         event.preventDefault();
         const linkType = view.state.schema.marks.link;
         if (!linkType) return false;
-        const range =
-          getMarkRange(view.state.doc.resolve(pos), linkType) ?? { from: pos, to: pos };
+        const range = getMarkRange(view.state.doc.resolve(pos), linkType) ?? { from: pos, to: pos };
         setState(computeLinkMenuState(view, range));
         return true;
       },
@@ -414,9 +413,7 @@ export function LinkMenu({
         ) : null}
       </div>
       {invalid ? (
-        <div className="dohc-link-menu__error">
-          Enter a valid http(s) or mailto link.
-        </div>
+        <div className="dohc-link-menu__error">Enter a valid http(s) or mailto link.</div>
       ) : null}
     </div>
   );

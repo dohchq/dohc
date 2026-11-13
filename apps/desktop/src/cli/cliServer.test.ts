@@ -4,17 +4,54 @@ import { stripTypeScriptTypes } from "node:module";
 import { makeLink as mcpMakeLink } from "@dohc/mcp/tools";
 import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
 import { finishMoveRecovery } from "../workspaces/workspaceMoveRecovery";
-import { readWorkspaceHistoryOperation, undoWorkspaceHistoryOperation } from "../workspaces/workspaceHistoryOperations";
+import {
+  readWorkspaceHistoryOperation,
+  undoWorkspaceHistoryOperation,
+} from "../workspaces/workspaceHistoryOperations";
 import { readOperation, undoOperation } from "@dohc/mcp/tools";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, importData, replyToChat, startGroupChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
-import { createActorIssuer, deriveMomentActor, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
+import {
+  createApp,
+  importData,
+  replyToChat,
+  startGroupChat,
+  writeWorkspaceFile,
+  type ToolContext,
+} from "../../../../packages/mcp/src/tools";
+import {
+  createActorIssuer,
+  deriveMomentActor,
+  parseActorKey,
+} from "@dohc/workspace-contracts/actor-identity";
 import { executeCli } from "@dohc/cli";
-import { CLI_PROTOCOL_VERSION, cliTransportResponseSchema, parseCliResult, type CliLinkTarget, type CliRequest, type CliResultByVerb, type CliTransportResponse, type CliVerb } from "@dohc/cli/protocol";
-import type { LinkedChatStore, VersionedTextMoment, VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
+import {
+  CLI_PROTOCOL_VERSION,
+  cliTransportResponseSchema,
+  parseCliResult,
+  type CliLinkTarget,
+  type CliRequest,
+  type CliResultByVerb,
+  type CliTransportResponse,
+  type CliVerb,
+} from "@dohc/cli/protocol";
+import type {
+  LinkedChatStore,
+  VersionedTextMoment,
+  VersionedTextMomentSummary,
+} from "@dohc/workspace-contracts/engine";
 import { CHATS_METHOD, DaemonRefusalError, type Request } from "@dohc/workspace-engine-client";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -31,18 +68,40 @@ import { DESKTOP_USAGE_COVERAGE } from "../usage/cliUsage";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
-import { CLI_ENDPOINT_FILE, CLI_SOCKET_FILE, RUN_MESSAGE_LINK_RECOVERY_FILE, WATCH_BATCH_MAX_BYTES, disposeCliServerRuntime, handleCliRequestLine, resolveCliWorkspace, restoreCliServerRuntime, startCliServer, type CliCollectionWriteSeam, type CliRegistryWorkspace, type CliServerHandle, type CliServerOptions, type CliWorkspaceContext } from "./cliServer";
+import {
+  CLI_ENDPOINT_FILE,
+  CLI_SOCKET_FILE,
+  RUN_MESSAGE_LINK_RECOVERY_FILE,
+  WATCH_BATCH_MAX_BYTES,
+  disposeCliServerRuntime,
+  handleCliRequestLine,
+  resolveCliWorkspace,
+  restoreCliServerRuntime,
+  startCliServer,
+  type CliCollectionWriteSeam,
+  type CliRegistryWorkspace,
+  type CliServerHandle,
+  type CliServerOptions,
+  type CliWorkspaceContext,
+} from "./cliServer";
 import { agentWriteAuthor, workspaceRequesters } from "./desktopCliServer";
 import { cliMessageId, cliThreadId } from "@dohc/workspace-operations/chats";
 import { openedLocalState } from "../testing/preparedLocalState";
-import { agentHandle, agentYouRun, listAgents, type DesktopUserSettings } from "../settings/userSettings";
+import {
+  agentHandle,
+  agentYouRun,
+  listAgents,
+  type DesktopUserSettings,
+} from "../settings/userSettings";
 import { testAgent } from "../testing/agentSettings";
 
 // Another spelling of one real folder, as Linux keeps it for a folder that
 // ignores capitals: a lookup through `spelled` reaches `stored`, stat gives
 // the same folder, and realpath returns the capitals it was given. Without an
 // alias every call passes straight through.
-const folderAlias = vi.hoisted(() => ({ current: null as { spelled: string; stored: string } | null }));
+const folderAlias = vi.hoisted(() => ({
+  current: null as { spelled: string; stored: string } | null,
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   const { sep } = await import("node:path");
@@ -70,7 +129,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const WORKSPACE_ID = "workspace-cli-server";
-type AgentRequest = Awaited<ReturnType<LinkedChatStore["listAgentRequestsPage"]>>["requests"][number];
+type AgentRequest = Awaited<
+  ReturnType<LinkedChatStore["listAgentRequestsPage"]>
+>["requests"][number];
 // The secret dohc gives the process of the run it dispatched.
 const RUN_SECRET = "b".repeat(64);
 const SERVER_NOW_MS = Date.parse("2026-07-10T04:05:06.000Z");
@@ -107,12 +168,14 @@ function momentFixtures(
       origin: "local-file",
       summary: `Updated ${suffix}`,
     },
-    authors: [{
-      kind: "agent",
-      agentId: `agent_${suffix}`,
-      onBehalfOf: `user_${suffix}`,
-      agentRunId: `run_${suffix}`,
-    }],
+    authors: [
+      {
+        kind: "agent",
+        agentId: `agent_${suffix}`,
+        onBehalfOf: `user_${suffix}`,
+        agentRunId: `run_${suffix}`,
+      },
+    ],
     momentOrder: 1,
   };
   return {
@@ -141,10 +204,7 @@ function momentFixtures(
   };
 }
 
-function readSocketResponse(
-  socketPath: string,
-  payload: unknown,
-): Promise<CliTransportResponse> {
+function readSocketResponse(socketPath: string, payload: unknown): Promise<CliTransportResponse> {
   return new Promise((resolveResponse, rejectResponse) => {
     const socket = createConnection(socketPath);
     socket.setEncoding("utf8");
@@ -170,9 +230,7 @@ function readSocketResponse(
       socket.destroy();
       try {
         resolveResponse(
-          cliTransportResponseSchema.parse(
-            JSON.parse(buffer.slice(0, newline)) as unknown,
-          ),
+          cliTransportResponseSchema.parse(JSON.parse(buffer.slice(0, newline)) as unknown),
         );
       } catch (error: unknown) {
         rejectResponse(error instanceof Error ? error : new Error("Invalid response"));
@@ -194,10 +252,7 @@ describe("CLI socket server", () => {
   let workspaceRoot: string;
   let stateDir: string;
   let store: LinkedChatStore | null;
-  let storeForWorkspace: (
-    workspaceId: string,
-    rootPath: string,
-  ) => LinkedChatStore;
+  let storeForWorkspace: (workspaceId: string, rootPath: string) => LinkedChatStore;
   let dispatchStore: AwaitableAgentDispatchStore;
   let sessions: EngineWorkspaceSessions | null;
   let seedDispatchThread: (threadId: string) => Promise<void>;
@@ -238,10 +293,16 @@ describe("CLI socket server", () => {
   async function makeChannelReadOnly(channelId: string): Promise<void> {
     const channelWireId = await store!.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId });
     if (!channelWireId) throw new Error("Channel has no wire id");
-    chatRow.sharedChannels = [{
-      shareId: "share", channelWireId, access: "read-only", granterEmail: null,
-      relayUrl: "https://relay.test", recipientUserId: "verified-user-id",
-    }];
+    chatRow.sharedChannels = [
+      {
+        shareId: "share",
+        channelWireId,
+        access: "read-only",
+        granterEmail: null,
+        relayUrl: "https://relay.test",
+        recipientUserId: "verified-user-id",
+      },
+    ];
   }
 
   // `show` and `chat` read a thread here; invokeAny also takes a group's stream.
@@ -250,7 +311,8 @@ describe("CLI socket server", () => {
     args: ArgsFor<Verb>,
   ): Promise<ThreadResult<Verb>> {
     const result: unknown = await invokeAny(verb, args);
-    if (typeof result === "object" && result !== null && Object.hasOwn(result, "stream")) throw new Error("expected a thread, not a stream");
+    if (typeof result === "object" && result !== null && Object.hasOwn(result, "stream"))
+      throw new Error("expected a thread, not a stream");
     return result as ThreadResult<Verb>;
   }
 
@@ -272,11 +334,7 @@ describe("CLI socket server", () => {
 
   async function rawRequest(payload: unknown): Promise<CliTransportResponse> {
     if (server) return readSocketResponse(server.socketPath, payload);
-    const line = await handleCliRequestLine(
-      JSON.stringify(payload),
-      token,
-      serverOptions,
-    );
+    const line = await handleCliRequestLine(JSON.stringify(payload), token, serverOptions);
     return cliTransportResponseSchema.parse(JSON.parse(line) as unknown);
   }
 
@@ -316,9 +374,8 @@ describe("CLI socket server", () => {
       mkdir(workspaceRoot, { recursive: true }),
       mkdir(stateDir, { recursive: true }),
     ]);
-    const staleEndpointArtifact = process.platform === "win32"
-      ? CLI_ENDPOINT_FILE
-      : CLI_SOCKET_FILE;
+    const staleEndpointArtifact =
+      process.platform === "win32" ? CLI_ENDPOINT_FILE : CLI_SOCKET_FILE;
     await writeFile(join(stateDir, staleEndpointArtifact), "stale endpoint", "utf8");
     await writeFile(
       join(workspaceRoot, "AGENTS.md"),
@@ -340,9 +397,7 @@ describe("CLI socket server", () => {
           return {
             id: request.id,
             result: {
-              workspace: typeof params.workspaceId === "string"
-                ? params.workspaceId
-                : WORKSPACE_ID,
+              workspace: typeof params.workspaceId === "string" ? params.workspaceId : WORKSPACE_ID,
             },
           };
         }
@@ -356,17 +411,17 @@ describe("CLI socket server", () => {
           request.method === CHATS_METHOD.channelEnsureGeneral
         ) {
           params.channelId = `channel-${++idCounters.channel}`;
-          params.nowMs = (storeNowMs += 1_000);
+          params.nowMs = storeNowMs += 1_000;
         } else if (request.method === CHATS_METHOD.threadCreate) {
           params.threadId = `thread-${++idCounters.thread}`;
-          params.nowMs = (storeNowMs += 1_000);
+          params.nowMs = storeNowMs += 1_000;
         } else if (request.method === CHATS_METHOD.threadStart) {
           params.threadId = `thread-${++idCounters.thread}`;
           params.messageId = `message-${++idCounters.message}`;
-          params.nowMs = (storeNowMs += 1_000);
+          params.nowMs = storeNowMs += 1_000;
         } else if (request.method === CHATS_METHOD.messageSend) {
           params.messageId = `message-${++idCounters.message}`;
-          params.nowMs = (storeNowMs += 1_000);
+          params.nowMs = storeNowMs += 1_000;
         }
         return await loopback.sendRequest({
           ...request,
@@ -378,19 +433,17 @@ describe("CLI socket server", () => {
     storeForWorkspace = (workspaceId, rootPath) =>
       createLiveLinkedChatStore({ workspaceId, rootPath }, sessions!);
     store = storeForWorkspace(WORKSPACE_ID, workspaceRoot);
-    const wireRequest = async (
-      workspace: string,
-      method: string,
-      params: Request["params"],
-    ) => {
+    const wireRequest = async (workspace: string, method: string, params: Request["params"]) => {
       const id = nextSeedRequestId++;
-      return (await loopback.sendRequest({
-        id,
-        method,
-        workspace,
-        idempotencyKey: `cli-fixture-${id}`,
-        params,
-      })).result;
+      return (
+        await loopback.sendRequest({
+          id,
+          method,
+          workspace,
+          idempotencyKey: `cli-fixture-${id}`,
+          params,
+        })
+      ).result;
     };
     seedDispatchThread = async (threadId) => {
       await wireRequest(WORKSPACE_ID, CHATS_METHOD.threadCreate, {
@@ -401,11 +454,11 @@ describe("CLI socket server", () => {
       });
     };
     listUnreadFileThreads = async (input) =>
-      await wireRequest(
+      (await wireRequest(
         WORKSPACE_ID,
         CHATS_METHOD.readStateListUnreadFileThreads,
         input,
-      ) as Array<{
+      )) as Array<{
         threadId: string;
         messageCount: number;
         lastReadSequence: number;
@@ -462,7 +515,13 @@ describe("CLI socket server", () => {
     dispatchedRunId = null;
     agentWriteRunId = null;
     const { launch: _launch, ...terminal } = testAgent({ name: "Terminal" });
-    agentSettings = { agents: { default: testAgent({ name: "Nova" }), codex: testAgent({ name: "Codex" }), terminal } };
+    agentSettings = {
+      agents: {
+        default: testAgent({ name: "Nova" }),
+        codex: testAgent({ name: "Codex" }),
+        terminal,
+      },
+    };
     callerRunSecret = RUN_SECRET;
     serverOptions = {
       localPersonId: () => "person-local",
@@ -482,13 +541,17 @@ describe("CLI socket server", () => {
           calls.identity += 1;
         },
         currentCredentials: () => ({
-          serverUrl: "https://cloud.test", relayUrl: "https://relay.test",
-          userId: "verified-user-id", email: "sam@test.invalid", token: "token",
+          serverUrl: "https://cloud.test",
+          relayUrl: "https://relay.test",
+          userId: "verified-user-id",
+          email: "sam@test.invalid",
+          token: "token",
         }),
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
-        agentDisplayName: async (agentId) => listAgents(agentSettings).find(agent => agent.id === agentId)?.name ?? "Agent",
-        agentIdsToWake: async (_body, dmAgentId) => dmAgentId === null ? [] : [dmAgentId],
+        agentDisplayName: async (agentId) =>
+          listAgents(agentSettings).find((agent) => agent.id === agentId)?.name ?? "Agent",
+        agentIdsToWake: async (_body, dmAgentId) => (dmAgentId === null ? [] : [dmAgentId]),
         localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
@@ -500,17 +563,26 @@ describe("CLI socket server", () => {
         notifyRenderer: () => undefined,
       }),
       localUserDisplayName: () => "Sam",
-      agentRunDepth: (workspaceId) => workspaceId === WORKSPACE_ID ? agentRunDepth : 0,
+      agentRunDepth: (workspaceId) => (workspaceId === WORKSPACE_ID ? agentRunDepth : 0),
       dispatchedAgent: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRun : null),
       dispatchedRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? dispatchedRunId : null),
       agentWriteRunId: (workspaceId) => (workspaceId === WORKSPACE_ID ? agentWriteRunId : null),
-      dispatchedRunSecret: (workspaceId) => (workspaceId === WORKSPACE_ID && dispatchedRun !== null ? RUN_SECRET : null),
-      agentRunWorkspace: (runId) => (dispatchedRun !== null && runId === dispatchedRunId ? WORKSPACE_ID : undefined),
+      dispatchedRunSecret: (workspaceId) =>
+        workspaceId === WORKSPACE_ID && dispatchedRun !== null ? RUN_SECRET : null,
+      agentRunWorkspace: (runId) =>
+        dispatchedRun !== null && runId === dispatchedRunId ? WORKSPACE_ID : undefined,
       // As the desktop finds one: an agent you run in these settings, with
       // the accounts the fixture workspace records for its person.
       async connectedAgent(workspaceId, agentId) {
         const agent = workspaceId === WORKSPACE_ID ? agentYouRun(agentSettings, agentId) : null;
-        return agent ? { agentId, name: agent.name, handle: agentHandle(agent.name), ...workspaceRequesters(chatRow) } : null;
+        return agent
+          ? {
+              agentId,
+              name: agent.name,
+              handle: agentHandle(agent.name),
+              ...workspaceRequesters(chatRow),
+            }
+          : null;
       },
       async onWrite() {
         calls.writes += 1;
@@ -533,11 +605,9 @@ describe("CLI socket server", () => {
       server = await startCliServer(serverOptions);
       token = (await readFile(server.tokenPath, "utf8")).trim();
     } catch (error) {
-      const code = typeof error === "object" && error !== null && "code" in error
-        ? error.code
-        : undefined;
-      const sandboxDenied =
-        process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1" && code === "EPERM";
+      const code =
+        typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+      const sandboxDenied = process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1" && code === "EPERM";
       if (!sandboxDenied) {
         throw error;
       }
@@ -563,33 +633,115 @@ describe("CLI socket server", () => {
     const queried = deferred<void>();
     const original = store!.listAgentRequestsPage.bind(store!);
     const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
-      const page = await original(...args); queried.resolve(); return page;
+      const page = await original(...args);
+      queried.resolve();
+      return page;
     });
     try {
-      const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId });
+      const pending = invoke("watch", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        group: "general",
+        thread: root.threadId,
+      });
       await queried.promise;
-      const reply = await invoke("reply", { cwd: workspaceRoot, actor: "human", thread: root.threadId, body: "A reply", attachments: [], needsDecision: false });
+      const reply = await invoke("reply", {
+        cwd: workspaceRoot,
+        actor: "human",
+        thread: root.threadId,
+        body: "A reply",
+        attachments: [],
+        needsDecision: false,
+      });
       const batch = await pending;
-      expect(batch.messages.map(row => row.messageId)).toEqual([reply.messageId]);
-      expect((await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map(row => row.messageId)).toEqual([reply.messageId]);
-      expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId, cursor: batch.cursor, timeoutMs: 0 })).messages).toEqual([]);
-      const later = await invoke("reply", { cwd: workspaceRoot, actor: "human", thread: root.threadId, body: "Another reply", attachments: [], needsDecision: false });
-      expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: root.threadId, cursor: batch.cursor, timeoutMs: 0 })).messages.map(row => row.messageId)).toEqual([later.messageId]);
-    } finally { spy.mockRestore(); }
+      expect(batch.messages.map((row) => row.messageId)).toEqual([reply.messageId]);
+      expect(
+        (await invoke("inbox", { cwd: workspaceRoot, actor: "agent" })).mentions.map(
+          (row) => row.messageId,
+        ),
+      ).toEqual([reply.messageId]);
+      expect(
+        (
+          await invoke("watch", {
+            cwd: workspaceRoot,
+            actor: "agent",
+            group: "general",
+            thread: root.threadId,
+            cursor: batch.cursor,
+            timeoutMs: 0,
+          })
+        ).messages,
+      ).toEqual([]);
+      const later = await invoke("reply", {
+        cwd: workspaceRoot,
+        actor: "human",
+        thread: root.threadId,
+        body: "Another reply",
+        attachments: [],
+        needsDecision: false,
+      });
+      expect(
+        (
+          await invoke("watch", {
+            cwd: workspaceRoot,
+            actor: "agent",
+            group: "general",
+            thread: root.threadId,
+            cursor: batch.cursor,
+            timeoutMs: 0,
+          })
+        ).messages.map((row) => row.messageId),
+      ).toEqual([later.messageId]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("narrows to a Group and thread without widening the inbox", async () => {
     const ordinary = await post({ group: "general", actor: "human", body: "An ordinary message" });
-    const mentioned = await post({ group: "general", actor: "human", body: "@agent check this thread" });
-    await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "default", name: "Nova" });
+    const mentioned = await post({
+      group: "general",
+      actor: "human",
+      body: "@agent check this thread",
+    });
+    await store!.ensureAgentChannel({
+      workspaceId: WORKSPACE_ID,
+      agentId: "default",
+      name: "Nova",
+    });
     const dm = await post({ group: "my-agent", actor: "human", body: "Please check this DM" });
-    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", group: "general", thread: mentioned.threadId, timeoutMs: 0 });
-    expect(batch.messages.map(message => message.messageId)).toEqual([mentioned.messageId]);
-    const other = await invoke("watch", { cwd: workspaceRoot, actor: "agent", thread: ordinary.threadId, timeoutMs: 0 });
+    const batch = await invoke("watch", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      group: "general",
+      thread: mentioned.threadId,
+      timeoutMs: 0,
+    });
+    expect(batch.messages.map((message) => message.messageId)).toEqual([mentioned.messageId]);
+    const other = await invoke("watch", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      thread: ordinary.threadId,
+      timeoutMs: 0,
+    });
     expect(other.messages).toEqual([]);
     // An agent's chat belongs to its agent, so an unnamed agent's wait skips it.
-    expect((await invoke("watch", { cwd: workspaceRoot, actor: "agent", thread: dm.threadId, timeoutMs: 0 })).messages).toEqual([]);
-    const changedScope = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor, timeoutMs: 0 } });
+    expect(
+      (
+        await invoke("watch", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: dm.threadId,
+          timeoutMs: 0,
+        })
+      ).messages,
+    ).toEqual([]);
+    const changedScope = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "watch",
+      args: { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor, timeoutMs: 0 },
+    });
     expect(changedScope).toMatchObject({ ok: false, error: expect.stringContaining("cursor") });
   });
 
@@ -597,20 +749,45 @@ describe("CLI socket server", () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const asked = await store.startChannelThread({
-      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id, lane: "posts", author: { kind: "human", displayName: "Ice" }, body: "@agent pick up the card",
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      lane: "posts",
+      author: { kind: "human", displayName: "Ice" },
+      body: "@agent pick up the card",
     });
-    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: asked.thread.id, triggerMessageId: asked.message.id, agentId: "default" });
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      threadId: asked.thread.id,
+      triggerMessageId: asked.message.id,
+      agentId: "default",
+    });
     const claim = await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" });
     if (!claim) throw new Error("Expected a run");
     holdRun(claim.run.runId);
-    const blocker = await post({ group: "general", actor: "agent", runId: claim.run.runId, body: "Which date?", needsDecision: true });
+    const blocker = await post({
+      group: "general",
+      actor: "agent",
+      runId: claim.run.runId,
+      body: "Which date?",
+      needsDecision: true,
+    });
     const threadId = blocker.threadId.replace(/^th_/u, "thread-");
     const [opening] = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId });
     const answer = await store.sendMessage({
-      authorActorKey: null, workspaceId: WORKSPACE_ID, threadId, parentMessageId: opening!.id,
-      author: { kind: "human", displayName: "Ice" }, body: "Friday",
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      threadId,
+      parentMessageId: opening!.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Friday",
     });
-    await dispatchStore.recordTrigger({ workspaceId: WORKSPACE_ID, threadId: answer.threadId, triggerMessageId: answer.id, agentId: "default" });
+    await dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      threadId: answer.threadId,
+      triggerMessageId: answer.id,
+      agentId: "default",
+    });
 
     const gate = deferred<void>();
     const read = deferred<void>();
@@ -627,97 +804,182 @@ describe("CLI socket server", () => {
       gate.resolve();
       await read.promise;
       // Room for the stray read to finish whatever it would do with the reply.
-      await new Promise(settle => setTimeout(settle, 100));
+      await new Promise((settle) => setTimeout(settle, 100));
     } finally {
       spy.mockRestore();
     }
     await dispatchStore.completeRun({ runId: claim.run.runId, exitCode: 0 });
-    expect(await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" })).not.toBeNull();
+    expect(
+      await dispatchStore.claimNextPending(WORKSPACE_ID, { agentId: "default" }),
+    ).not.toBeNull();
   });
 
-
-  it.each(["mention", "posted-thread reply"])("uses the cloud-pull wake mechanism for a %s that predates the cursor", async (kind) => {
-    const first = await post({ group: "general", actor: "human", body: "@agent first" });
-    // The request as the engine lists it, taken before a reply acknowledges it.
-    const [current] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
-    expect(cliThreadId(current!.threadId)).toBe(first.threadId);
-    if (kind === "posted-thread reply") await invoke("reply", { cwd: workspaceRoot, actor: "agent", thread: first.threadId, body: "Joining the thread", attachments: [], needsDecision: false });
-    const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
-    const queried = deferred<void>();
-    const original = store!.listAgentRequestsPage.bind(store!);
-    const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
-      const page = await original(...args); queried.resolve(); return page;
-    });
-    try {
-      const pending = invoke("watch", { cwd: workspaceRoot, actor: "agent", cursor: batch.cursor });
-      await queried.promise;
-      const older = { ...current!, messageId: "synced-message", createdAtMs: 0, body: kind === "mention" ? "@agent synced" : "A synced reply" };
-      const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
-      const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
-      const end = source.indexOf("\n    // Recorded durably before each pull", start);
-      expect(start).toBeGreaterThan(-1);
-      expect(end).toBeGreaterThan(start);
-      const dependencies = {
-        workspace: { workspaceId: WORKSPACE_ID },
-        signalChatWrite: chatWriteSignals.signalChatWrite,
-        noticeStore: () => ({ sync: vi.fn() }),
-        shareRosters: { pulled: vi.fn() }, refreshShareLabels: vi.fn(),
-        automationHosts: { relayAnswered: vi.fn() }, collectionAutomationsOf: vi.fn(),
-        withWorkspaceAttachment: vi.fn(),
-        withWorkspaceAttachmentAsync: async (_workspace: unknown, work: () => Promise<void>) => work(),
-        projectPendingChatBookmarks: vi.fn(async () => undefined),
-        chatWakes: { pulled: vi.fn(async () => undefined) },
-      };
-      const callback = stripTypeScriptTypes(`({${source.slice(start, end)}})`);
-      const afterSuccessfulPull = new Function("dependencies",
-        `const { ${Object.keys(dependencies).join(", ")} } = dependencies; return ${callback}.afterSuccessfulPull;`,
-      )(dependencies) as NonNullable<Parameters<typeof createRelaySyncEngine>[0]["afterSuccessfulPull"]>;
-      const sync = createRelaySyncEngine({
-        rootDir: workspaceRoot, relay: { baseUrl: "https://relay.test", token: "token" }, onChange: vi.fn(),
-        capture: { runRelaySync: async task => task(async () => undefined), countOpenConflicts: async () => 0 } as WorkspaceEngineCapture,
-        operations: {
-          claim: async () => undefined,
-          push: async () => ({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
-          recoverOrigin: async () => { throw new Error("Unexpected recovery"); },
-          pull: async () => {
-            spy.mockImplementation(async (...args) => {
-              const page = await original(...args);
-              return { ...page, requests: [older, ...page.requests] };
-            });
-            return { fetched: 1, applied: 1, skipped: 0, conflictsOpened: 0, fastForwardedPaths: [], nextCursor: 1, sharingDeclined: [] };
-          },
-        },
-        afterSuccessfulPull,
+  it.each(["mention", "posted-thread reply"])(
+    "uses the cloud-pull wake mechanism for a %s that predates the cursor",
+    async (kind) => {
+      const first = await post({ group: "general", actor: "human", body: "@agent first" });
+      // The request as the engine lists it, taken before a reply acknowledges it.
+      const [current] = (
+        await store!.listAgentRequestsPage({
+          workspaceId: WORKSPACE_ID,
+          reader: { kind: "unnamed" },
+        })
+      ).requests;
+      expect(cliThreadId(current!.threadId)).toBe(first.threadId);
+      if (kind === "posted-thread reply")
+        await invoke("reply", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: first.threadId,
+          body: "Joining the thread",
+          attachments: [],
+          needsDecision: false,
+        });
+      const batch = await invoke("watch", { cwd: workspaceRoot, actor: "agent", timeoutMs: 0 });
+      const queried = deferred<void>();
+      const original = store!.listAgentRequestsPage.bind(store!);
+      const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async (...args) => {
+        const page = await original(...args);
+        queried.resolve();
+        return page;
       });
       try {
-        await sync.start();
-        expect(sync.snapshot().syncFailure).toBeNull();
-        expect((await pending).messages.map(message => message.text)).toEqual([older.body]);
-        // The whole hook ran: a missing dependency would throw before its last step.
-        expect(dependencies.chatWakes.pulled).toHaveBeenCalledWith(expect.objectContaining({ applied: true }));
-        expect(dependencies.projectPendingChatBookmarks).toHaveBeenCalledWith(WORKSPACE_ID);
-      } finally { await sync.stop(); }
-    } finally { spy.mockRestore(); }
-  });
+        const pending = invoke("watch", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          cursor: batch.cursor,
+        });
+        await queried.promise;
+        const older = {
+          ...current!,
+          messageId: "synced-message",
+          createdAtMs: 0,
+          body: kind === "mention" ? "@agent synced" : "A synced reply",
+        };
+        const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
+        const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
+        const end = source.indexOf("\n    // Recorded durably before each pull", start);
+        expect(start).toBeGreaterThan(-1);
+        expect(end).toBeGreaterThan(start);
+        const dependencies = {
+          workspace: { workspaceId: WORKSPACE_ID },
+          signalChatWrite: chatWriteSignals.signalChatWrite,
+          noticeStore: () => ({ sync: vi.fn() }),
+          shareRosters: { pulled: vi.fn() },
+          refreshShareLabels: vi.fn(),
+          automationHosts: { relayAnswered: vi.fn() },
+          collectionAutomationsOf: vi.fn(),
+          withWorkspaceAttachment: vi.fn(),
+          withWorkspaceAttachmentAsync: async (_workspace: unknown, work: () => Promise<void>) =>
+            work(),
+          projectPendingChatBookmarks: vi.fn(async () => undefined),
+          chatWakes: { pulled: vi.fn(async () => undefined) },
+        };
+        const callback = stripTypeScriptTypes(`({${source.slice(start, end)}})`);
+        const afterSuccessfulPull = new Function(
+          "dependencies",
+          `const { ${Object.keys(dependencies).join(", ")} } = dependencies; return ${callback}.afterSuccessfulPull;`,
+        )(dependencies) as NonNullable<
+          Parameters<typeof createRelaySyncEngine>[0]["afterSuccessfulPull"]
+        >;
+        const sync = createRelaySyncEngine({
+          rootDir: workspaceRoot,
+          relay: { baseUrl: "https://relay.test", token: "token" },
+          onChange: vi.fn(),
+          capture: {
+            runRelaySync: async (task) => task(async () => undefined),
+            countOpenConflicts: async () => 0,
+          } as WorkspaceEngineCapture,
+          operations: {
+            claim: async () => undefined,
+            push: async () => ({
+              pushed: 0,
+              hasMore: false,
+              originsPushed: [],
+              ownerAdmissionPending: [],
+              sharingDeclined: [],
+            }),
+            recoverOrigin: async () => {
+              throw new Error("Unexpected recovery");
+            },
+            pull: async () => {
+              spy.mockImplementation(async (...args) => {
+                const page = await original(...args);
+                return { ...page, requests: [older, ...page.requests] };
+              });
+              return {
+                fetched: 1,
+                applied: 1,
+                skipped: 0,
+                conflictsOpened: 0,
+                fastForwardedPaths: [],
+                nextCursor: 1,
+                sharingDeclined: [],
+              };
+            },
+          },
+          afterSuccessfulPull,
+        });
+        try {
+          await sync.start();
+          expect(sync.snapshot().syncFailure).toBeNull();
+          expect((await pending).messages.map((message) => message.text)).toEqual([older.body]);
+          // The whole hook ran: a missing dependency would throw before its last step.
+          expect(dependencies.chatWakes.pulled).toHaveBeenCalledWith(
+            expect.objectContaining({ applied: true }),
+          );
+          expect(dependencies.projectPendingChatBookmarks).toHaveBeenCalledWith(WORKSPACE_ID);
+        } finally {
+          await sync.stop();
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
 
   describe("an agent you run", () => {
-    const terminalArgs = () => ({ cwd: workspaceRoot, actor: "agent" as const, agentId: "terminal" });
-    const cli = (...messages: Array<{ id: string }>) => messages.map(message => cliMessageId(message.id));
-    const seenIn = (cursor: string): unknown => (JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { seen: unknown }).seen;
+    const terminalArgs = () => ({
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      agentId: "terminal",
+    });
+    const cli = (...messages: Array<{ id: string }>) =>
+      messages.map((message) => cliMessageId(message.id));
+    const seenIn = (cursor: string): unknown =>
+      (JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { seen: unknown }).seen;
 
     // A person's message from the app, stamped with the owner's account
     // unless another account, or none, is named.
-    async function personPosts(channelId: string, body: string, authorUserId: string | null = "verified-user-id", wakeAgentIds?: string[]) {
+    async function personPosts(
+      channelId: string,
+      body: string,
+      authorUserId: string | null = "verified-user-id",
+      wakeAgentIds?: string[],
+    ) {
       return await store!.startChannelThread({
-        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId, author: { kind: "human", displayName: "Sam" },
-        ...(authorUserId === null ? {} : { authorUserId }), ...(wakeAgentIds ? { wakeAgentIds } : {}), body,
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        channelId,
+        author: { kind: "human", displayName: "Sam" },
+        ...(authorUserId === null ? {} : { authorUserId }),
+        ...(wakeAgentIds ? { wakeAgentIds } : {}),
+        body,
       });
     }
 
-    async function personReplies(threadId: string, body: string, authorUserId: string | null = "verified-user-id") {
+    async function personReplies(
+      threadId: string,
+      body: string,
+      authorUserId: string | null = "verified-user-id",
+    ) {
       return await store!.sendMessage({
-        authorActorKey: null, workspaceId: WORKSPACE_ID, threadId, author: { kind: "human", displayName: "Sam" },
-        ...(authorUserId === null ? {} : { authorUserId }), body,
+        authorActorKey: null,
+        workspaceId: WORKSPACE_ID,
+        threadId,
+        author: { kind: "human", displayName: "Sam" },
+        ...(authorUserId === null ? {} : { authorUserId }),
+        body,
       });
     }
 
@@ -725,16 +987,24 @@ describe("CLI socket server", () => {
     // unnamed agents with null.
     async function waitFor(agentId: string | null, cursor?: string) {
       const batch = await invoke("watch", {
-        cwd: workspaceRoot, actor: "agent", timeoutMs: 0,
-        ...(agentId === null ? {} : { agentId }), ...(cursor === undefined ? {} : { cursor }),
+        cwd: workspaceRoot,
+        actor: "agent",
+        timeoutMs: 0,
+        ...(agentId === null ? {} : { agentId }),
+        ...(cursor === undefined ? {} : { cursor }),
       });
-      return { ids: batch.messages.map(row => row.messageId), cursor: batch.cursor };
+      return { ids: batch.messages.map((row) => row.messageId), cursor: batch.cursor };
     }
 
     async function authorAgentIdOf(sent: { threadId: string; messageId: string }) {
-      const thread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(row => cliThreadId(row.id) === sent.threadId)!;
-      const messages = await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: thread.id });
-      return messages.find(row => cliMessageId(row.id) === sent.messageId)?.authorAgentId;
+      const thread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(
+        (row) => cliThreadId(row.id) === sent.threadId,
+      )!;
+      const messages = await store!.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: thread.id,
+      });
+      return messages.find((row) => cliMessageId(row.id) === sent.messageId)?.authorAgentId;
     }
 
     // The author of each Collection write and the origin of each document
@@ -755,7 +1025,10 @@ describe("CLI socket server", () => {
           },
           async createRecord(input) {
             authors.push(input.author);
-            return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+            return {
+              path: `${input.collectionPath}/${input.name}.md`,
+              recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+            };
           },
         },
       };
@@ -777,50 +1050,91 @@ describe("CLI socket server", () => {
 
     it("is named only by an agent, without a run, from this computer's agents you run", async () => {
       const send = (verb: "inbox" | "post", args: Record<string, unknown>) =>
-        rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: workspaceRoot, ...args } });
-      const posted = { actor: "agent", group: "general", attachments: [], needsDecision: false, body: "Hello" };
-      await expect(send("inbox", { actor: "agent", agentId: "terminal" })).resolves.toMatchObject({ ok: true });
+        rawRequest({
+          token,
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb,
+          args: { cwd: workspaceRoot, ...args },
+        });
+      const posted = {
+        actor: "agent",
+        group: "general",
+        attachments: [],
+        needsDecision: false,
+        body: "Hello",
+      };
+      await expect(send("inbox", { actor: "agent", agentId: "terminal" })).resolves.toMatchObject({
+        ok: true,
+      });
       // Nova and Codex are agents dohc starts. An id must match exactly.
       for (const agentId of ["codex", "default", "unknown", "p-terminal"]) {
         await expect(send("inbox", { actor: "agent", agentId }), agentId).resolves.toMatchObject({
-          ok: false, error: expect.stringContaining("No agent you run has this id in Settings › Agents."),
+          ok: false,
+          error: expect.stringContaining("No agent you run has this id in Settings › Agents."),
         });
       }
       await expect(send("inbox", { actor: "human", agentId: "terminal" })).resolves.toMatchObject({
-        ok: false, error: expect.stringContaining("Only an agent works as an agent you run."),
+        ok: false,
+        error: expect.stringContaining("Only an agent works as an agent you run."),
       });
-      await expect(send("post", { ...posted, agentId: "terminal", runId: "run-elsewhere" })).resolves.toMatchObject({
-        ok: false, error: expect.stringContaining("An agent you run is not a run."),
+      await expect(
+        send("post", { ...posted, agentId: "terminal", runId: "run-elsewhere" }),
+      ).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining("An agent you run is not a run."),
       });
-      await expect(send("post", { ...posted, agentId: "terminal" })).resolves.toMatchObject({ ok: true });
+      await expect(send("post", { ...posted, agentId: "terminal" })).resolves.toMatchObject({
+        ok: true,
+      });
       // A name with no letter or digit has no handle, so @ can't reach it.
       const { launch: _launch, ...blank } = testAgent({ name: "!!!" });
       agentSettings = { agents: { ...agentSettings.agents, blank } };
       await expect(send("inbox", { actor: "agent", agentId: "blank" })).resolves.toMatchObject({
-        ok: false, error: expect.stringContaining("Give this agent a name with a letter or digit"),
+        ok: false,
+        error: expect.stringContaining("Give this agent a name with a letter or digit"),
       });
     });
 
     it("reads its chat, a mention of its name, and replies where it posted, from its person in the app", async () => {
       const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-      const chat = await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "terminal", name: "Terminal" });
-      const codexChat = await store!.ensureAgentChannel({ workspaceId: WORKSPACE_ID, agentId: "codex", name: "Codex" });
+      const chat = await store!.ensureAgentChannel({
+        workspaceId: WORKSPACE_ID,
+        agentId: "terminal",
+        name: "Terminal",
+      });
+      const codexChat = await store!.ensureAgentChannel({
+        workspaceId: WORKSPACE_ID,
+        agentId: "codex",
+        name: "Codex",
+      });
       const inChat = await personPosts(chat.id, "Hello");
       const mention = await personPosts(general.id, "Could @Terminal check this?");
       await post({ actor: "human", body: "@Terminal from the CLI" });
       await personPosts(codexChat.id, "Only for Codex");
       const codexMention = await personPosts(codexChat.id, "@Terminal, Codex is stuck");
-      const own = await invoke("post", { ...terminalArgs(), group: "general", attachments: [], needsDecision: false, body: "My discussion" });
+      const own = await invoke("post", {
+        ...terminalArgs(),
+        group: "general",
+        attachments: [],
+        needsDecision: false,
+        body: "My discussion",
+      });
       expect(await authorAgentIdOf(own)).toBe("terminal");
-      const ownThread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(row => cliThreadId(row.id) === own.threadId)!;
+      const ownThread = (await store!.listThreads({ workspaceId: WORKSPACE_ID })).find(
+        (row) => cliThreadId(row.id) === own.threadId,
+      )!;
       const reply = await personReplies(ownThread.id, "A plain reply");
       await personReplies(ownThread.id, "From another account", "other-account");
 
-      expect((await waitFor("terminal")).ids).toEqual(cli(inChat.message, mention.message, codexMention.message, reply));
+      expect((await waitFor("terminal")).ids).toEqual(
+        cli(inChat.message, mention.message, codexMention.message, reply),
+      );
       expect((await waitFor(null)).ids).toEqual([]);
       const inbox = await invoke("inbox", terminalArgs());
-      expect(inbox.threads.map(thread => thread.id)).toEqual([cliThreadId(inChat.thread.id)]);
-      expect(inbox.mentions.map(row => row.messageId).sort()).toEqual(cli(mention.message, codexMention.message, reply).sort());
+      expect(inbox.threads.map((thread) => thread.id)).toEqual([cliThreadId(inChat.thread.id)]);
+      expect(inbox.mentions.map((row) => row.messageId).sort()).toEqual(
+        cli(mention.message, codexMention.message, reply).sort(),
+      );
     });
 
     it("counts a post with no account only in your own workspace", async () => {
@@ -831,7 +1145,11 @@ describe("CLI socket server", () => {
       expect((await waitFor("terminal")).ids).toEqual(cli(yours.message, beforeSync.message));
 
       // In a workspace shared with you, only your account's posts count.
-      chatRow = { shareView: { recipientUserId: "verified-user-id" } as unknown as NonNullable<RegistryEntry["shareView"]> };
+      chatRow = {
+        shareView: { recipientUserId: "verified-user-id" } as unknown as NonNullable<
+          RegistryEntry["shareView"]
+        >,
+      };
       expect((await waitFor("terminal")).ids).toEqual(cli(yours.message));
     });
 
@@ -843,24 +1161,61 @@ describe("CLI socket server", () => {
       agentWriteRunId = "run-1";
       agentRunDepth = 2;
 
-      await invoke("collectionSetFields", { ...terminalArgs(), recordPath: "tasks/a.md", fields: { status: "done" } });
-      await invoke("documentEdit", { ...terminalArgs(), path: "notes/plan.md", replacement: "Done." });
+      await invoke("collectionSetFields", {
+        ...terminalArgs(),
+        recordPath: "tasks/a.md",
+        fields: { status: "done" },
+      });
+      await invoke("documentEdit", {
+        ...terminalArgs(),
+        path: "notes/plan.md",
+        replacement: "Done.",
+      });
       // The run's own write still names the run.
-      await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "parked" } });
+      await invoke("collectionSetFields", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        recordPath: "tasks/a.md",
+        fields: { status: "parked" },
+      });
       expect(authors).toEqual([
         { kind: "agent", agentId: "terminal", onBehalfOf: "person-local", depth: 2 },
-        { actorOriginId: "terminal", attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 2 } },
-        { kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 2, agentRunId: "run-1" },
+        {
+          actorOriginId: "terminal",
+          attribution: { actorKind: "agent", onBehalfOf: "person-local", depth: 2 },
+        },
+        {
+          kind: "agent",
+          agentId: "codex",
+          onBehalfOf: "person-local",
+          depth: 2,
+          agentRunId: "run-1",
+        },
       ]);
 
       // A reaction carries its author's name, not an agent id.
-      await invoke("react", { ...terminalArgs(), message: cliMessageId(asked.message.id), emoji: "👍" });
-      expect((await store!.listReactions({ workspaceId: WORKSPACE_ID, threadId: asked.thread.id })).map(reaction => reaction.author))
-        .toMatchObject([{ kind: "agent", displayName: "Terminal" }]);
-      const commented = await invoke("fileChatStart", { ...terminalArgs(), path: "tracked.md", title: "Review", body: "Looks right" });
+      await invoke("react", {
+        ...terminalArgs(),
+        message: cliMessageId(asked.message.id),
+        emoji: "👍",
+      });
+      expect(
+        (await store!.listReactions({ workspaceId: WORKSPACE_ID, threadId: asked.thread.id })).map(
+          (reaction) => reaction.author,
+        ),
+      ).toMatchObject([{ kind: "agent", displayName: "Terminal" }]);
+      const commented = await invoke("fileChatStart", {
+        ...terminalArgs(),
+        path: "tracked.md",
+        title: "Review",
+        body: "Looks right",
+      });
       if (!commented.ok) throw new Error(commented.reason);
-      await expect(store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: commented.threadId }))
-        .resolves.toMatchObject([{ authorAgentId: "terminal", author: { kind: "agent", displayName: "Terminal" } }]);
+      await expect(
+        store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: commented.threadId }),
+      ).resolves.toMatchObject([
+        { authorAgentId: "terminal", author: { kind: "agent", displayName: "Terminal" } },
+      ]);
     });
 
     it("refuses a cursor from another reader", async () => {
@@ -868,61 +1223,137 @@ describe("CLI socket server", () => {
       const own = await waitFor("terminal");
       expect((await waitFor("terminal", own.cursor)).ids).toEqual([]);
       expect((await waitFor(null, unnamed.cursor)).ids).toEqual([]);
-      for (const args of [{ ...terminalArgs(), cursor: unnamed.cursor }, { cwd: workspaceRoot, actor: "agent", cursor: own.cursor }]) {
-        expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "watch", args: { ...args, timeoutMs: 0 } }))
-          .toMatchObject({ ok: false, error: expect.stringContaining("This chat cursor is invalid for this agent") });
+      for (const args of [
+        { ...terminalArgs(), cursor: unnamed.cursor },
+        { cwd: workspaceRoot, actor: "agent", cursor: own.cursor },
+      ]) {
+        expect(
+          await rawRequest({
+            token,
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            verb: "watch",
+            args: { ...args, timeoutMs: 0 },
+          }),
+        ).toMatchObject({
+          ok: false,
+          error: expect.stringContaining("This chat cursor is invalid for this agent"),
+        });
       }
     });
 
     it("cuts a batch at its size and keeps seen requests past the cut", async () => {
       await post({ actor: "human", body: "@agent template" });
-      const [template] = (await store!.listAgentRequestsPage({ workspaceId: WORKSPACE_ID, reader: { kind: "unnamed" } })).requests;
-      const request = (messageId: string, createdAtMs: number, bytes = 10): AgentRequest =>
-        ({ ...template!, messageId, createdAtMs, body: "x".repeat(bytes) });
+      const [template] = (
+        await store!.listAgentRequestsPage({
+          workspaceId: WORKSPACE_ID,
+          reader: { kind: "unnamed" },
+        })
+      ).requests;
+      const request = (messageId: string, createdAtMs: number, bytes = 10): AgentRequest => ({
+        ...template!,
+        messageId,
+        createdAtMs,
+        body: "x".repeat(bytes),
+      });
       let candidates = [request("a", 10), request("b", 11)];
-      const spy = vi.spyOn(store!, "listAgentRequestsPage").mockImplementation(async () => ({ requests: candidates, more: false }));
+      const spy = vi
+        .spyOn(store!, "listAgentRequestsPage")
+        .mockImplementation(async () => ({ requests: candidates, more: false }));
       try {
         const first = await waitFor(null);
         expect(first.ids).toEqual([cliMessageId("a"), cliMessageId("b")]);
         // Two large requests arrive with older times. Together they pass the
         // size, so the second waits for the next call.
         const large = Math.ceil(WATCH_BATCH_MAX_BYTES * 0.6);
-        candidates = [request("x", 1, large), request("y", 2, large), request("a", 10), request("b", 11)];
+        candidates = [
+          request("x", 1, large),
+          request("y", 2, large),
+          request("a", 10),
+          request("b", 11),
+        ];
         const second = await waitFor(null, first.cursor);
         expect(second.ids).toEqual([cliMessageId("x")]);
-        expect(seenIn(second.cursor)).toEqual([[10, "a"], [11, "b"], [1, "x"]]);
+        expect(seenIn(second.cursor)).toEqual([
+          [10, "a"],
+          [11, "b"],
+          [1, "x"],
+        ]);
         const third = await waitFor(null, second.cursor);
         expect(third.ids).toEqual([cliMessageId("y")]);
         expect((await waitFor(null, third.cursor)).ids).toEqual([]);
-      } finally { spy.mockRestore(); }
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 
   it("confines Access to the registered workspace and schema-parses every answer without secret fields", async () => {
-    const secret = { credentials: "secret", bearerUrl: "secret", invitationUrl: "secret", shareCode: "secret" };
-    const answer = { ...secret, ref: { kind: "path", path: "Notes/a.md", versionId: null }, rows: [], visibility: "visible",
-      unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval", ...secret }, checkedAtMs: 1, freshness: "stale", nextCursor: null };
-    const object = vi.fn(async () => answer as never), sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
-    context.access = { object, sharing, refresh: vi.fn() }; context.readOnly = true;
-    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
-      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "Notes/a.md" } } });
-    expect(response).toMatchObject({ ok: true, result: { freshness: "stale", coverage: { complete: true } } });
+    const secret = {
+      credentials: "secret",
+      bearerUrl: "secret",
+      invitationUrl: "secret",
+      shareCode: "secret",
+    };
+    const answer = {
+      ...secret,
+      ref: { kind: "path", path: "Notes/a.md", versionId: null },
+      rows: [],
+      visibility: "visible",
+      unknownReason: null,
+      coverage: { kind: "granted", complete: true, observation: "interval", ...secret },
+      checkedAtMs: 1,
+      freshness: "stale",
+      nextCursor: null,
+    };
+    const object = vi.fn(async () => answer as never),
+      sharing = vi.fn(async () => ({ ...answer, ref: null }) as never);
+    context.access = { object, sharing, refresh: vi.fn() };
+    context.readOnly = true;
+    const response = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "accessObject",
+      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "Notes/a.md" } },
+    });
+    expect(response).toMatchObject({
+      ok: true,
+      result: { freshness: "stale", coverage: { complete: true } },
+    });
     expect(JSON.stringify(response)).not.toContain("secret");
-    expect(object).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ref: { kind: "path", path: "Notes/a.md", versionId: null } }));
+    expect(object).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ ref: { kind: "path", path: "Notes/a.md", versionId: null } }),
+    );
     for (const args of [
       { cwd: workspaceRoot, actor: "agent", lane: "received", workspaceId: "other" },
-      { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "a.md", workspaceId: "other" } },
-    ]) expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args })).toMatchObject({ ok: false });
+      {
+        cwd: workspaceRoot,
+        actor: "agent",
+        ref: { kind: "path", path: "a.md", workspaceId: "other" },
+      },
+    ])
+      expect(
+        await rawRequest({
+          token,
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb: "accessSharing",
+          args,
+        }),
+      ).toMatchObject({ ok: false });
     expect(sharing).not.toHaveBeenCalled();
-    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessObject",
-      args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "../outside.md" } } })).toMatchObject({ ok: false });
+    expect(
+      await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "accessObject",
+        args: { cwd: workspaceRoot, actor: "agent", ref: { kind: "path", path: "../outside.md" } },
+      }),
+    ).toMatchObject({ ok: false });
     expect(object).toHaveBeenCalledOnce();
   });
 
-
   it("links a Group, thread, message, and path through the CLI and MCP, and refuses a read-only workspace", async () => {
     const made: unknown[] = [];
-    context.makeWorkReference = async target => {
+    context.makeWorkReference = async (target) => {
       if (target.kind === "documentCollection") throw new Error("not a Collection");
       const path = target.kind === "file" && "path" in target ? target.path : undefined;
       if (path === "missing.md") throw new Error("work-target-not-found");
@@ -931,16 +1362,29 @@ describe("CLI socket server", () => {
       return String(made.length).padStart(43, "R");
     };
     const started = await post({ actor: "agent", title: "Flights", body: "Book by Friday" });
-    const general = (await invoke("groups", { cwd: workspaceRoot, actor: "agent" })).groups.find(group => group.slug === "general")!;
-    const link = (target: CliLinkTarget) => invoke("link", { cwd: workspaceRoot, actor: "agent", target });
+    const general = (await invoke("groups", { cwd: workspaceRoot, actor: "agent" })).groups.find(
+      (group) => group.slug === "general",
+    )!;
+    const link = (target: CliLinkTarget) =>
+      invoke("link", { cwd: workspaceRoot, actor: "agent", target });
     await expect(link({ kind: "group", group: "general" })).resolves.toEqual({
-      reference: "R".repeat(42) + "1", link: `@[work:${"R".repeat(42)}1]`, kind: "chat",
+      reference: "R".repeat(42) + "1",
+      link: `@[work:${"R".repeat(42)}1]`,
+      kind: "chat",
     });
     expect((await link({ kind: "thread", thread: started.threadId })).kind).toBe("thread");
     expect((await link({ kind: "message", message: started.messageId })).kind).toBe("message");
     await mkdir(join(workspaceRoot, "plans"), { recursive: true });
     await writeFile(join(workspaceRoot, "plans", "trip.md"), "# Trip");
-    expect((await invoke("link", { cwd: join(workspaceRoot, "plans"), actor: "agent", target: { kind: "path", path: "trip.md" } })).kind).toBe("file");
+    expect(
+      (
+        await invoke("link", {
+          cwd: join(workspaceRoot, "plans"),
+          actor: "agent",
+          target: { kind: "path", path: "trip.md" },
+        })
+      ).kind,
+    ).toBe("file");
     // The CLI names chats by short ids; links name them by their engine ids.
     expect(general.id).toBe("ch_1");
     expect(made).toEqual([
@@ -951,29 +1395,69 @@ describe("CLI socket server", () => {
     ]);
     await expect(link({ kind: "message", message: "no-such-message" })).rejects.toThrow();
     // Only a path the engine cannot find is missing; another failure says what it is.
-    await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow("dohc could not find missing.md");
-    await expect(link({ kind: "path", path: "stopped.md" })).rejects.toThrow("The workspace engine is not running.");
-    await expect(link({ kind: "path", path: "../outside.md" })).rejects.toThrow("path rejected (traversal)");
+    await expect(link({ kind: "path", path: "missing.md" })).rejects.toThrow(
+      "dohc could not find missing.md",
+    );
+    await expect(link({ kind: "path", path: "stopped.md" })).rejects.toThrow(
+      "The workspace engine is not running.",
+    );
+    await expect(link({ kind: "path", path: "../outside.md" })).rejects.toThrow(
+      "path rejected (traversal)",
+    );
 
-    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: value => invoke(value.verb, value.args) };
-    await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({ kind: "chat", link: `@[work:${"R".repeat(42)}5]` });
-    await expect(mcpMakeLink(ctx, { group: "general", thread: started.threadId })).resolves.toEqual({
-      ok: false, reason: "Pass exactly one of group, thread, message, and path.",
+    const ctx: ToolContext = {
+      root: workspaceRoot,
+      home: stateDir,
+      request: (value) => invoke(value.verb, value.args),
+    };
+    await expect(mcpMakeLink(ctx, { group: "general" })).resolves.toMatchObject({
+      kind: "chat",
+      link: `@[work:${"R".repeat(42)}5]`,
     });
+    await expect(mcpMakeLink(ctx, { group: "general", thread: started.threadId })).resolves.toEqual(
+      {
+        ok: false,
+        reason: "Pass exactly one of group, thread, message, and path.",
+      },
+    );
 
-    context.readOnly = true; registryWorkspace.readOnly = true;
-    await expect(link({ kind: "group", group: "general" })).rejects.toThrow("This workspace is read-only. Make links in the owning workspace.");
+    context.readOnly = true;
+    registryWorkspace.readOnly = true;
+    await expect(link({ kind: "group", group: "general" })).rejects.toThrow(
+      "This workspace is read-only. Make links in the owning workspace.",
+    );
   });
 
   it("records once after a pending command settles and excludes concurrent and later request-id replays", async () => {
     const recordSuccess = vi.fn();
     serverOptions.recordSuccess = recordSuccess;
-    const entered = deferred(); const release = deferred();
-    const edit = vi.fn(async () => { entered.resolve(); await release.promise; return { path: "a.md", changed: true }; });
-    context.documents = { edit, read: async () => ({ path: "a.md", markdown: "x" }), create: async () => ({ path: "a.md" }) };
-    const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, door: "mcp", verb: "documentEdit",
-      args: { cwd: workspaceRoot, actor: "agent", path: "a.md", replacement: "PRIVATE", requestId: "edit" } };
-    const first = rawRequest(request); await entered.promise;
+    const entered = deferred();
+    const release = deferred();
+    const edit = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+      return { path: "a.md", changed: true };
+    });
+    context.documents = {
+      edit,
+      read: async () => ({ path: "a.md", markdown: "x" }),
+      create: async () => ({ path: "a.md" }),
+    };
+    const request = {
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      door: "mcp",
+      verb: "documentEdit",
+      args: {
+        cwd: workspaceRoot,
+        actor: "agent",
+        path: "a.md",
+        replacement: "PRIVATE",
+        requestId: "edit",
+      },
+    };
+    const first = rawRequest(request);
+    await entered.promise;
     const replay = rawRequest({ ...request, door: "cli" });
     expect(recordSuccess).not.toHaveBeenCalled();
     release.resolve();
@@ -985,12 +1469,22 @@ describe("CLI socket server", () => {
   });
 
   it("stops both socket doors immediately when Off begins, including pending completions", async () => {
-    const usage = createUsageStore({ stateDir: () => stateDir, appVersion: "0.1.0", coverage: DESKTOP_USAGE_COVERAGE });
+    const usage = createUsageStore({
+      stateDir: () => stateDir,
+      appVersion: "0.1.0",
+      coverage: DESKTOP_USAGE_COVERAGE,
+    });
     try {
       await usage.load();
-      serverOptions.recordSuccess = invocation => usage.recordSuccess(invocation);
-      const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "saveKeptCopy", args: { cwd: workspaceRoot, actor: "agent", id: 1 } };
-      const entered = deferred(); const release = deferred();
+      serverOptions.recordSuccess = (invocation) => usage.recordSuccess(invocation);
+      const request = {
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "saveKeptCopy",
+        args: { cwd: workspaceRoot, actor: "agent", id: 1 },
+      };
+      const entered = deferred();
+      const release = deferred();
       context.keptCopies = {
         list: async () => ({ keptCopies: [], more: false }),
         save: async () => ({ status: "saved", path: "kept.md" }),
@@ -999,16 +1493,29 @@ describe("CLI socket server", () => {
       };
       await rawRequest({ ...request, door: "cli" });
       const save = context.keptCopies.save;
-      context.keptCopies.save = async () => { entered.resolve(); await release.promise; return save(1); };
-      const pending = rawRequest({ ...request, door: "mcp" }); await entered.promise;
+      context.keptCopies.save = async () => {
+        entered.resolve();
+        await release.promise;
+        return save(1);
+      };
+      const pending = rawRequest({ ...request, door: "mcp" });
+      await entered.promise;
       const off = usage.setEnabled(false);
-      release.resolve(); await pending;
+      release.resolve();
+      await pending;
       await rawRequest({ ...request, door: "cli" });
       await rawRequest({ ...request, door: "mcp" });
       await off;
-      expect((await usage.read()).counts.map(({ capabilityId, door, count }) => ({ capabilityId, door, count })))
-        .toEqual([{ capabilityId: "file.kept.save", door: "cli", count: 1 }]);
-    } finally { await usage.close(); }
+      expect(
+        (await usage.read()).counts.map(({ capabilityId, door, count }) => ({
+          capabilityId,
+          door,
+          count,
+        })),
+      ).toEqual([{ capabilityId: "file.kept.save", door: "cli", count: 1 }]);
+    } finally {
+      await usage.close();
+    }
   });
 
   it("rejects a wrong token over the live transport before request parsing", async (ctx) => {
@@ -1038,14 +1545,35 @@ describe("CLI socket server", () => {
 
   it("receives a 256 KiB file through the socket and preserves partial batch results", async () => {
     if (!server) throw new Error("This test requires the CLI socket.");
-    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async (files) => ({
+      ok: true,
+      written: files.map((file) => file.path),
+    }));
     context.writeFiles = writeFiles;
-    const args = { cwd: workspaceRoot, actor: "agent" as const, requestId: "large", files: [{ path: "large.txt", contentBase64: Buffer.alloc(256 * 1024, 97).toString("base64") }] };
+    const args = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      requestId: "large",
+      files: [
+        { path: "large.txt", contentBase64: Buffer.alloc(256 * 1024, 97).toString("base64") },
+      ],
+    };
     expect(await invoke("fileWrite", args)).toEqual({ ok: true, written: ["large.txt"] });
     expect(writeFiles.mock.calls[0]?.[0][0]?.contentBase64).toBe(args.files[0]!.contentBase64);
-    const partial = { ok: false as const, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Disk full. Free space and retry." };
+    const partial = {
+      ok: false as const,
+      written: ["1.txt", "2.txt"],
+      path: "3.txt",
+      reason: "Disk full. Free space and retry.",
+    };
     writeFiles.mockResolvedValueOnce(partial);
-    expect(await invoke("fileWrite", { ...args, requestId: "batch", files: [1, 2, 3, 4, 5].map(n => ({ path: n + ".txt", contentBase64: "eA==" })) })).toEqual(partial);
+    expect(
+      await invoke("fileWrite", {
+        ...args,
+        requestId: "batch",
+        files: [1, 2, 3, 4, 5].map((n) => ({ path: n + ".txt", contentBase64: "eA==" })),
+      }),
+    ).toEqual(partial);
   });
 
   it("keeps all MCP file writes relative to a subfolder cwd", async () => {
@@ -1053,112 +1581,261 @@ describe("CLI socket server", () => {
     await mkdir(cwd);
     await writeFile(join(workspaceRoot, "index.html"), "root file");
     await writeFile(join(cwd, "source.csv"), "name\nPat\n");
-    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => {
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async (files) => {
       for (const file of files) {
         const absolute = join(workspaceRoot, file.path);
         await mkdir(dirname(absolute), { recursive: true });
         await writeFile(absolute, Buffer.from(file.contentBase64, "base64"));
       }
-      return { ok: true, written: files.map(file => file.path) };
+      return { ok: true, written: files.map((file) => file.path) };
     });
     context.writeFiles = writeFiles;
-    const ctx: ToolContext = { root: cwd, home: stateDir, request: request => invoke(request.verb, request.args) };
-    expect(await writeWorkspaceFile(ctx, { path: "index.html", content: "subfolder file" })).toMatchObject({ ok: true, path: "index.html" });
+    const ctx: ToolContext = {
+      root: cwd,
+      home: stateDir,
+      request: (request) => invoke(request.verb, request.args),
+    };
+    expect(
+      await writeWorkspaceFile(ctx, { path: "index.html", content: "subfolder file" }),
+    ).toMatchObject({ ok: true, path: "index.html" });
     expect(await createApp(ctx, { appRoot: "site" })).toMatchObject({ ok: true, appRoot: "site" });
-    expect(await importData(ctx, { sourcePath: "source.csv", databasePath: "people.sqlite", tableName: "people" })).toMatchObject({ ok: true, path: "people.sqlite" });
+    expect(
+      await importData(ctx, {
+        sourcePath: "source.csv",
+        databasePath: "people.sqlite",
+        tableName: "people",
+      }),
+    ).toMatchObject({ ok: true, path: "people.sqlite" });
     expect(await readFile(join(workspaceRoot, "index.html"), "utf8")).toBe("root file");
     expect(await readFile(join(cwd, "index.html"), "utf8")).toBe("subfolder file");
-    expect(writeFiles.mock.calls.map(([files]) => files.map(file => file.path))).toEqual([
-      ["app/index.html"], expect.arrayContaining(["app/site/index.html"]), ["app/people.sqlite"],
+    expect(writeFiles.mock.calls.map(([files]) => files.map((file) => file.path))).toEqual([
+      ["app/index.html"],
+      expect.arrayContaining(["app/site/index.html"]),
+      ["app/people.sqlite"],
     ]);
-    expect(writeFiles.mock.calls.flatMap(([files]) => files).every(file => file.path.startsWith("app/"))).toBe(true);
+    expect(
+      writeFiles.mock.calls
+        .flatMap(([files]) => files)
+        .every((file) => file.path.startsWith("app/")),
+    ).toBe(true);
     await expect(stat(join(cwd, "site/index.html"))).resolves.toBeDefined();
     await expect(stat(join(cwd, "people.sqlite"))).resolves.toBeDefined();
-    writeFiles.mockResolvedValueOnce({ ok: false, written: ["app/partial/index.html"], path: "app/partial/styles.css", reason: "Cannot write app/partial/styles.css: disk full. Free space." });
+    writeFiles.mockResolvedValueOnce({
+      ok: false,
+      written: ["app/partial/index.html"],
+      path: "app/partial/styles.css",
+      reason: "Cannot write app/partial/styles.css: disk full. Free space.",
+    });
     expect(await createApp(ctx, { appRoot: "partial" })).toEqual({
-      ok: false, written: ["partial/index.html"], path: "partial/styles.css", reason: "Cannot write partial/styles.css: disk full. Free space.",
+      ok: false,
+      written: ["partial/index.html"],
+      path: "partial/styles.css",
+      reason: "Cannot write partial/styles.css: disk full. Free space.",
     });
   });
 
-
   it("duplicates through CLI with agent authority, request replay, and path floors", async () => {
-    const duplicateFile = vi.fn<NonNullable<CliWorkspaceContext["duplicateFile"]>>(async () => ({ok: true, path: "copy.md", materialized: true, operationId: "dohc-operation:11111111-1111-4111-8111-111111111111", undo: {available: true}}));
+    const duplicateFile = vi.fn<NonNullable<CliWorkspaceContext["duplicateFile"]>>(async () => ({
+      ok: true,
+      path: "copy.md",
+      materialized: true,
+      operationId: "dohc-operation:11111111-1111-4111-8111-111111111111",
+      undo: { available: true },
+    }));
     context.duplicateFile = duplicateFile;
-    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "source.md", requestId: "duplicate-once"};
-    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
-    expect(await invoke("fileDuplicate", args)).toMatchObject({ok: true});
+    const args = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      path: "source.md",
+      requestId: "duplicate-once",
+    };
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ ok: true });
+    expect(await invoke("fileDuplicate", args)).toMatchObject({ ok: true });
     expect(duplicateFile).toHaveBeenCalledOnce();
-    expect(await executeCli({argv: ["file", "duplicate", "source.md", "--json"], cwd: workspaceRoot, request: request => invoke(request.verb, request.args)})).toMatchObject({exitCode: 0});
+    expect(
+      await executeCli({
+        argv: ["file", "duplicate", "source.md", "--json"],
+        cwd: workspaceRoot,
+        request: (request) => invoke(request.verb, request.args),
+      }),
+    ).toMatchObject({ exitCode: 0 });
     duplicateFile.mockClear();
-    expect(await invoke("fileDuplicate", {...args, actor: "human"})).toMatchObject({ok: false});
-    for (const path of ["../escape.md", ".env", ".dohc/private.md"]) expect(await invoke("fileDuplicate", {...args, path, requestId: path})).toMatchObject({ok: false});
+    expect(await invoke("fileDuplicate", { ...args, actor: "human" })).toMatchObject({ ok: false });
+    for (const path of ["../escape.md", ".env", ".dohc/private.md"])
+      expect(await invoke("fileDuplicate", { ...args, path, requestId: path })).toMatchObject({
+        ok: false,
+      });
     context.readOnly = true;
-    expect(await invoke("fileDuplicate", {...args, requestId: "readonly"})).toMatchObject({ok: false});
+    expect(await invoke("fileDuplicate", { ...args, requestId: "readonly" })).toMatchObject({
+      ok: false,
+    });
     expect(duplicateFile).not.toHaveBeenCalled();
   });
 
   it("undoes a move through socket, CLI and MCP with one compensation", async () => {
     const operationId = "dohc-operation:11111111-1111-4111-8111-111111111111";
     await writeFile(join(workspaceRoot, "a.txt"), "move body");
-    const plan = await stageDeleteRecovery(operationId, join(workspaceRoot, "a.txt"), "a.txt", ["a.txt"]);
+    const plan = await stageDeleteRecovery(operationId, join(workspaceRoot, "a.txt"), "a.txt", [
+      "a.txt",
+    ]);
     await rename(join(workspaceRoot, "a.txt"), join(workspaceRoot, "b.txt"));
     await openedLocalState({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot });
-    await finishMoveRecovery({ workspaceId: WORKSPACE_ID, rootPath: workspaceRoot }, plan, "a.txt", "b.txt", false);
-    const history = { resolveFiles: vi.fn(async () => ({versionId: "main", results: []})),readHistoryOperation: vi.fn(async (input: {operationId: string}) => ({operationId: input.operationId, versionId: "main", momentCount: 0, kind: null})),  readHistoryPage: vi.fn(async () => ({ moments: [{ momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" }], nextCursor: null }) as never),
-      undoHistoryOperation: vi.fn(async () => { await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
-        return { operationId, versionId: "main", deduped: false, materialized: true, momentCount: 1, notRestored: [], compensationOperationId: operationId }; }) };
-    const operation = { workspace: { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot, get readOnly() { return context.readOnly; }, shareView: undefined as unknown }, signal: new AbortController().signal, assertCurrent: vi.fn() };
-    context.historyOperation = input => readWorkspaceHistoryOperation(operation, input, history, {agent: true});
-    context.historyUndo = (input, origin) => undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), { history, agent: true });
+    await finishMoveRecovery(
+      { workspaceId: WORKSPACE_ID, rootPath: workspaceRoot },
+      plan,
+      "a.txt",
+      "b.txt",
+      false,
+    );
+    const history = {
+      resolveFiles: vi.fn(async () => ({ versionId: "main", results: [] })),
+      readHistoryOperation: vi.fn(async (input: { operationId: string }) => ({
+        operationId: input.operationId,
+        versionId: "main",
+        momentCount: 0,
+        kind: null,
+      })),
+      readHistoryPage: vi.fn(
+        async () =>
+          ({
+            moments: [
+              { momentId: "move", operation: "rename", path: "b.txt", beforePath: "a.txt" },
+            ],
+            nextCursor: null,
+          }) as never,
+      ),
+      undoHistoryOperation: vi.fn(async () => {
+        await rename(join(workspaceRoot, "b.txt"), join(workspaceRoot, "a.txt"));
+        return {
+          operationId,
+          versionId: "main",
+          deduped: false,
+          materialized: true,
+          momentCount: 1,
+          notRestored: [],
+          compensationOperationId: operationId,
+        };
+      }),
+    };
+    const operation = {
+      workspace: {
+        workspaceId: WORKSPACE_ID,
+        rootPath: workspaceRoot,
+        get readOnly() {
+          return context.readOnly;
+        },
+        shareView: undefined as unknown,
+      },
+      signal: new AbortController().signal,
+      assertCurrent: vi.fn(),
+    };
+    context.historyOperation = (input) =>
+      readWorkspaceHistoryOperation(operation, input, history, { agent: true });
+    context.historyUndo = (input, origin) =>
+      undoWorkspaceHistoryOperation(operation, input, agentWriteAuthor(origin), {
+        history,
+        agent: true,
+      });
     const args = { cwd: workspaceRoot, actor: "agent" as const, operationId };
-    const restored = { ok: true, tracked: { state: "restored", momentCount: 1 }, restored: [], remaining: [] };
+    const restored = {
+      ok: true,
+      tracked: { state: "restored", momentCount: 1 },
+      restored: [],
+      remaining: [],
+    };
     expect(await invoke("historyUndo", args)).toEqual(restored);
-    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    const ctx: ToolContext = {
+      root: workspaceRoot,
+      home: stateDir,
+      request: (request) => invoke(request.verb, request.args),
+    };
     expect(await undoOperation(ctx, { operationId })).toEqual(restored);
-    expect(await readOperation(ctx, { operationId })).toMatchObject({ ok: true, members: [{ operation: "rename" }] });
-    expect(await executeCli({ argv: ["history", "undo", operationId], cwd: workspaceRoot, request: request => invoke(request.verb, request.args) }))
-      .toEqual({ exitCode: 0, stdout: "History: restored\n", stderr: "" });
+    expect(await readOperation(ctx, { operationId })).toMatchObject({
+      ok: true,
+      members: [{ operation: "rename" }],
+    });
+    expect(
+      await executeCli({
+        argv: ["history", "undo", operationId],
+        cwd: workspaceRoot,
+        request: (request) => invoke(request.verb, request.args),
+      }),
+    ).toEqual({ exitCode: 0, stdout: "History: restored\n", stderr: "" });
     expect(await readFile(join(workspaceRoot, "a.txt"), "utf8")).toBe("move body");
     expect(history.undoHistoryOperation).toHaveBeenCalledOnce();
     context.historyUndo = vi.fn(context.historyUndo);
     const unexplained = { refusal: { code: "unexplained" } };
-    expect(await invoke("historyUndo", { ...args, actor: "human" }))
-      .toEqual({ ok: false, reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".', ...unexplained });
+    expect(await invoke("historyUndo", { ...args, actor: "human" })).toEqual({
+      ok: false,
+      reason: 'An Undo through the CLI socket is recorded as an agent\'s; send actor "agent".',
+      ...unexplained,
+    });
     expect(context.historyUndo).not.toHaveBeenCalled();
     for (const verb of ["historyOperation", "historyUndo"] as const) {
-      expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...args, operationId: operationId.slice(15) } })).toMatchObject({ ok: false });
+      expect(
+        await rawRequest({
+          token,
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb,
+          args: { ...args, operationId: operationId.slice(15) },
+        }),
+      ).toMatchObject({ ok: false });
       context.readOnly = true;
       // Only an Undo's refusal names its cause.
-      expect(await invoke(verb, args)).toEqual({ ok: false, reason: "History operations require the owning workspace. Open it to continue.",
-        ...(verb === "historyUndo" ? unexplained : {}) });
-      context.readOnly = false; operation.workspace.shareView = {};
+      expect(await invoke(verb, args)).toEqual({
+        ok: false,
+        reason: "History operations require the owning workspace. Open it to continue.",
+        ...(verb === "historyUndo" ? unexplained : {}),
+      });
+      context.readOnly = false;
+      operation.workspace.shareView = {};
       expect(await invoke(verb, args)).toMatchObject({ ok: false });
       operation.workspace.shareView = undefined;
       await mkdir(join(workspaceRoot, "shared-with-me"), { recursive: true });
-      expect(await invoke(verb, { ...args, cwd: join(workspaceRoot, "shared-with-me") })).toMatchObject({ ok: false });
+      expect(
+        await invoke(verb, { ...args, cwd: join(workspaceRoot, "shared-with-me") }),
+      ).toMatchObject({ ok: false });
     }
   });
 
   // #3089: a move of a live page waits up to the guard's limit, well inside the request's deadline.
 
-  it.each(["fileMove", "fileDelete"] as const)("keeps host paths out of %s failures", async verb => {
-    const cwd = join(workspaceRoot, "app");
-    await mkdir(cwd);
-    const absolute = join(workspaceRoot, "private.txt");
-    const error = Object.assign(new Error("EACCES: realpath '" + absolute + "'"), { code: "EACCES", syscall: "realpath" });
-    context.movePath = async () => { throw error; };
-    context.deletePath = async () => { throw error; };
-    const args = { cwd, actor: "agent" as const, requestId: "private" };
-    const result = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
-      : await invoke(verb, { ...args, path: "a" });
-    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("EACCES") });
-    expect(JSON.stringify(result)).not.toContain(workspaceRoot);
-    context.movePath = async () => { throw new Error("Failed at host=" + absolute + "."); };
-    context.deletePath = async () => { throw new Error("Failed at host=" + absolute + "."); };
-    const unstructured = verb === "fileMove" ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
-      : await invoke(verb, { ...args, path: "a" });
-    expect(JSON.stringify(unstructured)).not.toContain(workspaceRoot);
-  });
+  it.each(["fileMove", "fileDelete"] as const)(
+    "keeps host paths out of %s failures",
+    async (verb) => {
+      const cwd = join(workspaceRoot, "app");
+      await mkdir(cwd);
+      const absolute = join(workspaceRoot, "private.txt");
+      const error = Object.assign(new Error("EACCES: realpath '" + absolute + "'"), {
+        code: "EACCES",
+        syscall: "realpath",
+      });
+      context.movePath = async () => {
+        throw error;
+      };
+      context.deletePath = async () => {
+        throw error;
+      };
+      const args = { cwd, actor: "agent" as const, requestId: "private" };
+      const result =
+        verb === "fileMove"
+          ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
+          : await invoke(verb, { ...args, path: "a" });
+      expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("EACCES") });
+      expect(JSON.stringify(result)).not.toContain(workspaceRoot);
+      context.movePath = async () => {
+        throw new Error("Failed at host=" + absolute + ".");
+      };
+      context.deletePath = async () => {
+        throw new Error("Failed at host=" + absolute + ".");
+      };
+      const unstructured =
+        verb === "fileMove"
+          ? await invoke(verb, { ...args, fromPath: "a", toPath: "b" })
+          : await invoke(verb, { ...args, path: "a" });
+      expect(JSON.stringify(unstructured)).not.toContain(workspaceRoot);
+    },
+  );
 
   it("refuses a raw move or delete from a person, through traversal, or in a read-only view", async () => {
     const movePath = vi.fn<NonNullable<CliWorkspaceContext["movePath"]>>();
@@ -1166,24 +1843,42 @@ describe("CLI socket server", () => {
     context.movePath = movePath;
     context.deletePath = deletePath;
     const base = { cwd: workspaceRoot, requestId: "raw" };
-    expect(await invoke("fileMove", { ...base, actor: "human", fromPath: "a.txt", toPath: "b.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining('send actor "agent"') });
-    expect(await invoke("fileDelete", { ...base, actor: "human", path: "a.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining('send actor "agent"') });
-    expect(await invoke("fileMove", { ...base, actor: "agent", fromPath: "a.txt", toPath: "../b.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining("traversal") });
-    expect(await invoke("fileDelete", { ...base, actor: "agent", path: "../a.txt" })).toMatchObject({ ok: false, reason: expect.stringContaining("traversal") });
+    expect(
+      await invoke("fileMove", { ...base, actor: "human", fromPath: "a.txt", toPath: "b.txt" }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('send actor "agent"') });
+    expect(await invoke("fileDelete", { ...base, actor: "human", path: "a.txt" })).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('send actor "agent"'),
+    });
+    expect(
+      await invoke("fileMove", { ...base, actor: "agent", fromPath: "a.txt", toPath: "../b.txt" }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining("traversal") });
+    expect(await invoke("fileDelete", { ...base, actor: "agent", path: "../a.txt" })).toMatchObject(
+      { ok: false, reason: expect.stringContaining("traversal") },
+    );
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
-    await expect(invoke("fileDelete", { ...base, actor: "agent", path: "a.txt" })).rejects.toThrow("read-only");
+    await expect(invoke("fileDelete", { ...base, actor: "agent", path: "a.txt" })).rejects.toThrow(
+      "read-only",
+    );
     expect(movePath).not.toHaveBeenCalled();
     expect(deletePath).not.toHaveBeenCalled();
   });
 
   // shared-with-me holds what others share with you, inside your own workspace.
   describe("from inside a folder others share with you", () => {
-    const OWNER = "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
-    const CHAT = "dohc: Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
+    const OWNER =
+      "dohc: This command isn't available in a folder others share with you. Run it from your own workspace's folder.";
+    const CHAT =
+      "dohc: Chat isn't available from the command line in a folder others share with you. Run this command from your own workspace's folder.";
     let inShare: string;
     const send = (verb: CliVerb, args: Record<string, unknown>) =>
-      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd: inShare, actor: "agent", ...args } });
+      rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb,
+        args: { cwd: inShare, actor: "agent", ...args },
+      });
 
     beforeEach(async () => {
       inShare = join(workspaceRoot, "shared-with-me", "received", "notes");
@@ -1192,10 +1887,20 @@ describe("CLI socket server", () => {
 
     it("refuses the commands for your workspace as its owner, before opening it", async () => {
       // Every port these commands use, so a command that got through would reach one.
-      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const reached = vi.fn(async () => {
+        throw new Error("reached");
+      });
       const port = new Proxy({}, { get: () => reached });
-      Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: port, keptCopies: port, retainedCopies: port,
-        ownerAppResponses: reached, dataset: reached, appPublication: reached });
+      Object.assign(context, {
+        stopSync: reached,
+        shareCopy: reached,
+        shareLinkAgents: port,
+        keptCopies: port,
+        retainedCopies: port,
+        ownerAppResponses: reached,
+        dataset: reached,
+        appPublication: reached,
+      });
       const ownerCommands: Array<[CliVerb, Record<string, unknown>]> = [
         ["stopSync", { actor: "human" }],
         ["shareCopy", { shareId: "share", grantId: "grant" }],
@@ -1205,15 +1910,49 @@ describe("CLI socket server", () => {
         ["saveKeptCopy", { id: 1 }],
         ["retainedCopies", {}],
         ["deleteRetainedCopies", { copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true }],
-        ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }],
+        [
+          "ownerAppResponses",
+          { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } },
+        ],
         ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }],
-        ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }],
-        ["dataset", { request: { action: "cancelInvoke", workspaceId: WORKSPACE_ID, invocationId: "00000000-0000-4000-8000-000000000003" } }],
-        ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } }],
+        [
+          "dataset",
+          {
+            request: {
+              action: "prepareRecovery",
+              workspaceId: WORKSPACE_ID,
+              sourcePath: workspaceRoot,
+            },
+          },
+        ],
+        [
+          "dataset",
+          {
+            request: {
+              action: "cancelInvoke",
+              workspaceId: WORKSPACE_ID,
+              invocationId: "00000000-0000-4000-8000-000000000003",
+            },
+          },
+        ],
+        [
+          "appPublication",
+          {
+            request: {
+              action: "cancel",
+              workspaceId: WORKSPACE_ID,
+              approvalId: "00000000-0000-4000-8000-000000000001",
+            },
+          },
+        ],
       ];
       for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
         for (const [verb, args] of ownerCommands) {
-          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            ok: false,
+            error: OWNER,
+          });
         }
       }
       expect(reached).not.toHaveBeenCalled();
@@ -1223,8 +1962,26 @@ describe("CLI socket server", () => {
     it("refuses chat commands, and shows a Group with --peek", async () => {
       const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
         ["groupCreate", { name: "needs-ice" }],
-        ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
-        ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+        [
+          "post",
+          {
+            actor: "human",
+            group: "general",
+            attachments: [],
+            needsDecision: false,
+            body: "hello",
+          },
+        ],
+        [
+          "reply",
+          {
+            actor: "human",
+            thread: "thread-1",
+            body: "hello",
+            attachments: [],
+            needsDecision: false,
+          },
+        ],
         ["nothingToReport", { thread: "thread-1" }],
         ["react", { actor: "human", message: "message-1", emoji: "👍" }],
         ["chatRetry", { thread: "thread-1" }],
@@ -1237,7 +1994,11 @@ describe("CLI socket server", () => {
       ];
       for (const cwd of [inShare, join(workspaceRoot, "shared-with-me")]) {
         for (const [verb, args] of chatCommands) {
-          expect(await send(verb, { cwd, ...args }), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+          expect(await send(verb, { cwd, ...args }), verb).toEqual({
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            ok: false,
+            error: CHAT,
+          });
         }
       }
       expect(calls.openWorkspace).toBe(0);
@@ -1246,7 +2007,9 @@ describe("CLI socket server", () => {
 
     // The rule reads the folder a link leads to, as choosing the workspace does.
     it("refuses from a link outside shared-with-me that leads into a share's folder", async () => {
-      const reached = vi.fn(async () => { throw new Error("reached"); });
+      const reached = vi.fn(async () => {
+        throw new Error("reached");
+      });
       Object.assign(context, { stopSync: reached, dataset: reached });
       const outside = await mkdtemp(join(tmpdir(), "dohc-link-"));
       try {
@@ -1254,17 +2017,39 @@ describe("CLI socket server", () => {
         const links = [join(workspaceRoot, "into-share"), join(outside, "into-share")];
         for (const link of links) await symlink(inShare, link, "junction");
         const linked = join(outside, "linked-into-share");
-        try { await symlink(inShare, linked, "dir"); links.push(linked); } catch (error) {
+        try {
+          await symlink(inShare, linked, "dir");
+          links.push(linked);
+        } catch (error) {
           // Windows makes a folder symlink only with Developer Mode or as an administrator.
           if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
         }
         for (const cwd of links) {
-          expect(await send("stopSync", { cwd, actor: "human" }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
-          expect(await send("dataset", { cwd, request: { action: "list", workspaceId: WORKSPACE_ID } }), cwd)
-            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
-          expect(await send("post", { cwd, actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }), cwd)
-            .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
-          expect(await send("watch", { cwd, timeoutMs: 0 }), cwd).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+          expect(await send("stopSync", { cwd, actor: "human" }), cwd).toEqual({
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            ok: false,
+            error: OWNER,
+          });
+          expect(
+            await send("dataset", { cwd, request: { action: "list", workspaceId: WORKSPACE_ID } }),
+            cwd,
+          ).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: OWNER });
+          expect(
+            await send("post", {
+              cwd,
+              actor: "human",
+              group: "general",
+              attachments: [],
+              needsDecision: false,
+              body: "hello",
+            }),
+            cwd,
+          ).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: CHAT });
+          expect(await send("watch", { cwd, timeoutMs: 0 }), cwd).toEqual({
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            ok: false,
+            error: CHAT,
+          });
         }
         expect(reached).not.toHaveBeenCalled();
         expect(calls.openWorkspace).toBe(0);
@@ -1274,44 +2059,141 @@ describe("CLI socket server", () => {
     });
   });
 
-
   it("refuses a fileWrite envelope larger than 14 MiB before opening the workspace", async () => {
     if (!server) throw new Error("This test requires the CLI socket.");
     const opened = calls.openWorkspace;
-    const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
-      args: { cwd: workspaceRoot, actor: "agent", requestId: "oversized", files: [{ path: "large.txt", contentBase64: "A".repeat(14 * 1024 * 1024) }] } });
-    expect(response).toMatchObject({ ok: false, error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches." });
+    const response = await rawRequest({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "fileWrite",
+      args: {
+        cwd: workspaceRoot,
+        actor: "agent",
+        requestId: "oversized",
+        files: [{ path: "large.txt", contentBase64: "A".repeat(14 * 1024 * 1024) }],
+      },
+    });
+    expect(response).toMatchObject({
+      ok: false,
+      error: "dohc: CLI request exceeds 14 MiB. Split the files into smaller batches.",
+    });
     expect(calls.openWorkspace).toBe(opened);
   });
 
   it("refuses owner and chat commands in a received share opened as its own workspace", async () => {
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
-    const reached = vi.fn(async () => { throw new Error("reached"); });
-    Object.assign(context, { stopSync: reached, shareCopy: reached, shareLinkAgents: new Proxy({}, { get: () => reached }),
-      ownerAppResponses: reached, dataset: reached, appPublication: reached });
+    const reached = vi.fn(async () => {
+      throw new Error("reached");
+    });
+    Object.assign(context, {
+      stopSync: reached,
+      shareCopy: reached,
+      shareLinkAgents: new Proxy({}, { get: () => reached }),
+      ownerAppResponses: reached,
+      dataset: reached,
+      appPublication: reached,
+    });
     const folder = join(workspaceRoot, "notes", "deeper");
     await mkdir(folder, { recursive: true });
     const send = (cwd: string, verb: CliVerb, args: Record<string, unknown>) =>
-      rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { cwd, actor: "agent", ...args } });
+      rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb,
+        args: { cwd, actor: "agent", ...args },
+      });
     const ownerCommands: Array<[CliVerb, Record<string, unknown>, string]> = [
       ["stopSync", { actor: "human" }, "Open the owning workspace to stop its sync."],
-      ["shareCopy", { shareId: "share", grantId: "grant" }, "Share copy details require the owning workspace."],
-      ["shareAgents", { shareId: "share", grantId: "grant" }, "Open the owning workspace to list a link's agents."],
-      ["shareDisconnect", { shareId: "share", grantId: "grant", connectionId: "connection" }, "Open the owning workspace to disconnect a link's agent."],
-      ["ownerAppResponses", { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } }, "App responses require the owning workspace."],
-      ["dataset", { request: { action: "list", workspaceId: WORKSPACE_ID } }, "Collections require the owning workspace."],
-      ["dataset", { request: { action: "prepareRecovery", workspaceId: WORKSPACE_ID, sourcePath: workspaceRoot } }, "Collections require the owning workspace."],
-      ["dataset", { request: { action: "describe", workspaceId: WORKSPACE_ID, datasetPath: "tasks/dataset.json" } }, "Collections require the owning workspace."],
-      ["appPublication", { request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: "00000000-0000-4000-8000-000000000001" } },
-        "App publication requires the owning workspace."],
-      ["appPublication", { request: { action: "createLink", workspaceId: WORKSPACE_ID, appRoot: "app", access: "view",
-        operationId: "00000000-0000-4000-8000-000000000101", agentLabel: "Builder" } }, "App publication requires the owning workspace."],
+      [
+        "shareCopy",
+        { shareId: "share", grantId: "grant" },
+        "Share copy details require the owning workspace.",
+      ],
+      [
+        "shareAgents",
+        { shareId: "share", grantId: "grant" },
+        "Open the owning workspace to list a link's agents.",
+      ],
+      [
+        "shareDisconnect",
+        { shareId: "share", grantId: "grant", connectionId: "connection" },
+        "Open the owning workspace to disconnect a link's agent.",
+      ],
+      [
+        "ownerAppResponses",
+        { request: { action: "list", workspaceId: WORKSPACE_ID, grantId: "g", limit: 100 } },
+        "App responses require the owning workspace.",
+      ],
+      [
+        "dataset",
+        { request: { action: "list", workspaceId: WORKSPACE_ID } },
+        "Collections require the owning workspace.",
+      ],
+      [
+        "dataset",
+        {
+          request: {
+            action: "prepareRecovery",
+            workspaceId: WORKSPACE_ID,
+            sourcePath: workspaceRoot,
+          },
+        },
+        "Collections require the owning workspace.",
+      ],
+      [
+        "dataset",
+        {
+          request: {
+            action: "describe",
+            workspaceId: WORKSPACE_ID,
+            datasetPath: "tasks/dataset.json",
+          },
+        },
+        "Collections require the owning workspace.",
+      ],
+      [
+        "appPublication",
+        {
+          request: {
+            action: "cancel",
+            workspaceId: WORKSPACE_ID,
+            approvalId: "00000000-0000-4000-8000-000000000001",
+          },
+        },
+        "App publication requires the owning workspace.",
+      ],
+      [
+        "appPublication",
+        {
+          request: {
+            action: "createLink",
+            workspaceId: WORKSPACE_ID,
+            appRoot: "app",
+            access: "view",
+            operationId: "00000000-0000-4000-8000-000000000101",
+            agentLabel: "Builder",
+          },
+        },
+        "App publication requires the owning workspace.",
+      ],
     ];
     const chatCommands: Array<[CliVerb, Record<string, unknown>]> = [
       ["groupCreate", { name: "needs-ice" }],
-      ["post", { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" }],
-      ["reply", { actor: "human", thread: "thread-1", body: "hello", attachments: [], needsDecision: false }],
+      [
+        "post",
+        { actor: "human", group: "general", attachments: [], needsDecision: false, body: "hello" },
+      ],
+      [
+        "reply",
+        {
+          actor: "human",
+          thread: "thread-1",
+          body: "hello",
+          attachments: [],
+          needsDecision: false,
+        },
+      ],
       ["react", { actor: "human", message: "message-1", emoji: "👍" }],
       ["chatRetry", { thread: "thread-1" }],
       ["fileChatStart", { path: "a.md", title: "About a", body: "hello" }],
@@ -1321,30 +2203,64 @@ describe("CLI socket server", () => {
     ];
     for (const cwd of [workspaceRoot, folder]) {
       for (const [verb, args, error] of ownerCommands) {
-        expect(await send(cwd, verb, args), verb).toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: `dohc: ${error}` });
+        expect(await send(cwd, verb, args), verb).toEqual({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: false,
+          error: `dohc: ${error}`,
+        });
       }
       for (const [verb, args] of chatCommands) {
-        expect(await send(cwd, verb, args), verb)
-          .toEqual({ protocolVersion: CLI_PROTOCOL_VERSION, ok: false, error: "dohc: chats are not available in a read-only shared view" });
+        expect(await send(cwd, verb, args), verb).toEqual({
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          ok: false,
+          error: "dohc: chats are not available in a read-only shared view",
+        });
       }
     }
     expect(reached).not.toHaveBeenCalled();
   });
 
   it("requires owner-local authority and refuses all automation publication actions", async () => {
-    context.appPublication=vi.fn(async()=>({kind:"cancelled" as const}));
-    const request={action:"createLink" as const,workspaceId:WORKSPACE_ID,appRoot:"app",access:"view" as const,operationId:"00000000-0000-4000-8000-000000000101",agentLabel:"Builder"};
-    await invoke("appPublication",{cwd:workspaceRoot,actor:"human",request});
-    expect(context.appPublication).toHaveBeenLastCalledWith(request,null);
-    await invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request});
-    expect(context.appPublication).toHaveBeenLastCalledWith(expect.objectContaining({agentLabel:"Builder"}),{kind:"agent",label:"Builder",labelSource:"agent-declared"});
-    await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"other"}})).rejects.toThrow("owning workspace");
-    context.readOnly=true;
-    await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
-    context.readOnly=false;agentRunDepth=1;
+    context.appPublication = vi.fn(async () => ({ kind: "cancelled" as const }));
+    const request = {
+      action: "createLink" as const,
+      workspaceId: WORKSPACE_ID,
+      appRoot: "app",
+      access: "view" as const,
+      operationId: "00000000-0000-4000-8000-000000000101",
+      agentLabel: "Builder",
+    };
+    await invoke("appPublication", { cwd: workspaceRoot, actor: "human", request });
+    expect(context.appPublication).toHaveBeenLastCalledWith(request, null);
+    await invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request });
+    expect(context.appPublication).toHaveBeenLastCalledWith(
+      expect.objectContaining({ agentLabel: "Builder" }),
+      { kind: "agent", label: "Builder", labelSource: "agent-declared" },
+    );
+    await expect(
+      invoke("appPublication", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        request: { ...request, workspaceId: "other" },
+      }),
+    ).rejects.toThrow("owning workspace");
+    context.readOnly = true;
+    await expect(
+      invoke("appPublication", { cwd: workspaceRoot, actor: "agent", request }),
+    ).rejects.toThrow("owning workspace");
+    context.readOnly = false;
+    agentRunDepth = 1;
     for (const actor of ["human", "agent"] as const) {
-      await expect(invoke("appPublication",{cwd:workspaceRoot,actor,request})).rejects.toThrow("Automations cannot use app publication");
-      await expect(invoke("appPublication",{cwd:workspaceRoot,actor,request:{action:"cancel",workspaceId:WORKSPACE_ID,approvalId:request.operationId}})).rejects.toThrow("Automations cannot use app publication");
+      await expect(
+        invoke("appPublication", { cwd: workspaceRoot, actor, request }),
+      ).rejects.toThrow("Automations cannot use app publication");
+      await expect(
+        invoke("appPublication", {
+          cwd: workspaceRoot,
+          actor,
+          request: { action: "cancel", workspaceId: WORKSPACE_ID, approvalId: request.operationId },
+        }),
+      ).rejects.toThrow("Automations cannot use app publication");
     }
     expect(context.appPublication).toHaveBeenCalledTimes(2);
   });
@@ -1409,11 +2325,7 @@ describe("CLI socket server", () => {
       author: { kind: "human", displayName: "Scoped" },
       body: "Scoped file message",
     });
-    const scopedMoments = momentFixtures(
-      scopedWorkspaceId,
-      "scoped",
-      SERVER_NOW_MS + 1,
-    );
+    const scopedMoments = momentFixtures(scopedWorkspaceId, "scoped", SERVER_NOW_MS + 1);
     const scopedContext: CliWorkspaceContext = {
       ...context,
       ...scopedWorkspace,
@@ -1429,46 +2341,50 @@ describe("CLI socket server", () => {
         return [scopedMoments.summary];
       },
       async readMoment(momentId) {
-        return momentId === scopedMoments.detail.id
-          ? scopedMoments.detail
-          : null;
+        return momentId === scopedMoments.detail.id ? scopedMoments.detail : null;
       },
     };
     serverOptions.listWorkspaces = () => [registryWorkspace, scopedWorkspace];
     serverOptions.openWorkspace = async (workspace) => {
       calls.openWorkspace += 1;
-      return workspace.workspaceId === scopedWorkspaceId
-        ? scopedContext
-        : context;
+      return workspace.workspaceId === scopedWorkspaceId ? scopedContext : context;
     };
 
     const moments = await invoke("moments", {
       cwd: scopedRoot,
       actor: "agent",
     });
-    expect("changes" in moments && moments.changes.map((change) => change.path)).toEqual(["scoped.md"]);
-    await expect(invoke("moment", {
-      cwd: scopedRoot,
-      actor: "agent",
-      id: scopedMoments.detail.id,
-    })).resolves.toMatchObject({
+    expect("changes" in moments && moments.changes.map((change) => change.path)).toEqual([
+      "scoped.md",
+    ]);
+    await expect(
+      invoke("moment", {
+        cwd: scopedRoot,
+        actor: "agent",
+        id: scopedMoments.detail.id,
+      }),
+    ).resolves.toMatchObject({
       ok: true,
       change: { path: "scoped.md" },
     });
-    await expect(invoke("fileChats", {
-      cwd: scopedRoot,
-      actor: "agent",
-      path: "scoped.md",
-    })).resolves.toMatchObject({
+    await expect(
+      invoke("fileChats", {
+        cwd: scopedRoot,
+        actor: "agent",
+        path: "scoped.md",
+      }),
+    ).resolves.toMatchObject({
       ok: true,
       fileObjectId: "object_scoped",
       threads: [{ id: scopedFileThread.id }],
     });
-    await expect(invoke("chat", {
-      cwd: scopedRoot,
-      actor: "agent",
-      threadId: scopedFileThread.id,
-    })).resolves.toMatchObject({
+    await expect(
+      invoke("chat", {
+        cwd: scopedRoot,
+        actor: "agent",
+        threadId: scopedFileThread.id,
+      }),
+    ).resolves.toMatchObject({
       ok: true,
       thread: { id: scopedFileThread.id },
       projection: { text: expect.stringContaining("scoped.md") },
@@ -1479,16 +2395,16 @@ describe("CLI socket server", () => {
     });
     expect(channels).toMatchObject({
       ok: true,
-      groups: [{
-        id: scopedGeneral.id,
-        threads: [{ id: scopedChannelChat.thread.id }],
-      }],
+      groups: [
+        {
+          id: scopedGeneral.id,
+          threads: [{ id: scopedChannelChat.thread.id }],
+        },
+      ],
     });
     expect(
       channels.ok
-        ? channels.groups.flatMap((channel) =>
-            channel.threads.map((thread) => thread.title)
-          )
+        ? channels.groups.flatMap((channel) => channel.threads.map((thread) => thread.title))
         : [],
     ).not.toContain("Primary-only channel chat");
 
@@ -1500,10 +2416,12 @@ describe("CLI socket server", () => {
       needsDecision: false,
       body: "Scoped opening",
     });
-    const startedThread = (await scopedStore.listChannelThreads({
-      workspaceId: scopedWorkspaceId,
-      channelId: scopedGeneral.id,
-    })).find((summary) => cliThreadId(summary.thread.id) === started.threadId)?.thread;
+    const startedThread = (
+      await scopedStore.listChannelThreads({
+        workspaceId: scopedWorkspaceId,
+        channelId: scopedGeneral.id,
+      })
+    ).find((summary) => cliThreadId(summary.thread.id) === started.threadId)?.thread;
     if (!startedThread) throw new Error("Scoped opening is not in the scoped store");
     const replied = await invoke("reply", {
       cwd: scopedRoot,
@@ -1515,43 +2433,77 @@ describe("CLI socket server", () => {
     });
     expect(replied).toMatchObject({ threadId: started.threadId });
     expect(
-      (await store.listThreads({ workspaceId: WORKSPACE_ID }))
-        .map((thread) => thread.id),
+      (await store.listThreads({ workspaceId: WORKSPACE_ID })).map((thread) => thread.id),
     ).not.toContain(startedThread.id);
-    expect(await scopedStore.listMessages({
-      workspaceId: scopedWorkspaceId,
-      threadId: startedThread.id,
-    })).toHaveLength(2);
+    expect(
+      await scopedStore.listMessages({
+        workspaceId: scopedWorkspaceId,
+        threadId: startedThread.id,
+      }),
+    ).toHaveLength(2);
   });
 
   it("refuses an agent's post through the CLI and through MCP that links a file the Group's share does not cover", async () => {
     if (!store) throw new Error("Store is not available");
     const general = await store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-    const channelWireId = await store.getChannelWireId({ workspaceId: WORKSPACE_ID, channelId: general.id });
+    const channelWireId = await store.getChannelWireId({
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+    });
     if (!channelWireId) throw new Error("Channel has no wire id");
     chatRow.shareRoster = {
-      grants: [{
-        granterUserId: "verified-user-id", granterEmail: null, subjectName: null, sharerName: null,
-        shareId: "share-general", grantId: "grant-general", generation: 1, status: "active",
-        recipientUserId: "peer-user-id", recipientEmail: null,
-        selector: { kind: "group", channelWireId, paths: ["team"], versionId: null },
-        access: "read-write", fileScope: "served",
-      }],
-      links: [], formerGrants: [], endedGrants: [], version: 1, listedAtMs: SERVER_NOW_MS,
+      grants: [
+        {
+          granterUserId: "verified-user-id",
+          granterEmail: null,
+          subjectName: null,
+          sharerName: null,
+          shareId: "share-general",
+          grantId: "grant-general",
+          generation: 1,
+          status: "active",
+          recipientUserId: "peer-user-id",
+          recipientEmail: null,
+          selector: { kind: "group", channelWireId, paths: ["team"], versionId: null },
+          access: "read-write",
+          fileScope: "served",
+        },
+      ],
+      links: [],
+      formerGrants: [],
+      endedGrants: [],
+      version: 1,
+      listedAtMs: SERVER_NOW_MS,
     };
-    const refusal = "This Group's share doesn't include finance/budget.md. Remove the link or share the file first.";
-    await expect(post({ actor: "agent", title: "Budget", body: "See @[finance/budget.md]" })).rejects.toThrow(refusal);
-    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: (value) => invoke(value.verb, value.args) };
-    await expect(startGroupChat(ctx, { group: "general", title: "Budget", body: "See @[finance/budget.md]" }))
-      .resolves.toMatchObject({ ok: false, reason: expect.stringContaining(refusal) });
-    expect(await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: general.id })).toEqual([]);
+    const refusal =
+      "This Group's share doesn't include finance/budget.md. Remove the link or share the file first.";
+    await expect(
+      post({ actor: "agent", title: "Budget", body: "See @[finance/budget.md]" }),
+    ).rejects.toThrow(refusal);
+    const ctx: ToolContext = {
+      root: workspaceRoot,
+      home: stateDir,
+      request: (value) => invoke(value.verb, value.args),
+    };
+    await expect(
+      startGroupChat(ctx, { group: "general", title: "Budget", body: "See @[finance/budget.md]" }),
+    ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(refusal) });
+    expect(
+      await store.listChannelThreads({ workspaceId: WORKSPACE_ID, channelId: general.id }),
+    ).toEqual([]);
     const existing = await store.startChannelThread({
-      authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
-      author: { kind: "human", displayName: "Sam" }, body: "Plans",
+      authorActorKey: null,
+      workspaceId: WORKSPACE_ID,
+      channelId: general.id,
+      author: { kind: "human", displayName: "Sam" },
+      body: "Plans",
     });
-    await expect(replyToChat(ctx, { threadId: existing.thread.id, body: "And @[finance/budget.md]" }))
-      .resolves.toMatchObject({ ok: false, reason: expect.stringContaining(refusal) });
-    expect(await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: existing.thread.id })).toHaveLength(1);
+    await expect(
+      replyToChat(ctx, { threadId: existing.thread.id, body: "And @[finance/budget.md]" }),
+    ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(refusal) });
+    expect(
+      await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: existing.thread.id }),
+    ).toHaveLength(1);
   });
 
   // Only the run itself says it has nothing to report, and the chat's own
@@ -1559,17 +2511,25 @@ describe("CLI socket server", () => {
   describe("nothing to report", () => {
     async function automationThread() {
       const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
-      return (await store!.startChannelThread({
-        authorActorKey: null, workspaceId: WORKSPACE_ID, channelId: general.id,
-        author: { kind: "automation", displayName: "Check overdue tasks" }, authorOwnerDisplayName: "Sam",
-        automation: { automationId: "collection:Tasks#overdue", chainDepth: 1 }, body: "Tell the Group about overdue tasks.",
-      })).thread.id;
+      return (
+        await store!.startChannelThread({
+          authorActorKey: null,
+          workspaceId: WORKSPACE_ID,
+          channelId: general.id,
+          author: { kind: "automation", displayName: "Check overdue tasks" },
+          authorOwnerDisplayName: "Sam",
+          automation: { automationId: "collection:Tasks#overdue", chainDepth: 1 },
+          body: "Tell the Group about overdue tasks.",
+        })
+      ).thread.id;
     }
 
     function quietRuns(refusal: QuietRunRefusal | null = null): string[] {
       const asked: string[] = [];
       serverOptions.chatRuns = {
-        dispatchStateForThread: async () => { throw new Error("Not read for nothing to report."); },
+        dispatchStateForThread: async () => {
+          throw new Error("Not read for nothing to report.");
+        },
         retryStoppedRun: async () => false,
         endRunQuietly(workspaceId, runId, threadId) {
           asked.push(`${workspaceId}/${runId}/${threadId}`);
@@ -1584,64 +2544,152 @@ describe("CLI socket server", () => {
       const threadId = await automationThread();
       holdRun("run-quiet");
       callerRunSecret = "c".repeat(64);
-      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId), runId: "run-quiet" }))
-        .rejects.toThrow("Only a running agent run that an automation started can end with nothing to report.");
+      await expect(
+        invoke("nothingToReport", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: cliThreadId(threadId),
+          runId: "run-quiet",
+        }),
+      ).rejects.toThrow(
+        "Only a running agent run that an automation started can end with nothing to report.",
+      );
       callerRunSecret = undefined;
-      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
-        .rejects.toThrow("Only a running agent run that an automation started can end with nothing to report.");
+      await expect(
+        invoke("nothingToReport", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: cliThreadId(threadId),
+        }),
+      ).rejects.toThrow(
+        "Only a running agent run that an automation started can end with nothing to report.",
+      );
       expect(asked).toEqual([]);
 
       callerRunSecret = RUN_SECRET;
       quietRuns("person");
-      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
-        .rejects.toThrow("A person asked for this run. Reply to them.");
+      await expect(
+        invoke("nothingToReport", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: cliThreadId(threadId),
+        }),
+      ).rejects.toThrow("A person asked for this run. Reply to them.");
       quietRuns("other-thread");
-      await expect(invoke("nothingToReport", { cwd: workspaceRoot, actor: "agent", thread: cliThreadId(threadId) }))
-        .rejects.toThrow("Send nothingToReport in the thread this run was started for.");
+      await expect(
+        invoke("nothingToReport", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: cliThreadId(threadId),
+        }),
+      ).rejects.toThrow("Send nothingToReport in the thread this run was started for.");
     });
   });
 
   it("answers the automation verbs from the Automations panel's calls", async () => {
     const AUTOMATION = "collection:object-tasks#stamp";
-    const trigger = { kind: "changed" as const, recordId: "rec_1", by: "agent" as const, sharedAuthor: null, depth: 1 };
-    const field = { kind: "field" as const, recordId: "rec_1", path: "tasks/one.md", field: "Done", before: null, after: "2026-09-27" };
+    const trigger = {
+      kind: "changed" as const,
+      recordId: "rec_1",
+      by: "agent" as const,
+      sharedAuthor: null,
+      depth: 1,
+    };
+    const field = {
+      kind: "field" as const,
+      recordId: "rec_1",
+      path: "tasks/one.md",
+      field: "Done",
+      before: null,
+      after: "2026-09-27",
+    };
     const run = {
-      claimId: "atc_1", state: "failed" as const, error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-      trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undoUnfinished: false, undone: false,
+      claimId: "atc_1",
+      state: "failed" as const,
+      error: "The record is open elsewhere.",
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      trigger,
+      definitionChanged: true,
+      neverStarted: false,
+      chainStopped: false,
+      undoUnfinished: false,
+      undone: false,
     };
     const retries: unknown[] = [];
-    const answers: Array<Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>> = [
+    const answers: Array<
+      Awaited<ReturnType<NonNullable<CliWorkspaceContext["automations"]>["retry"]>>
+    > = [
       { status: "definition-changed", repeatsMessages: true },
       { status: "queued", press: false },
       {
         status: "refused",
-        reason: "Only the computer this run failed on can try it again. The notice names that computer.",
-        notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+        reason:
+          "Only the computer this run failed on can try it again. The notice names that computer.",
+        notice: {
+          title: 'Automation "Stamp" failed',
+          body: "The record is open elsewhere. It ran on Laptop.",
+        },
       },
     ];
     context.automations = {
-      automationIdAt: vi.fn(async (collectionPath: string, id: string) => (collectionPath === "tasks" ? `collection:object-tasks#${id}` : null)),
+      automationIdAt: vi.fn(async (collectionPath: string, id: string) =>
+        collectionPath === "tasks" ? `collection:object-tasks#${id}` : null,
+      ),
       runs: vi.fn(async (_automationId: string, _before?: string) => ({
-        runs: [{ ...run, writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }] }],
+        runs: [
+          {
+            ...run,
+            writes: [field, { kind: "created" as const, recordId: "rec_2", path: "tasks/two.md" }],
+          },
+        ],
         next: "1:atc_1",
       })),
       run: vi.fn(async (_automationId: string, claimId: string) =>
-        claimId === "atc_1" ? { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
-          steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
-      serverRuns: vi.fn(), serverRun: vi.fn(),
+        claimId === "atc_1"
+          ? {
+              ...run,
+              findMs: 12,
+              planMs: 0,
+              writeMs: 30,
+              writeCount: 1,
+              steps: [{ step: 2, writes: [field] }],
+              failedStep: 3,
+              startsOver: true,
+            }
+          : null,
+      ),
+      serverRuns: vi.fn(),
+      serverRun: vi.fn(),
       retry: vi.fn(async (input) => {
         retries.push(input);
         return answers.shift()!;
       }),
     };
-    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", automation: "stamp" };
+    const args = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      collectionPath: "tasks",
+      automation: "stamp",
+    };
 
     await expect(invoke("automationRuns", args)).resolves.toEqual({
       ok: true,
-      runs: [{
-        run: "atc_1", state: "failed", error: "The record is open elsewhere.", createdAtMs: 1, updatedAtMs: 2,
-        trigger, definitionChanged: true, neverStarted: false, chainStopped: false, undone: false, changes: 2,
-      }],
+      runs: [
+        {
+          run: "atc_1",
+          state: "failed",
+          error: "The record is open elsewhere.",
+          createdAtMs: 1,
+          updatedAtMs: 2,
+          trigger,
+          definitionChanged: true,
+          neverStarted: false,
+          chainStopped: false,
+          undone: false,
+          changes: 2,
+        },
+      ],
       next: "1:atc_1",
     });
     expect(context.automations!.runs).toHaveBeenCalledWith(AUTOMATION, undefined);
@@ -1650,78 +2698,142 @@ describe("CLI socket server", () => {
     expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
       ok: true,
-      run: { run: "atc_1", trigger, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
-        steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
+      run: {
+        run: "atc_1",
+        trigger,
+        findMs: 12,
+        planMs: 0,
+        writeMs: 30,
+        writeCount: 1,
+        steps: [{ step: 2, changes: [field] }],
+        failedStep: 3,
+        startsOver: true,
+      },
     });
     await expect(invoke("automationRun", { ...args, run: "atc_9" })).resolves.toEqual({
       ok: false,
-      reason: "This computer has no run atc_9 of this automation. Each computer keeps the runs of the automations it ran.",
+      reason:
+        "This computer has no run atc_9 of this automation. Each computer keeps the runs of the automations it ran.",
     });
 
     const refused = await invoke("automationRetry", { ...args, run: "atc_1", startOver: false });
-    expect(refused).toMatchObject({ ok: false, status: "definition-changed", repeatsMessages: true });
-    expect("reason" in refused && refused.reason).toContain("This automation changed since the run failed.");
-    expect("reason" in refused && refused.reason).toContain("Posts, direct messages, and notices it already sent may be sent again.");
-    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({ ok: true, status: "queued" });
+    expect(refused).toMatchObject({
+      ok: false,
+      status: "definition-changed",
+      repeatsMessages: true,
+    });
+    expect("reason" in refused && refused.reason).toContain(
+      "This automation changed since the run failed.",
+    );
+    expect("reason" in refused && refused.reason).toContain(
+      "Posts, direct messages, and notices it already sent may be sent again.",
+    );
+    await expect(
+      invoke("automationRetry", { ...args, run: "atc_1", startOver: true }),
+    ).resolves.toEqual({ ok: true, status: "queued" });
     expect(retries).toEqual([
       { automationId: AUTOMATION, claimId: "atc_1", startOver: false },
       { automationId: AUTOMATION, claimId: "atc_1", startOver: true },
     ]);
     // Another computer's run is refused with the notice that names that computer.
-    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: false })).resolves.toEqual({
+    await expect(
+      invoke("automationRetry", { ...args, run: "atc_1", startOver: false }),
+    ).resolves.toEqual({
       ok: false,
-      reason: "Only the computer this run failed on can try it again. The notice names that computer.",
-      notice: { title: 'Automation "Stamp" failed', body: "The record is open elsewhere. It ran on Laptop." },
+      reason:
+        "Only the computer this run failed on can try it again. The notice names that computer.",
+      notice: {
+        title: 'Automation "Stamp" failed',
+        body: "The record is open elsewhere. It ran on Laptop.",
+      },
     });
 
-    await expect(invoke("automationRuns", { ...args, collectionPath: "../tasks" })).resolves.toMatchObject({ ok: false });
+    await expect(
+      invoke("automationRuns", { ...args, collectionPath: "../tasks" }),
+    ).resolves.toMatchObject({ ok: false });
     context.readOnly = true;
-    await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({
+    await expect(
+      invoke("automationRetry", { ...args, run: "atc_1", startOver: true }),
+    ).resolves.toEqual({
       ok: false,
       reason: "Run history is unavailable through shares. Each host keeps the runs it made.",
     });
     expect(retries).toHaveLength(3);
   });
 
-
-
-
   it("presses a button through the press path and reports the run, asking before actions dohc cannot undo", async () => {
     const presses: Array<Parameters<NonNullable<CliWorkspaceContext["buttons"]>["press"]>[0]> = [];
     const actions = [{ name: "sendInvoice", label: "Send invoice" }];
     const pressedBy: unknown[] = [];
-    context.buttons = { inspect: vi.fn(async () => []),
+    context.buttons = {
+      inspect: vi.fn(async () => []),
       press: vi.fn(async (input, by) => {
         presses.push(input);
         pressedBy.push(by);
-        if (input.field === "Send" && !input.confirm.includes("sendInvoice")) return { result: { confirm: actions }, waiting: null };
-        if (input.field === "Busy") return { result: { busy: true as const, reason: "Running for this record." }, waiting: null };
-        if (input.collectionPath === "shared") return { result: { busy: false as const, relayed: true as const }, waiting: null };
-        return { result: { busy: false as const, claimId: "atc_1", settled: null }, waiting: "roster" as const };
+        if (input.field === "Send" && !input.confirm.includes("sendInvoice"))
+          return { result: { confirm: actions }, waiting: null };
+        if (input.field === "Busy")
+          return {
+            result: { busy: true as const, reason: "Running for this record." },
+            waiting: null,
+          };
+        if (input.collectionPath === "shared")
+          return { result: { busy: false as const, relayed: true as const }, waiting: null };
+        return {
+          result: { busy: false as const, claimId: "atc_1", settled: null },
+          waiting: "roster" as const,
+        };
       }),
     };
-    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", field: "Mark paid", record: "rec_1", confirm: [] };
-    await expect(invoke("automationButtons", { cwd: workspaceRoot, actor: "agent", collectionPath: "shared" })).resolves.toEqual({ ok: true, buttons: [] });
-    expect(context.buttons.inspect).toHaveBeenCalledWith({ collectionPath: "shared" }, expect.objectContaining({ kind: "agent" }));
+    const args = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      collectionPath: "tasks",
+      field: "Mark paid",
+      record: "rec_1",
+      confirm: [],
+    };
+    await expect(
+      invoke("automationButtons", { cwd: workspaceRoot, actor: "agent", collectionPath: "shared" }),
+    ).resolves.toEqual({ ok: true, buttons: [] });
+    expect(context.buttons.inspect).toHaveBeenCalledWith(
+      { collectionPath: "shared" },
+      expect.objectContaining({ kind: "agent" }),
+    );
 
     await expect(invoke("automationPress", args)).resolves.toEqual({
-      ok: true, run: "atc_1", outcome: null, error: null, waiting: "Waiting to check who can edit this Collection.",
+      ok: true,
+      run: "atc_1",
+      outcome: null,
+      error: null,
+      waiting: "Waiting to check who can edit this Collection.",
     });
     await expect(invoke("automationPress", { ...args, field: "Send" })).resolves.toEqual({
       ok: false,
-      reason: 'This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.',
+      reason:
+        'This press runs actions dohc cannot undo: "Send invoice" (--confirm sendInvoice). Confirm each by name to run them.',
       confirm: actions,
     });
-    await expect(invoke("automationPress", { ...args, field: "Send", confirm: ["sendInvoice"] })).resolves.toMatchObject({ ok: true, run: "atc_1" });
-    await expect(invoke("automationPress", { ...args, field: "Busy" })).resolves.toEqual({ ok: false, reason: "Running for this record." });
+    await expect(
+      invoke("automationPress", { ...args, field: "Send", confirm: ["sendInvoice"] }),
+    ).resolves.toMatchObject({ ok: true, run: "atc_1" });
+    await expect(invoke("automationPress", { ...args, field: "Busy" })).resolves.toEqual({
+      ok: false,
+      reason: "Running for this record.",
+    });
 
     // The same request id answers the same press without pressing again, and refuses another request.
     const pressed = presses.length;
     const first = await invoke("automationPress", { ...args, requestId: "press-1" });
-    await expect(invoke("automationPress", { ...args, requestId: "press-1" })).resolves.toEqual(first);
+    await expect(invoke("automationPress", { ...args, requestId: "press-1" })).resolves.toEqual(
+      first,
+    );
     expect(presses).toHaveLength(pressed + 1);
-    await expect(invoke("automationPress", { ...args, collectionPath: "billing", requestId: "press-1" })).resolves.toEqual({
-      ok: false, reason: "request id press-1 was already used for a different request",
+    await expect(
+      invoke("automationPress", { ...args, collectionPath: "billing", requestId: "press-1" }),
+    ).resolves.toEqual({
+      ok: false,
+      reason: "request id press-1 was already used for a different request",
     });
     // After a restart forgets the request, the request id is still the press's key, which the executor's press id comes from.
     const restart = async () => {
@@ -1736,18 +2848,39 @@ describe("CLI socket server", () => {
     await invoke("automationPress", { ...args, requestId: "press-1" });
     await restart();
     await invoke("automationPress", { ...args, collectionPath: "billing", requestId: "press-1" });
-    expect([presses[pressed]!, ...presses.slice(-2)].map((press) => [press.collectionPath, press.pressKey]))
-      .toEqual([["tasks", "press-1"], ["tasks", "press-1"], ["billing", "press-1"]]);
+    expect(
+      [presses[pressed]!, ...presses.slice(-2)].map((press) => [
+        press.collectionPath,
+        press.pressKey,
+      ]),
+    ).toEqual([
+      ["tasks", "press-1"],
+      ["tasks", "press-1"],
+      ["billing", "press-1"],
+    ]);
     // A press with no request id gets a key of its own.
     await invoke("automationPress", args);
     await invoke("automationPress", args);
     const [one, two] = presses.slice(-2).map((press) => press.pressKey);
     expect(one).not.toBe(two);
     // A press refused for its question is not remembered, so the same id can confirm it.
-    await expect(invoke("automationPress", { ...args, field: "Send", requestId: "press-3" })).resolves.toMatchObject({ ok: false });
-    await expect(invoke("automationPress", { ...args, field: "Send", confirm: ["sendInvoice"], requestId: "press-3" }))
-      .resolves.toMatchObject({ ok: true, run: "atc_1" });
-    expect(presses[0]).toMatchObject({ collectionPath: "tasks", field: "Mark paid", recordId: "rec_1", confirm: [] });
+    await expect(
+      invoke("automationPress", { ...args, field: "Send", requestId: "press-3" }),
+    ).resolves.toMatchObject({ ok: false });
+    await expect(
+      invoke("automationPress", {
+        ...args,
+        field: "Send",
+        confirm: ["sendInvoice"],
+        requestId: "press-3",
+      }),
+    ).resolves.toMatchObject({ ok: true, run: "atc_1" });
+    expect(presses[0]).toMatchObject({
+      collectionPath: "tasks",
+      field: "Mark paid",
+      recordId: "rec_1",
+      confirm: [],
+    });
 
     // The press is the agent's, as a collection write through the socket is: named as dohc-mcp, at its run's depth.
     expect(pressedBy[0]).toEqual({ kind: "agent", originId: "dohc-mcp", depth: 0 });
@@ -1759,11 +2892,15 @@ describe("CLI socket server", () => {
     expect(pressedBy.at(-1)).toEqual({ kind: "agent", originId: "dohc-mcp", depth: 2 });
     agentRunDepth = 0;
     const count = presses.length;
-    await expect(invoke("automationPress", { ...args, collectionPath: "shared-with-me/tasks" })).resolves.toMatchObject({ ok: false });
+    await expect(
+      invoke("automationPress", { ...args, collectionPath: "shared-with-me/tasks" }),
+    ).resolves.toMatchObject({ ok: false });
     expect(presses).toHaveLength(count);
     // A shared view's press goes the app's relayed way.
     context.readOnly = true;
-    await expect(invoke("automationPress", { ...args, collectionPath: "shared" })).resolves.toEqual({ ok: true, relayed: true });
+    await expect(invoke("automationPress", { ...args, collectionPath: "shared" })).resolves.toEqual(
+      { ok: true, relayed: true },
+    );
   });
 
   it("routes collection writes through the write seam with a server-derived author", async () => {
@@ -1793,39 +2930,55 @@ describe("CLI socket server", () => {
       },
     };
 
-    await expect(invoke("collectionSetFields", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      agent: "Codex",
-      recordPath: "tasks/a.md",
-      fields: { status: "done", notes: null },
-    })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
-    await expect(invoke("collectionCreateRecord", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      collectionPath: "tasks",
-      name: "write-brief",
-      fields: { status: "open" },
-    })).resolves.toEqual({
+    await expect(
+      invoke("collectionSetFields", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        agent: "Codex",
+        recordPath: "tasks/a.md",
+        fields: { status: "done", notes: null },
+      }),
+    ).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+    await expect(
+      invoke("collectionCreateRecord", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        collectionPath: "tasks",
+        name: "write-brief",
+        fields: { status: "open" },
+      }),
+    ).resolves.toEqual({
       ok: true,
       recordId: "rec_abcdefghijklmnopqrstuvwxyz",
       recordPath: "tasks/write-brief.md",
     });
     // A person edits records in the app. Through the socket, a record write is
     // an agent's, refused as a document write is.
-    await expect(invoke("collectionSetFields", {
-      cwd: workspaceRoot,
-      actor: "human",
-      recordPath: "tasks/a.md",
-      fields: { status: "parked" },
-    })).resolves.toEqual({ ok: false, reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"" });
-    await expect(invoke("collectionCreateRecord", {
-      cwd: workspaceRoot,
-      actor: "human",
-      collectionPath: "tasks",
-      name: "by-hand",
-      fields: {},
-    })).resolves.toEqual({ ok: false, reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"" });
+    await expect(
+      invoke("collectionSetFields", {
+        cwd: workspaceRoot,
+        actor: "human",
+        recordPath: "tasks/a.md",
+        fields: { status: "parked" },
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      reason:
+        'a document edit through the CLI socket is recorded as an agent\'s; send actor "agent"',
+    });
+    await expect(
+      invoke("collectionCreateRecord", {
+        cwd: workspaceRoot,
+        actor: "human",
+        collectionPath: "tasks",
+        name: "by-hand",
+        fields: {},
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      reason:
+        'a document created through the CLI socket is recorded as an agent\'s; send actor "agent"',
+    });
 
     expect(seamCalls).toEqual([
       {
@@ -1849,134 +3002,370 @@ describe("CLI socket server", () => {
     ]);
   });
 
-
-
   it("lists and deletes old file copies for an agent only with the late-write risk accepted", async () => {
-    let copies = [{ id: 3, revision: 10 }, { id: 4, revision: 11 }];
+    let copies = [
+      { id: 3, revision: 10 },
+      { id: 4, revision: 11 },
+    ];
     const deleted: { id: number; revision: number }[][] = [];
     context.retainedCopies = {
       async list() {
-        return { copies, more: false, total: { count: copies.length, bytes: copies.length * 1024 } };
+        return {
+          copies,
+          more: false,
+          total: { count: copies.length, bytes: copies.length * 1024 },
+        };
       },
       async delete(requested) {
         deleted.push([...requested]);
-        copies = copies.filter(copy => !requested.some(gone => gone.id === copy.id));
-        return { deleted: requested.length, skipped: 0, failed: 0, remaining: { count: copies.length, bytes: copies.length * 1024 } };
+        copies = copies.filter((copy) => !requested.some((gone) => gone.id === copy.id));
+        return {
+          deleted: requested.length,
+          skipped: 0,
+          failed: 0,
+          remaining: { count: copies.length, bytes: copies.length * 1024 },
+        };
       },
     };
 
-    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
-      ok: true,
-      copies: [{ id: 3, revision: 10 }, { id: 4, revision: 11 }],
-      more: false,
-      total: { count: 2, bytes: 2048 },
-    });
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(
+      {
+        ok: true,
+        copies: [
+          { id: 3, revision: 10 },
+          { id: 4, revision: 11 },
+        ],
+        more: false,
+        total: { count: 2, bytes: 2048 },
+      },
+    );
     for (const args of [
       { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }] },
-      { cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: false },
-      { cwd: workspaceRoot, actor: "agent", copies: Array.from({ length: 101 }, (_, id) => ({ id, revision: 0 })), acceptLateWriteRisk: true },
+      {
+        cwd: workspaceRoot,
+        actor: "agent",
+        copies: [{ id: 3, revision: 10 }],
+        acceptLateWriteRisk: false,
+      },
+      {
+        cwd: workspaceRoot,
+        actor: "agent",
+        copies: Array.from({ length: 101 }, (_, id) => ({ id, revision: 0 })),
+        acceptLateWriteRisk: true,
+      },
     ]) {
-      const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "deleteRetainedCopies", args });
+      const response = await rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "deleteRetainedCopies",
+        args,
+      });
       expect(response.ok, JSON.stringify(args).slice(0, 80)).toBe(false);
     }
     expect(deleted).toEqual([]);
-    await expect(invoke("deleteRetainedCopies", {
-      cwd: workspaceRoot, actor: "agent", copies: [{ id: 3, revision: 10 }], acceptLateWriteRisk: true,
-    })).resolves.toEqual({ ok: true, deleted: 1, skipped: 0, failed: 0, remaining: { count: 1, bytes: 1024 } });
+    await expect(
+      invoke("deleteRetainedCopies", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        copies: [{ id: 3, revision: 10 }],
+        acceptLateWriteRisk: true,
+      }),
+    ).resolves.toEqual({
+      ok: true,
+      deleted: 1,
+      skipped: 0,
+      failed: 0,
+      remaining: { count: 1, bytes: 1024 },
+    });
     expect(deleted).toEqual([[{ id: 3, revision: 10 }]]);
 
     delete context.retainedCopies;
-    const unavailable = { ok: false, reason: "Old file copies are kept only in the owning workspace. Open it to continue." };
-    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(unavailable);
-    await expect(invoke("deleteRetainedCopies", {
-      cwd: workspaceRoot, actor: "agent", copies: [{ id: 4, revision: 11 }], acceptLateWriteRisk: true,
-    })).resolves.toEqual(unavailable);
+    const unavailable = {
+      ok: false,
+      reason: "Old file copies are kept only in the owning workspace. Open it to continue.",
+    };
+    await expect(invoke("retainedCopies", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(
+      unavailable,
+    );
+    await expect(
+      invoke("deleteRetainedCopies", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        copies: [{ id: 4, revision: 11 }],
+        acceptLateWriteRisk: true,
+      }),
+    ).resolves.toEqual(unavailable);
   });
 
-
   it("says why sync stopped in the person's words, with the engine's detail", async () => {
-    const sentences = "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
+    const sentences =
+      "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
     const detail = `DaemonRefusalError: conflict-wait-limit: ${sentences} (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)`;
     const failures = [{ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }, null];
     context.syncFailure = () => failures.shift() ?? null;
-    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
-      .resolves.toEqual({ ok: true, syncFailure: { code: "conflict-wait-limit", message: sentences, detail } });
-    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }))
-      .resolves.toEqual({ ok: true, syncFailure: null });
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      syncFailure: { code: "conflict-wait-limit", message: sentences, detail },
+    });
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual({
+      ok: true,
+      syncFailure: null,
+    });
     // Only the original workspace reads its sync, as with kept edits and
     // History: a received share's folder, any folder in it, and a shared view.
-    const refused = { ok: false, reason: "Sync status is kept only in the original workspace. Open it to continue." };
+    const refused = {
+      ok: false,
+      reason: "Sync status is kept only in the original workspace. Open it to continue.",
+    };
     const read = vi.fn(() => ({ cause: "unknown" as const, detail, sinceMs: 1, attempts: 2 }));
     context.syncFailure = read;
     await mkdir(join(workspaceRoot, "shared-with-me", "received", "notes"), { recursive: true });
-    for (const cwd of [join(workspaceRoot, "shared-with-me"), join(workspaceRoot, "shared-with-me", "received", "notes")]) {
+    for (const cwd of [
+      join(workspaceRoot, "shared-with-me"),
+      join(workspaceRoot, "shared-with-me", "received", "notes"),
+    ]) {
       await expect(invoke("syncFailure", { cwd, actor: "agent" })).resolves.toEqual(refused);
     }
     context.readOnly = true;
-    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(refused);
+    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toEqual(
+      refused,
+    );
     context.readOnly = false;
     expect(read).not.toHaveBeenCalled();
     // The desktop's own check for a shared view's marker refuses too.
-    context.syncFailure = () => { throw new Error("This is a shared view — only the original workspace can be shared."); };
-    await expect(invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" })).resolves.toMatchObject({ ok: false });
+    context.syncFailure = () => {
+      throw new Error("This is a shared view — only the original workspace can be shared.");
+    };
+    await expect(
+      invoke("syncFailure", { cwd: workspaceRoot, actor: "agent" }),
+    ).resolves.toMatchObject({ ok: false });
   });
 
   it("rebases MCP document and Collection paths from a subfolder and returns caller paths", async () => {
     const cwd = join(workspaceRoot, "app");
     await mkdir(cwd);
-    const documents = new Map([["notes.md", "Root"], ["app/notes.md", "Subfolder"]]);
+    const documents = new Map([
+      ["notes.md", "Root"],
+      ["app/notes.md", "Subfolder"],
+    ]);
     context.documents = {
-      async read(path) { return { path, markdown: documents.get(path) ?? "Missing" }; },
-      async edit({ path, edit }) { documents.set(path, edit.replacement); return { path, changed: true }; },
-      async create({ path, markdown }) { documents.set(path, markdown); return { path }; },
+      async read(path) {
+        return { path, markdown: documents.get(path) ?? "Missing" };
+      },
+      async edit({ path, edit }) {
+        documents.set(path, edit.replacement);
+        return { path, changed: true };
+      },
+      async create({ path, markdown }) {
+        documents.set(path, markdown);
+        return { path };
+      },
     };
-    await expect(invoke("documentRead", { cwd, actor: "agent", path: "notes.md" })).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Subfolder" });
-    await expect(invoke("documentEdit", { cwd, actor: "agent", path: "notes.md", replacement: "Edited" })).resolves.toEqual({ ok: true, path: "notes.md", changed: true });
-    await expect(invoke("documentCreate", { cwd, actor: "agent", path: "new.md", markdown: "Created" })).resolves.toEqual({ ok: true, path: "new.md" });
+    await expect(
+      invoke("documentRead", { cwd, actor: "agent", path: "notes.md" }),
+    ).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Subfolder" });
+    await expect(
+      invoke("documentEdit", { cwd, actor: "agent", path: "notes.md", replacement: "Edited" }),
+    ).resolves.toEqual({ ok: true, path: "notes.md", changed: true });
+    await expect(
+      invoke("documentCreate", { cwd, actor: "agent", path: "new.md", markdown: "Created" }),
+    ).resolves.toEqual({ ok: true, path: "new.md" });
     expect(documents.get("notes.md")).toBe("Root");
     expect(documents.get("app/notes.md")).toBe("Edited");
     expect(documents.get("app/new.md")).toBe("Created");
-    const setFields = vi.fn(async (input: Parameters<CliCollectionWriteSeam["setFields"]>[0]) => ({ path: input.recordPath }));
-    const createRecord = vi.fn(async (input: Parameters<CliCollectionWriteSeam["createRecord"]>[0]): Promise<Awaited<ReturnType<CliCollectionWriteSeam["createRecord"]>>> => ({ path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" }));
-    context.collections = { query: vi.fn(), getRecord: vi.fn(), writes: { setFields, createRecord } };
-    await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
-    expect(setFields).toHaveBeenCalledWith(expect.objectContaining({ recordPath: "app/tasks/a.md" }));
-    await expect(invoke("collectionCreateRecord", { cwd, actor: "agent", collectionPath: "tasks", name: "b", fields: {} })).resolves.toMatchObject({ ok: true, recordPath: "tasks/b.md" });
-    expect(createRecord).toHaveBeenCalledWith(expect.objectContaining({ collectionPath: "app/tasks" }));
-    const record = { id: "rec_abcdefghijklmnopqrstuvwxyz", path: "app/tasks/a.md", conflicted: false, values: [] };
-    context.collections.query = vi.fn(async () => ({ collection: { path: "app/tasks", objectId: "collection-app", status: "valid" as const, reasons: [] }, records: [record], groups: [{ value: "open", records: [record] }], nextCursor: { sortValues: [], recordPath: "app/tasks/a.md", recordId: record.id } }));
-    await expect(invoke("collectionQuery", { cwd, actor: "agent", collectionPath: "tasks", cursor: { sortValues: [], recordPath: "tasks/a.md", recordId: record.id } })).resolves.toMatchObject({ collection: { path: "tasks" }, records: [{ path: "tasks/a.md" }], groups: [{ records: [{ path: "tasks/a.md" }] }], nextCursor: { recordPath: "tasks/a.md" } });
-    expect(context.collections.query).toHaveBeenLastCalledWith(expect.objectContaining({ collectionPath: "app/tasks", cursor: expect.objectContaining({ recordPath: "app/tasks/a.md" }) }));
-    context.collections.getRecord = vi.fn(async () => ({ collection: { path: "app/tasks", objectId: "collection-app", status: "valid" as const, reasons: [] }, record, history: [], nextBeforeHistoryId: null }));
-    await expect(invoke("collectionRecord", { cwd, actor: "agent", collectionPath: "tasks", recordId: record.id, historyLimit: 25 })).resolves.toMatchObject({ collection: { path: "tasks" }, record: { path: "tasks/a.md" } });
-    createRecord.mockResolvedValueOnce({ kind: "partial", created: ["app/tasks/b.md"], failedStage: "fields", reason: "Cannot set app/tasks/b.md", retry: { mode: "resume", instruction: "Retry app/tasks/b.md", recordId: record.id } });
-    await expect(invoke("collectionCreateRecord", { cwd, actor: "agent", collectionPath: "tasks", name: "b", fields: {} })).resolves.toMatchObject({ ok: false, partial: { created: ["tasks/b.md"], reason: "Cannot set tasks/b.md", retry: { instruction: "Retry tasks/b.md" } } });
+    const setFields = vi.fn(async (input: Parameters<CliCollectionWriteSeam["setFields"]>[0]) => ({
+      path: input.recordPath,
+    }));
+    const createRecord = vi.fn(
+      async (
+        input: Parameters<CliCollectionWriteSeam["createRecord"]>[0],
+      ): Promise<Awaited<ReturnType<CliCollectionWriteSeam["createRecord"]>>> => ({
+        path: `${input.collectionPath}/${input.name}.md`,
+        recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+      }),
+    );
+    context.collections = {
+      query: vi.fn(),
+      getRecord: vi.fn(),
+      writes: { setFields, createRecord },
+    };
+    await expect(
+      invoke("collectionSetFields", {
+        cwd,
+        actor: "agent",
+        recordPath: "tasks/a.md",
+        fields: { status: "done" },
+      }),
+    ).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+    expect(setFields).toHaveBeenCalledWith(
+      expect.objectContaining({ recordPath: "app/tasks/a.md" }),
+    );
+    await expect(
+      invoke("collectionCreateRecord", {
+        cwd,
+        actor: "agent",
+        collectionPath: "tasks",
+        name: "b",
+        fields: {},
+      }),
+    ).resolves.toMatchObject({ ok: true, recordPath: "tasks/b.md" });
+    expect(createRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ collectionPath: "app/tasks" }),
+    );
+    const record = {
+      id: "rec_abcdefghijklmnopqrstuvwxyz",
+      path: "app/tasks/a.md",
+      conflicted: false,
+      values: [],
+    };
+    context.collections.query = vi.fn(async () => ({
+      collection: {
+        path: "app/tasks",
+        objectId: "collection-app",
+        status: "valid" as const,
+        reasons: [],
+      },
+      records: [record],
+      groups: [{ value: "open", records: [record] }],
+      nextCursor: { sortValues: [], recordPath: "app/tasks/a.md", recordId: record.id },
+    }));
+    await expect(
+      invoke("collectionQuery", {
+        cwd,
+        actor: "agent",
+        collectionPath: "tasks",
+        cursor: { sortValues: [], recordPath: "tasks/a.md", recordId: record.id },
+      }),
+    ).resolves.toMatchObject({
+      collection: { path: "tasks" },
+      records: [{ path: "tasks/a.md" }],
+      groups: [{ records: [{ path: "tasks/a.md" }] }],
+      nextCursor: { recordPath: "tasks/a.md" },
+    });
+    expect(context.collections.query).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        collectionPath: "app/tasks",
+        cursor: expect.objectContaining({ recordPath: "app/tasks/a.md" }),
+      }),
+    );
+    context.collections.getRecord = vi.fn(async () => ({
+      collection: {
+        path: "app/tasks",
+        objectId: "collection-app",
+        status: "valid" as const,
+        reasons: [],
+      },
+      record,
+      history: [],
+      nextBeforeHistoryId: null,
+    }));
+    await expect(
+      invoke("collectionRecord", {
+        cwd,
+        actor: "agent",
+        collectionPath: "tasks",
+        recordId: record.id,
+        historyLimit: 25,
+      }),
+    ).resolves.toMatchObject({ collection: { path: "tasks" }, record: { path: "tasks/a.md" } });
+    createRecord.mockResolvedValueOnce({
+      kind: "partial",
+      created: ["app/tasks/b.md"],
+      failedStage: "fields",
+      reason: "Cannot set app/tasks/b.md",
+      retry: { mode: "resume", instruction: "Retry app/tasks/b.md", recordId: record.id },
+    });
+    await expect(
+      invoke("collectionCreateRecord", {
+        cwd,
+        actor: "agent",
+        collectionPath: "tasks",
+        name: "b",
+        fields: {},
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      partial: {
+        created: ["tasks/b.md"],
+        reason: "Cannot set tasks/b.md",
+        retry: { instruction: "Retry tasks/b.md" },
+      },
+    });
     setFields.mockRejectedValueOnce(new Error("Cannot edit app/tasks/a.md"));
-    await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } })).resolves.toMatchObject({ ok: false, reason: "Cannot edit tasks/a.md" });
+    await expect(
+      invoke("collectionSetFields", {
+        cwd,
+        actor: "agent",
+        recordPath: "tasks/a.md",
+        fields: { status: "done" },
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: "Cannot edit tasks/a.md" });
     for (const path of ["../notes.md", "x/../notes.md", "../.dohc/private.md"]) {
-      await expect(invoke("documentRead", { cwd, actor: "agent", path })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
-      await expect(invoke("documentEdit", { cwd, actor: "agent", path, replacement: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
-      await expect(invoke("documentCreate", { cwd, actor: "agent", path, markdown: "Wrong" })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
+      await expect(invoke("documentRead", { cwd, actor: "agent", path })).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining(path),
+      });
+      await expect(
+        invoke("documentEdit", { cwd, actor: "agent", path, replacement: "Wrong" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
+      await expect(
+        invoke("documentCreate", { cwd, actor: "agent", path, markdown: "Wrong" }),
+      ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining(path) });
     }
-    await expect(invoke("collectionSetFields", { cwd, actor: "agent", recordPath: "../tasks/a.md", fields: { status: "done" } })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("../tasks/a.md") });
-    await expect(invoke("documentRead", { cwd: tempRoot, actor: "agent", path: "notes.md" })).rejects.toThrow("not inside a dohc workspace");
-    await expect(invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path: "notes.md" })).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Root" });
+    await expect(
+      invoke("collectionSetFields", {
+        cwd,
+        actor: "agent",
+        recordPath: "../tasks/a.md",
+        fields: { status: "done" },
+      }),
+    ).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("../tasks/a.md") });
+    await expect(
+      invoke("documentRead", { cwd: tempRoot, actor: "agent", path: "notes.md" }),
+    ).rejects.toThrow("not inside a dohc workspace");
+    await expect(
+      invoke("documentRead", { cwd: workspaceRoot, actor: "agent", path: "notes.md" }),
+    ).resolves.toEqual({ ok: true, path: "notes.md", markdown: "Root" });
     // A request that names its workspace runs from that workspace's folder,
     // wherever the caller stands: outside every workspace, or in a subfolder.
-    const named = (workspaceId: string, from: string) => rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "documentRead", workspaceId, args: { cwd: from, actor: "agent", path: "notes.md" } });
+    const named = (workspaceId: string, from: string) =>
+      rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "documentRead",
+        workspaceId,
+        args: { cwd: from, actor: "agent", path: "notes.md" },
+      });
     for (const from of [tempRoot, cwd]) {
-      await expect(named(WORKSPACE_ID, from)).resolves.toMatchObject({ ok: true, result: { ok: true, path: "notes.md", markdown: "Root" } });
+      await expect(named(WORKSPACE_ID, from)).resolves.toMatchObject({
+        ok: true,
+        result: { ok: true, path: "notes.md", markdown: "Root" },
+      });
     }
     // Only an id the registry lists selects a workspace.
-    await expect(named("workspace-elsewhere", workspaceRoot)).resolves.toMatchObject({ ok: false, error: "dohc: No workspace on this computer has this id." });
+    await expect(named("workspace-elsewhere", workspaceRoot)).resolves.toMatchObject({
+      ok: false,
+      error: "dohc: No workspace on this computer has this id.",
+    });
     // When two entries share a folder, a request runs only in the one it named.
-    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "twin", rootPath: workspaceRoot }];
+    serverOptions.listWorkspaces = () => [
+      registryWorkspace,
+      { workspaceId: "twin", rootPath: workspaceRoot },
+    ];
     const answers = await Promise.all([WORKSPACE_ID, "twin"].map((id) => named(id, tempRoot)));
     expect(answers.map((answer) => answer.ok).sort()).toEqual([false, true]);
-    expect(answers.find((answer) => !answer.ok)).toMatchObject({ error: "dohc: This workspace's folder belongs to another workspace on this computer." });
+    expect(answers.find((answer) => !answer.ok)).toMatchObject({
+      error: "dohc: This workspace's folder belongs to another workspace on this computer.",
+    });
     // A listed workspace whose folder is gone says so.
-    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "gone", rootPath: join(tempRoot, "no-such-folder") }];
-    await expect(named("gone", tempRoot)).resolves.toMatchObject({ ok: false, error: "dohc: This workspace's folder is missing on this computer." });
+    serverOptions.listWorkspaces = () => [
+      registryWorkspace,
+      { workspaceId: "gone", rootPath: join(tempRoot, "no-such-folder") },
+    ];
+    await expect(named("gone", tempRoot)).resolves.toMatchObject({
+      ok: false,
+      error: "dohc: This workspace's folder is missing on this computer.",
+    });
   });
 
   it("writes an agent's collection and document changes at the depth of the run an automation started", async () => {
@@ -1995,7 +3384,10 @@ describe("CLI socket server", () => {
         },
         async createRecord(input) {
           authors.push(input.author);
-          return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+          return {
+            path: `${input.collectionPath}/${input.name}.md`,
+            recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+          };
         },
       },
     };
@@ -2016,16 +3408,57 @@ describe("CLI socket server", () => {
     agentRunDepth = 3;
     dispatchedRun = "codex";
 
-    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
-    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
-    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", agent: "Client", recordPath: "tasks/a.md", fields: { status: "done" } });
-    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", agent: "Client", collectionPath: "tasks", name: "c", fields: {} });
-    await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path: "notes/plan.md", replacement: "Done." });
-    await invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" });
+    await invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+    });
+    await invoke("collectionCreateRecord", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+      name: "b",
+      fields: {},
+    });
+    await invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "Client",
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+    });
+    await invoke("collectionCreateRecord", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "Client",
+      collectionPath: "tasks",
+      name: "c",
+      fields: {},
+    });
+    await invoke("documentEdit", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "notes/plan.md",
+      replacement: "Done.",
+    });
+    await invoke("documentCreate", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      agent: "claude-code",
+      path: "notes/new.md",
+      markdown: "# New",
+    });
     // A write that names a person is refused, so the agent cannot start the
     // chain over by leaving out --as-agent.
-    await expect(invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "parked" } }))
-      .resolves.toMatchObject({ ok: false });
+    await expect(
+      invoke("collectionSetFields", {
+        cwd: workspaceRoot,
+        actor: "human",
+        recordPath: "tasks/a.md",
+        fields: { status: "parked" },
+      }),
+    ).resolves.toMatchObject({ ok: false });
 
     // A name the client gives, as "Client" and "claude-code" do, gives way to the run's.
     const woken = { kind: "agent", agentId: "codex", onBehalfOf: "person-local", depth: 3 };
@@ -2043,9 +3476,22 @@ describe("CLI socket server", () => {
   it("attributes a live run's reply to the agent and refuses its nested writable workspace", async () => {
     const posted = await post({ actor: "human", title: "Test", body: "Check." });
     const lastAuthor = async () =>
-      (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: `thread-${posted.threadId.slice(3)}` })).at(-1)?.author.kind;
+      (
+        await store!.listMessages({
+          workspaceId: WORKSPACE_ID,
+          threadId: `thread-${posted.threadId.slice(3)}`,
+        })
+      ).at(-1)?.author.kind;
     holdRun("run_live", "codex");
-    const args = { cwd: workspaceRoot, actor: "human", thread: posted.threadId, body: "Done.", attachments: [], needsDecision: false, runId: "run_live" } as const;
+    const args = {
+      cwd: workspaceRoot,
+      actor: "human",
+      thread: posted.threadId,
+      body: "Done.",
+      attachments: [],
+      needsDecision: false,
+      runId: "run_live",
+    } as const;
     // Without the run's secret, or with another, the run id is only a claim.
     for (const secret of [undefined, "c".repeat(64)]) {
       callerRunSecret = secret;
@@ -2056,7 +3502,13 @@ describe("CLI socket server", () => {
     // or a malformed one, whether the request worked or failed.
     for (const secret of [RUN_SECRET, "c".repeat(64), "C".repeat(64)]) {
       for (const thread of [posted.threadId, "th_missing"]) {
-        const response = await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "reply", args: { ...args, thread }, runSecret: secret });
+        const response = await rawRequest({
+          token,
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb: "reply",
+          args: { ...args, thread },
+          runSecret: secret,
+        });
         expect(response.ok).toBe(thread === posted.threadId && secret !== "C".repeat(64));
         expect(JSON.stringify(response)).not.toContain(secret);
       }
@@ -2066,37 +3518,74 @@ describe("CLI socket server", () => {
     expect(await lastAuthor()).toBe("agent");
     const nestedRoot = join(workspaceRoot, "notes");
     await mkdir(nestedRoot);
-    serverOptions.listWorkspaces = () => [registryWorkspace, { workspaceId: "nested", rootPath: nestedRoot }];
+    serverOptions.listWorkspaces = () => [
+      registryWorkspace,
+      { workspaceId: "nested", rootPath: nestedRoot },
+    ];
     const opened = calls.openWorkspace;
-    await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow("Agent runs cannot write in another workspace.");
+    await expect(invoke("reply", { ...args, cwd: nestedRoot, attachments: [] })).rejects.toThrow(
+      "Agent runs cannot write in another workspace.",
+    );
     // Naming the other workspace by id is refused the same way as standing in it.
-    await expect(rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "reply", workspaceId: "nested", runSecret: RUN_SECRET, args: { ...args, attachments: [] } }))
-      .resolves.toMatchObject({ ok: false, error: "dohc: Agent runs cannot write in another workspace." });
+    await expect(
+      rawRequest({
+        token,
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "reply",
+        workspaceId: "nested",
+        runSecret: RUN_SECRET,
+        args: { ...args, attachments: [] },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: "dohc: Agent runs cannot write in another workspace.",
+    });
     expect(calls.openWorkspace).toBe(opened);
   });
 
   it("records a named MCP client's file write and reply as one agent: a dispatched run's, else the unnamed agent", async () => {
     if (!store) throw new Error("Store is not available");
-    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async files => ({ ok: true, written: files.map(file => file.path) }));
+    const writeFiles = vi.fn<NonNullable<CliWorkspaceContext["writeFiles"]>>(async (files) => ({
+      ok: true,
+      written: files.map((file) => file.path),
+    }));
     context.writeFiles = writeFiles;
     // Main's person is the account the chat writes are admitted under.
     serverOptions.localPersonId = () => "verified-user-id";
-    const identity = { installationId: "install-local-user-id", account: { issuer: createActorIssuer("https://cloud.test"), userId: "verified-user-id" } };
-    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    const identity = {
+      installationId: "install-local-user-id",
+      account: { issuer: createActorIssuer("https://cloud.test"), userId: "verified-user-id" },
+    };
+    const ctx: ToolContext = {
+      root: workspaceRoot,
+      home: stateDir,
+      request: (request) => invoke(request.verb, request.args),
+    };
     const posted = await post({ actor: "human", title: "Trip", body: "Plan day 2." });
     const threadId = `thread-${posted.threadId.slice("th_".length)}`;
     // The MCP server names the client on the file write and the reply: the
     // name from its handshake, or a claim to "default", the person's first agent's id.
     async function writeAndReply(name: string) {
       await writeWorkspaceFile(ctx, { path: "plan.txt", content: "Day 2" }, name);
-      const reply = await replyToChat(ctx, { threadId: posted.threadId, body: "Planned day 2." }, name);
+      const reply = await replyToChat(
+        ctx,
+        { threadId: posted.threadId, body: "Planned day 2." },
+        name,
+      );
       if (!reply.ok) throw new Error(reply.reason);
-      const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find((row) => row.id === reply.messageId);
+      const message = (await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId })).find(
+        (row) => row.id === reply.messageId,
+      );
       const origin = writeFiles.mock.lastCall?.[1];
-      if (!origin || !message?.authorActorKey) throw new Error("Expected the file write and the reply.");
+      if (!origin || !message?.authorActorKey)
+        throw new Error("Expected the file write and the reply.");
       const author = agentWriteAuthor(origin);
       return {
-        file: deriveMomentActor(author, { source: "own-store", workspaceId: WORKSPACE_ID, identity }, name).key,
+        file: deriveMomentActor(
+          author,
+          { source: "own-store", workspaceId: WORKSPACE_ID, identity },
+          name,
+        ).key,
         fileName: author.kind === "agent" ? author.agentName : undefined,
         reply: parseActorKey(message.authorActorKey),
         name: message.author.displayName,
@@ -2133,56 +3622,88 @@ describe("CLI socket server", () => {
     }
   });
 
-
-
-
   it("keeps what an agent reported on its posts and replies, beside its unchanged name", async () => {
     if (!store) throw new Error("Store is not available");
     const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
     const started = await invoke("post", {
-      cwd: workspaceRoot, actor: "agent", group: "general", attachments: [], needsDecision: false,
-      body: "Opened a PR", reported,
+      cwd: workspaceRoot,
+      actor: "agent",
+      group: "general",
+      attachments: [],
+      needsDecision: false,
+      body: "Opened a PR",
+      reported,
     });
     const thread = started.threadId;
     await invoke("reply", {
-      cwd: workspaceRoot, actor: "agent", thread, attachments: [], needsDecision: false,
-      body: "Checks pass", reported: { product: "Claude Code" },
+      cwd: workspaceRoot,
+      actor: "agent",
+      thread,
+      attachments: [],
+      needsDecision: false,
+      body: "Checks pass",
+      reported: { product: "Claude Code" },
     });
     // A person's write carries no report, even when the caller sends one.
     await invoke("reply", {
-      cwd: workspaceRoot, actor: "human", thread, attachments: [], needsDecision: false,
-      body: "Thanks", reported,
+      cwd: workspaceRoot,
+      actor: "human",
+      thread,
+      attachments: [],
+      needsDecision: false,
+      body: "Thanks",
+      reported,
     });
     const listed = await invoke("groupsFull", { cwd: workspaceRoot, actor: "agent" });
     if (!listed.ok) throw new Error(listed.reason);
-    const engineThread = listed.groups.flatMap(group => group.threads).find(candidate => cliThreadId(candidate.id) === thread);
+    const engineThread = listed.groups
+      .flatMap((group) => group.threads)
+      .find((candidate) => cliThreadId(candidate.id) === thread);
     if (!engineThread) throw new Error("Posted thread is not listed");
-    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: engineThread.id });
-    expect(messages.map(message => [message.author.displayName, message.authorReported])).toEqual([
-      ["Agent", reported],
-      ["Agent", { product: "Claude Code" }],
-      ["Sam", undefined],
-    ]);
+    const messages = await store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: engineThread.id,
+    });
+    expect(messages.map((message) => [message.author.displayName, message.authorReported])).toEqual(
+      [
+        ["Agent", reported],
+        ["Agent", { product: "Claude Code" }],
+        ["Sam", undefined],
+      ],
+    );
 
     // An agent reading the chat sees what a person sees, through MCP and the CLI.
     const expected = [reported, { product: "Claude Code" }, undefined];
-    const read = await invoke("chat", { cwd: workspaceRoot, actor: "agent", threadId: engineThread.id });
+    const read = await invoke("chat", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      threadId: engineThread.id,
+    });
     if (!read.ok) throw new Error(read.reason);
-    expect(read.messages.map(message => message.authorReported)).toEqual(expected);
+    expect(read.messages.map((message) => message.authorReported)).toEqual(expected);
     expect(read.messages[2]).not.toHaveProperty("authorReported");
-    const shown = await invoke("show", { cwd: workspaceRoot, actor: "agent", target: thread, peek: true });
-    expect(shown.messages.map(message => message.authorReported)).toEqual(expected);
+    const shown = await invoke("show", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      target: thread,
+      peek: true,
+    });
+    expect(shown.messages.map((message) => message.authorReported)).toEqual(expected);
   });
-
-
 
   it("comments on a file through the chat write path a person's comment takes", async () => {
     if (!store) throw new Error("Store is not available");
-    const comment = (path: string, title: string, body: string, flags: string[] = []) => executeCli({
-      argv: ["document", "comment", path, "--title", title, "--text", body, "--json", ...flags],
-      cwd: workspaceRoot, env: {}, request: (request) => invoke(request.verb, request.args),
-    });
-    const output = await comment("tracked.md", "Budget", "Is 400 enough for food?", ["--agent", "claude-code"]);
+    const comment = (path: string, title: string, body: string, flags: string[] = []) =>
+      executeCli({
+        argv: ["document", "comment", path, "--title", title, "--text", body, "--json", ...flags],
+        cwd: workspaceRoot,
+        env: {},
+        request: (request) => invoke(request.verb, request.args),
+      });
+    const output = await comment("tracked.md", "Budget", "Is 400 enough for food?", [
+      "--agent",
+      "claude-code",
+    ]);
     expect(output.exitCode, output.stderr).toBe(0);
     const { schemaVersion, ...startedResult } = JSON.parse(output.stdout);
     expect(schemaVersion).toBe(3);
@@ -2192,36 +3713,67 @@ describe("CLI socket server", () => {
 
     // The comment is the file's chat, authored as the agent under the name
     // it gave, on behalf of the person.
-    await expect(invoke("fileChats", {
-      cwd: workspaceRoot, actor: "agent", path: "tracked.md",
-    })).resolves.toMatchObject({
+    await expect(
+      invoke("fileChats", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        path: "tracked.md",
+      }),
+    ).resolves.toMatchObject({
       ok: true,
       threads: [{ id: started.threadId, title: "Budget", linkedPathHint: "tracked.md" }],
     });
-    const messages = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: started.threadId });
-    expect(messages).toMatchObject([{
-      id: started.messageId,
-      body: "Is 400 enough for food?",
-      author: { kind: "agent", displayName: "claude-code" },
-      authorOwnerDisplayName: "Sam",
-    }]);
+    const messages = await store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: started.threadId,
+    });
+    expect(messages).toMatchObject([
+      {
+        id: started.messageId,
+        body: "Is 400 enough for food?",
+        author: { kind: "agent", displayName: "claude-code" },
+        authorOwnerDisplayName: "Sam",
+      },
+    ]);
 
     // A file dohc does not track has no chats to start.
-    await expect(invoke("fileChatStart", {
-      cwd: workspaceRoot, actor: "agent", path: "untracked.md", title: "T", body: "B",
-    })).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("does not track untracked.md") });
+    await expect(
+      invoke("fileChatStart", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        path: "untracked.md",
+        title: "T",
+        body: "B",
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("does not track untracked.md"),
+    });
 
     // A comment through the socket is an agent's, whatever the caller claims.
-    await expect(invoke("fileChatStart", {
-      cwd: workspaceRoot, actor: "human", path: "tracked.md", title: "T", body: "B",
-    })).resolves.toEqual({
+    await expect(
+      invoke("fileChatStart", {
+        cwd: workspaceRoot,
+        actor: "human",
+        path: "tracked.md",
+        title: "T",
+        body: "B",
+      }),
+    ).resolves.toEqual({
       ok: false,
-      reason: "a comment through the CLI socket is recorded as an agent's; send actor \"agent\"",
+      reason: 'a comment through the CLI socket is recorded as an agent\'s; send actor "agent"',
     });
 
     // A retry with the same request id returns the first chat instead of
     // starting a second; the id cannot be reused for a different comment.
-    const once = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Once", body: "One chat.", requestId: "req-1" };
+    const once = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      path: "tracked.md",
+      title: "Once",
+      body: "One chat.",
+      requestId: "req-1",
+    };
     const retryFlags = ["--request-id", once.requestId];
     const firstOutput = await comment(once.path, once.title, once.body, retryFlags);
     expect(firstOutput.exitCode, firstOutput.stderr).toBe(0);
@@ -2229,23 +3781,35 @@ describe("CLI socket server", () => {
     expect(retrySchemaVersion).toBe(3);
     const first = parseCliResult("fileChatStart", firstResult);
     if (!first.ok) throw new Error(first.reason);
-    await expect(comment(once.path, once.title, once.body, retryFlags)).resolves.toEqual(firstOutput);
+    await expect(comment(once.path, once.title, once.body, retryFlags)).resolves.toEqual(
+      firstOutput,
+    );
     await expect(comment(once.path, once.title, "Another.", retryFlags)).resolves.toEqual({
-      exitCode: 1, stdout: "", stderr: "dohc: request id req-1 was already used for a different request\n",
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: request id req-1 was already used for a different request\n",
     });
     await expect(invoke("fileChatStart", { ...once, body: "Another." })).resolves.toEqual({
       ok: false,
       reason: "request id req-1 was already used for a different request",
     });
-    const chats = await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" });
+    const chats = await invoke("fileChats", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      path: "tracked.md",
+    });
     if (!chats.ok) throw new Error(chats.reason);
     expect(chats.threads.filter((thread) => thread.title === "Once")).toHaveLength(1);
     // An agent that gave no name is "Agent".
-    await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
-      .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Agent" } }]);
+    await expect(
+      store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }),
+    ).resolves.toMatchObject([{ author: { kind: "agent", displayName: "Agent" } }]);
 
     for (const [path, reason] of [
-      ["untracked.md", "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file."],
+      [
+        "untracked.md",
+        "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file.",
+      ],
       ["../outside.md", "path rejected (traversal): ../outside.md"],
       [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
     ] as const) {
@@ -2256,37 +3820,64 @@ describe("CLI socket server", () => {
     // A shared view refuses before the chat module is reached.
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
-    await expect(invoke("fileChatStart", {
-      cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "T", body: "B",
-    })).rejects.toThrow("chats are not available in a read-only shared view");
+    await expect(
+      invoke("fileChatStart", {
+        cwd: workspaceRoot,
+        actor: "agent",
+        path: "tracked.md",
+        title: "T",
+        body: "B",
+      }),
+    ).rejects.toThrow("chats are not available in a read-only shared view");
     await expect(comment("tracked.md", "T", "B")).resolves.toEqual({
-      exitCode: 1, stdout: "", stderr: "dohc: chats are not available in a read-only shared view\n",
+      exitCode: 1,
+      stdout: "",
+      stderr: "dohc: chats are not available in a read-only shared view\n",
     });
     expect(calls.writes).toBe(beforeReadOnly);
   });
-
 
   it("lets a local agent review, drop, and undo through the shared held operation", async () => {
     const token = "a".repeat(64);
     let waiting = true;
     const calls: unknown[] = [];
-    context.heldNoteChange = async input => {
+    context.heldNoteChange = async (input) => {
       calls.push(input);
       if (input.action === "drop") waiting = false;
       if (input.action === "undo") waiting = true;
-      return {path: input.path, token, authors: [], held: waiting, historyMomentId: "history"};
+      return { path: input.path, token, authors: [], held: waiting, historyMomentId: "history" };
     };
-    const args = {cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md"};
-    expect(await invoke("heldNoteChange", {...args, action: "review"})).toMatchObject({ok: true, held: true, token});
-    expect(await invoke("heldNoteChange", {...args, action: "drop", token})).toMatchObject({ok: true, held: false});
-    expect(await invoke("heldNoteChange", {...args, action: "undo", token})).toMatchObject({ok: true, held: true});
-    expect(calls.slice(1)).toEqual(["drop", "undo"].map(action => ({path: "tracked.md", action, token,
-      author: {kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local"}})));
-    expect(await invoke("heldNoteChange", {...args, actor: "human", action: "drop", token})).toMatchObject({ok: false});
+    const args = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md" };
+    expect(await invoke("heldNoteChange", { ...args, action: "review" })).toMatchObject({
+      ok: true,
+      held: true,
+      token,
+    });
+    expect(await invoke("heldNoteChange", { ...args, action: "drop", token })).toMatchObject({
+      ok: true,
+      held: false,
+    });
+    expect(await invoke("heldNoteChange", { ...args, action: "undo", token })).toMatchObject({
+      ok: true,
+      held: true,
+    });
+    expect(calls.slice(1)).toEqual(
+      ["drop", "undo"].map((action) => ({
+        path: "tracked.md",
+        action,
+        token,
+        author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local" },
+      })),
+    );
+    expect(
+      await invoke("heldNoteChange", { ...args, actor: "human", action: "drop", token }),
+    ).toMatchObject({ ok: false });
     expect(waiting).toBe(true);
     context.readOnly = true;
     registryWorkspace.readOnly = true;
-    await expect(invoke("heldNoteChange", {...args, action: "drop", token})).rejects.toThrow("read-only shared view");
+    await expect(invoke("heldNoteChange", { ...args, action: "drop", token })).rejects.toThrow(
+      "read-only shared view",
+    );
     expect(waiting).toBe(true);
   });
 
@@ -2298,24 +3889,37 @@ describe("CLI socket server", () => {
         throw new Error("reads are not under test");
       },
       async edit(input) {
-        if (input.edit.replacement === "Refused.") throw new Error("The text to replace is not in the document.");
+        if (input.edit.replacement === "Refused.")
+          throw new Error("The text to replace is not in the document.");
         if (input.edit.replacement === "Unsaved.") {
           applied += 1;
-          throw new LiveDocumentEditAppliedError("The edit is in notes/plan.md, but dohc has not saved it to the file yet.");
+          throw new LiveDocumentEditAppliedError(
+            "The edit is in notes/plan.md, but dohc has not saved it to the file yet.",
+          );
         }
         if (input.edit.replacement === "Lost.") {
           applied += 1;
-          throw new LiveDocumentEditAppliedError("Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in notes/plan.md.");
+          throw new LiveDocumentEditAppliedError(
+            "Someone changed the blocks this edit went into at the same moment, so some or all of its text is not in notes/plan.md.",
+          );
         }
         applied += 1;
-        await new Promise<void>((resolve) => { saving.release = resolve; });
+        await new Promise<void>((resolve) => {
+          saving.release = resolve;
+        });
         return { path: input.path, changed: true };
       },
       async create() {
         throw new Error("creates are not under test");
       },
     };
-    const append = { cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement: "Appended.", requestId: "edit-1" };
+    const append = {
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      path: "notes/plan.md",
+      replacement: "Appended.",
+      requestId: "edit-1",
+    };
 
     // The caller's first request is still saving when it gives up and sends
     // the edit again; both hear the one result.
@@ -2325,7 +3929,11 @@ describe("CLI socket server", () => {
     saving.release();
     await expect(first).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
     await expect(resent).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
-    await expect(invoke("documentEdit", append)).resolves.toEqual({ ok: true, path: "notes/plan.md", changed: true });
+    await expect(invoke("documentEdit", append)).resolves.toEqual({
+      ok: true,
+      path: "notes/plan.md",
+      changed: true,
+    });
     expect(applied).toBe(1);
     await expect(invoke("documentEdit", { ...append, replacement: "Other." })).resolves.toEqual({
       ok: false,
@@ -2337,14 +3945,23 @@ describe("CLI socket server", () => {
     // removed the block it went into.
     const refused = { ...append, replacement: "Refused.", requestId: "edit-2" };
     await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false });
-    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("not in the document") });
+    await expect(invoke("documentEdit", refused)).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("not in the document"),
+    });
     const unsaved = { ...append, replacement: "Unsaved.", requestId: "edit-3" };
     const unsavedResult = await invoke("documentEdit", unsaved);
-    expect(unsavedResult).toMatchObject({ ok: false, reason: expect.stringContaining("not saved it") });
+    expect(unsavedResult).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("not saved it"),
+    });
     await expect(invoke("documentEdit", unsaved)).resolves.toEqual(unsavedResult);
     const lost = { ...append, replacement: "Lost.", requestId: "edit-4" };
     const lostResult = await invoke("documentEdit", lost);
-    expect(lostResult).toMatchObject({ ok: false, reason: expect.stringContaining("is not in notes/plan.md") });
+    expect(lostResult).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("is not in notes/plan.md"),
+    });
     await expect(invoke("documentEdit", lost)).resolves.toEqual(lostResult);
     expect(applied).toBe(3);
   });
@@ -2360,7 +3977,9 @@ describe("CLI socket server", () => {
       async edit(input) {
         applied += 1;
         if (input.edit.replacement === "Slow.") {
-          await new Promise<void>((resolve) => { slow.release = resolve; });
+          await new Promise<void>((resolve) => {
+            slow.release = resolve;
+          });
         }
         return { path: input.path, changed: true };
       },
@@ -2369,7 +3988,11 @@ describe("CLI socket server", () => {
       },
     };
     const request = (replacement: string, requestId: string) => ({
-      cwd: workspaceRoot, actor: "agent" as const, path: "notes/plan.md", replacement, requestId,
+      cwd: workspaceRoot,
+      actor: "agent" as const,
+      path: "notes/plan.md",
+      replacement,
+      requestId,
     });
 
     // Other requests finish while the first is still saving, past the limit.
@@ -2387,7 +4010,9 @@ describe("CLI socket server", () => {
     await invoke("documentEdit", request("Edit d.", "d"));
     await expect(invoke("documentEdit", request("Slow.", "slow"))).resolves.toMatchObject({
       ok: false,
-      reason: expect.stringContaining("no longer holds the result of request id slow, so it did not run it again"),
+      reason: expect.stringContaining(
+        "no longer holds the result of request id slow, so it did not run it again",
+      ),
     });
     expect(applied).toBe(5);
   });
@@ -2464,9 +4089,7 @@ describe("CLI socket server", () => {
     const elapsedMs = Date.now() - startedAtMs;
     if (!chat.ok) throw new Error(chat.reason);
 
-    expect(chat.messages.map((message) => message.body)).toEqual([
-      "Local-only message",
-    ]);
+    expect(chat.messages.map((message) => message.body)).toEqual(["Local-only message"]);
     // Waited roughly the configured budget — not zero (skipping the pass
     // entirely) and not the unbounded hang the mutation this pins against
     // leaves behind.
@@ -2479,8 +4102,6 @@ describe("CLI socket server", () => {
   // pass per read — main.ts's serializer only stops them running
   // concurrently, not from queueing up unboundedly.
 
-
-
   it("marks a person's show under the account main names, and never asks for an agent's", async () => {
     const general = await store!.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
     const { thread } = await store!.startChannelThread({
@@ -2490,15 +4111,20 @@ describe("CLI socket server", () => {
       author: { kind: "human", displayName: "Sam" },
       body: "Read me",
     });
-    const accountReadOwner = vi.fn(async (_threadId: string): Promise<string | undefined> => "verified-user-id");
+    const accountReadOwner = vi.fn(
+      async (_threadId: string): Promise<string | undefined> => "verified-user-id",
+    );
     context = { ...context, accountReadOwner };
     const marks = vi.spyOn(store!, "markThreadRead");
 
     await invoke("show", { cwd: workspaceRoot, actor: "human", target: thread.id, peek: false });
     expect(accountReadOwner).toHaveBeenCalledExactlyOnceWith(thread.id);
-    expect(marks).toHaveBeenLastCalledWith(expect.objectContaining({
-      threadId: thread.id, replicationOwnerUserId: "verified-user-id",
-    }));
+    expect(marks).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        threadId: thread.id,
+        replicationOwnerUserId: "verified-user-id",
+      }),
+    );
 
     // A signed-out or joined target gets no owner, and the read stays here.
     accountReadOwner.mockResolvedValueOnce(undefined);
@@ -2510,23 +4136,8 @@ describe("CLI socket server", () => {
     expect(accountReadOwner).not.toHaveBeenCalled();
   });
 
-
-
-
   // Provisioning General writes outside chatWrites, so only onWrite tells
   // the desktop to notify the renderer and queue cloud sync for it.
-
-
-
-
-
-
-
-
-
-
-
-
 
   it("persists pending provenance across shutdown without reporting it settled", async () => {
     await seedDispatchThread("thread-restart_recovery");
@@ -2553,10 +4164,8 @@ describe("CLI socket server", () => {
     };
     serverOptions.runMessageLinkRetryMs = 0;
     serverOptions.runMessageLinkRecoveryRetryMs = 60_000;
-    serverOptions.onRunMessageLinkPending = (link) =>
-      pending.push(link.messageId);
-    serverOptions.onRunMessageLinkSettled = (link) =>
-      settled.push(link.messageId);
+    serverOptions.onRunMessageLinkPending = (link) => pending.push(link.messageId);
+    serverOptions.onRunMessageLinkSettled = (link) => settled.push(link.messageId);
 
     const result = await post({
       actor: "agent",
@@ -2571,12 +4180,7 @@ describe("CLI socket server", () => {
 
     expect(settled).toEqual([]);
     expect(
-      JSON.parse(
-        await readFile(
-          join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE),
-          "utf8",
-        ),
-      ),
+      JSON.parse(await readFile(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE), "utf8")),
     ).toEqual([
       expect.objectContaining({
         workspaceId: WORKSPACE_ID,
@@ -2593,12 +4197,7 @@ describe("CLI socket server", () => {
     serverOptions = restoredOptions;
     await restoreCliServerRuntime(restoredOptions);
     for (let index = 0; index < 50; index += 1) {
-      if (
-        (await originalDispatch.runIdForMessage(
-          WORKSPACE_ID,
-          engineMessageId,
-        )) !== null
-      ) {
+      if ((await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId)) !== null) {
         break;
       }
       await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
@@ -2606,12 +4205,12 @@ describe("CLI socket server", () => {
 
     expect(pending).toEqual([engineMessageId, engineMessageId]);
     expect(settled).toEqual([engineMessageId]);
-    expect(
-      await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
-    ).toBe(claim.run.runId);
-    await expect(
-      stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId)).toBe(
+      claim.run.runId,
+    );
+    await expect(stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("settles a background provenance link on the first permanent refusal", async () => {
@@ -2654,10 +4253,8 @@ describe("CLI socket server", () => {
     };
     serverOptions.runMessageLinkRetryMs = 0;
     serverOptions.runMessageLinkRecoveryRetryMs = 0;
-    serverOptions.onRunMessageLinkSettled = (link) =>
-      settled.push(link.messageId);
-    serverOptions.onRunMessageLinkAbandoned = (link) =>
-      abandoned.push(link.messageId);
+    serverOptions.onRunMessageLinkSettled = (link) => settled.push(link.messageId);
+    serverOptions.onRunMessageLinkAbandoned = (link) => abandoned.push(link.messageId);
 
     const result = await post({
       actor: "agent",
@@ -2673,9 +4270,9 @@ describe("CLI socket server", () => {
     expect(settled).toEqual([engineMessageId]);
     expect(abandoned).toEqual([]);
     expect(attempts).toBe(4);
-    await expect(
-      stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE)),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(stateDir, RUN_MESSAGE_LINK_RECOVERY_FILE))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("keeps retrying a terminal refusal the link taxonomy does not call permanent", async () => {
@@ -2726,9 +4323,9 @@ describe("CLI socket server", () => {
     const engineMessageId = result.messageId.replace(/^msg_/u, "message-");
     expect(attempts).toBe(3);
     expect(result.warning).toBeUndefined();
-    expect(
-      await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
-    ).toBe(claim.run.runId);
+    expect(await originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId)).toBe(
+      claim.run.runId,
+    );
     expect(errors).toEqual([]);
   });
 
@@ -2739,16 +4336,29 @@ describe("CLI socket server", () => {
     const channel = await foreignStore.ensureGeneralChannel({ workspaceId: "foreign-workspace" });
     const opened = await foreignStore.startChannelThread({
       authorActorKey: null,
-      workspaceId: "foreign-workspace", channelId: channel.id,
-      author: { kind: "human", displayName: "Other owner" }, body: "Other workspace",
+      workspaceId: "foreign-workspace",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Other owner" },
+      body: "Other workspace",
     });
     for (const threadId of ["thread-missing", opened.thread.id]) {
-      await expect(invoke("reply", {
-        cwd: workspaceRoot, actor: "agent", thread: threadId,
-        attachments: [], needsDecision: false, body: "Must not cross workspaces",
-      })).rejects.toThrow();
+      await expect(
+        invoke("reply", {
+          cwd: workspaceRoot,
+          actor: "agent",
+          thread: threadId,
+          attachments: [],
+          needsDecision: false,
+          body: "Must not cross workspaces",
+        }),
+      ).rejects.toThrow();
     }
-    expect(await foreignStore.listMessages({ workspaceId: "foreign-workspace", threadId: opened.thread.id })).toHaveLength(1);
+    expect(
+      await foreignStore.listMessages({
+        workspaceId: "foreign-workspace",
+        threadId: opened.thread.id,
+      }),
+    ).toHaveLength(1);
   });
 
   it("posts the reply but keeps the decision open when access changes during send", async () => {
@@ -2762,7 +4372,10 @@ describe("CLI socket server", () => {
     const originalSend = store.sendMessage.bind(store);
     store.sendMessage = async (input) => {
       const message = await originalSend(input);
-      const channelId = await store!.findThreadChannelId({ workspaceId: WORKSPACE_ID, threadId: input.threadId });
+      const channelId = await store!.findThreadChannelId({
+        workspaceId: WORKSPACE_ID,
+        threadId: input.threadId,
+      });
       await makeChannelReadOnly(channelId!);
       return message;
     };
@@ -2779,7 +4392,10 @@ describe("CLI socket server", () => {
       });
       expect(reply.warning).toContain("could not be resolved: You can only read this.");
       expect(reply.resolvedMessageId).toBeUndefined();
-      const persisted = await store.listMessages({ workspaceId: WORKSPACE_ID, threadId: opened.threadId.replace(/^th_/u, "thread-") });
+      const persisted = await store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: opened.threadId.replace(/^th_/u, "thread-"),
+      });
       expect(reply.messageId).toBe(cliMessageId(persisted.at(-1)!.id));
     } finally {
       store.sendMessage = originalSend;
@@ -2813,8 +4429,9 @@ describe("CLI socket server", () => {
       body: "Nothing relevant in this thread",
     });
     if (!store) throw new Error("Store is not available");
-    const matchingThread = (await store.listThreads({ workspaceId: WORKSPACE_ID }))
-      .find((thread) => cliThreadId(thread.id) === matching.threadId);
+    const matchingThread = (await store.listThreads({ workspaceId: WORKSPACE_ID })).find(
+      (thread) => cliThreadId(thread.id) === matching.threadId,
+    );
     if (!matchingThread) throw new Error("Matching thread is unavailable");
     const matchingMessage = (
       await store.listMessages({
@@ -2893,10 +4510,9 @@ describe("CLI socket server", () => {
         limit: 20,
         regex: false,
       });
-      expect(
-        "matches" in failedPrefilterFallback &&
-          failedPrefilterFallback.matches,
-      ).toHaveLength(1);
+      expect("matches" in failedPrefilterFallback && failedPrefilterFallback.matches).toHaveLength(
+        1,
+      );
       expect(new Set(loadedThreadIds).size).toBe(2);
       expect(debugLines).toEqual([
         "grep daemon prefilter failed; falling back to full scan: " +
@@ -3010,20 +4626,24 @@ describe("CLI socket server", () => {
     });
     serverOptions.regexScanTimeoutMs = 50;
 
-    await expect(invoke("grep", {
-      cwd: workspaceRoot,
-      actor: "human",
-      pattern: "^(a+)+$",
-      ignoreCase: false,
-      filesWithMatches: false,
-      context: 0,
-      limit: 20,
-      regex: true,
-    })).rejects.toThrow("regular expression scan timed out");
-    await expect(invoke("groups", {
-      cwd: workspaceRoot,
-      actor: "human",
-    })).resolves.toMatchObject({ groups: expect.any(Array) });
+    await expect(
+      invoke("grep", {
+        cwd: workspaceRoot,
+        actor: "human",
+        pattern: "^(a+)+$",
+        ignoreCase: false,
+        filesWithMatches: false,
+        context: 0,
+        limit: 20,
+        regex: true,
+      }),
+    ).rejects.toThrow("regular expression scan timed out");
+    await expect(
+      invoke("groups", {
+        cwd: workspaceRoot,
+        actor: "human",
+      }),
+    ).resolves.toMatchObject({ groups: expect.any(Array) });
   });
 
   it("secures the CLI state directory, token, and socket", async (ctx) => {
@@ -3043,13 +4663,19 @@ describe("resolveCliWorkspace", () => {
   it("does not find a workspace through a second folder entry in other capitals, as a mount of its folder is", async (ctx) => {
     const scratch = await realpath(await createTestScratch("dohc-cli-mounted-"));
     try {
-      const notes: CliRegistryWorkspace = { workspaceId: "ws-notes", rootPath: join(scratch, "Notes") };
+      const notes: CliRegistryWorkspace = {
+        workspaceId: "ws-notes",
+        rootPath: join(scratch, "Notes"),
+      };
       await mkdir(join(notes.rootPath, "docs"), { recursive: true });
       const mounted = join(scratch, "notes");
-      const second = await mkdir(mounted).then(() => true, (error: NodeJS.ErrnoException) => {
-        if (error.code === "EEXIST") return false;
-        throw error;
-      });
+      const second = await mkdir(mounted).then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "EEXIST") return false;
+          throw error;
+        },
+      );
       // A disk that ignores capitals has only one folder here.
       if (!second) ctx.skip();
       // notes is Notes on disk, but the scratch folder lists both names, and a

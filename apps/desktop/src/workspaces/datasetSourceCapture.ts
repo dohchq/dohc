@@ -27,15 +27,28 @@ export async function flushDatasetSourceCapture(
   return capture;
 }
 
-export function assertSourcePathsNotDeferred(files: readonly string[], paths: readonly string[], under?: string): void {
-  const waiting = files.find(path => paths.includes(path) || (under !== undefined && (path === under || path.startsWith(under + "/"))));
+export function assertSourcePathsNotDeferred(
+  files: readonly string[],
+  paths: readonly string[],
+  under?: string,
+): void {
+  const waiting = files.find(
+    (path) =>
+      paths.includes(path) ||
+      (under !== undefined && (path === under || path.startsWith(under + "/"))),
+  );
   if (waiting) {
-    throw new Error(`"${waiting}" has an outside change waiting while it is open. Close the file, then try again.`);
+    throw new Error(
+      `"${waiting}" has an outside change waiting while it is open. Close the file, then try again.`,
+    );
   }
 }
 
-export function assertSourcePathsNotHeld(files: readonly { path: string }[], paths: readonly string[]): void {
-  const held = files.find(file => paths.includes(file.path));
+export function assertSourcePathsNotHeld(
+  files: readonly { path: string }[],
+  paths: readonly string[],
+): void {
+  const held = files.find((file) => paths.includes(file.path));
   if (held) {
     throw new Error(`dohc cannot use "${held.path}" for this change. ${CAPTURE_HELD_WORDS}`);
   }

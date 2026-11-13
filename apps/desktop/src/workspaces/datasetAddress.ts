@@ -3,21 +3,30 @@ import { createHash } from "node:crypto";
 import { parseDatasetPath, type DatasetDescription } from "@dohc/security-contract/dataset";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 
-export type ResolvedDatasetRequest<T = DatasetRequest> = T extends { datasetPath: string } ? Omit<T, "datasetPath" | "expectedDatasetId"> & { datasetId: string } : T;
-type Adapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
+export type ResolvedDatasetRequest<T = DatasetRequest> = T extends { datasetPath: string }
+  ? Omit<T, "datasetPath" | "expectedDatasetId"> & { datasetId: string }
+  : T;
+type Adapter = Pick<
+  VersionedLiveAdapter,
+  "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace"
+>;
 export class DatasetAddressUnavailableError extends Error {
-  constructor(path: string) { super(`Collection reference broken: ${path}. Choose its current dataset.json path.`); }
+  constructor(path: string) {
+    super(`Collection reference broken: ${path}. Choose its current dataset.json path.`);
+  }
 }
 type Address = { sha256: string; datasetId: string | null };
 // Content hashes come from the current authorized engine listing, never from the caller.
 const identities = new Map<string, string | null>();
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const maxBytes = 256 * 1024;
-export const isDatasetDescriptor = (path: string) => path === "dataset.json" || path.endsWith("/dataset.json");
+export const isDatasetDescriptor = (path: string) =>
+  path === "dataset.json" || path.endsWith("/dataset.json");
 
 const catalogs = new Map<string, { workspaceId: string; value: Promise<Map<string, Address>> }>();
 export function invalidateDatasetAddresses(scope?: { workspaceId?: string }) {
-  for (const [key, entry] of catalogs) if (!scope?.workspaceId || entry.workspaceId === scope.workspaceId) catalogs.delete(key);
+  for (const [key, entry] of catalogs)
+    if (!scope?.workspaceId || entry.workspaceId === scope.workspaceId) catalogs.delete(key);
 }
 
 function addresses(adapter: Adapter, workspaceId: string, versionId: string, signal: AbortSignal) {
@@ -30,34 +39,78 @@ function addresses(adapter: Adapter, workspaceId: string, versionId: string, sig
   const entry = { workspaceId, value };
   catalogs.set(key, entry);
   if (catalogs.size > 32) catalogs.delete(catalogs.keys().next().value!);
-  void value.catch(() => { if (catalogs.get(key) === entry) catalogs.delete(key); });
+  void value.catch(() => {
+    if (catalogs.get(key) === entry) catalogs.delete(key);
+  });
   return value;
 }
 
-async function readAddresses(adapter: Adapter, workspaceId: string, versionId: string, signal: AbortSignal) {
+async function readAddresses(
+  adapter: Adapter,
+  workspaceId: string,
+  versionId: string,
+  signal: AbortSignal,
+) {
   signal.throwIfAborted();
-  const files = (await adapter.listTextFileMetadata({ workspaceId, versionId })).filter(file => isDatasetDescriptor(file.path));
+  const files = (await adapter.listTextFileMetadata({ workspaceId, versionId })).filter((file) =>
+    isDatasetDescriptor(file.path),
+  );
   signal.throwIfAborted();
   const result = new Map<string, Address>();
-  const changed = files.filter(file => {
-    if (file.hasYdocMarker) { result.set(file.path, { sha256: file.sha256, datasetId: null }); return false; }
-    if (identities.has(file.sha256)) { result.set(file.path, { sha256: file.sha256, datasetId: identities.get(file.sha256)! }); return false; }
-    if (file.byteLength !== null && file.byteLength > maxBytes) { result.set(file.path, { sha256: file.sha256, datasetId: null }); return false; }
+  const changed = files.filter((file) => {
+    if (file.hasYdocMarker) {
+      result.set(file.path, { sha256: file.sha256, datasetId: null });
+      return false;
+    }
+    if (identities.has(file.sha256)) {
+      result.set(file.path, { sha256: file.sha256, datasetId: identities.get(file.sha256)! });
+      return false;
+    }
+    if (file.byteLength !== null && file.byteLength > maxBytes) {
+      result.set(file.path, { sha256: file.sha256, datasetId: null });
+      return false;
+    }
     return true;
   });
   for (let offset = 0; offset < changed.length; offset += 128) {
-    const paths = changed.slice(offset, offset + 128).map(file => file.path);
-    const metadata = await adapter.captureSourceMetadata({ workspaceId, versionId, paths, bounds: { maxInputFiles: 128, maxInputBytes: maxBytes * 128 }, signal });
+    const paths = changed.slice(offset, offset + 128).map((file) => file.path);
+    const metadata = await adapter.captureSourceMetadata({
+      workspaceId,
+      versionId,
+      paths,
+      bounds: { maxInputFiles: 128, maxInputBytes: maxBytes * 128 },
+      signal,
+    });
     const captured = await adapter.hydrateCapturedSources(metadata, signal);
     signal.throwIfAborted();
-    if (metadata.workspaceId !== workspaceId || metadata.versionId !== versionId || captured.length !== paths.length) throw Error("The Collection files changed. Refresh Collections.");
+    if (
+      metadata.workspaceId !== workspaceId ||
+      metadata.versionId !== versionId ||
+      captured.length !== paths.length
+    )
+      throw Error("The Collection files changed. Refresh Collections.");
     for (const file of captured) {
-      if (!paths.includes(file.path) || createHash("sha256").update(file.bytes).digest("hex") !== file.sha256) throw Error("The Collection files changed. Refresh Collections.");
+      if (
+        !paths.includes(file.path) ||
+        createHash("sha256").update(file.bytes).digest("hex") !== file.sha256
+      )
+        throw Error("The Collection files changed. Refresh Collections.");
       let datasetId: string | null = null;
       try {
-        const definition: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(file.bytes));
-        if (typeof definition === "object" && definition !== null && "datasetId" in definition && typeof definition.datasetId === "string" && uuid.test(definition.datasetId)) datasetId = definition.datasetId;
-      } catch { /* An unfinished descriptor cannot name a dataset until its JSON is readable. */ }
+        const definition: unknown = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(file.bytes),
+        );
+        if (
+          typeof definition === "object" &&
+          definition !== null &&
+          "datasetId" in definition &&
+          typeof definition.datasetId === "string" &&
+          uuid.test(definition.datasetId)
+        )
+          datasetId = definition.datasetId;
+      } catch {
+        /* An unfinished descriptor cannot name a dataset until its JSON is readable. */
+      }
       identities.delete(file.sha256);
       identities.set(file.sha256, datasetId);
       if (identities.size > 1024) identities.delete(identities.keys().next().value!);
@@ -68,7 +121,13 @@ async function readAddresses(adapter: Adapter, workspaceId: string, versionId: s
 }
 
 /** The engine supplies source identity; the host still authorizes every operation on its ID. */
-export async function resolveDatasetAddress(adapter: Adapter, workspaceId: string, path: string, signal: AbortSignal, versionId = "main"): Promise<string> {
+export async function resolveDatasetAddress(
+  adapter: Adapter,
+  workspaceId: string,
+  path: string,
+  signal: AbortSignal,
+  versionId = "main",
+): Promise<string> {
   parseDatasetPath(path);
   const catalog = await addresses(adapter, workspaceId, versionId, signal);
   signal.throwIfAborted();
@@ -78,7 +137,10 @@ export async function resolveDatasetAddress(adapter: Adapter, workspaceId: strin
     .filter(([, value]) => value.datasetId === id)
     .map(([candidate]) => candidate)
     .sort();
-  if (conflictingPaths.length !== 1) throw Error(`Collection address ambiguous: ${path}. These dataset.json files name this Collection: ${conflictingPaths.join(", ")}. Choose one file to keep. Remove the other files.`);
+  if (conflictingPaths.length !== 1)
+    throw Error(
+      `Collection address ambiguous: ${path}. These dataset.json files name this Collection: ${conflictingPaths.join(", ")}. Choose one file to keep. Remove the other files.`,
+    );
   return id;
 }
 
@@ -92,15 +154,23 @@ export async function resolveDatasetAddress(adapter: Adapter, workspaceId: strin
  * dataset.json files in that listing, so with none there it can change
  * nothing, and the engine's files go unread. It saves time and decides no access.
  */
-export async function unclaimedDatasetFolders(adapter: Adapter, workspaceId: string, signal: AbortSignal,
-  sources: { listed(): Promise<boolean | undefined>; kept(): Promise<readonly string[]> }): Promise<string[]> {
-  if (await sources.listed() === false) return [];
+export async function unclaimedDatasetFolders(
+  adapter: Adapter,
+  workspaceId: string,
+  signal: AbortSignal,
+  sources: { listed(): Promise<boolean | undefined>; kept(): Promise<readonly string[]> },
+): Promise<string[]> {
+  if ((await sources.listed()) === false) return [];
   signal.throwIfAborted();
-  const named = [...await addresses(adapter, workspaceId, "main", signal)].filter(([, value]) => value.datasetId !== null);
+  const named = [...(await addresses(adapter, workspaceId, "main", signal))].filter(
+    ([, value]) => value.datasetId !== null,
+  );
   signal.throwIfAborted();
   if (!named.length) return [];
   const ids = new Set(await sources.kept());
-  return named.filter(([, value]) => !ids.has(value.datasetId!)).map(([path]) => path.slice(0, Math.max(0, path.lastIndexOf("/"))));
+  return named
+    .filter(([, value]) => !ids.has(value.datasetId!))
+    .map(([path]) => path.slice(0, Math.max(0, path.lastIndexOf("/"))));
 }
 
 /** `datasetPaths`: the dataset.json files to fix before the Collection can open. */
@@ -115,28 +185,49 @@ export type DatasetAddress =
  * was deleted, and putting the file back brings it back. A dataset.json still
  * in that folder that names no Collection makes it unreadable.
  */
-export async function addressDatasets<T extends DatasetDescription>(adapter: Adapter, workspaceId: string, datasets: T[], signal: AbortSignal,
-  approvedFolder?: (datasetId: string) => Promise<string>): Promise<Array<T & DatasetAddress>> {
+export async function addressDatasets<T extends DatasetDescription>(
+  adapter: Adapter,
+  workspaceId: string,
+  datasets: T[],
+  signal: AbortSignal,
+  approvedFolder?: (datasetId: string) => Promise<string>,
+): Promise<Array<T & DatasetAddress>> {
   if (!datasets.length) return [];
   const catalog = await addresses(adapter, workspaceId, "main", signal);
   signal.throwIfAborted();
-  const named = new Map<string, string[]>(), unnamed = new Set<string>();
+  const named = new Map<string, string[]>(),
+    unnamed = new Set<string>();
   for (const [path, value] of catalog) {
-    if (value.datasetId) named.set(value.datasetId, [...named.get(value.datasetId) ?? [], path]);
+    if (value.datasetId) named.set(value.datasetId, [...(named.get(value.datasetId) ?? []), path]);
     else unnamed.add(path);
   }
   const addressed: Array<T & DatasetAddress> = [];
   for (const dataset of datasets) {
     const paths = (named.get(dataset.datasetId) ?? []).sort();
-    if (paths.length === 1) addressed.push({ ...dataset, datasetPath: paths[0]!, datasetAddressStatus: "available" });
-    else if (paths.length) addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: paths });
-    else if (!approvedFolder) addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "missing" });
+    if (paths.length === 1)
+      addressed.push({ ...dataset, datasetPath: paths[0]!, datasetAddressStatus: "available" });
+    else if (paths.length)
+      addressed.push({
+        ...dataset,
+        datasetPath: null,
+        datasetAddressStatus: "ambiguous",
+        datasetPaths: paths,
+      });
+    else if (!approvedFolder)
+      addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "missing" });
     else if (unnamed.size) {
       // Without its approved folder, dohc can't name a file to fix, so the Collection stays out.
       const folder = await approvedFolder(dataset.datasetId).catch(() => null);
       signal.throwIfAborted();
-      const path = folder === null ? null : folder === "." ? "dataset.json" : `${folder}/dataset.json`;
-      if (path !== null && unnamed.has(path)) addressed.push({ ...dataset, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: [path] });
+      const path =
+        folder === null ? null : folder === "." ? "dataset.json" : `${folder}/dataset.json`;
+      if (path !== null && unnamed.has(path))
+        addressed.push({
+          ...dataset,
+          datasetPath: null,
+          datasetAddressStatus: "unreadable",
+          datasetPaths: [path],
+        });
     }
   }
   return addressed;

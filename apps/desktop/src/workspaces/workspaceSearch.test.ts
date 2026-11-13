@@ -96,9 +96,7 @@ describe("buildRipgrepArgs", () => {
 describe("toSearchEntries secret floor backstop", () => {
   it("drops matches on secret-classified paths even if globs were out-voted", () => {
     for (const path of [".env", "config/prod.env", "apps/site/.ENV", "secrets%2eenv"]) {
-      const data = parseRipgrepLine(
-        matchEvent({ path, lineText: "API_KEY=super-secret\n" }),
-      );
+      const data = parseRipgrepLine(matchEvent({ path, lineText: "API_KEY=super-secret\n" }));
       expect(data, path).not.toBeNull();
       expect(toSearchEntries(data ?? {}), path).toEqual([]);
     }
@@ -363,26 +361,17 @@ describe("startRipgrepSearch (real rg)", () => {
 
   it("filters disallowed paths before they can consume the total-match cap", async () => {
     const root = await makeRoot();
-    const body = Array.from(
-      { length: 300 },
-      (_, i) => `line ${i} capmatch`,
-    ).join("\n");
+    const body = Array.from({ length: 300 }, (_, i) => `line ${i} capmatch`).join("\n");
     await Promise.all(
-      Array.from({ length: 15 }, (_, i) =>
-        writeFile(join(root, `recipient-${i}.md`), body),
-      ),
+      Array.from({ length: 15 }, (_, i) => writeFile(join(root, `recipient-${i}.md`), body)),
     );
     await writeFile(join(root, "canonical.md"), "one capmatch\n");
 
-    const batches = await runSearch(
-      root,
-      { query: "capmatch" },
-      (path) => path === "canonical.md",
-    );
+    const batches = await runSearch(root, { query: "capmatch" }, (path) => path === "canonical.md");
 
-    expect(
-      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
-    ).toEqual(["canonical.md"]);
+    expect(batches.flatMap((batch) => batch.entries).map((entry) => entry.path)).toEqual([
+      "canonical.md",
+    ]);
     expect(batches.at(-1)).toMatchObject({ done: true, limitHit: false });
   });
 
@@ -476,14 +465,7 @@ describe("createSearchRegistry", () => {
     const root = await createTestScratch("dohc-reg-");
     await registry.startSearch(1, root, "old", { query: "a" }, () => {}, current());
 
-    const replacement = registry.startSearch(
-      1,
-      root,
-      "new",
-      { query: "b" },
-      () => {},
-      current(),
-    );
+    const replacement = registry.startSearch(1, root, "new", { query: "b" }, () => {}, current());
     await vi.waitFor(() => expect(children[0]?.killed).toBe(true));
     expect(children.map((child) => child.searchId)).toEqual(["old"]);
 
@@ -514,27 +496,13 @@ describe("createSearchRegistry", () => {
         };
       },
     });
-    await registry.startSearch(
-      1,
-      root,
-      "old",
-      { query: "a" },
-      () => {},
-      current(),
-    );
+    await registry.startSearch(1, root, "old", { query: "a" }, () => {}, current());
 
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       let replaced = false;
       const replacement = registry
-        .startSearch(
-          1,
-          root,
-          "new",
-          { query: "b" },
-          () => {},
-          current(),
-        )
+        .startSearch(1, root, "new", { query: "b" }, () => {}, current())
         .then(() => {
           replaced = true;
         });
@@ -630,9 +598,9 @@ describe("createSearchRegistry", () => {
         .catch(reject);
     });
 
-    expect(
-      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
-    ).toEqual(["canonical.md"]);
+    expect(batches.flatMap((batch) => batch.entries).map((entry) => entry.path)).toEqual([
+      "canonical.md",
+    ]);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -651,26 +619,12 @@ describe("createSearchRegistry", () => {
       },
     });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(
-      1,
-      root,
-      "current",
-      { query: "a" },
-      () => {},
-      current(),
-    );
-    await registry.startSearch(
-      1,
-      root,
-      "stale",
-      { query: "b" },
-      () => {},
-      {
-        attachmentId,
-        signal: new AbortController().signal,
-        isCurrent: () => false,
-      },
-    );
+    await registry.startSearch(1, root, "current", { query: "a" }, () => {}, current());
+    await registry.startSearch(1, root, "stale", { query: "b" }, () => {}, {
+      attachmentId,
+      signal: new AbortController().signal,
+      isCurrent: () => false,
+    });
     expect(started).toEqual(["current"]);
     expect(killed).toEqual([]);
     await rm(root, { recursive: true, force: true });
@@ -805,24 +759,18 @@ describe("mountScopedIncludeGlob", () => {
     expect(mountScopedIncludeGlob("")).toBe("shared-with-me/**");
     // Projection-targeting globs pass through.
     expect(mountScopedIncludeGlob("shared-with-me/**")).toBe("shared-with-me/**");
-    expect(mountScopedIncludeGlob("shared-with-me/alex/**")).toBe(
-      "shared-with-me/alex/**",
-    );
+    expect(mountScopedIncludeGlob("shared-with-me/alex/**")).toBe("shared-with-me/alex/**");
     // Basename globs float to any depth in rg's gitignore semantics, so
     // they intersect mounts and get scoped.
     expect(mountScopedIncludeGlob("*.md")).toBe("shared-with-me/**/*.md");
     expect(mountScopedIncludeGlob("brief.*")).toBe("shared-with-me/**/brief.*");
     // Case-variant projection globs normalize their prefix to the on-disk
     // casing (rg glob matching is byte-wise).
-    expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe(
-      "shared-with-me/alex/**",
-    );
+    expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe("shared-with-me/alex/**");
     // Recursive "**/"-prefixed globs are not root-anchored and do match
     // mounted files — they scope under the projection.
     expect(mountScopedIncludeGlob("**/*.md")).toBe("shared-with-me/**/*.md");
-    expect(mountScopedIncludeGlob("**/docs/**/*.md")).toBe(
-      "shared-with-me/**/docs/**/*.md",
-    );
+    expect(mountScopedIncludeGlob("**/docs/**/*.md")).toBe("shared-with-me/**/docs/**/*.md");
     // Anchored path globs outside the projection cannot match under it.
     expect(mountScopedIncludeGlob("notes/**")).toBeNull();
     expect(mountScopedIncludeGlob("docs/plan.md")).toBeNull();

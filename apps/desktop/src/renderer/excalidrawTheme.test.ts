@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest";
 import { CSS_TOKEN_NAMES, palette, type ThemeTokens } from "./tokens";
 import { contrastRatio as contrast, mixHex as mix, readableAccent } from "./accentColor";
 
-const theme = readFileSync(new URL("./excalidrawTheme.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const theme = readFileSync(new URL("./excalidrawTheme.css", import.meta.url), "utf8").replace(
+  /\/\*[\s\S]*?\*\//g,
+  "",
+);
 // The build Excalidraw ships in production, which is what dohc packages.
 const dist = dirname(createRequire(import.meta.url).resolve("@excalidraw/excalidraw"));
 const excalidrawCss = readFileSync(join(dist, "index.css"), "utf8");
@@ -17,11 +20,22 @@ const block = (selector: string) => {
   return theme.slice(start, theme.indexOf("\n}", start));
 };
 const declarations = (css: string) =>
-  new Map([...css.matchAll(/(--[a-z0-9-]+):\s*([^;]+);/g)].map(([, name, value]) => [name!, value!.trim()]));
-const tokenKey = new Map(Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]));
+  new Map(
+    [...css.matchAll(/(--[a-z0-9-]+):\s*([^;]+);/g)].map(([, name, value]) => [
+      name!,
+      value!.trim(),
+    ]),
+  );
+const tokenKey = new Map(
+  Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]),
+);
 
 // A dohc token, or an sRGB mix of two, as the hex color it paints.
-function resolve(value: string | undefined, mode: "light" | "dark", accent = palette[mode].accent): string | undefined {
+function resolve(
+  value: string | undefined,
+  mode: "light" | "dark",
+  accent = palette[mode].accent,
+): string | undefined {
   const token = /^var\((--dohc-[a-z0-9-]+)\)$/.exec(value ?? "");
   if (token) {
     const key = tokenKey.get(token[1]!);
@@ -34,18 +48,23 @@ function resolve(value: string | undefined, mode: "light" | "dark", accent = pal
   return top && bottom ? mix(top, bottom, Number(mixed[2]) / 100) : undefined;
 }
 
-const channels = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
-const hexOf = (rgb: number[]) => `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
+const channels = (hex: string) =>
+  [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
+const hexOf = (rgb: number[]) =>
+  `#${rgb.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 const clip = (channel: number) => Math.min(255, Math.max(0, Math.round(channel)));
 
 // The dark selection's channels for an accent, before Chromium clips them.
 function drawnFor(accent: string): number[] {
-  const formula = declarations(block(':root[data-theme="dark"] .excalidraw')).get("--color-selection")!;
+  const formula = declarations(block(':root[data-theme="dark"] .excalidraw')).get(
+    "--color-selection",
+  )!;
   const [r, g, b] = channels(accent);
   const values = { r: r!, g: g!, b: b! };
   return [...formula.matchAll(/calc\(\(([^)]+)\) \/ ([\d.]+)\)/g)].map(([, sum, divisor]) => {
     const terms = [...sum!.matchAll(/([+-])?\s*([\d.]+)(?: \* ([rgb]))?/g)].map(
-      ([, sign, factor, channel]) => (sign === "-" ? -1 : 1) * Number(factor) * (channel ? values[channel as "r"] : 1),
+      ([, sign, factor, channel]) =>
+        (sign === "-" ? -1 : 1) * Number(factor) * (channel ? values[channel as "r"] : 1),
     );
     return terms.reduce((total, term) => total + term, 0) / Number(divisor);
   });
@@ -60,7 +79,9 @@ function shown(drawn: number[]): number[] {
     [0.426, 0.43, 0.144],
     [0.426, 1.43, -0.856],
   ];
-  return rotate.map((row) => row.reduce((total, factor, index) => total + factor * inverted[index]!, 0));
+  return rotate.map((row) =>
+    row.reduce((total, factor, index) => total + factor * inverted[index]!, 0),
+  );
 }
 
 describe("Excalidraw's chrome in dohc's tokens", () => {
@@ -91,17 +112,29 @@ describe("Excalidraw's chrome in dohc's tokens", () => {
     for (const channel of drawn) expect(channel).toBeGreaterThanOrEqual(-0.5);
     for (const channel of drawn) expect(channel).toBeLessThanOrEqual(255.5);
     const accent = channels(palette.dark.accent);
-    shown(drawn.map(clip)).forEach((channel, index) => expect(Math.abs(channel - accent[index]!)).toBeLessThanOrEqual(1));
+    shown(drawn.map(clip)).forEach((channel, index) =>
+      expect(Math.abs(channel - accent[index]!)).toBeLessThanOrEqual(1),
+    );
   });
 
   // The filter cannot show every color, so a saturated accent shows as the
   // nearest color it can, which must still stand out on a white canvas.
   it("keeps a saturated custom accent's selection visible on the dark canvas", () => {
     const canvas = hexOf(shown([255, 255, 255]).map(clip));
-    for (const chosen of ["#ff0000", "#00ff00", "#0000ff", "#00ffff", "#ff00ff", "#ffff00", "#ffffff"]) {
+    for (const chosen of [
+      "#ff0000",
+      "#00ff00",
+      "#0000ff",
+      "#00ffff",
+      "#ff00ff",
+      "#ffff00",
+      "#ffffff",
+    ]) {
       const accent = readableAccent(chosen, "dark");
       const selection = hexOf(shown(drawnFor(accent).map(clip)).map(clip));
-      expect(contrast(selection, canvas), `${chosen} shown as ${selection}`).toBeGreaterThanOrEqual(3);
+      expect(contrast(selection, canvas), `${chosen} shown as ${selection}`).toBeGreaterThanOrEqual(
+        3,
+      );
     }
   });
 
@@ -116,10 +149,16 @@ describe("Excalidraw's chrome in dohc's tokens", () => {
     ] as const;
     for (const mode of ["light", "dark"] as const) {
       for (const [foreground, background, minimum] of pairs) {
-        const [front, back] = [resolve(set.get(foreground), mode), resolve(set.get(background), mode)];
+        const [front, back] = [
+          resolve(set.get(foreground), mode),
+          resolve(set.get(background), mode),
+        ];
         expect(front, `${foreground} (${mode})`).toBeDefined();
         expect(back, `${background} (${mode})`).toBeDefined();
-        expect(contrast(front!, back!), `${foreground} on ${background} (${mode})`).toBeGreaterThanOrEqual(minimum);
+        expect(
+          contrast(front!, back!),
+          `${foreground} on ${background} (${mode})`,
+        ).toBeGreaterThanOrEqual(minimum);
       }
     }
   });
@@ -133,12 +172,18 @@ describe("Excalidraw's chrome in dohc's tokens", () => {
     const chosen = steps.flatMap((r) => steps.flatMap((g) => steps.map((b) => hexOf([r, g, b]))));
     chosen.push("#585838", "#5a5a5a", "#96a50f", "#ff0ff0", "#ff4bc3");
     for (const mode of ["light", "dark"] as const) {
-      for (const accent of [palette[mode].accent, ...chosen.map((hex) => readableAccent(hex, mode))]) {
+      for (const accent of [
+        palette[mode].accent,
+        ...chosen.map((hex) => readableAccent(hex, mode)),
+      ]) {
         const text = resolve(set.get("--color-primary-light"), mode, accent);
         for (const background of ["--color-primary", "--color-primary-hover"]) {
           const fill = resolve(set.get(background), mode, accent);
           expect(text && fill, `${background} (${mode})`).toBeDefined();
-          expect(contrast(text!, fill!), `${accent} ${background} (${mode})`).toBeGreaterThanOrEqual(4.5);
+          expect(
+            contrast(text!, fill!),
+            `${accent} ${background} (${mode})`,
+          ).toBeGreaterThanOrEqual(4.5);
         }
       }
     }

@@ -12,9 +12,11 @@ const REASONS = {
 
 // What happened and the next step. The renderer gives each its title.
 const MESSAGES: Record<ChatWakeProblem, string> = {
-  unreadable: "Agents here do not start for messages from your phone until it can. Restore or repair the file in Details before you try again.",
+  unreadable:
+    "Agents here do not start for messages from your phone until it can. Restore or repair the file in Details before you try again.",
   dropped: "The server no longer lists this computer for it, so nothing ran here.",
-  parked: "Its workspace stopped syncing here with this account. dohc starts it once the workspace syncs here again.",
+  parked:
+    "Its workspace stopped syncing here with this account. dohc starts it once the workspace syncs here again.",
   unconfirmed: "Its request is queued on this computer, and the server no longer lists it.",
 };
 
@@ -26,11 +28,13 @@ const LEDGER_UNREADABLE =
 
 // Why the server can't take this computer's agents, and the one thing to do.
 const REFUSALS: Record<ChatRunnerRefusal["reason"], string> = {
-  "too-many-agents": "The server takes up to 64 agents from each computer, and this one has more. Remove some in Settings › Agents.",
+  "too-many-agents":
+    "The server takes up to 64 agents from each computer, and this one has more. Remove some in Settings › Agents.",
   "same-name": "Two agents' names read as one name in chat. Rename one in Settings › Agents.",
   "agent-name": "The server cannot take one agent's name. Rename it in Settings › Agents.",
   "agent-id": "The server cannot take one agent's ID. Change it in your settings file.",
-  "computer-label": "The server cannot take this computer's name. Rename this computer in your system settings.",
+  "computer-label":
+    "The server cannot take this computer's name. Rename this computer in your system settings.",
   "install-id": "The server cannot take this computer's ID.",
 };
 
@@ -67,13 +71,15 @@ export function createChatWakeNotices(deps: {
     return {
       report(): void {
         let workspaceIds: readonly string[];
-        try { workspaceIds = deps.workspaces(); }
-        catch (error) {
+        try {
+          workspaceIds = deps.workspaces();
+        } catch (error) {
           deps.log(error);
           return;
         }
         for (const id of workspaceIds) {
-          if (!shownIn.has(id) && attempt(() => deps.report(id, { reason, message, file }))) shownIn.add(id);
+          if (!shownIn.has(id) && attempt(() => deps.report(id, { reason, message, file })))
+            shownIn.add(id);
         }
       },
       clear(): void {
@@ -86,13 +92,19 @@ export function createChatWakeNotices(deps: {
   const intentsFile = fileRows(REASONS.unreadable, MESSAGES.unreadable, deps.file);
   const ledgerFile = fileRows("wake-runners-unreadable", LEDGER_UNREADABLE, deps.ledgerFile);
   return {
-    report(workspaceId: string | null, problem: ChatWakeProblem, intent: ChatWakeIntent | null): void {
+    report(
+      workspaceId: string | null,
+      problem: ChatWakeProblem,
+      intent: ChatWakeIntent | null,
+    ): void {
       if (workspaceId === null) return intentsFile.report();
       // The lifetime counts the row as shown only if this returns.
       deps.report(workspaceId, {
         reason: REASONS[problem],
         message: MESSAGES[problem],
-        ...(intent ? { threadId: intent.threadId, messageId: intent.messageId, wakeId: intent.wakeId } : {}),
+        ...(intent
+          ? { threadId: intent.threadId, messageId: intent.messageId, wakeId: intent.wakeId }
+          : {}),
       });
     },
     /** The declarations ledger could not be read. Offered again on each failed read. */

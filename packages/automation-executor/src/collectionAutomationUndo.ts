@@ -7,7 +7,11 @@ import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import type { StoredRun, UndoKeptField, UndoWrite } from "./automationRunStore";
 import { sharedFileUpdateKey, sharedReversalsOf } from "./automationRunStore";
 import { unrecordedEffect } from "./automationStepRun";
-import { rebaseRun, type CollectionAutomationReads, type CollectionRecordWrites } from "./collectionAutomationRun";
+import {
+  rebaseRun,
+  type CollectionAutomationReads,
+  type CollectionRecordWrites,
+} from "./collectionAutomationRun";
 
 // Undo for one run of a Collection automation (AGENTS.md: every reversible
 // change gets a way back). A field goes back to what it held before the run
@@ -57,7 +61,10 @@ export interface CollectionAutomationUndoDependencies {
   recordReversal?(write: UndoWrite): Promise<void>;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
-  withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
+  withRecordWrites<T>(
+    signal: AbortSignal,
+    work: (writes: CollectionRecordWrites) => Promise<T>,
+  ): Promise<T>;
   /** Moves a file to the trash the way a person's delete does. */
   trash(path: string): Promise<void>;
   /** Where the document Collection with this id is now, or null when this workspace has none. */
@@ -81,44 +88,104 @@ interface RecordChanges {
  * without recording it. A record such an effect may have added is among
  * `added`, and is found only if it exists.
  */
-export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<string, string>; records: Map<string, RecordChanges> } {
+export function documentUndoChanges(runs: readonly StoredRun[]): {
+  added: Map<string, string>;
+  records: Map<string, RecordChanges>;
+} {
   const added = new Map<string, string>();
   const records = new Map<string, RecordChanges>();
-  const activeScopes = new Set(runs.filter(run => run.undo !== "done").flatMap(run => run.undoScope ? [run.undoScope] : []));
-  const completedCreations = new Set(runs.filter(run => run.undo === "done" && run.undoScope && activeScopes.has(run.undoScope)).flatMap(run => [
-    ...run.created.map(created => created.recordId),
-    ...run.applied.flatMap(step => step.writes.filter(write => write.kind === "created").map(write => write.recordId)),
-  ]));
-  const fallbackScope = createHash("sha256").update(JSON.stringify(runs.filter(run => run.undo !== "done" ||
-    sharedReversalsOf([run]).some(write => write.state === "not-accepted"))
-    .map(run => [run.automationId, run.claimId, run.keySeed]).sort())).digest("hex");
+  const activeScopes = new Set(
+    runs
+      .filter((run) => run.undo !== "done")
+      .flatMap((run) => (run.undoScope ? [run.undoScope] : [])),
+  );
+  const completedCreations = new Set(
+    runs
+      .filter((run) => run.undo === "done" && run.undoScope && activeScopes.has(run.undoScope))
+      .flatMap((run) => [
+        ...run.created.map((created) => created.recordId),
+        ...run.applied.flatMap((step) =>
+          step.writes.filter((write) => write.kind === "created").map((write) => write.recordId),
+        ),
+      ]),
+  );
+  const fallbackScope = createHash("sha256")
+    .update(
+      JSON.stringify(
+        runs
+          .filter(
+            (run) =>
+              run.undo !== "done" ||
+              sharedReversalsOf([run]).some((write) => write.state === "not-accepted"),
+          )
+          .map((run) => [run.automationId, run.claimId, run.keySeed])
+          .sort(),
+      ),
+    )
+    .digest("hex");
   const wrote = (recordId: string, path: string, field: string, write: FieldWrite) => {
-    const record = records.get(recordId) ?? { recordId, path, fields: new Map<string, FieldWrite[]>() };
+    const record = records.get(recordId) ?? {
+      recordId,
+      path,
+      fields: new Map<string, FieldWrite[]>(),
+    };
     record.path = path;
     record.fields.set(field, [...(record.fields.get(field) ?? []), write]);
     records.set(recordId, record);
   };
   for (const run of [...runs].sort((left, right) => left.startedAtMs - right.startedAtMs)) {
-    const refused = run.undo === "done" && !(run.undoScope && activeScopes.has(run.undoScope)) ? new Set(sharedReversalsOf([run]).filter(write => write.state === "not-accepted")
-      .map(write => JSON.stringify([write.recordId, write.field]))) : null;
+    const refused =
+      run.undo === "done" && !(run.undoScope && activeScopes.has(run.undoScope))
+        ? new Set(
+            sharedReversalsOf([run])
+              .filter((write) => write.state === "not-accepted")
+              .map((write) => JSON.stringify([write.recordId, write.field])),
+          )
+        : null;
     if (refused?.size === 0) continue;
     const scope = run.undoScope ?? fallbackScope;
     // A record is listed as created before its fields are written, so one a
     // run stopped after creating is still found.
-    if (run.undo !== "done") for (const created of run.created) if (!completedCreations.has(created.recordId)) added.set(created.recordId, created.path);
+    if (run.undo !== "done")
+      for (const created of run.created)
+        if (!completedCreations.has(created.recordId)) added.set(created.recordId, created.path);
     for (const [index, { writes }] of run.applied.entries()) {
       for (const write of writes) {
-        if (write.kind === "created" && run.undo !== "done" && !completedCreations.has(write.recordId)) added.set(write.recordId, write.path);
-        if (write.kind === "field" && !completedCreations.has(write.recordId) && (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))) {
-          wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: writeConfirmed(run, index, write), scope });
+        if (
+          write.kind === "created" &&
+          run.undo !== "done" &&
+          !completedCreations.has(write.recordId)
+        )
+          added.set(write.recordId, write.path);
+        if (
+          write.kind === "field" &&
+          !completedCreations.has(write.recordId) &&
+          (refused === null || refused.has(JSON.stringify([write.recordId, write.field])))
+        ) {
+          wrote(write.recordId, write.path, write.field, {
+            before: write.before,
+            after: write.after,
+            sure: writeConfirmed(run, index, write),
+            scope,
+          });
         }
       }
     }
     const unrecorded = refused === null ? unrecordedEffect(run)?.effect : undefined;
-    if (unrecorded?.kind === "add" && !completedCreations.has(unrecorded.recordId) && !run.created.some((created) => created.planned === unrecorded.recordId)) {
+    if (
+      unrecorded?.kind === "add" &&
+      !completedCreations.has(unrecorded.recordId) &&
+      !run.created.some((created) => created.planned === unrecorded.recordId)
+    ) {
       added.set(unrecorded.recordId, `${unrecorded.collectionPath}/${unrecorded.name}.md`);
     } else if (unrecorded?.kind === "set" && !completedCreations.has(unrecorded.target.recordId)) {
-      for (const { field, before, after } of unrecorded.fields) wrote(unrecorded.target.recordId, unrecorded.target.path, field, { before, after, sure: false, scope });
+      for (const { field, before, after } of unrecorded.fields)
+        wrote(unrecorded.target.recordId, unrecorded.target.path, field, {
+          before,
+          after,
+          sure: false,
+          scope,
+        });
     }
   }
   return { added, records };
@@ -133,7 +200,11 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
  * chain left straight to that value, so an Undo that stops part way leaves
  * each field where it was or where it goes.
  */
-function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValue[]; scope: string } {
+function wayBack(writes: readonly FieldWrite[]): {
+  to: JsonValue;
+  from: JsonValue[];
+  scope: string;
+} {
   const last = writes.at(-1)!;
   const from = last.sure ? [last.after] : [last.after, last.before];
   let uncertain = !last.sure;
@@ -149,7 +220,11 @@ function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValu
     else if (!earlier.sure && isDeepStrictEqual(earlier.before, value)) continue;
     else break;
   }
-  return { to: value, from: from.filter((candidate) => !isDeepStrictEqual(candidate, value)), scope: last.scope };
+  return {
+    to: value,
+    from: from.filter((candidate) => !isDeepStrictEqual(candidate, value)),
+    scope: last.scope,
+  };
 }
 
 /** Where the record with `recordId` is now and whether it has a sync conflict, or null when it left the Collection. */
@@ -160,7 +235,11 @@ async function locate(
 ): Promise<{ path: string; conflicted: boolean } | null> {
   const found = await dependencies.withReads(async (reads) => {
     try {
-      const { record } = await reads.getCollectionRecord({ collectionPath: posix.dirname(path), recordId, historyLimit: 1 });
+      const { record } = await reads.getCollectionRecord({
+        collectionPath: posix.dirname(path),
+        recordId,
+        historyLimit: 1,
+      });
       return { record: { path: record.path, conflicted: record.conflicted } };
     } catch (error) {
       if (error instanceof Error && error.message === RECORD_NOT_FOUND) return { record: null };
@@ -186,35 +265,79 @@ export async function undoCollectionAutomationRuns(
   only?: ReadonlyArray<{ recordId: string; field: string }>,
   onlyRecordId?: string,
   prepared?: ReturnType<typeof documentUndoChanges>,
-): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[]; undoWrites: UndoWrite[] }> {
+): Promise<{
+  undone: CollectionAutomationUndone;
+  keptFields: UndoKeptField[];
+  undoWrites: UndoWrite[];
+}> {
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
-  const { added, records } = prepared ?? documentUndoChanges((only ? runs.map(run => ({...run, undo: null, undoScope: run.undoKeptScope ?? run.undoScope})) : runs).map((run) => {
-    const moved = structuredClone(run);
-    rebaseRun(moved, (collectionId) => dependencies.collectionPathOf(collectionId));
-    return moved;
-  }));
+  const { added, records } =
+    prepared ??
+    documentUndoChanges(
+      (only
+        ? runs.map((run) => ({ ...run, undo: null, undoScope: run.undoKeptScope ?? run.undoScope }))
+        : runs
+      ).map((run) => {
+        const moved = structuredClone(run);
+        rebaseRun(moved, (collectionId) => dependencies.collectionPathOf(collectionId));
+        return moved;
+      }),
+    );
   const undone: CollectionAutomationUndone = {
-    reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
+    reverted: 0,
+    removed: 0,
+    deleted: 0,
+    kept: 0,
+    keptChanged: 0,
+    gone: 0,
+    changedSince: 0,
+    missing: 0,
+    irreversible: 0,
+    actions: 0,
+    actionsReversed: 0,
   };
   const keptFields: UndoKeptField[] = [];
-  const activeRuns = only ? runs : runs.filter(run => run.undo !== "done" || sharedReversalsOf([run]).some(write => write.state === "not-accepted"));
-  const undoWrites = [...new Map(activeRuns.flatMap(run => run.undoWrites ?? []).map(write =>
-    [JSON.stringify([write.recordId, write.field]), write])).values()]
-    .filter(write => onlyRecordId === undefined || write.recordId === onlyRecordId);
-  const refusedReversals = sharedReversalsOf(runs).filter(write => write.state === "not-accepted");
-  const refusedFields = new Set(refusedReversals.map(write => JSON.stringify([write.recordId, write.field])));
-  const recordedFields = new Set(undoWrites.map(write => JSON.stringify([write.recordId, write.field])));
-  const tried = only ? new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field]))) : null;
+  const activeRuns = only
+    ? runs
+    : runs.filter(
+        (run) =>
+          run.undo !== "done" ||
+          sharedReversalsOf([run]).some((write) => write.state === "not-accepted"),
+      );
+  const undoWrites = [
+    ...new Map(
+      activeRuns
+        .flatMap((run) => run.undoWrites ?? [])
+        .map((write) => [JSON.stringify([write.recordId, write.field]), write]),
+    ).values(),
+  ].filter((write) => onlyRecordId === undefined || write.recordId === onlyRecordId);
+  const refusedReversals = sharedReversalsOf(runs).filter(
+    (write) => write.state === "not-accepted",
+  );
+  const refusedFields = new Set(
+    refusedReversals.map((write) => JSON.stringify([write.recordId, write.field])),
+  );
+  const recordedFields = new Set(
+    undoWrites.map((write) => JSON.stringify([write.recordId, write.field])),
+  );
+  const tried = only
+    ? new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field])))
+    : null;
   for (const record of records.values()) {
     if (onlyRecordId !== undefined && record.recordId !== onlyRecordId) continue;
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId) && tried === null) continue;
-    const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => {
-      const key = JSON.stringify([record.recordId, field]);
-      return from.length > 0 && (tried === null || tried.has(key)) &&
-        (tried !== null || !recordedFields.has(key) || refusedFields.has(key));
-    });
+    const fields = [...record.fields]
+      .map(([field, writes]) => ({ field, ...wayBack(writes) }))
+      .filter(({ field, from }) => {
+        const key = JSON.stringify([record.recordId, field]);
+        return (
+          from.length > 0 &&
+          (tried === null || tried.has(key)) &&
+          (tried !== null || !recordedFields.has(key) || refusedFields.has(key))
+        );
+      });
     if (fields.length === 0) continue;
     const found = await locate(dependencies, record.path, record.recordId);
     if (found === null) {
@@ -231,34 +354,59 @@ export async function undoCollectionAutomationRuns(
       let result: Awaited<ReturnType<CollectionRecordWrites["setFields"]>>;
       try {
         result = await dependencies.withRecordWrites(signal, async (edit) => {
-          const combined: Awaited<ReturnType<CollectionRecordWrites["setFields"]>> = {replaced: {}, kept: {}};
+          const combined: Awaited<ReturnType<CollectionRecordWrites["setFields"]>> = {
+            replaced: {},
+            kept: {},
+          };
           // A refused shared field needs a new key. Other fields keep their
           // original keys, even when the same record has a refused reversal.
           const groups = new Map<string, typeof pending>();
           for (const entry of pending) {
-            const refused = refusedReversals.find(write => write.recordId === record.recordId && write.field === entry.field);
-            const key = JSON.stringify([entry.scope, refused ? [entry.field, sharedFileUpdateKey(refused.draft)] : null]);
+            const refused = refusedReversals.find(
+              (write) => write.recordId === record.recordId && write.field === entry.field,
+            );
+            const key = JSON.stringify([
+              entry.scope,
+              refused ? [entry.field, sharedFileUpdateKey(refused.draft)] : null,
+            ]);
             const group = groups.get(key);
             if (group) group.push(entry);
             else groups.set(key, [entry]);
           }
           for (const group of groups.values()) {
-            const fields = new Set(group.map(entry => entry.field));
+            const fields = new Set(group.map((entry) => entry.field));
             const written = await edit.setFields({
               recordPath: path,
               fields: Object.fromEntries(group.map(({ field, to }) => [field, to])),
-              expectedBefore: Object.fromEntries(group.map(({ field, from, attempt }) => [field, from[attempt]])),
+              expectedBefore: Object.fromEntries(
+                group.map(({ field, from, attempt }) => [field, from[attempt]]),
+              ),
               preserveCompletedFields: true,
-              idempotencyKeyPrefix: `automation-undo/${createHash("sha256").update(JSON.stringify([
-                group[0]!.scope, record.recordId,
-                refusedReversals.filter(write => write.recordId === record.recordId && fields.has(write.field))
-                  .map(write => JSON.stringify([write.field, sharedFileUpdateKey(write.draft)])).sort(),
-              ])).digest("hex")}`,
+              idempotencyKeyPrefix: `automation-undo/${createHash("sha256")
+                .update(
+                  JSON.stringify([
+                    group[0]!.scope,
+                    record.recordId,
+                    refusedReversals
+                      .filter(
+                        (write) => write.recordId === record.recordId && fields.has(write.field),
+                      )
+                      .map((write) =>
+                        JSON.stringify([write.field, sharedFileUpdateKey(write.draft)]),
+                      )
+                      .sort(),
+                  ]),
+                )
+                .digest("hex")}`,
               author: PERSON,
             });
-            combined.replaced = {...combined.replaced, ...written.replaced};
-            combined.kept = {...combined.kept, ...written.kept};
-            if (written.sharedFileUpdates) combined.sharedFileUpdates = {...combined.sharedFileUpdates, ...written.sharedFileUpdates};
+            combined.replaced = { ...combined.replaced, ...written.replaced };
+            combined.kept = { ...combined.kept, ...written.kept };
+            if (written.sharedFileUpdates)
+              combined.sharedFileUpdates = {
+                ...combined.sharedFileUpdates,
+                ...written.sharedFileUpdates,
+              };
           }
           return combined;
         });
@@ -269,10 +417,15 @@ export async function undoCollectionAutomationRuns(
         if (now?.conflicted) throw new RecordConflictError(now.path);
         throw error;
       }
-      for (const field of new Set([...Object.keys(result.replaced), ...Object.keys(result.sharedFileUpdates ?? {})])) {
+      for (const field of new Set([
+        ...Object.keys(result.replaced),
+        ...Object.keys(result.sharedFileUpdates ?? {}),
+      ])) {
         const draft = result.sharedFileUpdates?.[field];
         if (!draft && Object.hasOwn(result.replaced, field)) undone.reverted += 1;
-        const prior = undoWrites.findIndex(write => write.recordId === record.recordId && write.field === field);
+        const prior = undoWrites.findIndex(
+          (write) => write.recordId === record.recordId && write.field === field,
+        );
         if (prior >= 0) undoWrites.splice(prior, 1);
         if (draft) {
           const write = { recordId: record.recordId, field, draft };
@@ -286,12 +439,20 @@ export async function undoCollectionAutomationRuns(
         const current = result.kept[entry.field] as JsonValue;
         // Already back, from an Undo that stopped part way.
         if (isDeepStrictEqual(current, entry.to)) continue;
-        const again = entry.from.findIndex((candidate, index) => index > entry.attempt && isDeepStrictEqual(candidate, current));
+        const again = entry.from.findIndex(
+          (candidate, index) => index > entry.attempt && isDeepStrictEqual(candidate, current),
+        );
         if (again >= 0) next.push({ ...entry, attempt: again });
         else {
           undone.changedSince += 1;
           // Document field names are also their identity; datasets use separate field ids.
-          keptFields.push({ recordId: record.recordId, field: entry.field, path, fieldName: entry.field, datasetRecordId: null });
+          keptFields.push({
+            recordId: record.recordId,
+            field: entry.field,
+            path,
+            fieldName: entry.field,
+            datasetRecordId: null,
+          });
         }
       }
       pending = next;

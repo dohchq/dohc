@@ -15,10 +15,7 @@ export async function waitForReceivedShareCaptureReady(input: {
     input.assertCurrent();
     const status = await input.readStatus();
     input.assertCurrent();
-    if (
-      status.terminal ||
-      (status.phase !== "starting" && status.phase !== "importing")
-    ) {
+    if (status.terminal || (status.phase !== "starting" && status.phase !== "importing")) {
       return;
     }
     await (input.waitForPoll?.() ?? delay(CAPTURE_READY_POLL_MS));

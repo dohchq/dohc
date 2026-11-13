@@ -12,9 +12,20 @@ export function GlassCircle({ size, children }: { size: number; children: ReactN
   const light = useColorScheme() !== "dark";
   if (liquidGlass) {
     // Over flat paper, glass has nothing to refract; a faint ink tint keeps the control visible in light mode.
-    return <GlassView isInteractive glassEffectStyle="regular" tintColor={light ? "rgba(28, 27, 24, 0.06)" : undefined} style={[styles.center, shape]}>{children}</GlassView>;
+    return (
+      <GlassView
+        isInteractive
+        glassEffectStyle="regular"
+        tintColor={light ? "rgba(28, 27, 24, 0.06)" : undefined}
+        style={[styles.center, shape]}
+      >
+        {children}
+      </GlassView>
+    );
   }
   return <View style={[styles.center, shape, { backgroundColor: theme.line }]}>{children}</View>;
 }
 
-const styles = StyleSheet.create({ center: { alignItems: "center", justifyContent: "center", overflow: "hidden" } });
+const styles = StyleSheet.create({
+  center: { alignItems: "center", justifyContent: "center", overflow: "hidden" },
+});

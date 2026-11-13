@@ -20,10 +20,7 @@ export function registerNativeMenusIpcHandlers<
     assertCurrent(): void;
   },
 >(dependencies: {
-  registerHandler(
-    channel: string,
-    handler: (event: Event, payload: unknown) => unknown,
-  ): void;
+  registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
   app: { readonly isPackaged: boolean };
   exactRendererWorkspaceReferences: ReturnType<
@@ -46,8 +43,7 @@ export function registerNativeMenusIpcHandlers<
   registerHandler(CHANNELS.showWorkbenchMenu, async (event, payload) => {
     assertTrustedSender(event);
     const input = ShowWorkbenchMenuPayload.parse(payload);
-    const inactiveMessage =
-      "Workbench menu stopped because this window changed workspaces.";
+    const inactiveMessage = "Workbench menu stopped because this window changed workspaces.";
     const workspaceReference = await exactRendererWorkspaceReferences.capture(
       event.sender,
       input.workspaceId,

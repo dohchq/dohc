@@ -38,39 +38,63 @@ it("writes version 1 on capture and replacement and restores both", () => {
 
 // A deleted file's draft keeps saying so after a restart.
 it("restores why main set a draft aside, and refuses a reason it does not know", () => {
-  const recovery = { objectId: "object", updateBase64: "AAA=", recordId: "a".repeat(64), reason: "deleted" as const };
+  const recovery = {
+    objectId: "object",
+    updateBase64: "AAA=",
+    recordId: "a".repeat(64),
+    reason: "deleted" as const,
+  };
   expect(storeDraft({ ...draft, recovery })).toBe(true);
   expect(loadStoredDrafts(now)).toEqual([expect.objectContaining({ recovery })]);
   clearStoredDrafts();
-  localStorage.setItem(key, JSON.stringify({ ...draft, version: 1, recovery: { ...recovery, reason: "unknown" } }));
+  localStorage.setItem(
+    key,
+    JSON.stringify({ ...draft, version: 1, recovery: { ...recovery, reason: "unknown" } }),
+  );
   expect(loadStoredDrafts(now)).toEqual([]);
 });
 
 it("preserves a superseded key another window changed before cleanup", () => {
-  const original = JSON.stringify({...draft, version: 1});
+  const original = JSON.stringify({ ...draft, version: 1 });
   localStorage.setItem(key, original);
   loadStoredDrafts(now);
-  const changed = JSON.stringify({...draft, text: "another window typing", version: 1});
+  const changed = JSON.stringify({ ...draft, text: "another window typing", version: 1 });
   const setItem = Storage.prototype.setItem;
-  const intercepted = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, nextKey, raw) {
+  const intercepted = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+    this: Storage,
+    nextKey,
+    raw,
+  ) {
     setItem.call(this, nextKey, raw);
     if (nextKey !== key) setItem.call(this, key, changed);
   });
-  try {expect(replaceStoredDraft({...draft, text: "newer typing"})).toBe(true);}
-  finally {intercepted.mockRestore();}
+  try {
+    expect(replaceStoredDraft({ ...draft, text: "newer typing" })).toBe(true);
+  } finally {
+    intercepted.mockRestore();
+  }
   expect(localStorage.getItem(key)).toBe(changed);
-  expect(loadStoredDrafts(now).map(row => row.text).sort()).toEqual(["another window typing", "newer typing"]);
+  expect(
+    loadStoredDrafts(now)
+      .map((row) => row.text)
+      .sort(),
+  ).toEqual(["another window typing", "newer typing"]);
 });
 
 it("keeps the superseded key when the new copy cannot be written", () => {
-  const original = JSON.stringify({...draft, version: 1});
+  const original = JSON.stringify({ ...draft, version: 1 });
   localStorage.setItem(key, original);
   loadStoredDrafts(now);
-  const refused = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {throw new Error("quota exceeded");});
-  try {expect(replaceStoredDraft({...draft, text: "newer typing"})).toBe(false);}
-  finally {refused.mockRestore();}
+  const refused = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+    throw new Error("quota exceeded");
+  });
+  try {
+    expect(replaceStoredDraft({ ...draft, text: "newer typing" })).toBe(false);
+  } finally {
+    refused.mockRestore();
+  }
   expect(localStorage.getItem(key)).toBe(original);
-  expect(loadStoredDrafts(now).map(row => row.text)).toEqual([draft.text]);
+  expect(loadStoredDrafts(now).map((row) => row.text)).toEqual([draft.text]);
 });
 
 describe.each([{}, { version: 1 }])("supported format %j", (version) => {

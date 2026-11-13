@@ -3,14 +3,23 @@ import { DOCUMENT_END } from "./helpers/keys";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, explorerRow, openWorkspaceFromFirstRun, waitForWorkspaceFile, writeWorkspaceFiles } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  explorerRow,
+  openWorkspaceFromFirstRun,
+  waitForWorkspaceFile,
+  writeWorkspaceFiles,
+} from "./helpers/workspace";
 
 test("@verification-smoke an editor change reaches disk and survives restart", async () => {
   test.setTimeout(120_000);
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(workspace, [{ path: "proof.md", contents: "# Verification\n\nOriginal paragraph.\n" }]);
+    await writeWorkspaceFiles(workspace, [
+      { path: "proof.md", contents: "# Verification\n\nOriginal paragraph.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace });
     const opened = await openWorkspaceFromFirstRun(desktop.page, workspace);
     await waitForWorkspaceFile(desktop.page, opened.workspaceId, "proof.md");
@@ -20,24 +29,36 @@ test("@verification-smoke an editor change reaches disk and survives restart", a
     await editor.click();
     await desktop.page.keyboard.press(DOCUMENT_END);
     await desktop.page.keyboard.type(" Durable verification edit.");
-    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
+    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute(
+      "data-state",
+      "saved",
+    );
     // The saved note ends with exactly one line break after the edit.
-    await expect.poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8")).toMatch(/Durable verification edit\.\n$/);
+    await expect
+      .poll(() => readFile(join(workspace.rootPath, "proof.md"), "utf8"))
+      .toMatch(/Durable verification edit\.\n$/);
     await desktop.close();
     desktop = null;
     desktop = await launchDesktopApp({ workspace });
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     await waitForWorkspaceFile(desktop.page, opened.workspaceId, "proof.md");
     await explorerRow(desktop.page, "proof.md").click();
-    await expect(desktop.page.getByTestId("markdown-editor")).toContainText("Durable verification edit.");
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(
+      "Durable verification edit.",
+    );
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
     await desktop.close();
     desktop = null;
-  } finally { await cleanupDesktopWorkspace(desktop, workspace); }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
 });
 
 test("@artifact-proof a failing run keeps its desktop evidence", async () => {
-  test.skip(process.env.DOHC_QA_ARTIFACT_PROBE !== "1", "Only the artifact verifier invokes this intentional failure.");
+  test.skip(
+    process.env.DOHC_QA_ARTIFACT_PROBE !== "1",
+    "Only the artifact verifier invokes this intentional failure.",
+  );
   const workspace = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -45,5 +66,7 @@ test("@artifact-proof a failing run keeps its desktop evidence", async () => {
     await expect(desktop.page.getByTestId("first-run-open-share")).toBeVisible();
     await desktop.page.evaluate(() => console.log("verification-artifact-sentinel"));
     expect("intentional artifact probe").toBe("failure required");
-  } finally { await cleanupDesktopWorkspace(desktop, workspace); }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, workspace);
+  }
 });

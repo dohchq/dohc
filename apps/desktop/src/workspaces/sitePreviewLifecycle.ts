@@ -212,10 +212,7 @@ export function createSitePreviewLifecycle<
 
   const supersedeOlderStarts = (pending: PendingStart): void => {
     for (const older of pendingBySite.get(pending.siteKey) ?? []) {
-      if (
-        older.sequence < pending.sequence &&
-        older.phase !== "executing"
-      ) {
+      if (older.sequence < pending.sequence && older.phase !== "executing") {
         older.controller.abort();
       }
     }
@@ -252,10 +249,7 @@ export function createSitePreviewLifecycle<
     });
   };
 
-  const stopRetained = (
-    key: string,
-    record: StoppingPreview,
-  ): Promise<void> => {
+  const stopRetained = (key: string, record: StoppingPreview): Promise<void> => {
     if (record.stopAttempt) return record.stopAttempt;
     const attempt = Promise.resolve()
       .then(() => record.handle.stop())
@@ -268,10 +262,7 @@ export function createSitePreviewLifecycle<
         if (activePreviews.get(key) === record) activePreviews.delete(key);
       })
       .finally(() => {
-        if (
-          activePreviews.get(key) === record &&
-          record.stopAttempt === attempt
-        ) {
+        if (activePreviews.get(key) === record && record.stopAttempt === attempt) {
           record.stopAttempt = null;
         }
       });
@@ -279,10 +270,7 @@ export function createSitePreviewLifecycle<
     return attempt;
   };
 
-  const stopCurrent = async (
-    key: string,
-    expected?: SitePreviewHandle,
-  ): Promise<void> => {
+  const stopCurrent = async (key: string, expected?: SitePreviewHandle): Promise<void> => {
     const active = activePreviews.get(key);
     if (expected && active?.handle !== expected) return;
     if (!active) return;
@@ -340,9 +328,7 @@ export function createSitePreviewLifecycle<
     const active = activePreviews.get(key);
     if (active) {
       if (active.handle !== handle) {
-        throw new Error(
-          "A different app preview already owns this workspace and app.",
-        );
+        throw new Error("A different app preview already owns this workspace and app.");
       }
       await stopCurrent(key, handle);
       return;
@@ -361,15 +347,11 @@ export function createSitePreviewLifecycle<
     await stopRetained(key, stopping);
   };
 
-  const failAfterCleanup = async (
-    error: unknown,
-    cleanup: () => Promise<void>,
-  ): Promise<never> => {
+  const failAfterCleanup = async (error: unknown, cleanup: () => Promise<void>): Promise<never> => {
     try {
       await cleanup();
     } catch (cleanupError) {
-      const message =
-        error instanceof Error ? error.message : "App preview start failed.";
+      const message = error instanceof Error ? error.message : "App preview start failed.";
       throw new AggregateError([error, cleanupError], message);
     }
     throw error;
@@ -417,9 +399,9 @@ export function createSitePreviewLifecycle<
     isCurrent: () => boolean;
     // Gets the start's own lifetime check, which execution must use: for a
     // shared start, it holds while any surface holding the preview does.
-    prepare: (isCurrent: () => boolean) => Promise<
-      (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
-    >;
+    prepare: (
+      isCurrent: () => boolean,
+    ) => Promise<(signal: AbortSignal) => Promise<SitePreviewExecution<T>>>;
     // Stops the start when it aborts.
     cancelled?: AbortSignal;
     // Runs once preparation passed, before the start replaces anything.
@@ -427,14 +409,12 @@ export function createSitePreviewLifecycle<
     onPrepared?: () => boolean;
   }): Promise<StartedPreview<T>> {
     if (retired) throw new Error(START_CANCELLED_MESSAGE);
-    const pending = beginPending(
-      startInput.senderId,
-      startInput.workspaceId,
-      startInput.siteRoot,
-    );
+    const pending = beginPending(startInput.senderId, startInput.workspaceId, startInput.siteRoot);
     const key = pending.siteKey;
     if (startInput.cancelled?.aborted) pending.controller.abort();
-    startInput.cancelled?.addEventListener("abort", () => pending.controller.abort(), { once: true });
+    startInput.cancelled?.addEventListener("abort", () => pending.controller.abort(), {
+      once: true,
+    });
     const isCurrent = () =>
       !retired && !pending.controller.signal.aborted && startInput.isCurrent();
     const requireCurrent = (): void => {
@@ -467,11 +447,7 @@ export function createSitePreviewLifecycle<
         }
         if (!isCurrent()) {
           await failAfterCleanup(new Error(START_CANCELLED_MESSAGE), () =>
-            retainAndStop(
-              startInput.workspaceId,
-              startInput.siteRoot,
-              execution.handle,
-            ),
+            retainAndStop(startInput.workspaceId, startInput.siteRoot, execution.handle),
           );
         }
 
@@ -503,9 +479,7 @@ export function createSitePreviewLifecycle<
             exited: true,
           };
         }
-        throw new Error(
-          "The app preview stopped before it opened. Start the preview again.",
-        );
+        throw new Error("The app preview stopped before it opened. Start the preview again.");
       });
     } finally {
       removePending(pending);
@@ -530,9 +504,9 @@ export function createSitePreviewLifecycle<
     mode: string;
     restart: boolean;
     isCurrent: () => boolean;
-    prepare: (isCurrent: () => boolean) => Promise<
-      (signal: AbortSignal) => Promise<SitePreviewExecution<T>>
-    >;
+    prepare: (
+      isCurrent: () => boolean,
+    ) => Promise<(signal: AbortSignal) => Promise<SitePreviewExecution<T>>>;
   }): Promise<HeldPreview<T> | ReplacedStart> {
     const key = previewKey(acquireInput.workspaceId, acquireInput.siteRoot);
     const holder: PreviewHolder = {
@@ -646,11 +620,7 @@ export function createSitePreviewLifecycle<
 
   // Tells the surfaces that did not ask for this generation what they show
   // now. A generation another start already replaced tells no one.
-  function tellOthers(
-    key: string,
-    hold: PreviewHold<T>,
-    preview: HeldPreview<T> | null,
-  ): void {
+  function tellOthers(key: string, hold: PreviewHold<T>, preview: HeldPreview<T> | null): void {
     if (holds.get(key) !== hold || !input.notifyReplaced) return;
     for (const [holderId, holder] of hold.holders) {
       if (hold.answered.has(holderId)) continue;
@@ -806,15 +776,10 @@ export function createSitePreviewLifecycle<
     const failures: unknown[] = [];
     await Promise.all([
       ...snapshots.map(({ key, handle }) =>
-        runInKeyedLane(startLanes, key, () => stopCurrent(key, handle)).catch(
-          (error: unknown) => {
-            failures.push(error);
-            console.warn(
-              "[desktop] failed to stop site preview during workspace switch",
-              error,
-            );
-          },
-        ),
+        runInKeyedLane(startLanes, key, () => stopCurrent(key, handle)).catch((error: unknown) => {
+          failures.push(error);
+          console.warn("[desktop] failed to stop site preview during workspace switch", error);
+        }),
       ),
       ...draining.map((start) => start.settled),
     ]);
@@ -826,7 +791,13 @@ export function createSitePreviewLifecycle<
     // code.
     for (const record of activePreviews.values()) {
       if (record.workspaceId !== workspaceId || !("command" in record.handle)) continue;
-      if (failures.some((failure) => failure instanceof AppCommandStillRunningError && failure.handle === record.handle)) continue;
+      if (
+        failures.some(
+          (failure) =>
+            failure instanceof AppCommandStillRunningError && failure.handle === record.handle,
+        )
+      )
+        continue;
       failures.push(new AppCommandStillRunningError(record.handle, []));
     }
     if (failures.length === 0) return;
@@ -848,23 +819,18 @@ export function createSitePreviewLifecycle<
       ...activePreviews.keys(),
       ...pending.map((start) => start.siteKey),
     ]);
-    const drains = [...keys].map((key) =>
-      runInKeyedLane(startLanes, key, () => stopCurrent(key)),
+    const drains = [...keys].map((key) => runInKeyedLane(startLanes, key, () => stopCurrent(key)));
+    const attempt = Promise.allSettled([...drains, ...draining.map((start) => start.settled)]).then(
+      (results) => {
+        const errors = results
+          .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+          .map((result) => result.reason);
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) {
+          throw new AggregateError(errors, "Some app previews did not stop.");
+        }
+      },
     );
-    const attempt = Promise.allSettled([
-      ...drains,
-      ...draining.map((start) => start.settled),
-    ]).then((results) => {
-      const errors = results
-        .filter((result): result is PromiseRejectedResult =>
-          result.status === "rejected",
-        )
-        .map((result) => result.reason);
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) {
-        throw new AggregateError(errors, "Some app previews did not stop.");
-      }
-    });
     stopAllPromise = attempt;
     void attempt.catch(() => {
       // Successful retirement stays memoized. A failed attempt leaves exact

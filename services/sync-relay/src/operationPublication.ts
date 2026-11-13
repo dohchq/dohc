@@ -27,7 +27,11 @@ export const WORKSPACE_CHANGED: RefusalReason = "This workspace changed on your 
 export const TOO_OLD: RefusalReason = "too old";
 const ALREADY_ANSWERED: RefusalReason = "already answered";
 const REFUSAL_REASONS: ReadonlySet<string> = new Set<RefusalReason>([
-  ALREADY_ANSWERED, "The message it replies to wasn't sent", WORKSPACE_CHANGED, COULD_NOT_SEND, TOO_OLD,
+  ALREADY_ANSWERED,
+  "The message it replies to wasn't sent",
+  WORKSPACE_CHANGED,
+  COULD_NOT_SEND,
+  TOO_OLD,
 ]);
 
 /** Whether `reason` is one of the answers a refused write may give the phone. */
@@ -81,23 +85,36 @@ export type ExpectedRecord = {
  * hold its thread, and `refusedStage`: the key of a stage the engine refused
  * before writing, which publication refuses the write by.
  */
-export type OperationResult = { threadId: string | null; reason?: RefusalReason; winnerMessageId?: string };
+export type OperationResult = {
+  threadId: string | null;
+  reason?: RefusalReason;
+  winnerMessageId?: string;
+};
 
 export type Verdict =
   /** `threadId`: the thread the first stage's receipt names, once there is one. */
   | { stage: "pending"; messagePublished: boolean; threadId: string | null }
   | { stage: "saved" | "refused"; messagePublished: boolean; result: OperationResult };
 
-export type PublicationAnswer = { state: "saved" | "refused" | "pending"; record: OperationRecord | null };
+export type PublicationAnswer = {
+  state: "saved" | "refused" | "pending";
+  record: OperationRecord | null;
+};
 
 /** Reads the receipts of these stage keys, in one engine snapshot. */
 export type ReceiptReader = (stageKeys: readonly string[]) => Promise<OrdinaryPublicationState>;
 
 type StageState = OrdinaryPublicationState["stages"][number];
 type Coordinate = Extract<StageState, { state: "present" }>["coordinates"][number];
-type PublicationStorage = Pick<SyncRelayStorage, "fetchAccountOperationLogRow" | "advanceAccountOperation">;
+type PublicationStorage = Pick<
+  SyncRelayStorage,
+  "fetchAccountOperationLogRow" | "advanceAccountOperation"
+>;
 /** What publication needs of an open copy. */
-export type PublicationCopy = Pick<AutomationReplica, "workspaceId" | "incarnation" | "client" | "workspace" | "signal" | "nextRequestId" | "step">;
+export type PublicationCopy = Pick<
+  AutomationReplica,
+  "workspaceId" | "incarnation" | "client" | "workspace" | "signal" | "nextRequestId" | "step"
+>;
 
 const ROLES: ReadonlySet<string> = new Set(["post", "reply", "decision", "reaction"]);
 const isRole = (role: string): role is PublicationStage["role"] => ROLES.has(role);
@@ -109,27 +126,62 @@ export function commandStages(command: JsonValue): PublicationStage[] | null {
   const decoded: PublicationStage[] = [];
   for (const value of stages as unknown[]) {
     const stage = asRecord(value);
-    const key = stage?.key, role = stage?.role, records = stage?.records, engineThread = stage?.engineThread;
-    if (typeof key !== "string" || !key || typeof role !== "string" || !isRole(role) || !Array.isArray(records)) return null;
-    if (engineThread !== undefined && (typeof engineThread !== "string" || !engineThread)) return null;
+    const key = stage?.key,
+      role = stage?.role,
+      records = stage?.records,
+      engineThread = stage?.engineThread;
+    if (
+      typeof key !== "string" ||
+      !key ||
+      typeof role !== "string" ||
+      !isRole(role) ||
+      !Array.isArray(records)
+    )
+      return null;
+    if (engineThread !== undefined && (typeof engineThread !== "string" || !engineThread))
+      return null;
     const expected: ExpectedRecord[] = [];
     for (const item of records as unknown[]) {
       const record = asRecord(item);
-      const kind = record?.kind, fields = asRecord(record?.fields), optional = record?.optional;
-      const whenPresent = record?.whenPresent === undefined ? undefined : asRecord(record.whenPresent), absent = record?.absent;
-      if (typeof kind !== "string" || fields === null || (optional !== undefined && typeof optional !== "boolean")) return null;
-      if (whenPresent === null || (absent !== undefined && !(Array.isArray(absent) && (absent as unknown[]).every((field) => typeof field === "string")))) {
+      const kind = record?.kind,
+        fields = asRecord(record?.fields),
+        optional = record?.optional;
+      const whenPresent =
+          record?.whenPresent === undefined ? undefined : asRecord(record.whenPresent),
+        absent = record?.absent;
+      if (
+        typeof kind !== "string" ||
+        fields === null ||
+        (optional !== undefined && typeof optional !== "boolean")
+      )
+        return null;
+      if (
+        whenPresent === null ||
+        (absent !== undefined &&
+          !(
+            Array.isArray(absent) &&
+            (absent as unknown[]).every((field) => typeof field === "string")
+          ))
+      ) {
         return null;
       }
       // Parsed from the stored JSON, so every field is JSON.
       expected.push({
-        kind, fields: fields as { [field: string]: JsonValue },
-        ...(whenPresent === undefined ? {} : { whenPresent: whenPresent as { [field: string]: JsonValue } }),
+        kind,
+        fields: fields as { [field: string]: JsonValue },
+        ...(whenPresent === undefined
+          ? {}
+          : { whenPresent: whenPresent as { [field: string]: JsonValue } }),
         ...(absent === undefined ? {} : { absent: absent as string[] }),
         ...(optional === true ? { optional } : {}),
       });
     }
-    decoded.push({ key, role, records: expected, ...(engineThread === undefined ? {} : { engineThread }) });
+    decoded.push({
+      key,
+      role,
+      records: expected,
+      ...(engineThread === undefined ? {} : { engineThread }),
+    });
   }
   return decoded;
 }
@@ -157,7 +209,10 @@ export function judgeOperation(
   const stages = commandStages(record.command);
   // A stage the engine refused before it wrote, with no receipt then, which nothing asks of it again.
   const refusedStage = asRecord(record.result)?.refusedStage;
-  let threadId: string | null = null, unresolved = stages === null, refused = false, messagePublished = false;
+  let threadId: string | null = null,
+    unresolved = stages === null,
+    refused = false,
+    messagePublished = false;
   let lost: { winnerMessageId?: string } | null = null;
   for (const stage of stages ?? []) {
     const receipt = receipts.get(stage.key);
@@ -171,19 +226,29 @@ export function judgeOperation(
     }
     threadId ??= receipt.threadId;
     if (receipt.outcome === "lost") {
-      lost = receipt.winnerMessageId === undefined ? {} : { winnerMessageId: receipt.winnerMessageId };
+      lost =
+        receipt.winnerMessageId === undefined ? {} : { winnerMessageId: receipt.winnerMessageId };
       continue;
     }
     // A stage that wrote nothing has nothing to publish.
     if (receipt.outcome === "no-op") continue;
-    const accepted = accepts(storage, record, receipt.coordinates, expectedRecords(stage, receipt.threadId), settling !== null);
+    const accepted = accepts(
+      storage,
+      record,
+      receipt.coordinates,
+      expectedRecords(stage, receipt.threadId),
+      settling !== null,
+    );
     if (accepted === "refused") refused = true;
     else if (accepted === "unresolved") unresolved = true;
     else if (stage.role === "post" || stage.role === "reply") messagePublished = true;
   }
   if (unresolved && settling === null) return { stage: "pending", messagePublished, threadId };
-  const refuse = (reason: RefusalReason, extra: { winnerMessageId?: string } = {}): Verdict =>
-    ({ stage: "refused", messagePublished, result: { threadId, reason, ...extra } });
+  const refuse = (reason: RefusalReason, extra: { winnerMessageId?: string } = {}): Verdict => ({
+    stage: "refused",
+    messagePublished,
+    result: { threadId, reason, ...extra },
+  });
   if (lost !== null) return refuse(ALREADY_ANSWERED, lost);
   if (unresolved) return refuse(settling ?? COULD_NOT_SEND);
   if (refused) return refuse(COULD_NOT_SEND);
@@ -199,7 +264,8 @@ function expectedRecords(stage: PublicationStage, threadId: string): readonly Ex
   return stage.records.map((record) => {
     const fields = { ...record.fields };
     if (fields.threadId === proposed) fields.threadId = threadId;
-    if (record.kind === "chat.follow.set" && fields.targetId === proposed) fields.targetId = threadId;
+    if (record.kind === "chat.follow.set" && fields.targetId === proposed)
+      fields.targetId = threadId;
     return { ...record, fields };
   });
 }
@@ -225,22 +291,29 @@ function accepts(
     }
     // The stored epoch and stream, never the copy's current ones.
     const row = storage.fetchAccountOperationLogRow({
-      accountId: record.accountId, operationId: record.operationId, workspaceId: record.workspaceId,
-      replicationEpoch: record.replicationEpoch, streamIdentity: record.streamIdentity,
-      originId: coordinate.originId, originSeq: coordinate.originSeq,
+      accountId: record.accountId,
+      operationId: record.operationId,
+      workspaceId: record.workspaceId,
+      replicationEpoch: record.replicationEpoch,
+      streamIdentity: record.streamIdentity,
+      originId: coordinate.originId,
+      originSeq: coordinate.originSeq,
     });
     if (row === null) {
       unresolved = true;
       continue;
     }
     if (row.relayAdmission === "refused" || row.opKind === REFUSED_OP_KIND) return "refused";
-    const expected = row.relayAdmission === undefined
-      ? records.find((record) => record.kind === row.opKind && holds(row.payloadJson, record))
-      : undefined;
+    const expected =
+      row.relayAdmission === undefined
+        ? records.find((record) => record.kind === row.opKind && holds(row.payloadJson, record))
+        : undefined;
     if (expected === undefined) unresolved = true;
     else matched.add(expected);
   }
-  return unresolved || !records.every((record) => record.optional === true || matched.has(record)) ? "unresolved" : "accepted";
+  return unresolved || !records.every((record) => record.optional === true || matched.has(record))
+    ? "unresolved"
+    : "accepted";
 }
 
 function parseObject(json: string): Record<string, unknown> | null {
@@ -253,11 +326,18 @@ function parseObject(json: string): Record<string, unknown> | null {
 
 function holds(payloadJson: string, expected: ExpectedRecord): boolean {
   const payload = parseObject(payloadJson);
-  const same = (field: string, value: JsonValue) => stableJsonStringify(payload?.[field]) === stableJsonStringify(value);
-  return payload !== null &&
-    Object.entries(expected.fields).every(([field, value]) => Object.hasOwn(payload, field) && same(field, value)) &&
-    Object.entries(expected.whenPresent ?? {}).every(([field, value]) => !Object.hasOwn(payload, field) || same(field, value)) &&
-    (expected.absent ?? []).every((field) => !Object.hasOwn(payload, field));
+  const same = (field: string, value: JsonValue) =>
+    stableJsonStringify(payload?.[field]) === stableJsonStringify(value);
+  return (
+    payload !== null &&
+    Object.entries(expected.fields).every(
+      ([field, value]) => Object.hasOwn(payload, field) && same(field, value),
+    ) &&
+    Object.entries(expected.whenPresent ?? {}).every(
+      ([field, value]) => !Object.hasOwn(payload, field) || same(field, value),
+    ) &&
+    (expected.absent ?? []).every((field) => !Object.hasOwn(payload, field))
+  );
 }
 
 /**
@@ -273,15 +353,26 @@ export function recordVerdict(
   verdict: Verdict,
   nowMs: number,
 ): OperationRecord | null {
-  const stage = verdict.stage !== "pending" ? verdict.stage : nowMs >= record.activeUntilMs ? "stalled" : undefined;
+  const stage =
+    verdict.stage !== "pending"
+      ? verdict.stage
+      : nowMs >= record.activeUntilMs
+        ? "stalled"
+        : undefined;
   const wakes = operationWakeChange(record.command, verdict);
-  return storage.advanceAccountOperation({
-    accountId: record.accountId, operationId: record.operationId, nowMs,
-    ...(stage === undefined ? {} : { stage }),
-    ...(wakes === undefined ? {} : { wakes }),
-    ...(verdict.messagePublished && record.messageState !== null ? { message: "published" as const } : {}),
-    ...(verdict.stage === "pending" ? {} : { result: verdict.result }),
-  })?.record ?? null;
+  return (
+    storage.advanceAccountOperation({
+      accountId: record.accountId,
+      operationId: record.operationId,
+      nowMs,
+      ...(stage === undefined ? {} : { stage }),
+      ...(wakes === undefined ? {} : { wakes }),
+      ...(verdict.messagePublished && record.messageState !== null
+        ? { message: "published" as const }
+        : {}),
+      ...(verdict.stage === "pending" ? {} : { result: verdict.result }),
+    })?.record ?? null
+  );
 }
 
 /** Writes whose outcome stays unknown stall. They keep their reason, at a slower rate, and can still be saved. */
@@ -291,7 +382,12 @@ export function stallOperations(
   nowMs: number,
 ): void {
   for (const record of records) {
-    storage.advanceAccountOperation({ accountId: record.accountId, operationId: record.operationId, stage: "stalled", nowMs });
+    storage.advanceAccountOperation({
+      accountId: record.accountId,
+      operationId: record.operationId,
+      stage: "stalled",
+      nowMs,
+    });
   }
 }
 
@@ -301,30 +397,57 @@ export function stallExpired(
   records: readonly OperationRecord[],
   nowMs: number,
 ): void {
-  stallOperations(storage, records.filter((record) => nowMs >= record.activeUntilMs), nowMs);
+  stallOperations(
+    storage,
+    records.filter((record) => nowMs >= record.activeUntilMs),
+    nowMs,
+  );
 }
 
 /**
  * Reads receipts from a workspace open in a copy's engine, with the copy's
  * own request IDs. `signal` ends a read still waiting for its answer.
  */
-export function receiptReader(engine: Pick<AutomationReplica, "client" | "nextRequestId">, workspace: string, signal?: AbortSignal): ReceiptReader {
+export function receiptReader(
+  engine: Pick<AutomationReplica, "client" | "nextRequestId">,
+  workspace: string,
+  signal?: AbortSignal,
+): ReceiptReader {
   const requester: Pick<WorkspaceDaemonRequester, "request"> = {
-    request: async (method, params, options) => (await engine.client.sendRequest({
-      id: engine.nextRequestId(), method, params,
-      ...(options?.workspace === undefined ? {} : { workspace: options.workspace }),
-      ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
-    }, signal)).result,
+    request: async (method, params, options) =>
+      (
+        await engine.client.sendRequest(
+          {
+            id: engine.nextRequestId(),
+            method,
+            params,
+            ...(options?.workspace === undefined ? {} : { workspace: options.workspace }),
+            ...(options?.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+          },
+          signal,
+        )
+      ).result,
   };
-  return (stageKeys) => readOrdinaryPublicationState(requester, workspace, stageKeys, { deadlineMs: RECEIPT_DEADLINE_MS });
+  return (stageKeys) =>
+    readOrdinaryPublicationState(requester, workspace, stageKeys, {
+      deadlineMs: RECEIPT_DEADLINE_MS,
+    });
 }
 
 // Every stage the records name, at most MAX_PUBLICATION_STAGE_KEYS a request.
-async function readStages(read: ReceiptReader, records: readonly OperationRecord[]): Promise<Map<string, StageState>> {
-  const keys = [...new Set(records.flatMap((record) => commandStages(record.command)?.map((stage) => stage.key) ?? []))];
+async function readStages(
+  read: ReceiptReader,
+  records: readonly OperationRecord[],
+): Promise<Map<string, StageState>> {
+  const keys = [
+    ...new Set(
+      records.flatMap((record) => commandStages(record.command)?.map((stage) => stage.key) ?? []),
+    ),
+  ];
   const stages = new Map<string, StageState>();
   for (let start = 0; start < keys.length; start += MAX_PUBLICATION_STAGE_KEYS) {
-    for (const stage of (await read(keys.slice(start, start + MAX_PUBLICATION_STAGE_KEYS))).stages) stages.set(stage.stageKey, stage);
+    for (const stage of (await read(keys.slice(start, start + MAX_PUBLICATION_STAGE_KEYS))).stages)
+      stages.set(stage.stageKey, stage);
   }
   return stages;
 }
@@ -352,7 +475,9 @@ export async function inspectOperations(
 ): Promise<Array<OperationRecord | null> | null> {
   const code = wholePushRejection(syncError);
   if (code !== null) {
-    console.error(`[sync-relay] The relay refused a whole push from this server's copy of workspace "${workspaceId}" (${code}). Its phone writes are stalled.`);
+    console.error(
+      `[sync-relay] The relay refused a whole push from this server's copy of workspace "${workspaceId}" (${code}). Its phone writes are stalled.`,
+    );
     stallOperations(storage, records, nowMs());
   }
   const receipts = await readStages(read, records).catch(() => null);
@@ -360,7 +485,9 @@ export async function inspectOperations(
     stallExpired(storage, records, nowMs());
     return null;
   }
-  return records.map((record) => recordVerdict(storage, record, judgeOperation(storage, record, receipts, null), nowMs()));
+  return records.map((record) =>
+    recordVerdict(storage, record, judgeOperation(storage, record, receipts, null), nowMs()),
+  );
 }
 
 /**
@@ -387,13 +514,25 @@ export async function publishOnce(
     syncError = error;
   }
   await authorize?.();
-  const inspected = await inspectOperations(storage, copy.workspaceId, receiptReader(copy, copy.workspace, signal), records, nowMs, syncError);
+  const inspected = await inspectOperations(
+    storage,
+    copy.workspaceId,
+    receiptReader(copy, copy.workspace, signal),
+    records,
+    nowMs,
+    syncError,
+  );
   signal?.throwIfAborted();
   return inspected;
 }
 
 const answerOf = (record: OperationRecord | null): PublicationAnswer => ({
-  state: record === null || record.stage === "refused" ? "refused" : record.stage === "saved" ? "saved" : "pending",
+  state:
+    record === null || record.stage === "refused"
+      ? "refused"
+      : record.stage === "saved"
+        ? "saved"
+        : "pending",
   record,
 });
 
@@ -425,30 +564,53 @@ export async function publishOperation(input: {
 }): Promise<PublicationAnswer> {
   const { storage, copy, signal } = input;
   const nowMs = input.nowMs ?? Date.now;
-  const pause = input.pause ?? ((ms: number, abort?: AbortSignal) => sleep(ms, undefined, abort === undefined ? {} : { signal: abort }));
+  const pause =
+    input.pause ??
+    ((ms: number, abort?: AbortSignal) =>
+      sleep(ms, undefined, abort === undefined ? {} : { signal: abort }));
   const authorize = input.authorize?.bind(input);
   // A write made on an earlier incarnation settles when that incarnation's folder goes.
-  if (input.record.workspaceId !== copy.workspaceId || input.record.incarnation !== copy.incarnation) return answerOf(input.record);
+  if (
+    input.record.workspaceId !== copy.workspaceId ||
+    input.record.incarnation !== copy.incarnation
+  )
+    return answerOf(input.record);
   const { accountId, operationId } = input.record;
-  let record = storage.advanceAccountOperation({ accountId, operationId, stage: "publishing", nowMs: nowMs() })?.record ?? null;
+  let record =
+    storage.advanceAccountOperation({ accountId, operationId, stage: "publishing", nowMs: nowMs() })
+      ?.record ?? null;
   const budgetMs = input.deadlineMs ?? PUBLICATION_DEADLINE_MS;
   const deadline = nowMs() + budgetMs;
   const expired = new AbortController();
-  const timer = setTimeout(() => expired.abort(new Error("The write's publication deadline passed.")), budgetMs);
+  const timer = setTimeout(
+    () => expired.abort(new Error("The write's publication deadline passed.")),
+    budgetMs,
+  );
   timer.unref?.();
   const attempt = signal === undefined ? expired.signal : AbortSignal.any([expired.signal, signal]);
   try {
-    for (let wait = FIRST_POLL_MS; record !== null && record.stage !== "saved" && record.stage !== "refused"; wait = Math.min(wait * 2, MAX_POLL_MS)) {
+    for (
+      let wait = FIRST_POLL_MS;
+      record !== null && record.stage !== "saved" && record.stage !== "refused";
+      wait = Math.min(wait * 2, MAX_POLL_MS)
+    ) {
       const after = await publishOnce(storage, copy, [record], nowMs, attempt, authorize);
       if (after !== null) record = after[0] ?? null;
-      if (record === null || record.stage === "saved" || record.stage === "refused" || nowMs() + wait >= deadline) break;
+      if (
+        record === null ||
+        record.stage === "saved" ||
+        record.stage === "refused" ||
+        nowMs() + wait >= deadline
+      )
+        break;
       await pause(wait, attempt);
       await authorize?.();
     }
   } catch (error) {
     // Only the deadline ends the attempt with an answer; the caller's abort, or a failure, rejects.
     if (signal?.aborted || !expired.signal.aborted) throw error;
-    record = storage.advanceAccountOperation({ accountId, operationId, nowMs: nowMs() })?.record ?? null;
+    record =
+      storage.advanceAccountOperation({ accountId, operationId, nowMs: nowMs() })?.record ?? null;
   } finally {
     clearTimeout(timer);
   }
@@ -476,7 +638,8 @@ export async function settleOperations(
   if (records.length === 0) return;
   const receipts = read === null ? new Map<string, StageState>() : await readStages(read, records);
   await beforeRecording?.();
-  for (const record of records) recordVerdict(storage, record, judgeOperation(storage, record, receipts, reason), nowMs);
+  for (const record of records)
+    recordVerdict(storage, record, judgeOperation(storage, record, receipts, reason), nowMs);
 }
 
 /** Turns every write settled long enough ago into a tombstone, a batch at a time, yielding between batches. Answers how many. */

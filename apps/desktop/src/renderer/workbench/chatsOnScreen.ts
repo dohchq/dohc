@@ -20,5 +20,7 @@ export function showChat(threadId: string, element: Element): () => void {
 // another window isn't looking at this one.
 export function chatOnScreen(threadId: string): boolean {
   if (document.visibilityState !== "visible" || !windowFocused()) return false;
-  return [...(shown.get(threadId) ?? [])].some((element) => element.isConnected && (element.checkVisibility?.() ?? true));
+  return [...(shown.get(threadId) ?? [])].some(
+    (element) => element.isConnected && (element.checkVisibility?.() ?? true),
+  );
 }

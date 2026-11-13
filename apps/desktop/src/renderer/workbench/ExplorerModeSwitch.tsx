@@ -8,13 +8,20 @@ const LABELS: Record<ExplorerMode, string> = { home: "Home", files: "Files" };
 
 // Home | Files, in the side panel's header where the Explorer's title was.
 // Left and Right move between the two and show the one they land on.
-export function ExplorerModeSwitch(props: { mode: ExplorerMode; onChange: (mode: ExplorerMode) => void }) {
+export function ExplorerModeSwitch(props: {
+  mode: ExplorerMode;
+  onChange: (mode: ExplorerMode) => void;
+}) {
   const tabs = useRef(new Map<ExplorerMode, HTMLButtonElement>());
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     const index = EXPLORER_MODES.indexOf(props.mode);
-    const next = EXPLORER_MODES[(index + (event.key === "ArrowRight" ? 1 : EXPLORER_MODES.length - 1)) % EXPLORER_MODES.length]!;
+    const next =
+      EXPLORER_MODES[
+        (index + (event.key === "ArrowRight" ? 1 : EXPLORER_MODES.length - 1)) %
+          EXPLORER_MODES.length
+      ]!;
     props.onChange(next);
     tabs.current.get(next)?.focus();
   };

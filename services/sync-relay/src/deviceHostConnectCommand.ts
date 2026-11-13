@@ -1,6 +1,9 @@
 import { isAbsolute } from "node:path";
 import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
-import { DeviceHostCredentialFileUnavailable, readDeviceHostCredentialFile } from "./deviceHostCredentialFile.js";
+import {
+  DeviceHostCredentialFileUnavailable,
+  readDeviceHostCredentialFile,
+} from "./deviceHostCredentialFile.js";
 import { connectDeviceHost } from "./deviceHostConnect.js";
 
 const usage = `Connect this device outbound to share-web. No inbound listener or relay database is needed.
@@ -14,35 +17,64 @@ Registration establishes control only. It does not make a document editable.
 The command exits when the connection closes. Run it again to reconnect the same credential.`;
 
 async function main(args: string[]): Promise<void> {
-  if (args.length === 1 && args[0] === "--help") { console.log(usage); return; }
+  if (args.length === 1 && args[0] === "--help") {
+    console.log(usage);
+    return;
+  }
   const fields = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
-    const key = args[index]!, value = args[index + 1];
+    const key = args[index]!,
+      value = args[index + 1];
     if (fields.has(key) || !value || value.startsWith("--")) throw new Error();
     fields.set(key, value);
   }
-  if (![3, 4].includes(fields.size) || ["--url", "--credential-directory", "--limits-json"].some(key => !fields.has(key)) ||
-    [...fields.keys()].some(key => !["--url", "--credential-directory", "--limits-json", "--delivery-config"].includes(key))) throw new Error();
+  if (
+    ![3, 4].includes(fields.size) ||
+    ["--url", "--credential-directory", "--limits-json"].some((key) => !fields.has(key)) ||
+    [...fields.keys()].some(
+      (key) =>
+        !["--url", "--credential-directory", "--limits-json", "--delivery-config"].includes(key),
+    )
+  )
+    throw new Error();
   const directory = fields.get("--credential-directory")!;
   if (!isAbsolute(directory)) throw new Error();
   const limits = parseDeviceControlLimits(JSON.parse(fields.get("--limits-json")!));
   const credential = await readDeviceHostCredentialFile(directory);
-  let registered = false, requestedStop = false;
-  const connection = connectDeviceHost({ url: fields.get("--url")!, credential, limits,
-    ...(fields.has("--delivery-config") ? { deliveryConfigPath: fields.get("--delivery-config")! } : {}), onRegistered(notice) {
-    registered = true;
-    console.log(JSON.stringify(notice));
-  } });
-  const stop = () => { requestedStop = true; connection.stop(); };
+  let registered = false,
+    requestedStop = false;
+  const connection = connectDeviceHost({
+    url: fields.get("--url")!,
+    credential,
+    limits,
+    ...(fields.has("--delivery-config")
+      ? { deliveryConfigPath: fields.get("--delivery-config")! }
+      : {}),
+    onRegistered(notice) {
+      registered = true;
+      console.log(JSON.stringify(notice));
+    },
+  });
+  const stop = () => {
+    requestedStop = true;
+    connection.stop();
+  };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  try { await connection.closed; }
-  finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
+  try {
+    await connection.closed;
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+  }
   if (!registered || !requestedStop) throw new Error();
 }
 
-main(process.argv.slice(2)).catch(error => {
-  console.error(error instanceof DeviceHostCredentialFileUnavailable ? error.message :
-    "Device host connection closed or refused. Check the service, credential, and limits. Use --help for arguments.");
+main(process.argv.slice(2)).catch((error) => {
+  console.error(
+    error instanceof DeviceHostCredentialFileUnavailable
+      ? error.message
+      : "Device host connection closed or refused. Check the service, credential, and limits. Use --help for arguments.",
+  );
   process.exitCode = 1;
 });

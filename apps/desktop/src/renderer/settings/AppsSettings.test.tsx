@@ -46,7 +46,14 @@ const signup: SitePackageInfo = {
   configPath: "apps/signup/dohc.json",
   packagePath: "apps/signup/package.json",
   configuredPreviewMode: "build",
-  diagnostics: [{ severity: "warning", code: "x", message: "The build output is older than its source.", path: "apps/signup/dist" }],
+  diagnostics: [
+    {
+      severity: "warning",
+      code: "x",
+      message: "The build output is older than its source.",
+      path: "apps/signup/dist",
+    },
+  ],
 };
 
 const bridge = {
@@ -76,7 +83,11 @@ const modeOf = async (root: string) => {
   const row = await screen.findByRole("button", { name: rootTitle[root] });
   return within(row).getByTestId("settings-app-mode").textContent;
 };
-const rootTitle: Record<string, string> = { report: "Report", "apps/trip": "Trip planner", "apps/signup": "Signup" };
+const rootTitle: Record<string, string> = {
+  report: "Report",
+  "apps/trip": "Trip planner",
+  "apps/signup": "Signup",
+};
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -116,7 +127,11 @@ describe("AppsSettings", () => {
     const startWith = within(page).getByTestId("settings-app-start-with");
     expect(startWith.textContent).toContain("Default starts Dev, which dohc picks for this app.");
     const control = within(page).getByTestId("settings-app-mode-control");
-    expect(within(control).getAllByRole("radio").map((radio) => radio.textContent)).toEqual(["Default", "Dev", "Build"]);
+    expect(
+      within(control)
+        .getAllByRole("radio")
+        .map((radio) => radio.textContent),
+    ).toEqual(["Default", "Dev", "Build"]);
 
     await user.click(within(control).getByRole("radio", { name: "Build" }));
     expect(window.localStorage.getItem("dohc.site-preview-mode.v1:ws-1:apps/trip")).toBe("build");
@@ -135,12 +150,20 @@ describe("AppsSettings", () => {
     renderApps();
     await user.click(await screen.findByRole("button", { name: "Signup" }));
     const details = screen.getByTestId("settings-app-details");
-    expect([...details.querySelectorAll("dt")].map((term) => term.textContent))
-      .toEqual(["Folder", "Settings file", "Package", "Dev script", "Build script"]);
+    expect([...details.querySelectorAll("dt")].map((term) => term.textContent)).toEqual([
+      "Folder",
+      "Settings file",
+      "Package",
+      "Dev script",
+      "Build script",
+    ]);
     expect(details.textContent).toContain("apps/signup/package.json (pnpm)");
-    expect(screen.getByTestId("settings-app-start-with").textContent).toContain("Default starts Build, as its dohc.json sets.");
-    expect(screen.getByTestId("settings-app-problems").textContent)
-      .toBe("The build output is older than its source.apps/signup/dist");
+    expect(screen.getByTestId("settings-app-start-with").textContent).toContain(
+      "Default starts Build, as its dohc.json sets.",
+    );
+    expect(screen.getByTestId("settings-app-problems").textContent).toBe(
+      "The build output is older than its source.apps/signup/dist",
+    );
   });
 
   it("pins and opens an app from its page", async () => {
@@ -159,17 +182,23 @@ describe("AppsSettings", () => {
     const user = userEvent.setup();
     renderApps({ trust: { trusted: false, onOpen: vi.fn() } });
     await user.click(await screen.findByRole("button", { name: "Trip planner" }));
-    expect(screen.getByTestId("settings-app-restricted").textContent)
-      .toBe("Restricted Mode holds Dev until you trust this workspace.");
-    await user.click(within(screen.getByTestId("settings-app-mode-control")).getByRole("radio", { name: "Build" }));
-    expect(screen.getByTestId("settings-app-restricted").textContent)
-      .toBe("Restricted Mode holds Build until you trust this workspace.");
+    expect(screen.getByTestId("settings-app-restricted").textContent).toBe(
+      "Restricted Mode holds Dev until you trust this workspace.",
+    );
+    await user.click(
+      within(screen.getByTestId("settings-app-mode-control")).getByRole("radio", { name: "Build" }),
+    );
+    expect(screen.getByTestId("settings-app-restricted").textContent).toBe(
+      "Restricted Mode holds Build until you trust this workspace.",
+    );
   });
 
   it("says when the workspace has no apps", async () => {
     bridge.listSites.mockResolvedValueOnce({ sites: [] });
     renderApps();
-    expect((await screen.findByTestId("settings-apps-empty")).textContent).toBe("No apps in this workspace yet.");
+    expect((await screen.findByTestId("settings-apps-empty")).textContent).toBe(
+      "No apps in this workspace yet.",
+    );
   });
 
   it("reports a failed list once and lists again on Try again", async () => {

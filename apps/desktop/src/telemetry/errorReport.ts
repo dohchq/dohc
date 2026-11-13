@@ -31,7 +31,9 @@ const WITHHELD_FILE = "<withheld>";
 
 // A place in dohc's own code, by the name the report gives its file and the
 // path under dohc's folder that holds it, or a run of frames outside dohc.
-type Frame = { file: string; path: string; line: number; column: number } | { file: typeof WITHHELD_FILE };
+type Frame =
+  | { file: string; path: string; line: number; column: number }
+  | { file: typeof WITHHELD_FILE };
 
 // One error of a chain. The class and message come from errorChain's fixed
 // lists; the frames run newest first.
@@ -89,7 +91,10 @@ export function errorReport(
     const group = JSON.stringify([tags, links.map(({ type, value }) => [type, value])]);
     properties.$exception_fingerprint = createHash("sha256").update(group).digest("hex");
   }
-  const handled = reported.kind === "renderer" ? reported.origin === "boundary" : reported.event.kind !== "main-exception";
+  const handled =
+    reported.kind === "renderer"
+      ? reported.origin === "boundary"
+      : reported.event.kind !== "main-exception";
   return {
     report: { error: chainError(links), properties, atMs: facts.atMs, files, handled },
     key: JSON.stringify([tags, links]),
@@ -107,15 +112,21 @@ function describe(
       const process = crashEventSource(event);
       return {
         tags: { process, reason },
-        links: [{ type: "ProcessGone", value: `${process} ${reason} (exit code ${event.exitCode})` }],
+        links: [
+          { type: "ProcessGone", value: `${process} ${reason} (exit code ${event.exitCode})` },
+        ],
       };
     }
-    if (event.kind === "engine") return { tags: { process: "engine", stage: event.stage }, links: chain(event.error, null) };
+    if (event.kind === "engine")
+      return { tags: { process: "engine", stage: event.stage }, links: chain(event.error, null) };
     return { tags: { process: "main", origin: event.origin }, links: chain(event.error, frames) };
   }
   const tags = { process: "renderer", origin: reported.origin };
   if ("type" in reported.error) {
-    return { tags, links: [{ type: "ThrownValue", value: `a value of type ${reported.error.type}` }] };
+    return {
+      tags,
+      links: [{ type: "ThrownValue", value: `a value of type ${reported.error.type}` }],
+    };
   }
   return { tags, links: chain(rendererError(reported.error), frames) };
 }
@@ -123,9 +134,11 @@ function describe(
 function chain(error: unknown, frames: ((stack: readonly string[]) => Frame[]) | null): Link[] {
   // errorChain reads nothing from undefined.
   if (error === undefined) return [{ type: "ThrownValue", value: "a value of type undefined" }];
-  return errorChain(error).map((link) => link.kind === "value"
-    ? { type: "ThrownValue", value: `a value of type ${link.type}` }
-    : { type: link.name, value: link.message, ...(frames ? { frames: frames(link.stack) } : {}) });
+  return errorChain(error).map((link) =>
+    link.kind === "value"
+      ? { type: "ThrownValue", value: `a value of type ${link.type}` }
+      : { type: link.name, value: link.message, ...(frames ? { frames: frames(link.stack) } : {}) },
+  );
 }
 
 // The window's error, rebuilt from its class and stack. errorChain keeps the
@@ -137,12 +150,20 @@ function rendererError(thrown: { name: string; stack: string }): Error {
   return error;
 }
 
-function codeFrames(stack: readonly string[], locate: (frame: string) => CodeLocation | null): Frame[] {
+function codeFrames(
+  stack: readonly string[],
+  locate: (frame: string) => CodeLocation | null,
+): Frame[] {
   const frames: Frame[] = [];
   for (const line of stack) {
     const location = locate(line);
     if (location) {
-      frames.push({ file: frameFile(location.path), path: location.path, line: location.line, column: location.column });
+      frames.push({
+        file: frameFile(location.path),
+        path: location.path,
+        line: location.line,
+        column: location.column,
+      });
     } else if (frames.at(-1)?.file !== WITHHELD_FILE) {
       // Runs of frames outside dohc read as one.
       frames.push({ file: WITHHELD_FILE });
@@ -167,8 +188,13 @@ function chainError(links: readonly Link[]): Error {
   for (const link of [...links].reverse()) {
     const error = new Error(link.value, cause ? { cause } : undefined);
     error.name = link.type;
-    error.stack = ["Error", ...(link.frames ?? []).map((frame) =>
-      `    at ${"path" in frame ? `${frame.file}:${frame.line}:${frame.column}` : frame.file}`)].join("\n");
+    error.stack = [
+      "Error",
+      ...(link.frames ?? []).map(
+        (frame) =>
+          `    at ${"path" in frame ? `${frame.file}:${frame.line}:${frame.column}` : frame.file}`,
+      ),
+    ].join("\n");
     cause = error;
   }
   return cause!;

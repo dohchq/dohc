@@ -57,8 +57,16 @@ export async function spawnSyncRelay(input: {
     const command = input.compiledMain
       ? [join(dirname(input.compiledMain), "relay-deployment.js")]
       : ["--import", "tsx/esm", "src/relayDeploymentCommand.ts"];
-    await initializeRelayDeployment([...command, "initialize",
-      "--config", join(deployment, "deployment.json"), "--database", input.dbPath, "--continuity-directory", join(deployment, "continuity")]);
+    await initializeRelayDeployment([
+      ...command,
+      "initialize",
+      "--config",
+      join(deployment, "deployment.json"),
+      "--database",
+      input.dbPath,
+      "--continuity-directory",
+      join(deployment, "continuity"),
+    ]);
     if (input.editLinks) mkdirSync(join(deployment, "live-host"));
   }
   // share-web reaches the relay's live routes at its loopback address, and they accept only listed hosts.
@@ -69,7 +77,8 @@ export async function spawnSyncRelay(input: {
       ...(input.compiledMain === undefined
         ? ["--import", process.platform === "win32" ? "tsx" : "tsx/esm"]
         : []),
-      "--input-type=module", "--eval",
+      "--input-type=module",
+      "--eval",
       `process.on("message", (message) => {
         if (message === "SIGTERM") process.emit("SIGTERM");
       });
@@ -102,7 +111,10 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_ENGINE_EXECUTABLE: input.editLinks.engineExecutable,
               DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
               DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin,
-              DOHC_RELAY_NAMED_LIVE_HOSTS: [new URL(input.editLinks.publicOrigin).host, `127.0.0.1:${listenPort}`].join(","),
+              DOHC_RELAY_NAMED_LIVE_HOSTS: [
+                new URL(input.editLinks.publicOrigin).host,
+                `127.0.0.1:${listenPort}`,
+              ].join(","),
               // The self-host image gives the live host a Markdown reader. Without one it holds every lossy rewrite.
               DOHC_ENGINE_READER_CONFIG: realDaemonReaderConfig(),
               ...input.editLinks.trustEnv,
@@ -117,26 +129,27 @@ export async function spawnSyncRelay(input: {
   // Register at spawn: exitCode can be set before the process's stdio closes.
   const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
   let stopping: Promise<void> | undefined;
-  const stop = (): Promise<void> => stopping ??= (async () => {
-    if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
-      await closed;
-      return;
-    }
-    // Allow the service's 10 s HTTP drain, then bound a wedged child's lifetime.
-    const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
-    try {
-      if (child.connected) {
-        child.send("SIGTERM", (error) => {
-          if (error) child.kill("SIGTERM");
-        });
-      } else {
-        child.kill("SIGTERM");
+  const stop = (): Promise<void> =>
+    (stopping ??= (async () => {
+      if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+        await closed;
+        return;
       }
-      await closed;
-    } finally {
-      clearTimeout(timer);
-    }
-  })();
+      // Allow the service's 10 s HTTP drain, then bound a wedged child's lifetime.
+      const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+      try {
+        if (child.connected) {
+          child.send("SIGTERM", (error) => {
+            if (error) child.kill("SIGTERM");
+          });
+        } else {
+          child.kill("SIGTERM");
+        }
+        await closed;
+      } finally {
+        clearTimeout(timer);
+      }
+    })());
   const startupStatus = () =>
     `after ${Math.round(performance.now() - started)}ms ` +
     `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})`;
@@ -184,7 +197,10 @@ export async function spawnSyncRelay(input: {
     await requireOwnerRestoreList(baseUrl);
   } catch (error) {
     await stop();
-    throw new Error(`sync relay failed its startup check ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`, { cause: error });
+    throw new Error(
+      `sync relay failed its startup check ${startupStatus()}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+      { cause: error },
+    );
   }
 
   const port = Number(new URL(baseUrl).port);
@@ -204,7 +220,9 @@ export async function reserveRelayPort(): Promise<number> {
     listener.listen(0, "127.0.0.1", resolve);
   });
   const address = listener.address();
-  await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+  await new Promise<void>((resolve, reject) =>
+    listener.close((error) => (error ? reject(error) : resolve())),
+  );
   if (!address || typeof address === "string") throw new Error("No relay port reserved.");
   return address.port;
 }
@@ -212,37 +230,66 @@ export async function reserveRelayPort(): Promise<number> {
 // An owner's list of unfinished restores reads the deployment's history. A relay without one answers 500.
 async function requireOwnerRestoreList(baseUrl: string): Promise<void> {
   const workspaceId = randomUUID();
-  const headers = { authorization: "Bearer test:relay-startup-check", "content-type": "application/json" };
+  const headers = {
+    authorization: "Bearer test:relay-startup-check",
+    "content-type": "application/json",
+  };
   // A hang guard: a relay that takes the requests and never answers fails startup, which stops it.
   const signal = AbortSignal.timeout(60_000);
-  const claim = await fetch(`${baseUrl}/sync/workspaces`, { method: "POST", headers, body: JSON.stringify({ workspaceId }), signal });
-  if (!claim.ok) throw new Error(`Claiming a workspace answered ${claim.status}: ${await claim.text()}`);
-  const restores = await fetch(`${baseUrl}/sync/${workspaceId}/live-restores/unfinished`, { headers, signal });
-  if (restores.status !== 200) throw new Error(`Unfinished restores answered ${restores.status}: ${await restores.text()}`);
+  const claim = await fetch(`${baseUrl}/sync/workspaces`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ workspaceId }),
+    signal,
+  });
+  if (!claim.ok)
+    throw new Error(`Claiming a workspace answered ${claim.status}: ${await claim.text()}`);
+  const restores = await fetch(`${baseUrl}/sync/${workspaceId}/live-restores/unfinished`, {
+    headers,
+    signal,
+  });
+  if (restores.status !== 200)
+    throw new Error(`Unfinished restores answered ${restores.status}: ${await restores.text()}`);
 }
 
 async function initializeRelayDeployment(args: string[]): Promise<void> {
   const started = performance.now();
-  const child = spawn(process.execPath, args, { cwd: relayRoot, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
-  let stdout = "", stderr = "";
-  child.stdout?.on("data", chunk => { stdout += String(chunk); });
-  child.stderr?.on("data", chunk => { stderr += String(chunk); });
+  const child = spawn(process.execPath, args, {
+    cwd: relayRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  let stdout = "",
+    stderr = "";
+  child.stdout?.on("data", (chunk) => {
+    stdout += String(chunk);
+  });
+  child.stderr?.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     await new Promise<void>((resolve, reject) => {
-      timeout = setTimeout(() => reject(new Error("Deployment initializer did not finish.")), 120_000);
+      timeout = setTimeout(
+        () => reject(new Error("Deployment initializer did not finish.")),
+        120_000,
+      );
       child.once("error", reject);
       child.once("close", (code, signal) => {
         if (code === 0) resolve();
-        else reject(new Error(`Deployment initializer exited with code=${code}, signal=${signal}.`));
+        else
+          reject(new Error(`Deployment initializer exited with code=${code}, signal=${signal}.`));
       });
     });
   } catch (error) {
     if (child.pid && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await closed;
-    throw new Error(`sync relay deployment initialization failed after ${Math.round(performance.now() - started)}ms ` +
-      `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`, { cause: error });
+    throw new Error(
+      `sync relay deployment initialization failed after ${Math.round(performance.now() - started)}ms ` +
+        `(pid=${child.pid}, exit=${child.exitCode}, signal=${child.signalCode})\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+      { cause: error },
+    );
   } finally {
     clearTimeout(timeout);
   }

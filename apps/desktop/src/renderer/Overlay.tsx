@@ -52,17 +52,22 @@ export function OverlayFrame(props: {
     <div
       data-dohc-modal="true"
       className={`fixed inset-0 ${props.appearance === "warning" ? "z-50" : "z-30"} flex flex-col items-center overflow-auto ${props.scrim === false ? "" : "bg-scrim"} px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]`}
-      {...(props.onBackdropClick ? {
-        onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
-          const target = event.target instanceof Node ? event.target : null;
-          pressedBackdrop.current = target !== null && event.currentTarget.contains(target) &&
-            !props.panelRef.current?.contains(target) && !menuClosingPresses.has(event.nativeEvent);
-        },
-        onClick: () => {
-          if (pressedBackdrop.current) props.onBackdropClick?.();
-          pressedBackdrop.current = false;
-        },
-      } : {})}
+      {...(props.onBackdropClick
+        ? {
+            onPointerDown: (event: PointerEvent<HTMLDivElement>) => {
+              const target = event.target instanceof Node ? event.target : null;
+              pressedBackdrop.current =
+                target !== null &&
+                event.currentTarget.contains(target) &&
+                !props.panelRef.current?.contains(target) &&
+                !menuClosingPresses.has(event.nativeEvent);
+            },
+            onClick: () => {
+              if (pressedBackdrop.current) props.onBackdropClick?.();
+              pressedBackdrop.current = false;
+            },
+          }
+        : {})}
     >
       <div aria-hidden className="min-h-4 shrink grow-0 basis-24" />
       <div
@@ -117,7 +122,8 @@ export function Overlay(props: {
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
-    if (panel && (props.appearance === "warning" || !panel.contains(focusedElementIn(panel)))) panel.focus();
+    if (panel && (props.appearance === "warning" || !panel.contains(focusedElementIn(panel))))
+      panel.focus();
   }, []);
 
   useEffect(() => {
@@ -130,14 +136,23 @@ export function Overlay(props: {
         // One Escape closes one surface: a menu, an open combobox list, a
         // control's tooltip or an edit in place inside the dialog takes this
         // one, and the next reaches the dialog.
-        if (event.target instanceof Element && event.target.closest("[role='menu'], [role='combobox'][aria-expanded='true'], [data-tooltip-open], [data-edit-in-place]")) return;
+        if (
+          event.target instanceof Element &&
+          event.target.closest(
+            "[role='menu'], [role='combobox'][aria-expanded='true'], [data-tooltip-open], [data-edit-in-place]",
+          )
+        )
+          return;
         event.stopPropagation();
         onCloseRef.current?.();
         return;
       }
       // macOS closes a dialog with ⌘W, as it closes a window. A dialog with no
       // onClose still takes the chord, so the menu never closes what is behind it.
-      if (window.dohcDesktop?.platform === "darwin" && matchesShortcut(event, "close-tab", "darwin")) {
+      if (
+        window.dohcDesktop?.platform === "darwin" &&
+        matchesShortcut(event, "close-tab", "darwin")
+      ) {
         event.preventDefault();
         event.stopPropagation();
         onCloseRef.current?.();

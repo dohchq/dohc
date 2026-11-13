@@ -1,5 +1,9 @@
 import { nameSlug as slug } from "@dohc/workspace-contracts/names";
-import { chatMentionTokens, scanMentionTokens, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
+import {
+  chatMentionTokens,
+  scanMentionTokens,
+  normalizeHandle,
+} from "@dohc/workspace-contracts/chat-mentions";
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
 import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core";
@@ -7,7 +11,11 @@ import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import { asObject, optionalString } from "./json";
 import type { ChatReportedAgent } from "@dohc/workspace-contracts/engine";
-import { isChatWorkStatus, isWorkUrl, type ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
+import {
+  isChatWorkStatus,
+  isWorkUrl,
+  type ChatWorkReport,
+} from "@dohc/workspace-contracts/chat-work";
 import {
   CHATS_METHOD,
   type ChatActor,
@@ -83,11 +91,20 @@ function messageAutomation(authorKind: string, value: unknown): ChatMessage["aut
     if (authorKind === "automation") throw new Error("invalid-input");
     return undefined;
   }
-  if (authorKind !== "automation" || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-input");
+  if (authorKind !== "automation" || typeof value !== "object" || Array.isArray(value))
+    throw new Error("invalid-input");
   const { automationId, chainDepth, ...rest } = value as Record<string, unknown>;
-  const match = typeof automationId === "string" ? /^collection:[A-Za-z0-9_-]+#.+$/su.exec(automationId) : null;
-  if (Object.keys(rest).length > 0 || !match || automationId !== (automationId as string).trim() ||
-    typeof chainDepth !== "number" || !Number.isInteger(chainDepth) || chainDepth < 1 || chainDepth > 64) {
+  const match =
+    typeof automationId === "string" ? /^collection:[A-Za-z0-9_-]+#.+$/su.exec(automationId) : null;
+  if (
+    Object.keys(rest).length > 0 ||
+    !match ||
+    automationId !== (automationId as string).trim() ||
+    typeof chainDepth !== "number" ||
+    !Number.isInteger(chainDepth) ||
+    chainDepth < 1 ||
+    chainDepth > 64
+  ) {
     throw new Error("invalid-input");
   }
   return { automationId: automationId as string };
@@ -107,19 +124,30 @@ function strictObject(
 
 // The daemon's rule: only an agent's message names its agent, and only a
 // person's message wakes agents, each once by a valid id.
-function messageAgents(params: ChatsJsonObject): { authorAgentId: string | undefined; wakeAgentIds: string[] } {
+function messageAgents(params: ChatsJsonObject): {
+  authorAgentId: string | undefined;
+  wakeAgentIds: string[];
+} {
   const authorAgentId = optionalString(params, "authorAgentId");
-  if (authorAgentId !== undefined && (params.authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))) {
+  if (
+    authorAgentId !== undefined &&
+    (params.authorKind !== "agent" || !AGENT_ID_PATTERN.test(authorAgentId))
+  ) {
     throw new Error("invalid-input");
   }
   const listed = params.wakeAgentIds ?? [];
   const valid = Array.isArray(listed)
-    ? listed.filter((agentId): agentId is string => typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId))
+    ? listed.filter(
+        (agentId): agentId is string =>
+          typeof agentId === "string" && AGENT_ID_PATTERN.test(agentId),
+      )
     : [];
   const wakeAgentIds = [...new Set(valid)];
   if (
-    !Array.isArray(listed) || valid.length !== listed.length ||
-    (listed.length > 0 && params.authorKind !== "human") || wakeAgentIds.length > MAX_WAKE_AGENTS
+    !Array.isArray(listed) ||
+    valid.length !== listed.length ||
+    (listed.length > 0 && params.authorKind !== "human") ||
+    wakeAgentIds.length > MAX_WAKE_AGENTS
   ) {
     throw new Error("invalid-input");
   }
@@ -135,18 +163,30 @@ const MAX_REPORTED_AGENT_CHARS = 64;
 // product, and a report with no parts is no report.
 function messageReported(params: ChatsJsonObject): ChatReportedAgent | undefined {
   if (params.authorReported === undefined) return undefined;
-  const reported = strictObject(params.authorReported, "authorReported", ["product", "version", "model"]);
+  const reported = strictObject(params.authorReported, "authorReported", [
+    "product",
+    "version",
+    "model",
+  ]);
   const parts: ChatReportedAgent = {};
   for (const key of ["product", "version", "model"] as const) {
     const value = optionalString(reported, key);
     if (value === undefined) continue;
-    if (value === "" || value.length > MAX_REPORTED_AGENT_CHARS || value.trim() !== value || /\p{Cc}/u.test(value)) {
+    if (
+      value === "" ||
+      value.length > MAX_REPORTED_AGENT_CHARS ||
+      value.trim() !== value ||
+      /\p{Cc}/u.test(value)
+    ) {
       throw new Error("invalid-input");
     }
     parts[key] = value;
   }
   if (Object.keys(parts).length === 0) return undefined;
-  if (params.authorKind !== "agent" || (parts.version !== undefined && parts.product === undefined)) {
+  if (
+    params.authorKind !== "agent" ||
+    (parts.version !== undefined && parts.product === undefined)
+  ) {
     throw new Error("invalid-input");
   }
   return parts;
@@ -158,7 +198,11 @@ function messageWork(params: ChatsJsonObject): ChatWorkReport | undefined {
   if (params.work === undefined) return undefined;
   const work = strictObject(params.work, "work", ["status", "url"]);
   const url = optionalString(work, "url");
-  if (params.authorKind !== "agent" || !isChatWorkStatus(work.status) || (url !== undefined && !isWorkUrl(url))) {
+  if (
+    params.authorKind !== "agent" ||
+    !isChatWorkStatus(work.status) ||
+    (url !== undefined && !isWorkUrl(url))
+  ) {
     throw new Error("invalid-input");
   }
   return { status: work.status, ...(url !== undefined ? { url } : {}) };
@@ -166,13 +210,17 @@ function messageWork(params: ChatsJsonObject): ChatWorkReport | undefined {
 
 // The daemon's rule: a thread's Work card is its newest work report.
 function threadWork(state: WorkspaceState, threadId: string) {
-  const newest = threadMessages(state, threadId).filter((message) => message.work !== undefined).at(-1);
+  const newest = threadMessages(state, threadId)
+    .filter((message) => message.work !== undefined)
+    .at(-1);
   if (!newest?.work) return undefined;
   return {
     ...newest.work,
     messageId: newest.id,
     author: newest.author,
-    ...(newest.authorOwnerDisplayName ? { authorOwnerDisplayName: newest.authorOwnerDisplayName } : {}),
+    ...(newest.authorOwnerDisplayName
+      ? { authorOwnerDisplayName: newest.authorOwnerDisplayName }
+      : {}),
     ...(newest.authorUserId ? { authorUserId: newest.authorUserId } : {}),
     ...(newest.authorAgentId ? { authorAgentId: newest.authorAgentId } : {}),
     reportedAtMs: newest.createdAtMs,
@@ -194,13 +242,23 @@ const MAX_AUTHOR_USER_ID_CHARS = 200;
 type AgentReader =
   | { kind: "run"; runId: string }
   | { kind: "unnamed" }
-  | { kind: "connected"; agentId: string; handle: string; requesters: string[]; unattributedCounts: boolean };
+  | {
+      kind: "connected";
+      agentId: string;
+      handle: string;
+      requesters: string[];
+      unattributedCounts: boolean;
+    };
 
 // The engine's handle rule: one mention token, stored as mentions store it.
 function mentionHandle(value: string): string {
   const input = value.trim();
   const token = scanMentionTokens("@" + input)[0];
-  if (!token || token.end !== 1 + input.replace(/[._-]+$/u, "").length || !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)) {
+  if (
+    !token ||
+    token.end !== 1 + input.replace(/[._-]+$/u, "").length ||
+    !/^[\p{L}\p{N}\p{M}._-]+$/u.test(input)
+  ) {
     throw new Error("invalid-message-body");
   }
   return normalizeHandle(token.handle);
@@ -213,7 +271,11 @@ function agentReaderParam(params: ChatsJsonObject): { reader: AgentReader; bindi
   const value = params.reader ?? null;
   const kind = asObject(value, "reader").kind;
   if (kind === "run") {
-    const runId = requiredString(strictObject(value, "reader", ["kind", "runId"]), "runId", "invalid-parameters");
+    const runId = requiredString(
+      strictObject(value, "reader", ["kind", "runId"]),
+      "runId",
+      "invalid-parameters",
+    );
     return { reader: { kind: "run", runId }, binding: `run\0${runId}` };
   }
   if (kind === "unnamed") {
@@ -221,30 +283,53 @@ function agentReaderParam(params: ChatsJsonObject): { reader: AgentReader; bindi
     return { reader: { kind: "unnamed" }, binding: "unnamed" };
   }
   if (kind !== "connected") throw new Error("invalid-parameters");
-  const object = strictObject(value, "reader", ["kind", "agentId", "handle", "requesters", "unattributedCounts"]);
+  const object = strictObject(value, "reader", [
+    "kind",
+    "agentId",
+    "handle",
+    "requesters",
+    "unattributedCounts",
+  ]);
   const agentId = requiredString(object, "agentId", "invalid-parameters");
   const handle = requiredString(object, "handle", "invalid-parameters");
   const listed = Array.isArray(object.requesters) ? object.requesters : [];
   const requesters = listed.filter((account): account is string => typeof account === "string");
   const unattributedCounts = object.unattributedCounts;
-  if (!Array.isArray(object.requesters) || requesters.length !== listed.length || typeof unattributedCounts !== "boolean") {
+  if (
+    !Array.isArray(object.requesters) ||
+    requesters.length !== listed.length ||
+    typeof unattributedCounts !== "boolean"
+  ) {
     throw new Error("invalid-parameters");
   }
-  const binding = ["connected", agentId, handle, unattributedCounts ? "1" : "0", ...requesters].join("\0");
-  if (!AGENT_ID_PATTERN.test(agentId) || requesters.length > MAX_AGENT_REQUESTERS) throw new Error("invalid-input");
+  const binding = [
+    "connected",
+    agentId,
+    handle,
+    unattributedCounts ? "1" : "0",
+    ...requesters,
+  ].join("\0");
+  if (!AGENT_ID_PATTERN.test(agentId) || requesters.length > MAX_AGENT_REQUESTERS)
+    throw new Error("invalid-input");
   const accounts: string[] = [];
   for (const requester of requesters) {
     const account = normalizeAuthorUserId(requester);
     if (!accounts.includes(account)) accounts.push(account);
   }
-  const normalized = { agentId, handle: mentionHandle(handle), requesters: accounts, unattributedCounts };
+  const normalized = {
+    agentId,
+    handle: mentionHandle(handle),
+    requesters: accounts,
+    unattributedCounts,
+  };
   return { reader: { kind: "connected", ...normalized }, binding };
 }
 
 // The engine stores an account id trimmed, and refuses an empty or long one.
 function normalizeAuthorUserId(value: string): string {
   const account = value.trim();
-  if (account === "" || account.length > MAX_AUTHOR_USER_ID_CHARS) throw new Error("invalid-sender");
+  if (account === "" || account.length > MAX_AUTHOR_USER_ID_CHARS)
+    throw new Error("invalid-sender");
   return account;
 }
 
@@ -257,7 +342,10 @@ function readCoordinate(value: JsonValue): { createdAtMs: number; messageId: str
 }
 
 // Messages after the first one `posted` matches in each thread, in thread order.
-function messagesAfterFirstPost(state: WorkspaceState, posted: (message: ChatMessage) => boolean): ChatMessage[] {
+function messagesAfterFirstPost(
+  state: WorkspaceState,
+  posted: (message: ChatMessage) => boolean,
+): ChatMessage[] {
   const after: ChatMessage[] = [];
   for (const ids of state.threadMessages.values()) {
     let found = false;
@@ -296,20 +384,13 @@ function optionalSafeInteger(
   return value as number;
 }
 
-function requiredSafeInteger(
-  object: ChatsJsonObject,
-  key: string,
-  code = "invalid-input",
-): number {
+function requiredSafeInteger(object: ChatsJsonObject, key: string, code = "invalid-input"): number {
   const value = object[key];
   if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(code);
   return value as number;
 }
 
-function optionalInteger(
-  object: ChatsJsonObject,
-  key: string,
-): number | undefined {
+function optionalInteger(object: ChatsJsonObject, key: string): number | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
   if (!Number.isSafeInteger(value)) throw new Error("invalid-parameters");
@@ -520,13 +601,17 @@ function agentRequest(
   if (dispatch.state === "pending") return { agentId: dispatch.agentId, state: "waiting" as const };
   const found = dispatch.runId ? state.runs.get(dispatch.runId) : undefined;
   const run = found?.agentId === dispatch.agentId ? found : undefined;
-  const requestState = dispatch.state === "running" || (dispatch.state === "done" && run && run.endedAtMs === undefined)
-    ? "running"
-    : dispatch.state === "failed" || (dispatch.state === "done" && run?.failureHandled)
-      ? "failed"
-      : null;
+  const requestState =
+    dispatch.state === "running" ||
+    (dispatch.state === "done" && run && run.endedAtMs === undefined)
+      ? "running"
+      : dispatch.state === "failed" || (dispatch.state === "done" && run?.failureHandled)
+        ? "failed"
+        : null;
   if (!requestState) return null;
-  const failureReason = dispatch.failureReason ?? run?.failureReason ??
+  const failureReason =
+    dispatch.failureReason ??
+    run?.failureReason ??
     (dispatch.state === "done" && run?.exitCode === 0 ? "no-reply" : undefined);
   return {
     agentId: dispatch.agentId,
@@ -544,9 +629,11 @@ function agentRequest(
 }
 
 function compareStreamPosition(left: ChatStreamPosition, right: ChatStreamPosition): number {
-  return left.createdAtMs - right.createdAtMs ||
+  return (
+    left.createdAtMs - right.createdAtMs ||
     (left.lane === right.lane ? 0 : left.lane === "posts" ? -1 : 1) ||
-    compareText(left.id, right.id);
+    compareText(left.id, right.id)
+  );
 }
 
 // Every item in a group's stream, oldest first: each post's first message and
@@ -586,9 +673,17 @@ function streamItems(state: WorkspaceState, channelId: string) {
 function streamPost(state: WorkspaceState, threadId: string) {
   const replies = threadMessages(state, threadId).slice(1);
   const work = threadWork(state, threadId);
-  const repliers = new Map<string, { author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }>();
+  const repliers = new Map<
+    string,
+    { author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }
+  >();
   for (const reply of replies) {
-    const key = JSON.stringify([reply.author.kind, reply.author.displayName, reply.authorUserId ?? null, reply.authorAgentId ?? null]);
+    const key = JSON.stringify([
+      reply.author.kind,
+      reply.author.displayName,
+      reply.authorUserId ?? null,
+      reply.authorAgentId ?? null,
+    ]);
     repliers.set(key, {
       author: reply.author,
       ...(reply.authorUserId ? { authorUserId: reply.authorUserId } : {}),
@@ -601,8 +696,11 @@ function streamPost(state: WorkspaceState, threadId: string) {
   return {
     replyCount: replies.length,
     repliers: [...repliers.values()]
-      .sort((left, right) => right.lastReplyAtMs - left.lastReplyAtMs ||
-        compareText(left.author.displayName, right.author.displayName))
+      .sort(
+        (left, right) =>
+          right.lastReplyAtMs - left.lastReplyAtMs ||
+          compareText(left.author.displayName, right.author.displayName),
+      )
       .slice(0, 3),
     ...(lastReply ? { lastReplyAtMs: lastReply.createdAtMs } : {}),
     ...(latestAgent
@@ -621,7 +719,9 @@ function streamPost(state: WorkspaceState, threadId: string) {
         }
       : {}),
     openDecisionCount: [...state.decisions.values()].filter(
-      (decision) => decision.threadId === threadId && decision.state === "open" &&
+      (decision) =>
+        decision.threadId === threadId &&
+        decision.state === "open" &&
         state.messages.has(decision.messageId),
     ).length,
     ...(work ? { work } : {}),
@@ -661,49 +761,34 @@ function personalFeedMessages(
   return [...state.messages.values()]
     .filter((message) => {
       const thread = state.threads.get(message.threadId);
-      const channel = thread?.channelId
-        ? state.channels.get(thread.channelId)
-        : undefined;
-      const openingMessageId = thread
-        ? threadMessages(state, thread.id)[0]?.id
-        : undefined;
-      return message.workspaceId === workspace && !!thread && (
-        follows.has(`thread\0${thread.id}`) ||
-        (
-          message.id === openingMessageId &&
-          channel?.wireId !== null &&
-          channel?.wireId !== undefined &&
-          follows.has(`channel\0${channel.wireId}`)
-        ) ||
-        (
-          message.author.kind === "human" &&
-          message.authorUserId !== undefined &&
-          follows.has(`person\0${message.authorUserId}`)
-        ) ||
-        (
-          message.author.kind === "agent" &&
-          message.authorUserId !== undefined &&
-          follows.has(`agent\0${message.authorUserId}`)
-        )
+      const channel = thread?.channelId ? state.channels.get(thread.channelId) : undefined;
+      const openingMessageId = thread ? threadMessages(state, thread.id)[0]?.id : undefined;
+      return (
+        message.workspaceId === workspace &&
+        !!thread &&
+        (follows.has(`thread\0${thread.id}`) ||
+          (message.id === openingMessageId &&
+            channel?.wireId !== null &&
+            channel?.wireId !== undefined &&
+            follows.has(`channel\0${channel.wireId}`)) ||
+          (message.author.kind === "human" &&
+            message.authorUserId !== undefined &&
+            follows.has(`person\0${message.authorUserId}`)) ||
+          (message.author.kind === "agent" &&
+            message.authorUserId !== undefined &&
+            follows.has(`agent\0${message.authorUserId}`)))
       );
     })
-    .sort(
-      (left, right) =>
-        right.createdAtMs - left.createdAtMs ||
-        compareText(right.id, left.id),
-    );
+    .sort((left, right) => right.createdAtMs - left.createdAtMs || compareText(right.id, left.id));
 }
 
 function mentionHandles(body: string): string[] {
-  return [...new Set(chatMentionTokens(body).map(token => normalizeHandle(token.handle)))];
+  return [...new Set(chatMentionTokens(body).map((token) => normalizeHandle(token.handle)))];
 }
 
 const EMOJI_ATOM =
   "(?:[#*0-9]\\uFE0F?\\u20E3|\\u{1F3F4}\\u{E0067}\\u{E0062}(?:\\u{E0065}\\u{E006E}\\u{E0067}|\\u{E0073}\\u{E0063}\\u{E0074}|\\u{E0077}\\u{E006C}\\u{E0073})\\u{E007F}|\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
-const EMOJI_GRAPHEME_PATTERN = new RegExp(
-  `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
-  "u",
-);
+const EMOJI_GRAPHEME_PATTERN = new RegExp(`^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`, "u");
 
 function validateEmoji(value: string): string {
   const emoji = value.normalize("NFC").trim();
@@ -726,10 +811,9 @@ function encodeCursor(binding: string, index: number): string {
 }
 
 function encodeFeedCursor(message: ChatMessage): string {
-  return Buffer.from(
-    JSON.stringify([message.createdAtMs, message.id]),
-    "utf8",
-  ).toString("base64url");
+  return Buffer.from(JSON.stringify([message.createdAtMs, message.id]), "utf8").toString(
+    "base64url",
+  );
 }
 
 function decodeFeedCursor(cursor: string): {
@@ -737,20 +821,11 @@ function decodeFeedCursor(cursor: string): {
   messageId: string;
 } {
   try {
-    if (
-      cursor.length === 0 ||
-      cursor.length > 512 ||
-      !/^[A-Za-z0-9_-]+$/u.test(cursor)
-    ) {
+    if (cursor.length === 0 || cursor.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) {
       throw new Error();
     }
-    const decoded = JSON.parse(
-      Buffer.from(cursor, "base64url").toString("utf8"),
-    ) as unknown;
-    if (
-      Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url") !==
-      cursor
-    ) {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (Buffer.from(JSON.stringify(decoded), "utf8").toString("base64url") !== cursor) {
       throw new Error();
     }
     if (
@@ -816,9 +891,11 @@ function dispatchKey(triggerMessageId: string, agentId: string): string {
 }
 
 function compareDispatches(left: ChatDispatch, right: ChatDispatch): number {
-  return left.createdAtMs - right.createdAtMs ||
+  return (
+    left.createdAtMs - right.createdAtMs ||
     compareText(left.triggerMessageId, right.triggerMessageId) ||
-    compareText(left.agentId, right.agentId);
+    compareText(left.agentId, right.agentId)
+  );
 }
 
 // The engine's chat page cut: rows fit 256 KiB serialized, and the first row
@@ -831,7 +908,8 @@ function byteBudgetPage<T>(rows: readonly T[]): T[] {
   let included = 0;
   for (const row of rows) {
     const size = Buffer.byteLength(JSON.stringify(row), "utf8");
-    if (included === 0 && size > SINGLE_ROW_HARD_CAP_BYTES) throw new Error("row-exceeds-wire-limit");
+    if (included === 0 && size > SINGLE_ROW_HARD_CAP_BYTES)
+      throw new Error("row-exceeds-wire-limit");
     remaining -= size;
     if (included > 0 && remaining < 0) break;
     included += 1;
@@ -858,39 +936,85 @@ function allowedKeys(method: string): readonly string[] {
   switch (method) {
     case CHATS_METHOD.channelCreate:
       return ["channelId", "name", "kind", "type", "purpose", "folderPath", "nowMs"];
-    case CHATS_METHOD.channelEnsureAgent: return ["channelId", "agentId", "name", "nowMs"];
+    case CHATS_METHOD.channelEnsureAgent:
+      return ["channelId", "agentId", "name", "nowMs"];
     case CHATS_METHOD.channelEnsureGeneral:
       return ["channelId", "nowMs"];
-    case CHATS_METHOD.channelFindBySlug: return ["slug"];
+    case CHATS_METHOD.channelFindBySlug:
+      return ["slug"];
     case CHATS_METHOD.channelsList:
     case CHATS_METHOD.threadsList:
       return ["pageLimit", "cursor"];
     case CHATS_METHOD.readStateListUnreadFileThreads:
       return ["pageLimit", "afterThreadId"];
-    case CHATS_METHOD.channelGetWireId: return ["channelId"];
+    case CHATS_METHOD.channelGetWireId:
+      return ["channelId"];
     case CHATS_METHOD.threadStart:
       return [
-        "channelId", "threadId", "messageId", "title", "lane", "ownThread", "authorKind", "authorDisplayName", "authorOwnerDisplayName",
-        "authorUserId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs", "stageReceipt",
+        "channelId",
+        "threadId",
+        "messageId",
+        "title",
+        "lane",
+        "ownThread",
+        "authorKind",
+        "authorDisplayName",
+        "authorOwnerDisplayName",
+        "authorUserId",
+        "authorActorKey",
+        "origin",
+        "body",
+        "needsDecision",
+        "options",
+        "attachments",
+        "automation",
+        "authorAgentId",
+        "authorReported",
+        "work",
+        "wakeAgentIds",
+        "nowMs",
+        "stageReceipt",
       ];
-    case CHATS_METHOD.threadCreate: return ["threadId", "title", "linkedFile", "nowMs"];
-    case CHATS_METHOD.threadsListForFile: return ["objectId", "pageLimit", "cursor"];
-    case CHATS_METHOD.threadsListForChannel: return ["channelId", "lane", "pageLimit", "cursor"];
-    case CHATS_METHOD.streamList: return ["channelId", "before", "pageLimit"];
+    case CHATS_METHOD.threadCreate:
+      return ["threadId", "title", "linkedFile", "nowMs"];
+    case CHATS_METHOD.threadsListForFile:
+      return ["objectId", "pageLimit", "cursor"];
+    case CHATS_METHOD.threadsListForChannel:
+      return ["channelId", "lane", "pageLimit", "cursor"];
+    case CHATS_METHOD.streamList:
+      return ["channelId", "before", "pageLimit"];
     case CHATS_METHOD.threadGet:
     case CHATS_METHOD.threadFindChannelId:
     case CHATS_METHOD.threadRevision:
     case CHATS_METHOD.dispatchIsThreadPaused:
     case CHATS_METHOD.dispatchGetThreadPauseState:
       return ["threadId"];
-    case CHATS_METHOD.dispatchLatestRunForThread: return ["threadId", "agentId"];
-    case CHATS_METHOD.threadGetProjection: return ["threadId", "linkedFileAccess"];
+    case CHATS_METHOD.dispatchLatestRunForThread:
+      return ["threadId", "agentId"];
+    case CHATS_METHOD.threadGetProjection:
+      return ["threadId", "linkedFileAccess"];
     case CHATS_METHOD.messageSend:
       return [
-        "threadId", "messageId", "authorKind", "authorDisplayName", "authorOwnerDisplayName", "authorUserId",
-        "parentMessageId", "authorActorKey", "origin", "body", "needsDecision", "options", "attachments", "automation",
-        "authorAgentId", "authorReported", "work", "wakeAgentIds", "nowMs", "stageReceipt",
+        "threadId",
+        "messageId",
+        "authorKind",
+        "authorDisplayName",
+        "authorOwnerDisplayName",
+        "authorUserId",
+        "parentMessageId",
+        "authorActorKey",
+        "origin",
+        "body",
+        "needsDecision",
+        "options",
+        "attachments",
+        "automation",
+        "authorAgentId",
+        "authorReported",
+        "work",
+        "wakeAgentIds",
+        "nowMs",
+        "stageReceipt",
       ];
     case CHATS_METHOD.messagesList:
       return ["threadId", "limit", "afterMessageOrder"];
@@ -905,11 +1029,24 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.readStateSeedAccount:
       return ["accountUserId", "seedLocal", "nowMs"];
     case CHATS_METHOD.decisionResolve:
-      return ["threadId", "messageId", "resolvedByMessageId", "chosenOption", "nowMs", "stageReceipt"];
+      return [
+        "threadId",
+        "messageId",
+        "resolvedByMessageId",
+        "chosenOption",
+        "nowMs",
+        "stageReceipt",
+      ];
     case CHATS_METHOD.reactionSet:
       return [
-        "threadId", "messageId", "emoji", "author", "replicationAuthorId",
-        "state", "nowMs", "stageReceipt",
+        "threadId",
+        "messageId",
+        "emoji",
+        "author",
+        "replicationAuthorId",
+        "state",
+        "nowMs",
+        "stageReceipt",
       ];
     case CHATS_METHOD.decisionsListForThread:
     case CHATS_METHOD.reactionsList:
@@ -927,19 +1064,20 @@ function allowedKeys(method: string): readonly string[] {
     case CHATS_METHOD.dispatchListPending:
     case CHATS_METHOD.dispatchOpenRuns:
       return ["pageLimit", "cursor"];
-    case CHATS_METHOD.dispatchListFailedRunRecoveries: return ["threadId", "pageLimit", "cursor"];
+    case CHATS_METHOD.dispatchListFailedRunRecoveries:
+      return ["threadId", "pageLimit", "cursor"];
     case CHATS_METHOD.agentReadMarkThreadRead:
       return ["reader", "threadId", "upTo", "expectedRevision"];
     case CHATS_METHOD.followsSet:
-      return [
-        "ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs",
-      ];
+      return ["ownerUserId", "replicationOwnerUserId", "targetKind", "targetId", "state", "nowMs"];
     case CHATS_METHOD.followsList:
       return ["ownerUserId", "state", "pageLimit", "cursor"];
-    case CHATS_METHOD.followsEnsureDefaults: return ["ownerUserId"];
+    case CHATS_METHOD.followsEnsureDefaults:
+      return ["ownerUserId"];
     case CHATS_METHOD.feedMarkSeen:
       return ["ownerUserId", "replicationOwnerUserId", "headCursor", "nowMs"];
-    case CHATS_METHOD.feedListPersonal: return ["ownerUserId", "limit", "cursor"];
+    case CHATS_METHOD.feedListPersonal:
+      return ["ownerUserId", "limit", "cursor"];
     case CHATS_METHOD.bookmarkSave:
       return ["ownerUserId", "targetKind", "targetId", "mode", "destinationPath", "nowMs"];
     case CHATS_METHOD.bookmarksList:
@@ -952,8 +1090,12 @@ function allowedKeys(method: string): readonly string[] {
       return ["ownerUserId", "limit", "pageLimit", "cursor"];
     case CHATS_METHOD.bookmarkMarkReady:
       return [
-        "ownerUserId", "bookmarkId", "generation", "projectedAtMs",
-        "projectionObjectId", "projectionPath",
+        "ownerUserId",
+        "bookmarkId",
+        "generation",
+        "projectedAtMs",
+        "projectionObjectId",
+        "projectionPath",
       ];
     case CHATS_METHOD.bookmarkMarkFailed:
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
@@ -963,23 +1105,35 @@ function allowedKeys(method: string): readonly string[] {
       return ["ownerUserId", "bookmarkId", "generation", "failureReason"];
     case CHATS_METHOD.dispatchEnqueue:
       return ["triggerMessageId", "agentId", "threadId", "nowMs"];
-    case CHATS_METHOD.dispatchClaimNextPending: return ["agentId", "runId", "command", "logPath", "nowMs"];
-    case CHATS_METHOD.dispatchListRunMessages: return ["runId", "pageLimit", "cursor"];
-    case CHATS_METHOD.dispatchRunIdForMessage: return ["messageId"];
+    case CHATS_METHOD.dispatchClaimNextPending:
+      return ["agentId", "runId", "command", "logPath", "nowMs"];
+    case CHATS_METHOD.dispatchListRunMessages:
+      return ["runId", "pageLimit", "cursor"];
+    case CHATS_METHOD.dispatchRunIdForMessage:
+      return ["messageId"];
     case CHATS_METHOD.dispatchRunRecordsForThread:
       return ["threadId", "limit", "pageLimit", "cursor"];
     case CHATS_METHOD.dispatchGetRunRecord:
     case CHATS_METHOD.dispatchMarkFailureHandled:
       return ["runId"];
-    case CHATS_METHOD.dispatchRecentCount: return ["threadId", "sinceMs"];
-    case CHATS_METHOD.dispatchFailPendingForThread: return ["threadId", "agentId", "reason"];
-    case CHATS_METHOD.dispatchCoverDelivered: return ["runId", "messageIds"];
-    case CHATS_METHOD.dispatchRecordRunMessage: return ["messageId", "runId"];
-    case CHATS_METHOD.dispatchSetThreadPaused: return ["threadId", "paused", "reason"];
-    case CHATS_METHOD.dispatchRequeueFailedTrigger: return ["triggerMessageId", "runId"];
-    case CHATS_METHOD.dispatchComplete: return ["runId", "exitCode", "nowMs"];
-    case CHATS_METHOD.dispatchFail: return ["runId", "reason", "exitCode", "nowMs"];
-    default: throw new Error(`Unsupported loopback method: ${method}`);
+    case CHATS_METHOD.dispatchRecentCount:
+      return ["threadId", "sinceMs"];
+    case CHATS_METHOD.dispatchFailPendingForThread:
+      return ["threadId", "agentId", "reason"];
+    case CHATS_METHOD.dispatchCoverDelivered:
+      return ["runId", "messageIds"];
+    case CHATS_METHOD.dispatchRecordRunMessage:
+      return ["messageId", "runId"];
+    case CHATS_METHOD.dispatchSetThreadPaused:
+      return ["threadId", "paused", "reason"];
+    case CHATS_METHOD.dispatchRequeueFailedTrigger:
+      return ["triggerMessageId", "runId"];
+    case CHATS_METHOD.dispatchComplete:
+      return ["runId", "exitCode", "nowMs"];
+    case CHATS_METHOD.dispatchFail:
+      return ["runId", "reason", "exitCode", "nowMs"];
+    default:
+      throw new Error(`Unsupported loopback method: ${method}`);
   }
 }
 
@@ -1029,7 +1183,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     triggerMessageId: string,
     agentId = DEFAULT_AGENT_ID,
   ): ChatDispatch | undefined {
-    const dispatch = this.workspaces.get(workspace)?.dispatches.get(dispatchKey(triggerMessageId, agentId));
+    const dispatch = this.workspaces
+      .get(workspace)
+      ?.dispatches.get(dispatchKey(triggerMessageId, agentId));
     return dispatch === undefined ? undefined : jsonClone(dispatch);
   }
 
@@ -1049,8 +1205,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const atMs = this.tick(nowMs);
     const requeued: string[] = [];
     for (const dispatch of running) {
-      const run =
-        dispatch.runId === undefined ? undefined : state.runs.get(dispatch.runId);
+      const run = dispatch.runId === undefined ? undefined : state.runs.get(dispatch.runId);
       if (run !== undefined && run.endedAtMs === undefined) {
         run.endedAtMs = atMs;
         run.exitCode = -1;
@@ -1083,7 +1238,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (typeof request.workspace !== "string") throw new Error("workspace-unavailable");
     const workspace = request.workspace;
     const state = this.workspace(workspace);
-    const params = strictObject(request.params, `${request.method} params`, allowedKeys(request.method));
+    const params = strictObject(
+      request.params,
+      `${request.method} params`,
+      allowedKeys(request.method),
+    );
     switch (request.method) {
       case CHATS_METHOD.channelCreate:
         return this.channelCreate(state, workspace, params);
@@ -1099,10 +1258,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.channelGetWireId(state, params);
       case CHATS_METHOD.threadStart:
         return this.replay(request, workspace, params, false, () =>
-          this.threadStart(state, workspace, params));
+          this.threadStart(state, workspace, params),
+        );
       case CHATS_METHOD.threadCreate:
         return this.replay(request, workspace, params, true, () =>
-          this.threadCreate(state, workspace, params));
+          this.threadCreate(state, workspace, params),
+        );
       case CHATS_METHOD.threadsList:
         return this.threadsList(state, workspace, params);
       case CHATS_METHOD.threadsListForFile:
@@ -1134,7 +1295,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.threadProjection(state, workspace, params);
       case CHATS_METHOD.messageSend:
         return this.replay(request, workspace, params, false, () =>
-          this.messageSend(state, workspace, params));
+          this.messageSend(state, workspace, params),
+        );
       case CHATS_METHOD.messagesList:
         return this.messagesList(state, params);
       case CHATS_METHOD.messageGet: {
@@ -1150,7 +1312,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.readStateMarkAccountRead: {
         const threadId = requiredString(params, "threadId");
         this.requireThread(state, threadId);
-        if (state.messages.get(requiredString(params, "messageId"))?.threadId !== threadId) throw new Error("message-not-found");
+        if (state.messages.get(requiredString(params, "messageId"))?.threadId !== threadId)
+          throw new Error("message-not-found");
         return this.readStateGet(state, workspace, params);
       }
       // The loopback keeps local counts, so it never records an account.
@@ -1160,12 +1323,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.listUnreadFileThreads(state, params);
       case CHATS_METHOD.decisionResolve:
         return this.replay(request, workspace, params, true, () =>
-          this.decisionResolve(state, params));
+          this.decisionResolve(state, params),
+        );
       case CHATS_METHOD.decisionsListForThread:
         return this.decisionsList(state, workspace, params);
       case CHATS_METHOD.reactionSet:
-        return this.replay(request, workspace, params, true, () =>
-          this.reactionSet(state, params));
+        return this.replay(request, workspace, params, true, () => this.reactionSet(state, params));
       case CHATS_METHOD.reactionsList:
         return this.reactionsList(state, workspace, params);
       case CHATS_METHOD.attachmentsListForThread:
@@ -1206,7 +1369,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         return this.bookmarkArchive(state, params);
       case CHATS_METHOD.bookmarkMarkPending:
         return this.replay(request, workspace, params, true, () =>
-          this.bookmarkMarkPending(state, params));
+          this.bookmarkMarkPending(state, params),
+        );
       case CHATS_METHOD.bookmarkMarkFailed:
         return this.bookmarkTransition(state, params, "failed");
       case CHATS_METHOD.bookmarkRetryFailed:
@@ -1231,8 +1395,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
         const threadId = requiredString(params, "threadId");
         const agentId = optionalString(params, "agentId");
         const run = [...state.runs.values()]
-          .filter((candidate) => candidate.threadId === threadId && (agentId === undefined || candidate.agentId === agentId))
-          .sort((left, right) => right.startedAtMs - left.startedAtMs || compareText(right.runId, left.runId))[0];
+          .filter(
+            (candidate) =>
+              candidate.threadId === threadId &&
+              (agentId === undefined || candidate.agentId === agentId),
+          )
+          .sort(
+            (left, right) =>
+              right.startedAtMs - left.startedAtMs || compareText(right.runId, left.runId),
+          )[0];
         return jsonResult(run ?? null);
       }
       case CHATS_METHOD.dispatchGetRunRecord:
@@ -1290,11 +1461,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return result;
   }
 
-  private writeFingerprint(
-    method: string,
-    workspace: string,
-    params: ChatsJsonObject,
-  ): string {
+  private writeFingerprint(method: string, workspace: string, params: ChatsJsonObject): string {
     switch (method) {
       case CHATS_METHOD.threadStart:
         optionalSafeInteger(params, "nowMs");
@@ -1318,7 +1485,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.threadCreate: {
         optionalSafeInteger(params, "nowMs");
         const linked = strictObject(params.linkedFile ?? null, "linkedFile", [
-          "objectId", "pathHint",
+          "objectId",
+          "pathHint",
         ]);
         const pathHint = optionalString(linked, "pathHint");
         return JSON.stringify([
@@ -1328,10 +1496,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
             requiredString(params, "title", "invalid-thread-title"),
             "invalid-thread-title",
           ),
-          normalizeTrimmed(
-            requiredString(linked, "objectId", "invalid-path"),
-            "invalid-path",
-          ),
+          normalizeTrimmed(requiredString(linked, "objectId", "invalid-path"), "invalid-path"),
           pathHint === undefined ? "" : normalizePath(pathHint),
         ]);
       }
@@ -1363,16 +1528,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
       case CHATS_METHOD.reactionSet: {
         optionalSafeInteger(params, "nowMs");
         const author = strictObject(params.author ?? null, "author", [
-          "authorId", "kind", "displayName",
+          "authorId",
+          "kind",
+          "displayName",
         ]);
         const authorId = normalizeTrimmed(
           requiredString(author, "authorId", "invalid-sender"),
           "invalid-sender",
         );
         const replicationAuthorId = optionalString(params, "replicationAuthorId");
-        const normalizedReplicationAuthorId = replicationAuthorId === undefined
-          ? undefined
-          : normalizeTrimmed(replicationAuthorId, "invalid-sender");
+        const normalizedReplicationAuthorId =
+          replicationAuthorId === undefined
+            ? undefined
+            : normalizeTrimmed(replicationAuthorId, "invalid-sender");
         if (
           normalizedReplicationAuthorId !== undefined &&
           normalizedReplicationAuthorId !== authorId
@@ -1410,11 +1578,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
   }
 
-  private optionalNormalizedString(
-    params: ChatsJsonObject,
-    key: string,
-    code: string,
-  ): string {
+  private optionalNormalizedString(params: ChatsJsonObject, key: string, code: string): string {
     const value = optionalString(params, key);
     return value === undefined ? "" : normalizeTrimmed(value, code);
   }
@@ -1428,7 +1592,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return [
       authorAgentId ?? "",
       wakeAgentIds.join(","),
-      (reported === undefined ? "" : JSON.stringify(reported)) + (work === undefined ? "" : JSON.stringify(work)),
+      (reported === undefined ? "" : JSON.stringify(reported)) +
+        (work === undefined ? "" : JSON.stringify(work)),
     ];
   }
 
@@ -1448,7 +1613,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const normalized: Array<[string, string, string, string, number | null]> = [];
     for (const [index, value] of values.entries()) {
       const input = strictObject(value, `attachments[${index}]`, [
-        "objectId", "pathHint", "headingText", "headingAnchor", "headingOccurrence",
+        "objectId",
+        "pathHint",
+        "headingText",
+        "headingAnchor",
+        "headingOccurrence",
       ]);
       const objectId = normalizeTrimmed(
         requiredString(input, "objectId", "invalid-path"),
@@ -1459,33 +1628,25 @@ export class ChatsLoopbackEngine implements EngineTransport {
       const headingTextInput = optionalString(input, "headingText");
       const headingAnchorInput = optionalString(input, "headingAnchor");
       const headingOccurrence = optionalSafeInteger(input, "headingOccurrence");
-      const headingCount = [
-        headingTextInput, headingAnchorInput, headingOccurrence,
-      ].filter((entry) => entry !== undefined).length;
+      const headingCount = [headingTextInput, headingAnchorInput, headingOccurrence].filter(
+        (entry) => entry !== undefined,
+      ).length;
       if (headingCount !== 0 && headingCount !== 3) throw new Error("invalid-path");
-      const headingText = headingTextInput === undefined
-        ? ""
-        : normalizeNonempty(headingTextInput, "invalid-path");
-      const headingAnchor = headingAnchorInput === undefined
-        ? ""
-        : normalizeNonempty(headingAnchorInput, "invalid-path");
+      const headingText =
+        headingTextInput === undefined ? "" : normalizeNonempty(headingTextInput, "invalid-path");
+      const headingAnchor =
+        headingAnchorInput === undefined
+          ? ""
+          : normalizeNonempty(headingAnchorInput, "invalid-path");
       const dedup = `${objectId}\0${headingAnchor}\0${headingOccurrence ?? ""}`;
       if (seen.has(dedup)) continue;
       seen.add(dedup);
-      normalized.push([
-        objectId,
-        pathHint,
-        headingText,
-        headingAnchor,
-        headingOccurrence ?? null,
-      ]);
+      normalized.push([objectId, pathHint, headingText, headingAnchor, headingOccurrence ?? null]);
     }
     return normalized;
   }
 
-  private channelJson(
-    channel: ChatChannel & { wireId?: string | null },
-  ): ChatChannel {
+  private channelJson(channel: ChatChannel & { wireId?: string | null }): ChatChannel {
     return {
       workspaceId: channel.workspaceId,
       channelId: channel.channelId,
@@ -1528,18 +1689,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
       (folderPath.length === 0 ||
         folderPath.startsWith("/") ||
         folderPath.includes("\\") ||
-        folderPath.split("/").some((segment) => segment === "" || segment === "." || segment === "..") ||
+        folderPath
+          .split("/")
+          .some((segment) => segment === "" || segment === "." || segment === "..") ||
         /[\p{Cc}]/u.test(folderPath))
     ) {
       throw new Error("invalid-channel-folder");
     }
     if (state.channels.has(channelId)) throw new Error("target-exists");
     const channelSlug = slug(name);
-    if (
-      [...state.channels.values()].some(
-        (channel) => channel.slug === channelSlug,
-      )
-    ) {
+    if ([...state.channels.values()].some((channel) => channel.slug === channelSlug)) {
       throw new Error("channel-exists");
     }
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
@@ -1568,9 +1727,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     kind: "channel",
   ): JsonValue {
     const wantedSlug = slug(name);
-    const existing = [...state.channels.values()].find(
-      (channel) => channel.slug === wantedSlug,
-    );
+    const existing = [...state.channels.values()].find((channel) => channel.slug === wantedSlug);
     if (existing) return jsonResult(this.channelJson(existing));
     return this.channelCreate(state, workspace, {
       channelId: requiredString(params, "channelId"),
@@ -1594,7 +1751,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const isDefault = agentId === DEFAULT_AGENT_ID;
     const name = isDefault
       ? "My agent"
-      : normalizeNonempty(requiredString(params, "name", "invalid-channel-name"), "invalid-channel-name");
+      : normalizeNonempty(
+          requiredString(params, "name", "invalid-channel-name"),
+          "invalid-channel-name",
+        );
     const channelSlug = isDefault ? "my-agent" : `my-agent-${agentId}`;
     const channelId = requiredString(params, "channelId");
     if (state.channels.has(channelId)) throw new Error("target-exists");
@@ -1632,8 +1792,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .filter((channel) => channel.workspaceId === workspace)
       .sort(
         (left, right) =>
-          left.createdAtMs - right.createdAtMs ||
-          compareText(left.channelId, right.channelId),
+          left.createdAtMs - right.createdAtMs || compareText(left.channelId, right.channelId),
       )
       .map((channel) => {
         const threads = [...state.threads.values()].filter(
@@ -1655,14 +1814,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     });
   }
 
-  private channelFindBySlug(
-    state: WorkspaceState,
-    params: ChatsJsonObject,
-  ): JsonValue {
+  private channelFindBySlug(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
     const wanted = requiredString(params, "slug");
-    const channel = [...state.channels.values()].find(
-      (candidate) => candidate.slug === wanted,
-    );
+    const channel = [...state.channels.values()].find((candidate) => candidate.slug === wanted);
     return jsonResult(channel ? this.channelJson(channel) : null);
   }
 
@@ -1686,18 +1840,24 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const requestedTitle = optionalString(params, "title")?.trim();
     const title = requestedTitle || body.split("\n")[0]?.slice(0, 80) || "New chat";
     const requestedLane = optionalString(params, "lane") ?? "posts";
-    if (requestedLane !== "posts" && requestedLane !== "chat") throw new Error("invalid-thread-lane");
+    if (requestedLane !== "posts" && requestedLane !== "chat")
+      throw new Error("invalid-thread-lane");
     // An agent DM is one conversation, as in the engine.
-    const agentDm = state.channels.get(channelId)?.kind === "agent" && optionalBoolean(params, "ownThread") !== true;
+    const agentDm =
+      state.channels.get(channelId)?.kind === "agent" &&
+      optionalBoolean(params, "ownThread") !== true;
     if (agentDm && requestedTitle) throw new Error("invalid-thread-title");
     const lane = agentDm ? "chat" : requestedLane;
     // One chat lane per channel: a second start appends to the oldest,
     // the way the engine does, and the caller's thread id is not used.
-    const existingLane = lane === "chat"
-      ? [...state.threads.values()]
-          .filter((thread) => thread.channelId === channelId && thread.lane === "chat")
-          .sort((a, b) => a.createdAtMs - b.createdAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0]
-      : undefined;
+    const existingLane =
+      lane === "chat"
+        ? [...state.threads.values()]
+            .filter((thread) => thread.channelId === channelId && thread.lane === "chat")
+            .sort(
+              (a, b) => a.createdAtMs - b.createdAtMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+            )[0]
+        : undefined;
     if (existingLane) {
       const message = this.insertMessage(state, workspace, params, existingLane.id, atMs);
       existingLane.updatedAtMs = atMs;
@@ -1727,13 +1887,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const threadId = requiredString(params, "threadId");
     if (state.threads.has(threadId)) throw new Error("target-exists");
     const linked = strictObject(params.linkedFile ?? null, "linkedFile", ["objectId", "pathHint"]);
-    const objectId = normalizeNonempty(requiredString(linked, "objectId", "invalid-path"), "invalid-path");
+    const objectId = normalizeNonempty(
+      requiredString(linked, "objectId", "invalid-path"),
+      "invalid-path",
+    );
     const pathHint = optionalString(linked, "pathHint");
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     const thread: ChatThread = {
       id: threadId,
       workspaceId: workspace,
-      title: normalizeNonempty(requiredString(params, "title", "invalid-thread-title"), "invalid-thread-title"),
+      title: normalizeNonempty(
+        requiredString(params, "title", "invalid-thread-title"),
+        "invalid-thread-title",
+      ),
       createdAtMs: atMs,
       updatedAtMs: atMs,
       linkedFile: {
@@ -1753,11 +1919,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const threads = [...state.threads.values()]
       .filter((thread) => thread.workspaceId === workspace)
-      .sort(
-        (left, right) =>
-          left.createdAtMs - right.createdAtMs ||
-          compareText(left.id, right.id),
-      )
+      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id))
       .map((thread) => ({
         workspaceId: thread.workspaceId,
         threadId: thread.id,
@@ -1794,10 +1956,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(message);
   }
 
-  private messagesList(
-    state: WorkspaceState,
-    params: ChatsJsonObject,
-  ): JsonValue {
+  private messagesList(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const messages = threadMessages(state, threadId);
@@ -1805,8 +1964,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const start = (optionalSafeInteger(params, "afterMessageOrder") ?? -1) + 1;
     const limit = Math.min(optionalSafeInteger(params, "limit", 1) ?? 100, 500);
     const rows = messages.slice(start, start + limit);
-    const next =
-      start + rows.length < messages.length ? start + rows.length - 1 : null;
+    const next = start + rows.length < messages.length ? start + rows.length - 1 : null;
     return jsonResult({
       messages: rows.map((message) => withAgentRequests(state, message)),
       nextAfterMessageOrder: next,
@@ -1863,10 +2021,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(result);
   }
 
-  private listUnreadFileThreads(
-    state: WorkspaceState,
-    params: ChatsJsonObject,
-  ): JsonValue {
+  private listUnreadFileThreads(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
     const limit = pageLimit(params);
     const afterThreadId = optionalString(params, "afterThreadId");
     return jsonResult(
@@ -1875,18 +2030,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
         .filter((thread) => afterThreadId === undefined || thread.id > afterThreadId)
         .flatMap((thread) => {
           const messageCount = threadMessages(state, thread.id).length;
-          const lastReadSequence =
-            state.humanReadStates.get(thread.id)?.lastReadSequence ?? 0;
+          const lastReadSequence = state.humanReadStates.get(thread.id)?.lastReadSequence ?? 0;
           return messageCount > Math.min(lastReadSequence, messageCount)
             ? [{ threadId: thread.id, messageCount, lastReadSequence }]
             : [];
         })
         .sort((left, right) =>
-          left.threadId < right.threadId
-            ? -1
-            : left.threadId > right.threadId
-              ? 1
-              : 0)
+          left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0,
+        )
         .slice(0, limit),
     );
   }
@@ -1917,7 +2068,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const messageId = requiredString(params, "messageId", "invalid-message-body");
     if (state.messages.has(messageId)) throw new Error("target-exists");
     const authorKind = requiredString(params, "authorKind", "invalid-sender");
-    if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation") throw new Error("invalid-sender");
+    if (authorKind !== "human" && authorKind !== "agent" && authorKind !== "automation")
+      throw new Error("invalid-sender");
     const automation = messageAutomation(authorKind, params.automation);
     const { authorAgentId, wakeAgentIds } = messageAgents(params);
     const authorReported = messageReported(params);
@@ -1996,7 +2148,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
         });
       }
     }
-    if (automation) state.chainDepths.set(messageId, (params.automation as { chainDepth: number }).chainDepth);
+    if (automation)
+      state.chainDepths.set(messageId, (params.automation as { chainDepth: number }).chainDepth);
     const ids = state.threadMessages.get(threadId) ?? [];
     ids.push(messageId);
     state.threadMessages.set(threadId, ids);
@@ -2031,9 +2184,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): ChatAttachment {
     const label = `attachments[${index}]`;
     const input = strictObject(value, label, [
-      "objectId", "pathHint", "headingText", "headingAnchor", "headingOccurrence",
+      "objectId",
+      "pathHint",
+      "headingText",
+      "headingAnchor",
+      "headingOccurrence",
     ]) as ChatLocalAttachmentParams;
-    const objectId = normalizeNonempty(requiredString(input, "objectId", "invalid-path"), "invalid-path");
+    const objectId = normalizeNonempty(
+      requiredString(input, "objectId", "invalid-path"),
+      "invalid-path",
+    );
     const pathHint = optionalString(input, "pathHint");
     const headingText = optionalString(input, "headingText");
     const headingAnchor = optionalString(input, "headingAnchor");
@@ -2051,8 +2211,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
       createdAtMs: atMs,
     };
     if (pathHint !== undefined) attachment.pathHint = normalizePath(pathHint);
-    if (headingText !== undefined) attachment.headingText = normalizeNonempty(headingText, "invalid-path");
-    if (headingAnchor !== undefined) attachment.headingAnchor = normalizeNonempty(headingAnchor, "invalid-path");
+    if (headingText !== undefined)
+      attachment.headingText = normalizeNonempty(headingText, "invalid-path");
+    if (headingAnchor !== undefined)
+      attachment.headingAnchor = normalizeNonempty(headingAnchor, "invalid-path");
     if (headingOccurrence !== undefined) attachment.headingOccurrence = headingOccurrence;
     return attachment;
   }
@@ -2062,10 +2224,17 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const objectId = normalizeNonempty(requiredString(params, "objectId", "invalid-path"), "invalid-path");
+    const objectId = normalizeNonempty(
+      requiredString(params, "objectId", "invalid-path"),
+      "invalid-path",
+    );
     const rows = [...state.threads.values()]
-      .filter((thread) => thread.workspaceId === workspace && thread.linkedFile?.objectId === objectId)
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id));
+      .filter(
+        (thread) => thread.workspaceId === workspace && thread.linkedFile?.objectId === objectId,
+      )
+      .sort(
+        (left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id),
+      );
     const result = page(rows, params, `${workspace}\0threadsForFile\0${objectId}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
   }
@@ -2083,10 +2252,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs || compareText(right.id, left.id))
       .map((thread) => {
         const messages = threadMessages(state, thread.id);
-        const lastReadSequence = Math.min(
-          state.humanReads.get(thread.id) ?? 0,
-          messages.length,
-        );
+        const lastReadSequence = Math.min(state.humanReads.get(thread.id) ?? 0, messages.length);
         const opening = messages[0];
         const work = threadWork(state, thread.id);
         return {
@@ -2096,17 +2262,23 @@ export class ChatsLoopbackEngine implements EngineTransport {
           lastReadSequence,
           unreadCount: messages.length - lastReadSequence,
           openDecisionCount: [...state.decisions.values()].filter(
-            (decision) => decision.threadId === thread.id && decision.state === "open" &&
+            (decision) =>
+              decision.threadId === thread.id &&
+              decision.state === "open" &&
               state.messages.has(decision.messageId),
           ).length,
           ...(opening
             ? {
                 openingMessage: {
-                  ...(opening.authorActorKey !== undefined ? { authorActorKey: opening.authorActorKey } : {}),
+                  ...(opening.authorActorKey !== undefined
+                    ? { authorActorKey: opening.authorActorKey }
+                    : {}),
                   ...(opening.origin ? { origin: opening.origin } : {}),
                   id: opening.id,
                   author: opening.author,
-                  ...(opening.authorOwnerDisplayName ? { authorOwnerDisplayName: opening.authorOwnerDisplayName } : {}),
+                  ...(opening.authorOwnerDisplayName
+                    ? { authorOwnerDisplayName: opening.authorOwnerDisplayName }
+                    : {}),
                   ...(opening.authorUserId ? { authorUserId: opening.authorUserId } : {}),
                   createdAtMs: opening.createdAtMs,
                   bodySnippet:
@@ -2157,13 +2329,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
         ...(item.position.lane === "posts" ? { post: streamPost(state, item.position.id) } : {}),
       };
     });
-    const read = all.filter((item) => {
-      const cursor = state.humanReads.get(item.message.threadId) ?? 0;
-      return item.position.lane === "posts" ? cursor >= 1 : item.order < cursor;
-    }).at(-1);
+    const read = all
+      .filter((item) => {
+        const cursor = state.humanReads.get(item.message.threadId) ?? 0;
+        return item.position.lane === "posts" ? cursor >= 1 : item.order < cursor;
+      })
+      .at(-1);
     return jsonResult({
       items,
-      nextBefore: start > 0 ? items[0]?.position ?? null : null,
+      nextBefore: start > 0 ? (items[0]?.position ?? null) : null,
       readPosition: read?.position ?? null,
     });
   }
@@ -2188,7 +2362,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
       const kind = requiredString(object, "kind", "invalid-path");
       if (kind === "allowed") {
         strictObject(params.linkedFileAccess, "linkedFileAccess", ["kind", "path"]);
-        access = { kind: "allowed", path: normalizePath(requiredString(object, "path", "invalid-path")) };
+        access = {
+          kind: "allowed",
+          path: normalizePath(requiredString(object, "path", "invalid-path")),
+        };
       } else if (kind === "denied" || kind === "unknown") {
         strictObject(params.linkedFileAccess, "linkedFileAccess", ["kind"]);
         access = { kind };
@@ -2198,13 +2375,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     const lines = [`# ${thread.title}`, "", "Read-only chat projection.", ""];
     if (thread.linkedFile) {
-      lines.push(access.kind === "allowed" ? `Linked file: ${access.path}` : "Linked file: unavailable");
+      lines.push(
+        access.kind === "allowed" ? `Linked file: ${access.path}` : "Linked file: unavailable",
+      );
       lines.push("");
     }
     for (const message of threadMessages(state, thread.id)) {
-      const author = message.author.kind === "human"
-        ? message.author.displayName
-        : `${message.author.displayName} (${message.author.kind})`;
+      const author =
+        message.author.kind === "human"
+          ? message.author.displayName
+          : `${message.author.displayName} (${message.author.kind})`;
       lines.push(`## ${author}`, "", message.body, "");
     }
     const text = `${lines.join("\n").trimEnd()}\n`;
@@ -2252,8 +2432,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const rows = [...state.decisions.values()]
-      .filter((decision) => decision.threadId === threadId && state.messages.has(decision.messageId))
-      .sort((left, right) => left.atMs - right.atMs || compareText(left.messageId, right.messageId));
+      .filter(
+        (decision) => decision.threadId === threadId && state.messages.has(decision.messageId),
+      )
+      .sort(
+        (left, right) => left.atMs - right.atMs || compareText(left.messageId, right.messageId),
+      );
     const result = page(rows, params, `${workspace}\0decisions\0${threadId}`);
     return jsonResult({ decisions: result.values, nextCursor: result.nextCursor });
   }
@@ -2266,20 +2450,20 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (!message || message.threadId !== threadId) throw new Error("message-not-found");
     const emoji = validateEmoji(requiredString(params, "emoji", "invalid-message-body"));
     const authorInput = strictObject(params.author ?? null, "author", [
-      "authorId", "kind", "displayName",
+      "authorId",
+      "kind",
+      "displayName",
     ]);
     const authorId = normalizeTrimmed(
       requiredString(authorInput, "authorId", "invalid-sender"),
       "invalid-sender",
     );
     const replicationAuthorId = optionalString(params, "replicationAuthorId");
-    const normalizedReplicationAuthorId = replicationAuthorId === undefined
-      ? undefined
-      : normalizeTrimmed(replicationAuthorId, "invalid-sender");
-    if (
-      normalizedReplicationAuthorId !== undefined &&
-      normalizedReplicationAuthorId !== authorId
-    ) {
+    const normalizedReplicationAuthorId =
+      replicationAuthorId === undefined
+        ? undefined
+        : normalizeTrimmed(replicationAuthorId, "invalid-sender");
+    if (normalizedReplicationAuthorId !== undefined && normalizedReplicationAuthorId !== authorId) {
       throw new Error("invalid-sender");
     }
     const kind = requiredString(authorInput, "kind", "invalid-sender");
@@ -2324,7 +2508,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
           reaction.state === "added" &&
           state.messages.has(reaction.messageId),
       )
-      .sort((left, right) => left.atMs - right.atMs || compareText(left.reactionId, right.reactionId));
+      .sort(
+        (left, right) => left.atMs - right.atMs || compareText(left.reactionId, right.reactionId),
+      );
     const result = page(rows, params, `${workspace}\0reactions\0${threadId}`);
     return jsonResult({ reactions: result.values, nextCursor: result.nextCursor });
   }
@@ -2337,10 +2523,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const threadId = requiredString(params, "threadId");
     this.requireThread(state, threadId);
     const rows = [...state.attachments.values()]
-      .filter((attachment) => attachment.threadId === threadId && state.messages.has(attachment.messageId))
+      .filter(
+        (attachment) =>
+          attachment.threadId === threadId && state.messages.has(attachment.messageId),
+      )
       .sort(
         (left, right) =>
-          left.createdAtMs - right.createdAtMs || compareText(left.attachmentId, right.attachmentId),
+          left.createdAtMs - right.createdAtMs ||
+          compareText(left.attachmentId, right.attachmentId),
       );
     const result = page(rows, params, `${workspace}\0attachments\0${threadId}`);
     return jsonResult({ attachments: result.values, nextCursor: result.nextCursor });
@@ -2357,11 +2547,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (!objectId && !pathHint) throw new Error("invalid-path");
     const rows = [...state.attachments.values()]
       .filter((attachment) =>
-        objectId ? attachment.objectId === objectId : attachment.pathHint === pathHint)
+        objectId ? attachment.objectId === objectId : attachment.pathHint === pathHint,
+      )
       .filter((attachment) => state.messages.has(attachment.messageId))
       .sort(
         (left, right) =>
-          right.createdAtMs - left.createdAtMs || compareText(right.attachmentId, left.attachmentId),
+          right.createdAtMs - left.createdAtMs ||
+          compareText(right.attachmentId, left.attachmentId),
       )
       .slice(0, 2_000)
       .map((attachment) => {
@@ -2401,11 +2593,20 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const handle = mentionHandle(requiredString(params, "handle", "invalid-message-body"));
     const rows = state.mentions
       .filter((mention) => mention.handle === handle)
-      .filter((mention) => state.messages.has(mention.messageId) && state.threads.has(mention.threadId))
+      .filter(
+        (mention) => state.messages.has(mention.messageId) && state.threads.has(mention.threadId),
+      )
       // A message that woke a dohc agent is that agent's work.
-      .filter((mention) =>
-        ![...state.dispatches.values()].some((dispatch) => dispatch.triggerMessageId === mention.messageId))
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.messageId, right.messageId));
+      .filter(
+        (mention) =>
+          ![...state.dispatches.values()].some(
+            (dispatch) => dispatch.triggerMessageId === mention.messageId,
+          ),
+      )
+      .sort(
+        (left, right) =>
+          left.createdAtMs - right.createdAtMs || compareText(left.messageId, right.messageId),
+      );
     const result = page(rows, params, `${workspace}\0mentions\0${handle}`);
     return jsonResult({ mentions: result.values, nextCursor: result.nextCursor });
   }
@@ -2423,23 +2624,26 @@ export class ChatsLoopbackEngine implements EngineTransport {
   // One reader's unread requests, oldest first.
   private agentRequests(state: WorkspaceState, reader: AgentReader): ChatMessage[] {
     const place = this.agentPlace(state, reader);
-    const candidates = reader.kind === "run"
-      ? this.runRequests(state, place)
-      : reader.kind === "unnamed"
-        ? this.unnamedRequests(state)
-        : this.connectedRequests(state, reader);
+    const candidates =
+      reader.kind === "run"
+        ? this.runRequests(state, place)
+        : reader.kind === "unnamed"
+          ? this.unnamedRequests(state)
+          : this.connectedRequests(state, reader);
     return [...new Set(candidates)]
       .filter((message) => {
         if (!state.threads.has(message.threadId)) return false;
         const read = state.agentReads.get(agentReadKey(place, message.threadId));
-        return !read ||
+        return (
+          !read ||
           message.createdAtMs > read.lastReadCreatedAtMs ||
-          (
-            message.createdAtMs === read.lastReadCreatedAtMs &&
-            compareText(message.id, read.lastReadMessageId) > 0
-          );
+          (message.createdAtMs === read.lastReadCreatedAtMs &&
+            compareText(message.id, read.lastReadMessageId) > 0)
+        );
       })
-      .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id));
+      .sort(
+        (left, right) => left.createdAtMs - right.createdAtMs || compareText(left.id, right.id),
+      );
   }
 
   // The requests the run's agent was woken for.
@@ -2452,14 +2656,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
   // A plain @agent no agent was woken for, and a person's reply in a thread
   // an unnamed agent posted in. Agent chats belong to their agents.
   private unnamedRequests(state: WorkspaceState): ChatMessage[] {
-    const unnamedPost = (message: ChatMessage) => message.author.kind === "agent" && message.authorAgentId === undefined;
+    const unnamedPost = (message: ChatMessage) =>
+      message.author.kind === "agent" && message.authorAgentId === undefined;
     const dispatched = new Set([...state.dispatches.values()].map((row) => row.triggerMessageId));
     const mentioned = state.mentions
       .filter((row) => row.handle === "agent" && !dispatched.has(row.messageId))
       .flatMap((row) => state.messages.get(row.messageId) ?? []);
-    const replies = messagesAfterFirstPost(state, unnamedPost).filter((message) => message.author.kind === "human");
-    return [...mentioned, ...replies].filter((message) =>
-      !unnamedPost(message) && !isAgentChat(state, state.threads.get(message.threadId)));
+    const replies = messagesAfterFirstPost(state, unnamedPost).filter(
+      (message) => message.author.kind === "human",
+    );
+    return [...mentioned, ...replies].filter(
+      (message) =>
+        !unnamedPost(message) && !isAgentChat(state, state.threads.get(message.threadId)),
+    );
   }
 
   // Its chat, a mention of its handle, and a reply in a thread it posted in,
@@ -2469,7 +2678,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     reader: Extract<AgentReader, { kind: "connected" }>,
   ): ChatMessage[] {
     const chats = new Set(
-      [...state.channels.values()].filter((channel) => channel.agentId === reader.agentId).map((channel) => channel.channelId),
+      [...state.channels.values()]
+        .filter((channel) => channel.agentId === reader.agentId)
+        .map((channel) => channel.channelId),
     );
     const inChat = [...state.messages.values()].filter((message) => {
       const channelId = state.threads.get(message.threadId)?.channelId;
@@ -2478,12 +2689,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const mentioned = state.mentions
       .filter((row) => row.handle === reader.handle)
       .flatMap((row) => state.messages.get(row.messageId) ?? []);
-    const replies = messagesAfterFirstPost(state, (message) => message.authorAgentId === reader.agentId);
-    return [...inChat, ...mentioned, ...replies].filter((message) =>
-      message.author.kind === "human" && message.origin !== "cli" &&
-      (message.authorUserId === undefined
-        ? reader.unattributedCounts
-        : reader.requesters.includes(message.authorUserId)));
+    const replies = messagesAfterFirstPost(
+      state,
+      (message) => message.authorAgentId === reader.agentId,
+    );
+    return [...inChat, ...mentioned, ...replies].filter(
+      (message) =>
+        message.author.kind === "human" &&
+        message.origin !== "cli" &&
+        (message.authorUserId === undefined
+          ? reader.unattributedCounts
+          : reader.requesters.includes(message.authorUserId)),
+    );
   }
 
   private agentUnreadRequests(
@@ -2510,26 +2727,31 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const threadId = optionalString(params, "threadId");
     const after = params.after === undefined ? undefined : readCoordinate(params.after);
     const limit = pageLimit(params);
-    const rows = this.agentRequests(state, reader).filter((message) =>
-      (after === undefined || message.createdAtMs > after.createdAtMs ||
-        (message.createdAtMs === after.createdAtMs && compareText(message.id, after.messageId) > 0)) &&
-      (channelId === undefined || state.threads.get(message.threadId)?.channelId === channelId) &&
-      (threadId === undefined || message.threadId === threadId));
+    const rows = this.agentRequests(state, reader).filter(
+      (message) =>
+        (after === undefined ||
+          message.createdAtMs > after.createdAtMs ||
+          (message.createdAtMs === after.createdAtMs &&
+            compareText(message.id, after.messageId) > 0)) &&
+        (channelId === undefined || state.threads.get(message.threadId)?.channelId === channelId) &&
+        (threadId === undefined || message.threadId === threadId),
+    );
     const values = rows.slice(0, limit).map((message) => {
       const chatId = state.threads.get(message.threadId)?.channelId;
       const channel = chatId === undefined ? undefined : state.channels.get(chatId);
       return {
         threadId: message.threadId,
         messageId: message.id,
-        channel: channel === undefined
-          ? null
-          : {
-              id: channel.channelId,
-              kind: channel.kind,
-              name: channel.name,
-              slug: channel.slug,
-              purpose: channel.purpose,
-            },
+        channel:
+          channel === undefined
+            ? null
+            : {
+                id: channel.channelId,
+                kind: channel.kind,
+                name: channel.name,
+                slug: channel.slug,
+                purpose: channel.purpose,
+              },
         author: { kind: message.author.kind, displayName: message.author.displayName },
         body: message.body,
         createdAtMs: message.createdAtMs,
@@ -2556,12 +2778,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
         // An unnamed reader leaves agent chats to their agents.
         if (agentReader.kind === "unnamed" && isAgentChat(state, entry.thread)) return false;
         const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
-        return !read ||
+        return (
+          !read ||
           entry.latest.createdAtMs > read.lastReadCreatedAtMs ||
-          (
-            entry.latest.createdAtMs === read.lastReadCreatedAtMs &&
-            compareText(entry.latest.id, read.lastReadMessageId) > 0
-          );
+          (entry.latest.createdAtMs === read.lastReadCreatedAtMs &&
+            compareText(entry.latest.id, read.lastReadMessageId) > 0)
+        );
       })
       .sort(
         (left, right) =>
@@ -2570,10 +2792,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
       )
       .map((entry) => {
         const read = state.agentReads.get(agentReadKey(reader, entry.thread.id));
-        return { ...entry.thread, lastRead: {
-          createdAtMs: read?.lastReadCreatedAtMs ?? 0,
-          messageId: read?.lastReadMessageId ?? "",
-        } };
+        return {
+          ...entry.thread,
+          lastRead: {
+            createdAtMs: read?.lastReadCreatedAtMs ?? 0,
+            messageId: read?.lastReadMessageId ?? "",
+          },
+        };
       });
     const result = page(rows, params, `${workspace}\0agentUnread\0${binding}`);
     return jsonResult({ threads: result.values, nextCursor: result.nextCursor });
@@ -2599,21 +2824,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     const messages = threadMessages(state, threadId);
     const latest = messages.at(-1);
-    const clamped = latest && (
-      requested.createdAtMs > latest.createdAtMs ||
-      (
-        requested.createdAtMs === latest.createdAtMs &&
-        compareText(requested.messageId, latest.id) > 0
-      )
-    )
-      ? { createdAtMs: latest.createdAtMs, messageId: latest.id }
-      : requested;
-    const advances = !prior ||
+    const clamped =
+      latest &&
+      (requested.createdAtMs > latest.createdAtMs ||
+        (requested.createdAtMs === latest.createdAtMs &&
+          compareText(requested.messageId, latest.id) > 0))
+        ? { createdAtMs: latest.createdAtMs, messageId: latest.id }
+        : requested;
+    const advances =
+      !prior ||
       clamped.createdAtMs > prior.lastReadCreatedAtMs ||
-      (
-        clamped.createdAtMs === prior.lastReadCreatedAtMs &&
-        compareText(clamped.messageId, prior.lastReadMessageId) > 0
-      );
+      (clamped.createdAtMs === prior.lastReadCreatedAtMs &&
+        compareText(clamped.messageId, prior.lastReadMessageId) > 0);
     const result: ChatAgentReadState = advances
       ? {
           workspaceId: workspace,
@@ -2623,49 +2845,36 @@ export class ChatsLoopbackEngine implements EngineTransport {
           revision: (prior?.revision ?? 0) + 1,
           updatedAtMs: this.tick(),
         }
-      : prior ?? {
+      : (prior ?? {
           workspaceId: workspace,
           threadId,
           lastReadCreatedAtMs: 0,
           lastReadMessageId: "",
           revision: 0,
           updatedAtMs: 0,
-        };
+        });
     state.agentReads.set(agentReadKey(reader, threadId), result);
     return jsonResult(result);
   }
 
-  private followSet(
-    state: WorkspaceState,
-    workspace: string,
-    params: ChatsJsonObject,
-  ): JsonValue {
+  private followSet(state: WorkspaceState, workspace: string, params: ChatsJsonObject): JsonValue {
     const ownerUserId = normalizeTrimmed(
       requiredString(params, "ownerUserId", "invalid-follow-target"),
       "invalid-follow-target",
     );
-    const replicationOwner = optionalString(
-      params,
-      "replicationOwnerUserId",
-    );
-    const replicationOwnerUserId = replicationOwner === undefined
-      ? undefined
-      : normalizeTrimmed(replicationOwner, "invalid-follow-target");
-    if (
-      replicationOwnerUserId !== undefined &&
-      replicationOwnerUserId !== ownerUserId
-    ) {
+    const replicationOwner = optionalString(params, "replicationOwnerUserId");
+    const replicationOwnerUserId =
+      replicationOwner === undefined
+        ? undefined
+        : normalizeTrimmed(replicationOwner, "invalid-follow-target");
+    if (replicationOwnerUserId !== undefined && replicationOwnerUserId !== ownerUserId) {
       throw new Error("invalid-follow-target");
     }
     const targetKind = requiredString(params, "targetKind");
     if (!["person", "agent", "channel", "thread"].includes(targetKind)) {
       throw new Error("invalid-follow-target");
     }
-    const targetId = requiredString(
-      params,
-      "targetId",
-      "invalid-follow-target",
-    );
+    const targetId = requiredString(params, "targetId", "invalid-follow-target");
     const followState = requiredString(params, "state");
     if (followState !== "following" && followState !== "unfollowed") {
       throw new Error("invalid-follow-target");
@@ -2688,17 +2897,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const ownerUserId = requiredString(
-      params,
-      "ownerUserId",
-      "invalid-follow-target",
-    );
+    const ownerUserId = requiredString(params, "ownerUserId", "invalid-follow-target");
     const wantedState = optionalString(params, "state");
-    if (
-      wantedState !== undefined &&
-      wantedState !== "following" &&
-      wantedState !== "unfollowed"
-    ) {
+    if (wantedState !== undefined && wantedState !== "following" && wantedState !== "unfollowed") {
       throw new Error("invalid-follow-target");
     }
     const follows = [...state.followRecords.values()]
@@ -2710,8 +2911,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       )
       .sort(
         (left, right) =>
-          left.updatedAtMs - right.updatedAtMs ||
-          compareText(left.targetId, right.targetId),
+          left.updatedAtMs - right.updatedAtMs || compareText(left.targetId, right.targetId),
       );
     const result = page(
       follows,
@@ -2758,26 +2958,17 @@ export class ChatsLoopbackEngine implements EngineTransport {
       requiredString(params, "ownerUserId", "invalid-follow-target"),
       "invalid-follow-target",
     );
-    const replicationOwner = optionalString(
-      params,
-      "replicationOwnerUserId",
-    );
-    const replicationOwnerUserId = replicationOwner === undefined
-      ? undefined
-      : normalizeTrimmed(replicationOwner, "invalid-follow-target");
-    if (
-      replicationOwnerUserId !== undefined &&
-      replicationOwnerUserId !== ownerUserId
-    ) {
+    const replicationOwner = optionalString(params, "replicationOwnerUserId");
+    const replicationOwnerUserId =
+      replicationOwner === undefined
+        ? undefined
+        : normalizeTrimmed(replicationOwner, "invalid-follow-target");
+    if (replicationOwnerUserId !== undefined && replicationOwnerUserId !== ownerUserId) {
       throw new Error("invalid-follow-target");
     }
-    const cursor = decodeFeedCursor(
-      requiredString(params, "headCursor", "invalid-follow-target"),
-    );
+    const cursor = decodeFeedCursor(requiredString(params, "headCursor", "invalid-follow-target"));
     const visible = personalFeedMessages(state, workspace, ownerUserId).some(
-      (message) =>
-        message.createdAtMs === cursor.createdAtMs &&
-        message.id === cursor.messageId,
+      (message) => message.createdAtMs === cursor.createdAtMs && message.id === cursor.messageId,
     );
     if (!visible) throw new Error("invalid-follow-target");
 
@@ -2788,86 +2979,72 @@ export class ChatsLoopbackEngine implements EngineTransport {
       ownerUserId,
       lastSeenCreatedAtMs: cursor.createdAtMs,
       lastSeenMessageId: cursor.messageId,
-      updatedAtMs: Math.max(
-        requestedAtMs,
-        (prior?.updatedAtMs ?? -1) + 1,
-      ),
+      updatedAtMs: Math.max(requestedAtMs, (prior?.updatedAtMs ?? -1) + 1),
     };
     const advances =
       prior === undefined ||
       candidate.lastSeenCreatedAtMs > prior.lastSeenCreatedAtMs ||
-      (
-        candidate.lastSeenCreatedAtMs === prior.lastSeenCreatedAtMs &&
-        compareText(candidate.lastSeenMessageId, prior.lastSeenMessageId) >= 0
-      );
+      (candidate.lastSeenCreatedAtMs === prior.lastSeenCreatedAtMs &&
+        compareText(candidate.lastSeenMessageId, prior.lastSeenMessageId) >= 0);
     const result = advances ? candidate : prior;
     state.feedReads.set(ownerUserId, result);
     return jsonResult(result);
   }
 
-  private feedList(
-    state: WorkspaceState,
-    workspace: string,
-    params: ChatsJsonObject,
-  ): JsonValue {
+  private feedList(state: WorkspaceState, workspace: string, params: ChatsJsonObject): JsonValue {
     const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
     const follows = activeFollowTargets(state, workspace, owner);
     const feedMessages = personalFeedMessages(state, workspace, owner);
-    const candidates: ChatFeedItem[] = feedMessages
-      .map((message) => {
-        const thread = state.threads.get(message.threadId)!;
-        const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
-        const isOpeningMessage = threadMessages(state, thread.id)[0]?.id === message.id;
-        const matchedBy: ChatFeedItem["matchedBy"] = [];
-        if (
-          message.authorUserId &&
-          (
-            (message.author.kind === "human" && follows.has(`person\0${message.authorUserId}`)) ||
-            (message.author.kind === "agent" && follows.has(`agent\0${message.authorUserId}`))
-          )
-        ) {
-          matchedBy.push(message.author.kind === "agent" ? "agent" : "person");
-        }
-        if (follows.has(`thread\0${thread.id}`)) matchedBy.push("thread");
-        if (
-          isOpeningMessage &&
-          channel?.wireId !== null &&
-          channel?.wireId !== undefined &&
-          follows.has(`channel\0${channel.wireId}`)
-        ) {
-          matchedBy.push("channel");
-        }
-        const openingMessage = isOpeningMessage
-          ? undefined
-          : threadMessages(state, thread.id)[0];
-        const parentMessage = message.parentMessageId
-          ? state.messages.get(message.parentMessageId)
-          : undefined;
-        return {
-          message,
-          thread,
-          reactions: activeMessageReactions(state, message.id),
-          matchedBy,
-          ...(parentMessage ? { parentMessage } : {}),
-          ...(openingMessage ? { openingMessage } : {}),
-          ...(channel
-            ? {
-                channel: {
-                  id: channel.channelId,
-                  workspaceId: channel.workspaceId,
-                  name: channel.name,
-                  slug: channel.slug,
-                  kind: channel.kind,
-                  type: channel.type,
-                  purpose: channel.purpose,
-                  ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
-                  createdAtMs: channel.createdAtMs,
-                  updatedAtMs: channel.updatedAtMs,
-                },
-              }
-            : {}),
-        };
-      });
+    const candidates: ChatFeedItem[] = feedMessages.map((message) => {
+      const thread = state.threads.get(message.threadId)!;
+      const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
+      const isOpeningMessage = threadMessages(state, thread.id)[0]?.id === message.id;
+      const matchedBy: ChatFeedItem["matchedBy"] = [];
+      if (
+        message.authorUserId &&
+        ((message.author.kind === "human" && follows.has(`person\0${message.authorUserId}`)) ||
+          (message.author.kind === "agent" && follows.has(`agent\0${message.authorUserId}`)))
+      ) {
+        matchedBy.push(message.author.kind === "agent" ? "agent" : "person");
+      }
+      if (follows.has(`thread\0${thread.id}`)) matchedBy.push("thread");
+      if (
+        isOpeningMessage &&
+        channel?.wireId !== null &&
+        channel?.wireId !== undefined &&
+        follows.has(`channel\0${channel.wireId}`)
+      ) {
+        matchedBy.push("channel");
+      }
+      const openingMessage = isOpeningMessage ? undefined : threadMessages(state, thread.id)[0];
+      const parentMessage = message.parentMessageId
+        ? state.messages.get(message.parentMessageId)
+        : undefined;
+      return {
+        message,
+        thread,
+        reactions: activeMessageReactions(state, message.id),
+        matchedBy,
+        ...(parentMessage ? { parentMessage } : {}),
+        ...(openingMessage ? { openingMessage } : {}),
+        ...(channel
+          ? {
+              channel: {
+                id: channel.channelId,
+                workspaceId: channel.workspaceId,
+                name: channel.name,
+                slug: channel.slug,
+                kind: channel.kind,
+                type: channel.type,
+                purpose: channel.purpose,
+                ...(channel.folderPath !== undefined ? { folderPath: channel.folderPath } : {}),
+                createdAtMs: channel.createdAtMs,
+                updatedAtMs: channel.updatedAtMs,
+              },
+            }
+          : {}),
+      };
+    });
     const limit = optionalSafeInteger(params, "limit", 1) ?? 20;
     if (limit > 100) throw new Error("invalid-follow-target");
     const cursorParams: ChatsJsonObject = {
@@ -2889,20 +3066,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     workspace: string,
     params: ChatsJsonObject,
   ): JsonValue {
-    const ownerUserId = requiredString(
-      params,
-      "ownerUserId",
-      "invalid-follow-target",
-    );
+    const ownerUserId = requiredString(params, "ownerUserId", "invalid-follow-target");
     const targetKind = requiredString(params, "targetKind");
     if (targetKind !== "message" && targetKind !== "thread") {
       throw new Error("invalid-bookmark-target");
     }
-    const targetId = requiredString(
-      params,
-      "targetId",
-      "invalid-bookmark-target",
-    );
+    const targetId = requiredString(params, "targetId", "invalid-bookmark-target");
     const mode = requiredString(params, "mode");
     if (mode !== "live" && mode !== "snapshot") {
       throw new Error("invalid-bookmark-target");
@@ -2913,10 +3082,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const thread =
       targetKind === "thread"
         ? this.requireThread(state, targetId)
-        : this.requireThread(
-            state,
-            state.messages.get(targetId)?.threadId ?? "",
-          );
+        : this.requireThread(state, state.messages.get(targetId)?.threadId ?? "");
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     const existing = [...state.bookmarks.values()].find(
       (bookmark) =>
@@ -2926,8 +3092,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     );
     if (existing) {
       const resetsProjection =
-        existing.destinationPath !== destinationPath ||
-        existing.state === "archived";
+        existing.destinationPath !== destinationPath || existing.state === "archived";
       existing.threadId = thread.id;
       if (targetKind === "message") existing.messageId = targetId;
       else delete existing.messageId;
@@ -2962,21 +3127,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(bookmark);
   }
 
-  private bookmarksList(
-    state: WorkspaceState,
-    params: ChatsJsonObject,
-  ): JsonValue {
-    const ownerUserId = requiredString(
-      params,
-      "ownerUserId",
-      "invalid-follow-target",
-    );
+  private bookmarksList(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
+    const ownerUserId = requiredString(params, "ownerUserId", "invalid-follow-target");
     const wantedState = optionalString(params, "state");
-    if (
-      wantedState !== undefined &&
-      wantedState !== "active" &&
-      wantedState !== "archived"
-    ) {
+    if (wantedState !== undefined && wantedState !== "active" && wantedState !== "archived") {
       throw new Error("invalid-bookmark-target");
     }
     const bookmarks = [...state.bookmarks.values()]
@@ -2987,14 +3141,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
       )
       .sort(
         (left, right) =>
-          left.createdAtMs - right.createdAtMs ||
-          compareText(left.bookmarkId, right.bookmarkId),
+          left.createdAtMs - right.createdAtMs || compareText(left.bookmarkId, right.bookmarkId),
       );
-    const result = page(
-      bookmarks,
-      params,
-      `bookmarks\0${ownerUserId}\0${wantedState ?? ""}`,
-    );
+    const result = page(bookmarks, params, `bookmarks\0${ownerUserId}\0${wantedState ?? ""}`);
     return jsonResult({
       bookmarks: result.values,
       nextCursor: result.nextCursor,
@@ -3016,75 +3165,56 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const logicalLimit = optionalSafeInteger(params, "limit", 1) ?? 50;
     if (logicalLimit > 200) throw new Error("invalid-parameters");
     const rows = [...state.bookmarks.values()]
-      .filter((bookmark) =>
-        bookmark.ownerUserId === owner &&
-        bookmark.state === "active" &&
-        bookmark.projectionState === "pending")
-      .sort((left, right) => left.updatedAtMs - right.updatedAtMs || compareText(left.bookmarkId, right.bookmarkId))
+      .filter(
+        (bookmark) =>
+          bookmark.ownerUserId === owner &&
+          bookmark.state === "active" &&
+          bookmark.projectionState === "pending",
+      )
+      .sort(
+        (left, right) =>
+          left.updatedAtMs - right.updatedAtMs || compareText(left.bookmarkId, right.bookmarkId),
+      )
       .slice(0, logicalLimit);
     const result = page(rows, params, `${workspace}\0pendingBookmarks\0${owner}\0${logicalLimit}`);
     return jsonResult({ bookmarks: result.values, nextCursor: result.nextCursor });
   }
 
-  private bookmarkMarkReady(
-    state: WorkspaceState,
-    params: ChatsJsonObject,
-  ): JsonValue {
+  private bookmarkMarkReady(state: WorkspaceState, params: ChatsJsonObject): JsonValue {
     const bookmark = this.requireBookmark(state, params);
-    const generation = requiredSafeInteger(
-      params,
-      "generation",
-      "invalid-bookmark-target",
-    );
-    const applied =
-      bookmark.generation === generation &&
-      bookmark.projectionState === "pending";
-    const projectionObjectId = optionalString(
-      params,
-      "projectionObjectId",
-    );
+    const generation = requiredSafeInteger(params, "generation", "invalid-bookmark-target");
+    const applied = bookmark.generation === generation && bookmark.projectionState === "pending";
+    const projectionObjectId = optionalString(params, "projectionObjectId");
     const projectionPath = optionalString(params, "projectionPath");
-    if (
-      (projectionObjectId === undefined) !== (projectionPath === undefined)
-    ) {
+    if ((projectionObjectId === undefined) !== (projectionPath === undefined)) {
       throw new Error("invalid-bookmark-target");
     }
     const projectionIdentity =
       projectionObjectId === undefined || projectionPath === undefined
         ? undefined
         : {
-            objectId: normalizeTrimmed(
-              projectionObjectId,
-              "invalid-bookmark-target",
-            ),
+            objectId: normalizeTrimmed(projectionObjectId, "invalid-bookmark-target"),
             path: validateProjectionPath(projectionPath),
           };
     if (
       projectionIdentity !== undefined &&
-      (
-        projectionIdentity.objectId.length > 256 ||
-        /[\u0000-\u001f\u007f]/u.test(projectionIdentity.objectId)
-      )
+      (projectionIdentity.objectId.length > 256 ||
+        /[\u0000-\u001f\u007f]/u.test(projectionIdentity.objectId))
     ) {
       throw new Error("invalid-bookmark-target");
     }
     if (applied) {
       if (
         projectionIdentity !== undefined &&
-        (
-          projectionIdentity.path !== bookmark.destinationPath ||
-          (
-            bookmark.projectionObjectId !== undefined &&
-            bookmark.projectionObjectId !== projectionIdentity.objectId
-          )
-        )
+        (projectionIdentity.path !== bookmark.destinationPath ||
+          (bookmark.projectionObjectId !== undefined &&
+            bookmark.projectionObjectId !== projectionIdentity.objectId))
       ) {
         throw new Error("invalid-bookmark-target");
       }
       bookmark.projectionState = "ready";
       bookmark.projectedGeneration = generation;
-      bookmark.lastProjectedAtMs =
-        optionalSafeInteger(params, "projectedAtMs") ?? this.tick();
+      bookmark.lastProjectedAtMs = optionalSafeInteger(params, "projectedAtMs") ?? this.tick();
       if (projectionIdentity !== undefined) {
         bookmark.projectionObjectId = projectionIdentity.objectId;
       }
@@ -3141,9 +3271,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const bookmark = this.requireBookmark(state, params);
     const generation = requiredSafeInteger(params, "generation", "invalid-bookmark-target");
-    const applied =
-      bookmark.generation === generation &&
-      bookmark.projectionState === "pending";
+    const applied = bookmark.generation === generation && bookmark.projectionState === "pending";
     if (applied) {
       bookmark.projectionState = projectionState;
       const reason = optionalString(params, "failureReason")?.trim();
@@ -3196,7 +3324,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
         (row) => row.state === "running" && row.runId === runId,
       );
       if (existingRun.endedAtMs === undefined && existingDispatch) {
-        return jsonResult({ dispatch: existingDispatch, run: existingRun, chainDepth: this.runChainDepth(state, runId) });
+        return jsonResult({
+          dispatch: existingDispatch,
+          run: existingRun,
+          chainDepth: this.runChainDepth(state, runId),
+        });
       }
       throw new Error("invalid-input");
     }
@@ -3209,8 +3341,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     if ([...state.dispatches.values()].some((row) => row.state === "running")) return null;
     const dispatch = [...state.dispatches.values()]
-      .filter((row) =>
-        row.agentId === agentId && row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
+      .filter(
+        (row) =>
+          row.agentId === agentId &&
+          row.state === "pending" &&
+          !(state.pauses.get(row.threadId)?.paused ?? false),
+      )
       .sort(compareDispatches)[0];
     if (!dispatch) return null;
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
@@ -3222,7 +3358,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const place = (messageId: string) => state.messages.get(messageId)?.parentMessageId ?? null;
     for (const other of state.dispatches.values()) {
       if (
-        other.threadId === dispatch.threadId && other.agentId === dispatch.agentId && other.state === "pending" &&
+        other.threadId === dispatch.threadId &&
+        other.agentId === dispatch.agentId &&
+        other.state === "pending" &&
         place(other.triggerMessageId) === place(dispatch.triggerMessageId)
       ) {
         other.state = "done";
@@ -3280,11 +3418,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const unended = [...state.runs.values()].filter((run) => run.endedAtMs === undefined);
     for (const dispatch of state.dispatches.values()) {
       if (dispatch.state !== "running") continue;
-      const runs = unended.filter((run) =>
-        run.runId === dispatch.runId && run.triggerMessageId === dispatch.triggerMessageId &&
-        run.agentId === dispatch.agentId);
+      const runs = unended.filter(
+        (run) =>
+          run.runId === dispatch.runId &&
+          run.triggerMessageId === dispatch.triggerMessageId &&
+          run.agentId === dispatch.agentId,
+      );
       if (runs.length !== 1) throw new Error("state-corrupt");
-      claims.push({ dispatch, run: runs[0]!, chainDepth: this.runChainDepth(state, runs[0]!.runId) });
+      claims.push({
+        dispatch,
+        run: runs[0]!,
+        chainDepth: this.runChainDepth(state, runs[0]!.runId),
+      });
     }
     if (unended.some((run) => !claims.some((claim) => claim.run.runId === run.runId))) {
       throw new Error("state-corrupt");
@@ -3325,7 +3470,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const limit = optionalSafeInteger(params, "limit", 1);
     let selectedRuns = [...state.runs.values()]
       .filter((run) => run.threadId === threadId)
-      .sort((left, right) => right.startedAtMs - left.startedAtMs || compareText(right.runId, left.runId));
+      .sort(
+        (left, right) =>
+          right.startedAtMs - left.startedAtMs || compareText(right.runId, left.runId),
+      );
     if (limit !== undefined) selectedRuns = selectedRuns.slice(0, limit);
     const selectedIds = new Set(selectedRuns.map((run) => run.runId));
     const rows = [...state.runLinks.entries()]
@@ -3355,8 +3503,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const personInAgentDm = (run: ChatRun): boolean => {
       const trigger = state.messages.get(run.triggerMessageId);
       const thread = trigger && state.threads.get(trigger.threadId);
-      return trigger?.author.kind === "human" && thread?.lane === "chat" &&
-        !!thread.channelId && state.channels.get(thread.channelId)?.kind === "agent";
+      return (
+        trigger?.author.kind === "human" &&
+        thread?.lane === "chat" &&
+        !!thread.channelId &&
+        state.channels.get(thread.channelId)?.kind === "agent"
+      );
     };
     return jsonResult(
       [...state.runs.values()].filter(
@@ -3371,7 +3523,11 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const reason = normalizeNonempty(requiredString(params, "reason"), "invalid-input");
     let changed = 0;
     for (const dispatch of state.dispatches.values()) {
-      if (dispatch.threadId === threadId && dispatch.agentId === agentId && dispatch.state === "pending") {
+      if (
+        dispatch.threadId === threadId &&
+        dispatch.agentId === agentId &&
+        dispatch.state === "pending"
+      ) {
         dispatch.state = "failed";
         dispatch.failureReason = reason;
         dispatch.updatedAtMs = this.tick();
@@ -3381,10 +3537,18 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonResult(changed);
   }
 
-  private coverDelivered(state: WorkspaceState, workspace: string, params: ChatsJsonObject): JsonValue {
+  private coverDelivered(
+    state: WorkspaceState,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): JsonValue {
     const runId = requiredString(params, "runId");
     const messageIds = params.messageIds;
-    if (!Array.isArray(messageIds) || messageIds.length > 100 || !messageIds.every((id) => typeof id === "string")) {
+    if (
+      !Array.isArray(messageIds) ||
+      messageIds.length > 100 ||
+      !messageIds.every((id) => typeof id === "string")
+    ) {
       throw new Error("invalid-parameters");
     }
     const run = state.runs.get(runId);
@@ -3436,10 +3600,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (!dispatch || dispatch.runId !== runId || dispatch.state !== "running") {
       throw new Error("run-state-mismatch");
     }
-    const reason = normalizeNonempty(
-      requiredString(params, "reason"),
-      "invalid-input",
-    );
+    const reason = normalizeNonempty(requiredString(params, "reason"), "invalid-input");
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     run.endedAtMs = atMs;
     run.failureReason = reason;
@@ -3504,12 +3665,17 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const triggerMessageId = requiredString(params, "triggerMessageId");
     const runId = requiredString(params, "runId");
     const run = state.runs.get(runId);
-    const dispatch = run === undefined ? undefined : state.dispatches.get(dispatchKey(triggerMessageId, run.agentId));
+    const dispatch =
+      run === undefined
+        ? undefined
+        : state.dispatches.get(dispatchKey(triggerMessageId, run.agentId));
     const applies =
       run?.workspaceId === workspace &&
       run.endedAtMs !== undefined &&
-      (dispatch?.state === "failed" || (dispatch?.state === "done" &&
-        triggerMessageId === run.triggerMessageId && this.failedCompletedRun(state, run))) &&
+      (dispatch?.state === "failed" ||
+        (dispatch?.state === "done" &&
+          triggerMessageId === run.triggerMessageId &&
+          this.failedCompletedRun(state, run))) &&
       dispatch.runId === runId &&
       dispatch.attemptCount < 2;
     if (!applies || !dispatch) return jsonResult(false);
@@ -3525,9 +3691,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
   // The engine's rule: an interrupted run's covered triggers go back to the
   // queue unless they have used their attempts, whether or not its first
   // trigger goes back.
-  private requeueCovered(state: WorkspaceState, runId: string, maxAttempts: number, atMs: number): void {
+  private requeueCovered(
+    state: WorkspaceState,
+    runId: string,
+    maxAttempts: number,
+    atMs: number,
+  ): void {
     for (const covered of state.dispatches.values()) {
-      if (covered.runId !== runId || covered.state !== "done" || covered.attemptCount >= maxAttempts) continue;
+      if (
+        covered.runId !== runId ||
+        covered.state !== "done" ||
+        covered.attemptCount >= maxAttempts
+      )
+        continue;
       covered.state = "pending";
       delete covered.runId;
       delete covered.failureReason;
@@ -3536,8 +3712,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
   }
 
   private failedCompletedRun(state: WorkspaceState, run: ChatRun): boolean {
-    return ((run.exitCode !== undefined && run.exitCode !== 0) || run.failureHandled) &&
-      ![...state.runLinks.values()].includes(run.runId);
+    return (
+      ((run.exitCode !== undefined && run.exitCode !== 0) || run.failureHandled) &&
+      ![...state.runLinks.values()].includes(run.runId)
+    );
   }
 
   private failedRunRecoveries(
@@ -3553,14 +3731,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
           run.workspaceId === workspace &&
           (threadId === undefined || run.threadId === threadId) &&
           run.endedAtMs !== undefined &&
-          (dispatch?.state === "failed" || (dispatch?.state === "done" && this.failedCompletedRun(state, run))) &&
+          (dispatch?.state === "failed" ||
+            (dispatch?.state === "done" && this.failedCompletedRun(state, run))) &&
           dispatch.runId === run.runId
         );
       })
-      .sort((left, right) => left.startedAtMs - right.startedAtMs || compareText(left.runId, right.runId))
+      .sort(
+        (left, right) =>
+          left.startedAtMs - right.startedAtMs || compareText(left.runId, right.runId),
+      )
       .map((run) => ({
         run,
-        attemptCount: state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId))?.attemptCount ?? 0,
+        attemptCount:
+          state.dispatches.get(dispatchKey(run.triggerMessageId, run.agentId))?.attemptCount ?? 0,
       }));
     const result = page(rows, params, `${workspace}\0failedRunRecoveries\0${threadId ?? ""}`);
     return jsonResult({ recoveries: result.values, nextCursor: result.nextCursor });
@@ -3570,10 +3753,8 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return messages.filter(
       (message) =>
         message.createdAtMs < read.lastReadCreatedAtMs ||
-        (
-          message.createdAtMs === read.lastReadCreatedAtMs &&
-          compareText(message.id, read.lastReadMessageId) <= 0
-        ),
+        (message.createdAtMs === read.lastReadCreatedAtMs &&
+          compareText(message.id, read.lastReadMessageId) <= 0),
     ).length;
   }
 

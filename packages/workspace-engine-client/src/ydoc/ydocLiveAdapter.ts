@@ -4,10 +4,7 @@ import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "./ydocPendingL
 import { ydocUpdateDependsOn } from "./ydocUpdateDependencies";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import {
-  EngineRequestDeadlineError,
-  EngineRequestError,
-} from "../daemon/engineClient";
+import { EngineRequestDeadlineError, EngineRequestError } from "../daemon/engineClient";
 import {
   DaemonRefusalError,
   isDaemonReconnectError,
@@ -20,10 +17,7 @@ import {
   type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
 import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
-import {
-  VERSIONED_METHOD,
-  decodeVersionedResult,
-} from "../versioned/versionedWireContract";
+import { VERSIONED_METHOD, decodeVersionedResult } from "../versioned/versionedWireContract";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
@@ -42,9 +36,7 @@ import {
   type YdocOwnerDraft,
 } from "./ydocWireContract";
 
-const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
-  "dohc.workspaceEngineClient.localEditorOrigin",
-);
+const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol("dohc.workspaceEngineClient.localEditorOrigin");
 const ORIGINAL_REPLAY_ORIGIN = Symbol("dohc.workspaceEngineClient.originalReplayOrigin");
 
 export const ENGINE_DELIVERED_ORIGIN: unique symbol = Symbol(
@@ -65,18 +57,21 @@ export interface YdocDeliveredHead {
 // A delivery that changed nothing in the document but still carries a head.
 const EMPTY_UPDATE = new Uint8Array([0, 0]);
 
-const WITNESS_KEYS = ["dohcMarkdownSource", "dohcMarkdownSourceSha256", "dohcMarkdownSourceProjectionSha256"] as const;
+const WITNESS_KEYS = [
+  "dohcMarkdownSource",
+  "dohcMarkdownSourceSha256",
+  "dohcMarkdownSourceProjectionSha256",
+] as const;
 
 // The saved source the document records, which a lossy-note check reads with the head.
 function sourceWitness(doc: Y.Doc): unknown[] {
   const meta = doc.getMap("meta");
-  return WITNESS_KEYS.map(key => meta.get(key));
+  return WITNESS_KEYS.map((key) => meta.get(key));
 }
 
 function sameWitness(left: unknown[], right: unknown[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
-
 
 export interface EngineTransport extends DaemonRequesterClient {
   onEvent(handler: (event: Event) => void): () => void;
@@ -160,10 +155,8 @@ export class YdocOpenTimedOutError extends Error {
 function isYdocOpenDeadlineFailure(error: unknown): boolean {
   return (
     error instanceof EngineRequestDeadlineError ||
-    (error instanceof EngineRequestError &&
-      error.wireError?.code === "DEADLINE_EXCEEDED") ||
-    (error instanceof DaemonRefusalError &&
-      error.wireCode === "DEADLINE_EXCEEDED")
+    (error instanceof EngineRequestError && error.wireError?.code === "DEADLINE_EXCEEDED") ||
+    (error instanceof DaemonRefusalError && error.wireCode === "DEADLINE_EXCEEDED")
   );
 }
 
@@ -201,11 +194,7 @@ export class YdocResyncNeededError extends YdocAdapterError {
   readonly event: Event;
   override readonly cause: unknown;
 
-  constructor(input: {
-    reason: YdocResyncReason;
-    event: Event;
-    cause?: unknown;
-  }) {
+  constructor(input: { reason: YdocResyncReason; event: Event; cause?: unknown }) {
     super(
       "resync-needed",
       `The Y.Doc session is stale (${input.reason}); engine resynchronization is required.`,
@@ -227,10 +216,7 @@ export class RemoteYdocApplyError extends YdocAdapterError {
     postAttemptStateUpdate: Uint8Array;
     cause: unknown;
   }) {
-    super(
-      "invalid-update",
-      "An engine-delivered Y.Doc update failed during local application.",
-    );
+    super("invalid-update", "An engine-delivered Y.Doc update failed during local application.");
     this.name = "RemoteYdocApplyError";
     this.attemptedUpdate = input.attemptedUpdate;
     this.postAttemptStateUpdate = input.postAttemptStateUpdate;
@@ -300,19 +286,14 @@ function bytesToBase64(bytes: Uint8Array): string {
 function base64ToBytes(value: string): Uint8Array {
   if (
     value.length % 4 !== 0 ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-      value,
-    )
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
   ) {
     throw new YdocAdapterError("invalid-update", "Invalid base64 Y.Doc update.");
   }
   return Buffer.from(value, "base64");
 }
 
-function declareDohcRootSchema(
-  doc: Y.Doc,
-  contentKind?: YdocContentKind,
-): void {
+function declareDohcRootSchema(doc: Y.Doc, contentKind?: YdocContentKind): void {
   doc.getMap("frontmatter");
   doc.getMap("meta");
   doc.getXmlFragment("body");
@@ -332,10 +313,7 @@ function createPlaintextSeedDoc(content: string, clientID: number): Y.Doc {
   return doc;
 }
 
-function visitJsonStrings(
-  value: unknown,
-  visitor: (value: string) => void,
-): void {
+function visitJsonStrings(value: unknown, visitor: (value: string) => void): void {
   if (typeof value === "string") {
     visitor(value);
     return;
@@ -352,10 +330,7 @@ function visitJsonStrings(
   }
 }
 
-function visitDeltaStrings(
-  text: Y.Text | Y.XmlText,
-  visitor: (value: string) => void,
-): void {
+function visitDeltaStrings(text: Y.Text | Y.XmlText, visitor: (value: string) => void): void {
   for (const operation of text.toDelta()) {
     if (typeof operation.insert === "string") {
       visitor(operation.insert);
@@ -369,10 +344,7 @@ function visitDeltaStrings(
   }
 }
 
-function visitSharedValueStrings(
-  value: unknown,
-  visitor: (value: string) => void,
-): void {
+function visitSharedValueStrings(value: unknown, visitor: (value: string) => void): void {
   if (value instanceof Y.XmlText || value instanceof Y.Text) {
     visitDeltaStrings(value, visitor);
     return;
@@ -433,10 +405,7 @@ function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
     visitSharedValueStrings(value, (item) => strings.push(item));
     snapshot.set(root, {
       strings,
-      replacementCount: strings.reduce(
-        (count, item) => count + countReplacementChars(item),
-        0,
-      ),
+      replacementCount: strings.reduce((count, item) => count + countReplacementChars(item), 0),
     });
   }
   return snapshot;
@@ -487,10 +456,7 @@ function deletedReplacementCounts(
   Y.applyUpdate(clone, delta);
   const counts = new Map<string, number>();
   for (const [root, value] of clone.share) {
-    counts.set(
-      root,
-      countDeletedTextReplacementChars(value as unknown as YjsInternalType),
-    );
+    counts.set(root, countDeletedTextReplacementChars(value as unknown as YjsInternalType));
   }
   return counts;
 }
@@ -537,12 +503,7 @@ function isInsideSurrogatePair(value: string, index: number): boolean {
   if (index <= 0 || index >= value.length) return false;
   const previous = value.charCodeAt(index - 1);
   const current = value.charCodeAt(index);
-  return (
-    previous >= 0xd800 &&
-    previous <= 0xdbff &&
-    current >= 0xdc00 &&
-    current <= 0xdfff
-  );
+  return previous >= 0xd800 && previous <= 0xdbff && current >= 0xdc00 && current <= 0xdfff;
 }
 
 function assertTextEditIsValid(text: string, edit: YdocLocalTextEdit): void {
@@ -675,18 +636,18 @@ export class YdocAdapterSession {
   private acknowledgedDoc = new Y.Doc();
   private pendingRecordBytes = 0;
   ownerDraft: YdocOwnerDraft | undefined;
-  private readonly remoteUpdateListeners = new Set<(update: Uint8Array, head?: YdocDeliveredHead) => void>();
+  private readonly remoteUpdateListeners = new Set<
+    (update: Uint8Array, head?: YdocDeliveredHead) => void
+  >();
   private readonly durableLocalChangeListeners = new Set<() => void>();
   private readonly settlementWantedListeners = new Set<() => void>();
-  private readonly localUpdateAcknowledgedListeners = new Set<(id: string, lane: "journal" | "owner-outbox") => void>();
+  private readonly localUpdateAcknowledgedListeners = new Set<
+    (id: string, lane: "journal" | "owner-outbox") => void
+  >();
   private readonly localUpdateRefusedListeners = new Set<(id: string, error: unknown) => void>();
   private readonly ownerDraftChangedListeners = new Set<() => void>();
-  private readonly remoteApplyErrorListeners = new Set<
-    (error: RemoteYdocApplyError) => void
-  >();
-  private readonly resyncNeededListeners = new Set<
-    (error: YdocResyncNeededError) => void
-  >();
+  private readonly remoteApplyErrorListeners = new Set<(error: RemoteYdocApplyError) => void>();
+  private readonly resyncNeededListeners = new Set<(error: YdocResyncNeededError) => void>();
   private readonly sessionErrorListeners = new Set<(error: unknown) => void>();
   private readonly lineageReplacementListeners = new Set<
     (doc: Y.Doc, recoveredPaths: string[], head?: YdocDeliveredHead) => void
@@ -765,8 +726,10 @@ export class YdocAdapterSession {
 
   private async requestRecoveryBase(update: Uint8Array): Promise<void> {
     if (this.lineage !== "absent") {
-      throw new YdocAdapterError("acknowledged-state-missing",
-        "The engine is missing acknowledged document state. Recovery cannot replace an existing lineage.");
+      throw new YdocAdapterError(
+        "acknowledged-state-missing",
+        "The engine is missing acknowledged document state. Recovery cannot replace an existing lineage.",
+      );
     }
     try {
       await this.requestRecordUpdate({
@@ -777,17 +740,16 @@ export class YdocAdapterSession {
       });
     } catch (error) {
       if (!isYdocUpdateAdmissionRefusal(error)) throw error;
-      throw new YdocAdapterError("acknowledged-state-missing",
-        "The engine refused to restore acknowledged document state. Reopen the file to recover your edits.");
+      throw new YdocAdapterError(
+        "acknowledged-state-missing",
+        "The engine refused to restore acknowledged document state. Reopen the file to recover your edits.",
+      );
     }
   }
 
   applySeedUpdate(update: Uint8Array): Promise<YdocRecordUpdateResult | undefined> {
     if (this.lineage !== "absent" || this.seedReserved) {
-      throw new YdocAdapterError(
-        "seed-not-permitted",
-        "The session already has existing lineage.",
-      );
+      throw new YdocAdapterError("seed-not-permitted", "The session already has existing lineage.");
     }
     this.seedReserved = true;
     try {
@@ -809,12 +771,9 @@ export class YdocAdapterSession {
     mutator: (doc: Y.Doc) => void,
     options?: ApplyLocalUpdateOptions,
   ): Promise<YdocRecordUpdateResult | undefined> {
-    return this.runLocalMutation(
-      () => {
-        this.doc.transact(() => mutator(this.doc), LOCAL_EDITOR_ORIGIN);
-      },
-      options,
-    );
+    return this.runLocalMutation(() => {
+      this.doc.transact(() => mutator(this.doc), LOCAL_EDITOR_ORIGIN);
+    }, options);
   }
 
   applyLocalTextEdit(
@@ -825,18 +784,15 @@ export class YdocAdapterSession {
     const text = this.doc.getText(edit.root);
     const current = text.toString();
     assertTextEditIsValid(current, edit);
-    return this.runLocalMutation(
-      () => {
-        this.doc.transact(() => {
-          const deleteLength = edit.deleteLength ?? 0;
-          if (deleteLength > 0) text.delete(edit.index, deleteLength);
-          if (edit.insert !== undefined && edit.insert.length > 0) {
-            text.insert(edit.index, edit.insert);
-          }
-        }, LOCAL_EDITOR_ORIGIN);
-      },
-      options,
-    );
+    return this.runLocalMutation(() => {
+      this.doc.transact(() => {
+        const deleteLength = edit.deleteLength ?? 0;
+        if (deleteLength > 0) text.delete(edit.index, deleteLength);
+        if (edit.insert !== undefined && edit.insert.length > 0) {
+          text.insert(edit.index, edit.insert);
+        }
+      }, LOCAL_EDITOR_ORIGIN);
+    }, options);
   }
 
   private enqueueRecordUpdate(
@@ -852,20 +808,28 @@ export class YdocAdapterSession {
       idempotencyKey: options?.idempotencyKey ?? `${this.sessionId}:${this.nextLocalUpdateSeq++}`,
       ...(options?.actorOriginId ? { actorOriginId: options.actorOriginId } : {}),
       ...(options?.attribution ? { attribution: structuredClone(options.attribution) } : {}),
-      ...(options?.trustedAutomationDraft ? {trustedAutomationDraft: true} : {}),
+      ...(options?.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
       seed: seedUpdate,
       generation: this.generation,
     };
-    const retainedBytes = record.updateBase64.length * 2 +
+    const retainedBytes =
+      record.updateBase64.length * 2 +
       (record.actorOriginId?.length ?? 0) * 2 +
       (record.attribution ? JSON.stringify(record.attribution).length * 2 : 0);
-    if (this.pendingRecords.size >= YDOC_PENDING_MAX_RECORDS ||
-      retainedBytes > YDOC_PENDING_MAX_BYTES - this.pendingRecordBytes) {
-      const error = new DaemonRefusalError({ code: "LIMIT_EXCEEDED", retry: "no",
-        message: "pending-edits-limit" }, undefined);
+    if (
+      this.pendingRecords.size >= YDOC_PENDING_MAX_RECORDS ||
+      retainedBytes > YDOC_PENDING_MAX_BYTES - this.pendingRecordBytes
+    ) {
+      const error = new DaemonRefusalError(
+        { code: "LIMIT_EXCEEDED", retry: "no", message: "pending-edits-limit" },
+        undefined,
+      );
       for (const listener of this.localUpdateRefusedListeners) {
-        try { listener(record.idempotencyKey, error); }
-        catch (cause) { this.surfaceSessionError(cause); }
+        try {
+          listener(record.idempotencyKey, error);
+        } catch (cause) {
+          this.surfaceSessionError(cause);
+        }
       }
       this.restoreAcknowledgedDocument();
       throw error;
@@ -909,12 +873,9 @@ export class YdocAdapterSession {
           // write did; report that, not a story about recovery.
           if (isTransientEngineRefusal(recoveryFailure)) throw recoveryFailure;
           if (isTransientEngineRefusal(refusal)) throw refusal;
-          const refusalMessage =
-            refusal instanceof Error ? refusal.message : String(refusal);
+          const refusalMessage = refusal instanceof Error ? refusal.message : String(refusal);
           const recoveryMessage =
-            recoveryFailure instanceof Error
-              ? recoveryFailure.message
-              : String(recoveryFailure);
+            recoveryFailure instanceof Error ? recoveryFailure.message : String(recoveryFailure);
           throw new Error(
             `Y.Doc update recovery failed: ${recoveryMessage}. Original record refusal: ${refusalMessage}.`,
             { cause: refusal },
@@ -944,9 +905,7 @@ export class YdocAdapterSession {
    * every operation queued behind it, and the rejection is claimed once here
    * so a caller that ignores it does not trip an unhandled rejection.
    */
-  private trackRecordOperation<T>(
-    operation: Promise<T>,
-  ): Promise<T> {
+  private trackRecordOperation<T>(operation: Promise<T>): Promise<T> {
     const guarded = operation.then(
       (value) => {
         if (!this.closed && this.staleError === null && this.quarantinedError === null) {
@@ -956,8 +915,12 @@ export class YdocAdapterSession {
       },
       (error: unknown) => {
         // Transient refusals leave the originals queued for another attempt.
-        if (!isTransientEngineRefusal(error) && !isYdocUpdateAdmissionRefusal(error) &&
-          !isLineageChange(error)) this.quarantine(error);
+        if (
+          !isTransientEngineRefusal(error) &&
+          !isYdocUpdateAdmissionRefusal(error) &&
+          !isLineageChange(error)
+        )
+          this.quarantine(error);
         this.surfaceSessionError(error);
         throw error;
       },
@@ -986,7 +949,7 @@ export class YdocAdapterSession {
     const originals = [...this.pendingRecords];
     const operation = this.recordChain.then(async () => {
       this.assertRecordable();
-      const records = originals.filter(record => this.pendingRecords.has(record));
+      const records = originals.filter((record) => this.pendingRecords.has(record));
       if (records.length === 0) return;
       await this.mergeRecoveryState(this.generation);
       for (const record of records) {
@@ -996,9 +959,7 @@ export class YdocAdapterSession {
     return this.trackRecordOperation(operation);
   }
 
-  private async requestRecordUpdate(
-    record: LocalUpdateRecord,
-  ): Promise<YdocRecordUpdateResult> {
+  private async requestRecordUpdate(record: LocalUpdateRecord): Promise<YdocRecordUpdateResult> {
     const generation = record.generation;
     if (generation.refusal) throw generation.refusal;
     const params: YdocRecordUpdateParams = {
@@ -1007,17 +968,17 @@ export class YdocAdapterSession {
       expectedLineageClaimId: this.lineageClaimId,
       ...(record.actorOriginId ? { actorOriginId: record.actorOriginId } : {}),
       ...(record.attribution ? { attribution: structuredClone(record.attribution) } : {}),
-      ...(record.trustedAutomationDraft ? {trustedAutomationDraft: true} : {}),
+      ...(record.trustedAutomationDraft ? { trustedAutomationDraft: true } : {}),
       ...(record.seed ? { seed: true } : {}),
     };
     let result: YdocRecordUpdateResult;
     try {
-      result = decodeYdocResult(YDOC_METHOD.recordUpdate, await this.adapter.request(
-        this.workspace,
+      result = decodeYdocResult(
         YDOC_METHOD.recordUpdate,
-        params,
-        { idempotencyKey: record.idempotencyKey },
-      ));
+        await this.adapter.request(this.workspace, YDOC_METHOD.recordUpdate, params, {
+          idempotencyKey: record.idempotencyKey,
+        }),
+      );
     } catch (error) {
       if (isYdocUpdateAdmissionRefusal(error) && this.pendingRecords.has(record)) {
         // Retire causal dependents before replacement so observers can retain
@@ -1028,13 +989,20 @@ export class YdocAdapterSession {
           if (pending === record) tail = true;
           if (!tail) continue;
           const update = base64ToBytes(pending.updateBase64);
-          if (pending !== record && !refusedUpdates.some(refused => ydocUpdateDependsOn(update, refused))) continue;
+          if (
+            pending !== record &&
+            !refusedUpdates.some((refused) => ydocUpdateDependsOn(update, refused))
+          )
+            continue;
           if (pending !== record) refusedUpdates.push(update);
           pending.refusal = error;
           this.removePendingRecord(pending);
           for (const listener of this.localUpdateRefusedListeners) {
-            try { listener(pending.idempotencyKey, error); }
-            catch (cause) { this.surfaceSessionError(cause); }
+            try {
+              listener(pending.idempotencyKey, error);
+            } catch (cause) {
+              this.surfaceSessionError(cause);
+            }
           }
         }
         this.restoreAcknowledgedDocument();
@@ -1043,26 +1011,35 @@ export class YdocAdapterSession {
     }
     // Only an answer within this document's lineage acknowledges the edit.
     if (generation.refusal) throw generation.refusal;
-    if (!this.continuesLineage(result)) throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
+    if (!this.continuesLineage(result))
+      throw this.refuseGeneration(generation, LINEAGE_CHANGED_WHILE_RECORDING);
     Y.applyUpdate(this.acknowledgedDoc, base64ToBytes(record.updateBase64));
     this.removePendingRecord(record);
     if (!record.seed) {
       const lane = "ownerDraft" in result ? "owner-outbox" : "journal";
       for (const listener of this.localUpdateAcknowledgedListeners) {
-        try { listener(record.idempotencyKey, lane); }
-        catch (error) { this.surfaceSessionError(error); }
+        try {
+          listener(record.idempotencyKey, lane);
+        } catch (error) {
+          this.surfaceSessionError(error);
+        }
       }
     }
     if ("ownerDraft" in result && this.ownerDraft) {
-      this.ownerDraft = { ...this.ownerDraft, outboxId: result.ownerDraft.outboxId,
-        pendingBytes: result.ownerDraft.pendingBytes, state: result.ownerDraft.state };
+      this.ownerDraft = {
+        ...this.ownerDraft,
+        outboxId: result.ownerDraft.outboxId,
+        pendingBytes: result.ownerDraft.pendingBytes,
+        state: result.ownerDraft.state,
+      };
     }
     return result;
   }
 
   private removePendingRecord(record: LocalUpdateRecord): void {
     if (!this.pendingRecords.delete(record)) return;
-    this.pendingRecordBytes -= record.updateBase64.length * 2 +
+    this.pendingRecordBytes -=
+      record.updateBase64.length * 2 +
       (record.actorOriginId?.length ?? 0) * 2 +
       (record.attribution ? JSON.stringify(record.attribution).length * 2 : 0);
   }
@@ -1071,15 +1048,19 @@ export class YdocAdapterSession {
     const replacement = new Y.Doc();
     declareDohcRootSchema(replacement, this.contentKind);
     Y.applyUpdate(replacement, Y.encodeStateAsUpdate(this.acknowledgedDoc));
-    for (const record of this.pendingRecords) Y.applyUpdate(replacement, base64ToBytes(record.updateBase64));
+    for (const record of this.pendingRecords)
+      Y.applyUpdate(replacement, base64ToBytes(record.updateBase64));
     const refusedDoc = this.activeDoc;
     refusedDoc.off("update", this.handleDocUpdate);
     this.activeDoc = replacement;
     replacement.on("update", this.handleDocUpdate);
     this.initialUpdate = Y.encodeStateAsUpdate(replacement);
     for (const listener of this.lineageReplacementListeners) {
-      try { listener(replacement, []); }
-      catch (error) { this.surfaceSessionError(error); }
+      try {
+        listener(replacement, []);
+      } catch (error) {
+        this.surfaceSessionError(error);
+      }
     }
     refusedDoc.destroy();
   }
@@ -1093,15 +1074,15 @@ export class YdocAdapterSession {
     }
     const durableVector = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(durableState.update));
     const acknowledgedVector = Y.decodeStateVector(Y.encodeStateVector(this.acknowledgedDoc));
-    if ([...acknowledgedVector].some(([client, clock]) => (durableVector.get(client) ?? 0) < clock)) {
+    if (
+      [...acknowledgedVector].some(([client, clock]) => (durableVector.get(client) ?? 0) < clock)
+    ) {
       await this.requestRecoveryBase(Y.encodeStateAsUpdate(this.acknowledgedDoc));
     }
     this.installState(durableState.update, this.pairableHead(durableState.headSha256));
   }
 
-  private async recoverCanonicalState(
-    record: LocalUpdateRecord,
-  ): Promise<YdocRecordUpdateResult> {
+  private async recoverCanonicalState(record: LocalUpdateRecord): Promise<YdocRecordUpdateResult> {
     await this.mergeRecoveryState(record.generation);
     return this.requestRecordUpdate(record);
   }
@@ -1121,14 +1102,19 @@ export class YdocAdapterSession {
     this.assertRecordable();
     await this.recordChain;
     await this.resyncIfNeeded();
-    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.adoptCollectionRecord, { sessionId: this.sessionId });
+    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.adoptCollectionRecord, {
+      sessionId: this.sessionId,
+    });
     const result = decodeYdocResult(YDOC_METHOD.adoptCollectionRecord, raw);
     // Engine maintenance arrives through the same remote-state route as peer edits.
     await this.resync();
     return result.status;
   }
 
-  async settle(options?: { summary?: string; allowLossySourceSha256?: string }): Promise<YdocSettleResult> {
+  async settle(options?: {
+    summary?: string;
+    allowLossySourceSha256?: string;
+  }): Promise<YdocSettleResult> {
     this.assertRecordable();
     await this.recordChain;
     // A resync request that landed while the journal drained is waited out,
@@ -1143,7 +1129,9 @@ export class YdocAdapterSession {
     const params: YdocSettleParams = {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
-      ...(options?.allowLossySourceSha256 ? { allowLossySourceSha256: options.allowLossySourceSha256 } : {}),
+      ...(options?.allowLossySourceSha256
+        ? { allowLossySourceSha256: options.allowLossySourceSha256 }
+        : {}),
     };
     let raw: Response["result"];
     const installsAtStart = this.installs;
@@ -1172,11 +1160,13 @@ export class YdocAdapterSession {
           try {
             raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
           } catch (retryError) {
-            if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(retryError)) this.requestSettlement();
+            if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(retryError))
+              this.requestSettlement();
             throw retryError;
           }
         } else {
-          if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(error)) this.requestSettlement();
+          if (options?.allowLossySourceSha256 && isMarkdownWriteHeldRefusal(error))
+            this.requestSettlement();
           throw error;
         }
       }
@@ -1185,7 +1175,8 @@ export class YdocAdapterSession {
       this.settling -= 1;
       // A failed settle sends no head, so state installed while it ran needs
       // its own paired read.
-      if (!answered && this.installs !== installsAtStart && !this.closed) this.requestPairedResync();
+      if (!answered && this.installs !== installsAtStart && !this.closed)
+        this.requestPairedResync();
     }
     const result = decodeYdocResult(YDOC_METHOD.settle, raw);
     this.lastSettledSha = result.sha256;
@@ -1231,7 +1222,9 @@ export class YdocAdapterSession {
     if (!this.closed) this.notifyListeners(this.settlementWantedListeners, undefined);
   }
 
-  onLocalUpdateAcknowledged(handler: (id: string, lane: "journal" | "owner-outbox") => void): () => void {
+  onLocalUpdateAcknowledged(
+    handler: (id: string, lane: "journal" | "owner-outbox") => void,
+  ): () => void {
     this.localUpdateAcknowledgedListeners.add(handler);
     return () => this.localUpdateAcknowledgedListeners.delete(handler);
   }
@@ -1349,7 +1342,9 @@ export class YdocAdapterSession {
     this.headSha256 = headSha256;
     let head: YdocDeliveredHead = {};
     if (headSha256 !== undefined) {
-      head = this.confirmsSettle(headSha256) ? { sha256: headSha256, committed: true } : { sha256: headSha256 };
+      head = this.confirmsSettle(headSha256)
+        ? { sha256: headSha256, committed: true }
+        : { sha256: headSha256 };
       this.settled = null;
     }
     this.pairedHead = head;
@@ -1369,7 +1364,7 @@ export class YdocAdapterSession {
     const settled = this.settled;
     if (settled === null || headSha256 !== settled.sha256) return false;
     const witness = sourceWitness(this.acknowledgedDoc);
-    return sameWitness(witness, settled.witness) || witness.every(value => value === undefined);
+    return sameWitness(witness, settled.witness) || witness.every((value) => value === undefined);
   }
 
   private deliver(update: Uint8Array, head?: YdocDeliveredHead): void {
@@ -1387,20 +1382,20 @@ export class YdocAdapterSession {
       while (true) {
         await this.recordChain.catch(() => undefined);
         if (this.closed) {
-          throw new YdocAdapterError(
-            "session-closed",
-            "The Y.Doc adapter session is closed.",
-          );
+          throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         }
         const result = await this.requestResyncState();
-        if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
+        if (this.closed)
+          throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
         const update = result.update;
         const head = this.pairableHead(result.headSha256);
         // A refused generation is replaced even if this read shows its claim:
         // its records never reach the engine again.
         if (this.generation.refusal !== undefined || !this.continuesLineage(result)) {
-          const refusal = this.refuseGeneration(this.generation,
-            "The document lineage changed. The earlier edits cannot enter this lineage.");
+          const refusal = this.refuseGeneration(
+            this.generation,
+            "The document lineage changed. The earlier edits cannot enter this lineage.",
+          );
           this.generation = {};
           for (const record of this.pendingRecords) {
             record.refusal = refusal;
@@ -1426,7 +1421,11 @@ export class YdocAdapterSession {
           this.headSha256 = head;
           this.settled = null;
           for (const listener of this.lineageReplacementListeners) {
-            listener(replacement, result.recoveredPaths, head === undefined ? undefined : { sha256: head });
+            listener(
+              replacement,
+              result.recoveredPaths,
+              head === undefined ? undefined : { sha256: head },
+            );
           }
         } else {
           this.installState(update, head);
@@ -1490,13 +1489,12 @@ export class YdocAdapterSession {
     recoveredPaths: string[];
     artifactAssets: readonly ArtifactAssetDescriptor[];
   }> {
-    const delivery = await this.adapter.requestWithBlob(
-      this.workspace,
-      YDOC_METHOD.resync,
-      { sessionId: this.sessionId },
-    );
+    const delivery = await this.adapter.requestWithBlob(this.workspace, YDOC_METHOD.resync, {
+      sessionId: this.sessionId,
+    });
     const result = decodeYdocResult(YDOC_METHOD.resync, delivery.result);
-    if (this.closed) throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
+    if (this.closed)
+      throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     this.ownerDraft = result.ownerDraft;
     return {
       update: delivery.bytes,
@@ -1565,10 +1563,7 @@ export class YdocAdapterSession {
     this.adapter.releaseSession(this.sessionId);
   }
 
-  private readonly handleDocUpdate = (
-    update: Uint8Array,
-    origin: unknown,
-  ): void => {
+  private readonly handleDocUpdate = (update: Uint8Array, origin: unknown): void => {
     try {
       if (this.closed) return;
       if (origin === ENGINE_DELIVERED_ORIGIN) {
@@ -1603,7 +1598,8 @@ export class YdocAdapterSession {
         if (this.activeLocalRecordCapture !== null) {
           this.activeLocalRecordCapture.rejection = rejection;
         }
-        if (!isYdocUpdateAdmissionRefusal(rejection) && !isLineageChange(rejection)) this.quarantine(rejection);
+        if (!isYdocUpdateAdmissionRefusal(rejection) && !isLineageChange(rejection))
+          this.quarantine(rejection);
         this.surfaceSessionError(rejection);
       } else {
         this.surfaceSessionError(error);
@@ -1634,7 +1630,7 @@ export class YdocAdapterSession {
     }
     if (capture.rejection !== undefined) throw capture.rejection;
     return originalUpdate === undefined
-      ? capture.operation ?? Promise.resolve(undefined)
+      ? (capture.operation ?? Promise.resolve(undefined))
       : this.enqueueRecordUpdate(originalUpdate, capture.options, seedUpdate);
   }
 
@@ -1675,10 +1671,7 @@ export class YdocAdapterSession {
   // append names the draft revision the resync renews.
   private assertRecordable(): void {
     if (this.closed) {
-      throw new YdocAdapterError(
-        "session-closed",
-        "The Y.Doc adapter session is closed.",
-      );
+      throw new YdocAdapterError("session-closed", "The Y.Doc adapter session is closed.");
     }
     if (this.quarantinedError !== null) throw this.quarantinedError;
     if (this.ownerDraft !== undefined && this.staleError !== null) throw this.staleError;
@@ -1689,26 +1682,21 @@ export class YdocLiveAdapter {
   private readonly sessions = new Map<string, YdocAdapterSession>();
   private readonly unsubscribeEvents: () => void;
   private readonly requester: WorkspaceDaemonRequester;
-  private readonly eventPositions = new Map<
-    string,
-    { seq: number; sessionGeneration: number }
-  >();
+  private readonly eventPositions = new Map<string, { seq: number; sessionGeneration: number }>();
 
   constructor(transport: EngineTransport) {
     this.requester = new WorkspaceDaemonRequester(transport);
     this.unsubscribeEvents = transport.onEvent((event) => this.receiveEvent(event));
   }
 
-  async openSession(
-    input: OpenYdocAdapterSessionInput,
-  ): Promise<YdocAdapterSession> {
+  async openSession(input: OpenYdocAdapterSessionInput): Promise<YdocAdapterSession> {
     const params: YdocOpenParams = {
-      ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
+      ...(input.allowLossySourceSha256
+        ? { allowLossySourceSha256: input.allowLossySourceSha256 }
+        : {}),
       versionId: input.versionId,
       path: input.path,
-      ...(input.expectedObjectId
-        ? { expectedObjectId: input.expectedObjectId }
-        : {}),
+      ...(input.expectedObjectId ? { expectedObjectId: input.expectedObjectId } : {}),
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
       ...(input.contentKind === "scene"
         ? { seedFromArtifact: input.seedAbsentLineage !== false }
@@ -1718,12 +1706,9 @@ export class YdocLiveAdapter {
     const startedAtMs = performance.now();
     let delivery: Awaited<ReturnType<YdocLiveAdapter["requestWithBlob"]>>;
     try {
-      delivery = await this.requestWithBlob(
-        input.workspace,
-        YDOC_METHOD.open,
-        params,
-        { deadlineMs: YDOC_OPEN_DEADLINE_MS },
-      );
+      delivery = await this.requestWithBlob(input.workspace, YDOC_METHOD.open, params, {
+        deadlineMs: YDOC_OPEN_DEADLINE_MS,
+      });
     } catch (error) {
       if (!isYdocOpenDeadlineFailure(error)) throw error;
       throw new YdocOpenTimedOutError(
@@ -1755,8 +1740,7 @@ export class YdocLiveAdapter {
     if (
       lineageAbsent &&
       input.seedAbsentLineage !== false &&
-      (typeof result.seedContent === "string" ||
-        result.seedBlobSha256 !== undefined)
+      (typeof result.seedContent === "string" || result.seedBlobSha256 !== undefined)
     ) {
       try {
         if (result.contentKind === "scene") {
@@ -1766,8 +1750,7 @@ export class YdocLiveAdapter {
           );
         }
         const seedContent =
-          result.seedContent ??
-          (await this.readSeedBlob(input, result.seedBlobSha256 ?? ""));
+          result.seedContent ?? (await this.readSeedBlob(input, result.seedBlobSha256 ?? ""));
         if (!isWellFormedUtf16(seedContent)) {
           throw new IllFormedUtf16EditError();
         }
@@ -1848,10 +1831,7 @@ export class YdocLiveAdapter {
   // A seed past the in-band cap, read by the digest the open named. The bytes
   // must hash to that digest, so the seed is exactly the head the engine
   // derived the seed client from.
-  private async readSeedBlob(
-    input: OpenYdocAdapterSessionInput,
-    sha256: string,
-  ): Promise<string> {
+  private async readSeedBlob(input: OpenYdocAdapterSessionInput, sha256: string): Promise<string> {
     if (input.largeSeed === undefined || !/^[0-9a-f]{64}$/.test(sha256)) {
       throw new YdocAdapterError(
         "response-mismatch",
@@ -1861,17 +1841,12 @@ export class YdocLiveAdapter {
     const delivery = await this.requester.requestWithBlob(
       VERSIONED_METHOD.textReadBlob,
       { workspaceId: input.largeSeed.workspaceId, sha256 },
-      (raw) =>
-        decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw)
-          .bytesBase64 === null,
+      (raw) => decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw).bytesBase64 === null,
       // The open holds its lease while this read runs, so it gets the open's
       // own bound.
       { workspace: input.workspace, deadlineMs: YDOC_OPEN_DEADLINE_MS },
     );
-    const read = decodeVersionedResult(
-      VERSIONED_METHOD.textReadBlob,
-      delivery.result,
-    );
+    const read = decodeVersionedResult(VERSIONED_METHOD.textReadBlob, delivery.result);
     const bytes =
       read.bytesBase64 !== null
         ? new Uint8Array(Buffer.from(read.bytesBase64, "base64"))
@@ -1898,12 +1873,8 @@ export class YdocLiveAdapter {
   ): Promise<Response["result"]> {
     return this.requester.request(method, params, {
       workspace,
-      ...(options?.idempotencyKey
-        ? { idempotencyKey: options.idempotencyKey }
-        : {}),
-      ...(options?.deadlineMs !== undefined
-        ? { deadlineMs: options.deadlineMs }
-        : {}),
+      ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+      ...(options?.deadlineMs !== undefined ? { deadlineMs: options.deadlineMs } : {}),
     });
   }
 
@@ -1913,17 +1884,10 @@ export class YdocLiveAdapter {
     params: Request["params"],
     options?: { deadlineMs?: number },
   ): Promise<{ result: Response["result"]; bytes: Uint8Array }> {
-    const delivery = await this.requester.requestWithBlob(
-      method,
-      params,
-      () => true,
-      {
-        workspace,
-        ...(options?.deadlineMs !== undefined
-          ? { deadlineMs: options.deadlineMs }
-          : {}),
-      },
-    );
+    const delivery = await this.requester.requestWithBlob(method, params, () => true, {
+      workspace,
+      ...(options?.deadlineMs !== undefined ? { deadlineMs: options.deadlineMs } : {}),
+    });
     if (delivery.blob === null) {
       throw new YdocAdapterError(
         "missing-response-blob",
@@ -1956,7 +1920,7 @@ export class YdocLiveAdapter {
         return;
       }
       if ("resyncRequired" in payload) {
-        session.markStale(new YdocResyncNeededError({reason: "native-state-changed", event}));
+        session.markStale(new YdocResyncNeededError({ reason: "native-state-changed", event }));
         return;
       }
       const previous = this.eventPositions.get(payload.sessionId);
@@ -1964,10 +1928,7 @@ export class YdocLiveAdapter {
         seq: event.seq,
         sessionGeneration: event.sessionGeneration,
       });
-      if (
-        previous !== undefined &&
-        event.sessionGeneration !== previous.sessionGeneration
-      ) {
+      if (previous !== undefined && event.sessionGeneration !== previous.sessionGeneration) {
         session.markStale(
           new YdocResyncNeededError({
             reason: "session-generation-changed",

@@ -24,18 +24,11 @@ describe("buildTree — sort order (folders → alphabetical)", () => {
   });
 
   it("nests files at their full path and keeps fullPath unique per node", () => {
-    const tree = buildTree([
-      row("team/anna.md"),
-      row("team/ben.md"),
-      row("readme.md"),
-    ]);
+    const tree = buildTree([row("team/anna.md"), row("team/ben.md"), row("readme.md")]);
     expect(tree.children.map((c) => c.fullPath)).toEqual(["team", "readme.md"]);
     const team = tree.children[0]!;
     expect(team.file).toBeNull();
-    expect(team.children.map((c) => c.fullPath)).toEqual([
-      "team/anna.md",
-      "team/ben.md",
-    ]);
+    expect(team.children.map((c) => c.fullPath)).toEqual(["team/anna.md", "team/ben.md"]);
     expect(team.children[0]!.file).toEqual({ path: "team/anna.md", kind: "file" });
   });
 
@@ -51,15 +44,7 @@ describe("buildTree — sort order (folders → alphabetical)", () => {
   });
 
   it("sorts alphabetically within each tier", () => {
-    const tree = buildTree(
-      [row("b.md"), row("a.md")],
-      ["zfolder", "afolder"],
-    );
-    expect(tree.children.map((c) => c.segment)).toEqual([
-      "afolder",
-      "zfolder",
-      "a.md",
-      "b.md",
-    ]);
+    const tree = buildTree([row("b.md"), row("a.md")], ["zfolder", "afolder"]);
+    expect(tree.children.map((c) => c.segment)).toEqual(["afolder", "zfolder", "a.md", "b.md"]);
   });
 });

@@ -1,16 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fsPromises from "node:fs/promises";
 import * as storedNames from "./diskSpelling";
-import {
-  lstat,
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
@@ -31,10 +22,7 @@ import {
 } from "./sharedView";
 import { SharePinInvalidError } from "./shareViewRecords";
 import { resolveRegisteredShareViewFilesTarget } from "./shareViewFilesTarget";
-import {
-  mountRootFor,
-  shareViewFilesMountProjection,
-} from "./shareMounts";
+import { mountRootFor, shareViewFilesMountProjection } from "./shareMounts";
 import {
   type WorkspaceOperationLease,
   withExclusiveWorkspaceOperation,
@@ -94,10 +82,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       return actual.rename(oldPath, newPath);
     }) as typeof rename,
-    rm: (async (
-      path: Parameters<typeof rm>[0],
-      options?: Parameters<typeof rm>[1],
-    ) => {
+    rm: (async (path: Parameters<typeof rm>[0], options?: Parameters<typeof rm>[1]) => {
       const failure = sidecarRemoveFailure;
       if (failure !== null && String(path) === failure.path) {
         sidecarRemoveFailure = null;
@@ -112,7 +97,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 // opened once its `.dohc/local` exists.
 const OPENED = { localStateReady: true };
 beforeEach(() => {
-  readLocalStateFrom({ currentBinding: () => OPENED, localStateOpenAt: async () => ({ current: () => true }) });
+  readLocalStateFrom({
+    currentBinding: () => OPENED,
+    localStateOpenAt: async () => ({ current: () => true }),
+  });
 });
 
 /** A view the engine has opened: its `.dohc/local` is made. */
@@ -182,7 +170,11 @@ function readStore(input: {
 }): ShareViewFilesStore {
   const rows = input.paths ?? [{ path: "notes/a.md", text: input.text }];
   return {
-    listUnconfirmedSharePaths: vi.fn(async () => ({ paths: rows.map(row => row.path), unchecked: false, checked: 0 })),
+    listUnconfirmedSharePaths: vi.fn(async () => ({
+      paths: rows.map((row) => row.path),
+      unchecked: false,
+      checked: 0,
+    })),
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       const row = rows.find((entry) => entry.path === path);
@@ -229,7 +221,10 @@ function mutableTextStore(input?: {
   >();
   let nextId = 1;
   let metadataReads = 0;
-  const moments = new Map<string, { payload: { before: null; after: { path: string; text: string } } }>();
+  const moments = new Map<
+    string,
+    { payload: { before: null; after: { path: string; text: string } } }
+  >();
   for (const initial of input?.initial ?? []) {
     const id = nextId++;
     rows.set(initial.path, {
@@ -254,24 +249,35 @@ function mutableTextStore(input?: {
     }));
   return {
     listUnconfirmedSharePaths: vi.fn(async () => ({
-      paths: [...rows.entries()].filter(([, row]) => !row.accepted).map(([path]) => path), unchecked: false, checked: 0,
+      paths: [...rows.entries()].filter(([, row]) => !row.accepted).map(([path]) => path),
+      unchecked: false,
+      checked: 0,
     })),
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
     listTextFileMetadata: vi.fn(async () => {
-      const rows = snapshots().map(
-        ({ text: _text, metadata: _metadata, ...row }) => row,
-      );
+      const rows = snapshots().map(({ text: _text, metadata: _metadata, ...row }) => row);
       metadataReads += 1;
       await input?.afterMetadataRead?.(metadataReads);
       return rows;
     }),
-    getMoment: vi.fn(async ({ momentId }: { momentId: string }) => moments.get(momentId) ?? { payload: { before: null } }),
+    getMoment: vi.fn(
+      async ({ momentId }: { momentId: string }) =>
+        moments.get(momentId) ?? { payload: { before: null } },
+    ),
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       return snapshots().find((row) => row.path === path) ?? null;
     }),
     readBinaryFile: vi.fn(async () => null),
     writeTextFile: vi.fn(
-      async ({ path, text, metadata }: { path: string; text: string; metadata?: { origin: string } }) => {
+      async ({
+        path,
+        text,
+        metadata,
+      }: {
+        path: string;
+        text: string;
+        metadata?: { origin: string };
+      }) => {
         const existing = rows.get(path);
         const id = nextId++;
         moments.set(`moment-${id}`, { payload: { before: null, after: { path, text } } });
@@ -290,20 +296,18 @@ function mutableTextStore(input?: {
       rows.delete(path);
       return {};
     }),
-    renameTextFile: vi.fn(
-      async ({ fromPath, toPath }: { fromPath: string; toPath: string }) => {
-        const row = rows.get(fromPath);
-        if (!row) throw new Error(`Missing source: ${fromPath}`);
-        rows.delete(fromPath);
-        rows.set(toPath, {
-          ...row,
-          latestMomentId: `moment-${nextId++}`,
-          accepted: false,
-        });
-        input?.afterRename?.(fromPath, toPath);
-        return {};
-      },
-    ),
+    renameTextFile: vi.fn(async ({ fromPath, toPath }: { fromPath: string; toPath: string }) => {
+      const row = rows.get(fromPath);
+      if (!row) throw new Error(`Missing source: ${fromPath}`);
+      rows.delete(fromPath);
+      rows.set(toPath, {
+        ...row,
+        latestMomentId: `moment-${nextId++}`,
+        accepted: false,
+      });
+      input?.afterRename?.(fromPath, toPath);
+      return {};
+    }),
   } as unknown as ShareViewFilesStore;
 }
 
@@ -337,15 +341,30 @@ describe("ShareViewFiles", () => {
     const rootPath = await workspaceRoot();
     const path = "docs/a.md";
     const text = "shared file\n";
-    const registered = { ...target(rootPath), grantedSelector: { paths: ["docs"], versionId: null, access: "edit" } };
+    const registered = {
+      ...target(rootPath),
+      grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
+    };
     const store = mutableTextStore({ initial: [{ path, text }] });
     await mkdir(join(rootPath, "docs"));
     await writeFile(join(rootPath, path), text);
     const record = await writeRecord(rootPath, "share-collision-record.json", "not json");
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+    });
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    const change = { kind: "save" as const, path, text: "changed\n", expectedContentHash: createHash("sha256").update(text).digest("hex") };
-    const save = () => withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested, change));
+    const change = {
+      kind: "save" as const,
+      path,
+      text: "changed\n",
+      expectedContentHash: createHash("sha256").update(text).digest("hex"),
+    };
+    const save = () =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(lease, requested, change),
+      );
 
     await expect(save()).rejects.toMatchObject({ code: "share-collision-record" });
     expect(await readFile(record, "utf8")).toBe("not json");
@@ -358,24 +377,50 @@ describe("ShareViewFiles", () => {
   it("keeps an untracked preserved file apart after access narrows", async () => {
     const rootPath = await workspaceRoot();
     const path = "docs/mine.md";
-    const registered = { ...target(rootPath), unsavedPaths: [path] as string[] | null,
-      grantedSelector: { paths: ["docs"], versionId: null, access: "edit" as "edit" | "view" } };
+    const registered = {
+      ...target(rootPath),
+      unsavedPaths: [path] as string[] | null,
+      grantedSelector: { paths: ["docs"], versionId: null, access: "edit" as "edit" | "view" },
+    };
     const store = mutableTextStore();
     await mkdir(join(rootPath, "docs"));
     await writeFile(join(rootPath, path), "my own file");
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
-      updateUnsavedPaths: async (_target, paths) => { registered.unsavedPaths = paths; } });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+      updateUnsavedPaths: async (_target, paths) => {
+        registered.unsavedPaths = paths;
+      },
+    });
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.narrow(lease, requested, () => undefined, async paths => {
-      registered.grantedSelector.access = "view";
-      registered.unsavedPaths = paths ?? null;
-    }));
-    const refreshed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.narrow(
+        lease,
+        requested,
+        () => undefined,
+        async (paths) => {
+          registered.grantedSelector.access = "view";
+          registered.unsavedPaths = paths ?? null;
+        },
+      ),
+    );
+    const refreshed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, requested, "refresh"),
+    );
 
-    expect(refreshed).toMatchObject({ kind: "refresh", outcome: { ok: true,
-      unjournalablePaths: [{ path, reason: "local-collision" }] } });
+    expect(refreshed).toMatchObject({
+      kind: "refresh",
+      outcome: { ok: true, unjournalablePaths: [{ path, reason: "local-collision" }] },
+    });
     expect(await readFile(join(rootPath, path), "utf8")).toBe("my own file");
-    expect(await store.readTextFile({ workspaceId: registered.storeWorkspaceId, versionId: "main", path })).toBeNull();
+    expect(
+      await store.readTextFile({
+        workspaceId: registered.storeWorkspaceId,
+        versionId: "main",
+        path,
+      }),
+    ).toBeNull();
     expect(store.writeTextFile).not.toHaveBeenCalled();
     expect(registered.unsavedPaths).toEqual([path]);
   });
@@ -386,253 +431,548 @@ describe("ShareViewFiles", () => {
   it("refuses a change to a spelling held behind another one's file", async (context) => {
     const rootPath = await workspaceRoot();
     await writeFile(join(rootPath, "probe.md"), "");
-    const ignoresCase = await lstat(join(rootPath, "PROBE.md")).then(() => true, () => false);
+    const ignoresCase = await lstat(join(rootPath, "PROBE.md")).then(
+      () => true,
+      () => false,
+    );
     await rm(join(rootPath, "probe.md"));
     if (!ignoresCase) context.skip("this disk keeps case apart");
     const registered = target(rootPath);
-    const store = mutableTextStore({ initial: [{ path: "notes.md", text: "n\n" }, { path: "Notes.md", text: "N\n" }] });
+    const store = mutableTextStore({
+      initial: [
+        { path: "notes.md", text: "n\n" },
+        { path: "Notes.md", text: "N\n" },
+      ],
+    });
     await writeFile(join(rootPath, "notes.md"), "n\n");
-    await writeRecord(rootPath, "share-collision-record.json", JSON.stringify({ shareId: registered.shareId, paths: ["Notes.md"] }));
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
+    await writeRecord(
+      rootPath,
+      "share-collision-record.json",
+      JSON.stringify({ shareId: registered.shareId, paths: ["Notes.md"] }),
+    );
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+    });
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     const changes: ShareViewFileChange[] = [
-      { kind: "save", path: "Notes.md", text: "edited\n", expectedContentHash: createHash("sha256").update("N\n").digest("hex") },
+      {
+        kind: "save",
+        path: "Notes.md",
+        text: "edited\n",
+        expectedContentHash: createHash("sha256").update("N\n").digest("hex"),
+      },
       { kind: "delete", path: "Notes.md" },
       { kind: "move", fromPath: "Notes.md", toPath: "moved.md" },
     ];
     for (const change of changes) {
-      await expect(withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested, change)))
-        .rejects.toThrow("dohc did not change Notes.md. This machine treats Notes.md and notes.md as the same name.");
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(lease, requested, change),
+        ),
+      ).rejects.toThrow(
+        "dohc did not change Notes.md. This machine treats Notes.md and notes.md as the same name.",
+      );
     }
     expect(store.writeTextFile).not.toHaveBeenCalled();
     expect(store.deleteTextFile).not.toHaveBeenCalled();
     expect(await readFile(join(rootPath, "notes.md"), "utf8")).toBe("n\n");
   });
 
-  it.each(["end", "narrow"] as const)("lists unconfirmed changes without protecting them after %s", async restriction => {
-    const rootPath = await workspaceRoot();
-    const yaml = "tasks/automations.yaml";
-    const draft = "tasks/draft.md";
-    const accepted = "tasks/accepted.md";
-    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined,
-      unconfirmedChanges: undefined as { paths: string[]; unchecked: boolean; checked: number } | undefined,
-      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
-    const initial = [{ path: yaml, text: "version: 1\nautomations: []\n" },
-      { path: draft, text: "Retained record draft\n", pending: true }, { path: accepted, text: "Accepted by the owner\n" }];
-    const store = mutableTextStore({ initial });
-    await mkdir(join(rootPath, "tasks"), { recursive: true });
-    for (const row of initial) await writeFile(join(rootPath, row.path), row.text);
-    await writeFile(join(rootPath, yaml), `${initial[0]!.text}# Unsent edit\n`);
-    const ports = { ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
-      updateUnsavedPaths: async (_target: ResolvedShareViewFilesTarget, paths: string[]) => { registered.unsavedPaths = paths; },
-      markEnded: async (_target: ResolvedShareViewFilesTarget, paths?: string[] | null, snapshot?: { paths: string[]; unchecked: boolean; checked: number }) => {
-        registered.ended = true;
-        if (paths !== undefined) registered.unsavedPaths = paths;
-        if (snapshot !== undefined) registered.unconfirmedChanges = snapshot;
-      },
-      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
-      pull: vi.fn(async () => ({ fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
-        changedPaths: [], nextCursor: 1, commitCursor: async () => undefined })) };
-    const files = createShareViewFiles(ports);
-    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
-      if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
-        registered.grantedSelector.access = "view"; registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
-      });
-    });
-    expect(registered.unsavedPaths).toEqual([]);
-    expect(registered.unconfirmedChanges).toEqual({ paths: [yaml, draft], unchecked: false, checked: 0 });
-    const capturedHead = (await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path: yaml }))!.latestMomentId;
-    const saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
-    const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved });
-    const moments = vi.mocked(store.writeTextFile).mock.calls.length;
-    for (let pass = 0; pass < 3; pass += 1) {
-      await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "refresh"));
-    }
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
-    expect(saved.unsavedPaths).toEqual([]);
-    expect(saved.unconfirmedChanges).toEqual(registered.unconfirmedChanges);
-    expect(store.listUnconfirmedSharePaths).toHaveBeenCalledOnce();
-    expect(store.writeTextFile).toHaveBeenCalledTimes(moments);
-    expect(await readFile(join(rootPath, yaml), "utf8")).toContain("# Unsent edit");
-    expect(await readFile(join(rootPath, draft), "utf8")).toBe(initial[1]!.text);
-    if (restriction === "narrow") {
-      const ownerText = "later owner update\n";
-      const pulling = createShareViewFiles({ ...ports, resolveTarget: () => saved,
-        pull: async () => {
-          await store.writeTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: yaml,
-            text: ownerText, metadata: { origin: "sync" } });
-          return { fetched: 1, applied: 1, skipped: 0, refusals: [], refusalCount: 0,
-            changedPaths: [{ path: yaml, operation: "write", contentKind: "text" }], nextCursor: 2, commitCursor: async () => undefined };
-        } });
-      await withStaleSensitiveWorkspaceOperation(rootPath, lease => pulling.reconcile(lease, requested, "refresh"));
-      expect(await readFile(join(rootPath, yaml), "utf8")).toBe(ownerText);
-      expect(await store.readTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: yaml })).toMatchObject({ text: ownerText });
-      expect(await store.getMoment({ workspaceId: saved.workspaceId, momentId: capturedHead })).toMatchObject({
-        payload: { after: { path: yaml, text: `${initial[0]!.text}# Unsent edit\n` } },
-      });
-      expect(store.listUnconfirmedSharePaths).toHaveBeenCalledOnce();
-      vi.mocked(store.listUnconfirmedSharePaths).mockRejectedValueOnce(new Error("later check failed"));
-      const ending = createShareViewFiles({ ...ports, resolveTarget: () => saved,
-        markEnded: async (_target, paths, snapshot) => { saved.ended = true; saved.unsavedPaths = paths; saved.unconfirmedChanges = snapshot; } });
-      await withStaleSensitiveWorkspaceOperation(rootPath, lease => ending.end(lease, requested, () => undefined));
-      expect(saved.unconfirmedChanges).toEqual({ paths: [yaml, draft], unchecked: true, checked: 0 });
-      expect(saved.unsavedPaths).toEqual([]);
-    }
-  });
-
-  it.each(["end", "narrow"] as const)("keeps capture protection unchanged when status fails during %s", async restriction => {
-    const rootPath = await workspaceRoot();
-    const path = "notes.md";
-    await writeFile(join(rootPath, path), "local edit\n");
-    const registered = { ...target(rootPath), unsavedPaths: [] as string[] | null,
-      unconfirmedChanges: undefined as { paths: string[]; unchecked: boolean; checked: number } | undefined };
-    const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
-    vi.mocked(store.listUnconfirmedSharePaths).mockRejectedValueOnce(new Error("status unavailable"));
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
-      markEnded: async (_target, paths, snapshot) => { registered.unsavedPaths = paths!; registered.unconfirmedChanges = snapshot; } });
-    await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
+  it.each(["end", "narrow"] as const)(
+    "lists unconfirmed changes without protecting them after %s",
+    async (restriction) => {
+      const rootPath = await workspaceRoot();
+      const yaml = "tasks/automations.yaml";
+      const draft = "tasks/draft.md";
+      const accepted = "tasks/accepted.md";
+      const registered = {
+        ...target(rootPath),
+        unsavedPaths: undefined as string[] | null | undefined,
+        unconfirmedChanges: undefined as
+          | { paths: string[]; unchecked: boolean; checked: number }
+          | undefined,
+        grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" },
+      };
+      const initial = [
+        { path: yaml, text: "version: 1\nautomations: []\n" },
+        { path: draft, text: "Retained record draft\n", pending: true },
+        { path: accepted, text: "Accepted by the owner\n" },
+      ];
+      const store = mutableTextStore({ initial });
+      await mkdir(join(rootPath, "tasks"), { recursive: true });
+      for (const row of initial) await writeFile(join(rootPath, row.path), row.text);
+      await writeFile(join(rootPath, yaml), `${initial[0]!.text}# Unsent edit\n`);
+      const ports = {
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        updateUnsavedPaths: async (_target: ResolvedShareViewFilesTarget, paths: string[]) => {
+          registered.unsavedPaths = paths;
+        },
+        markEnded: async (
+          _target: ResolvedShareViewFilesTarget,
+          paths?: string[] | null,
+          snapshot?: { paths: string[]; unchecked: boolean; checked: number },
+        ) => {
+          registered.ended = true;
+          if (paths !== undefined) registered.unsavedPaths = paths;
+          if (snapshot !== undefined) registered.unconfirmedChanges = snapshot;
+        },
+        resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+        pull: vi.fn(async () => ({
+          fetched: 0,
+          applied: 0,
+          skipped: 0,
+          refusals: [],
+          refusalCount: 0,
+          changedPaths: [],
+          nextCursor: 1,
+          commitCursor: async () => undefined,
+        })),
+      };
+      const files = createShareViewFiles(ports);
       const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-      if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, async (paths, snapshot) => {
-        registered.unsavedPaths = paths; registered.unconfirmedChanges = snapshot;
-      });
-    });
-    expect(registered.unsavedPaths).toEqual([]);
-    expect(registered.unconfirmedChanges).toEqual({ paths: [], unchecked: true, checked: 0 });
-    expect(await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path })).toMatchObject({ text: "local edit\n" });
-  });
-
-  it.each(["end", "narrow"] as const)("preserves a recipient-created record's unreadable edits before %s", async restriction => {
-    const rootPath = await workspaceRoot();
-    const path = "tasks/Created.md";
-    const text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nRecipient draft\n";
-    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined,
-      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
-    const store = mutableTextStore({ initial: [] });
-    const ports = { ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
-      markEnded: async (_target: ResolvedShareViewFilesTarget, unsavedPaths?: string[] | null) => {
-        registered.ended = true; registered.unsavedPaths = unsavedPaths;
-      } };
-    const files = createShareViewFiles(ports);
-    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.change(lease, requested,
-      { kind: "create", path, initialText: text }));
-    await writeFile(join(rootPath, path), `${text}Unsent edit\n`);
-    const original = fsPromises.lstat;
-    const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
-      if (String(args[0]) === join(rootPath, path)) return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
-      return original(...args);
-    });
-    try {
-      await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
+      await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
         if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
-          registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
-        });
+        else
+          await files.narrow(
+            lease,
+            requested,
+            () => undefined,
+            async (paths, snapshot) => {
+              registered.grantedSelector.access = "view";
+              registered.unsavedPaths = paths;
+              registered.unconfirmedChanges = snapshot;
+            },
+          );
       });
-      expect(registered.unsavedPaths).toEqual([path]);
+      expect(registered.unsavedPaths).toEqual([]);
+      expect(registered.unconfirmedChanges).toEqual({
+        paths: [yaml, draft],
+        unchecked: false,
+        checked: 0,
+      });
+      const capturedHead = (await store.readTextFile({
+        workspaceId: registered.workspaceId,
+        versionId: "main",
+        path: yaml,
+      }))!.latestMomentId;
       const saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
       const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved });
-      await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
-      expect(await readFile(join(rootPath, path), "utf8")).toBe(`${text}Unsent edit\n`);
-      expect(saved.unsavedPaths).toEqual([path]);
-    } finally { inspect.mockRestore(); }
-  });
-
-  it.each(["end", "narrow"] as const)("captures an on-disk Edit change before %s and keeps it after a later read", async restriction => {
-    const rootPath = await workspaceRoot();
-    const path = "tasks/notes.md";
-    const registered = { ...target(rootPath), grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
-    const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
-    await mkdir(join(rootPath, "tasks"), { recursive: true });
-    await writeFile(join(rootPath, path), "recipient agent edit\n");
-    const markEnded = vi.fn(async () => { registered.ended = true; });
-    const retireTarget = vi.fn(async () => undefined);
-    const pull = vi.fn(unusedReconcilePorts.pull);
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered,
-      openStore: () => store, markEnded, retireTarget, pull });
-    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
-      if (restriction === "end") await files.end(lease, requested, () => undefined);
-      else await files.narrow(lease, requested, () => undefined, async () => { registered.grantedSelector.access = "view"; });
-    });
-    expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient agent edit\n", metadata: { origin: "local-file" } }));
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "settle"));
-    expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient agent edit\n");
-    expect(await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path })).toMatchObject({ text: "recipient agent edit\n" });
-    expect(pull).not.toHaveBeenCalled();
-    if (restriction === "end") {
-      expect(markEnded.mock.invocationCallOrder[0]).toBeLessThan(retireTarget.mock.invocationCallOrder[0]!);
-      expect(vi.mocked(store.writeTextFile).mock.invocationCallOrder[0]).toBeLessThan(markEnded.mock.invocationCallOrder[0]!);
-    }
-  });
-  it.each(["end", "narrow"] as const)("publishes %s despite unreadable files and retries them after restart and unlock", async restriction => {
-    const rootPath = await workspaceRoot();
-    const locked = "tasks/locked.md";
-    const good = "tasks/good.md";
-    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined,
-      grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" } };
-    const store = mutableTextStore({ initial: [locked, good].map(path => ({ path, text: "owner version\n" })) });
-    await mkdir(join(rootPath, "tasks"), { recursive: true });
-    for (const path of [locked, good]) await writeFile(join(rootPath, path), "recipient edit\n");
-    // A pending file's inspection failure formerly threw before markEnded.
-    await seedPendingMaterializationPaths(rootPath, [locked]);
-    const original = fsPromises.lstat;
-    const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
-      if (String(args[0]) === join(rootPath, locked)) return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
-      return original(...args);
-    });
-    const ports = { ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
-      markEnded: async (_target: ResolvedShareViewFilesTarget, unsavedPaths?: string[] | null) => {
-        registered.ended = true; registered.unsavedPaths = unsavedPaths;
-      } };
-    const files = createShareViewFiles(ports);
-    const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    let saved: typeof registered;
-    try {
-      await withStaleSensitiveWorkspaceOperation(rootPath, async lease => {
-        if (restriction === "end") await files.end(lease, requested, () => undefined);
-        else await files.narrow(lease, requested, () => undefined, async unsavedPaths => {
-          registered.grantedSelector.access = "view"; registered.unsavedPaths = unsavedPaths;
-        });
-      });
-      expect(registered.unsavedPaths).toEqual([locked]);
-      expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path: good, text: "recipient edit\n" }));
-      expect(restriction === "end" ? registered.ended : registered.grantedSelector.access === "view").toBe(true);
-      // Reload the persisted record and update/delete/re-add the canonical file.
-      saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
-      const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved,
-        updateUnsavedPaths: async (_target, paths) => { saved.unsavedPaths = paths; },
-        resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
-        pull: async () => ({ fetched: 1, applied: 1, skipped: 0, refusals: [], refusalCount: 0,
-          changedPaths: [{ path: locked, operation: "write", contentKind: "text" }], nextCursor: 1, commitCursor: async () => undefined }) });
-      for (const text of ["new owner version\n", null, "owner re-added\n"]) {
-        if (text === null) await store.deleteTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: locked, metadata: { origin: "local-file" } });
-        else await store.writeTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: locked, text, metadata: { origin: "local-file" } });
-        await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
-        expect(await readFile(join(rootPath, locked), "utf8")).toBe("recipient edit\n");
-        await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "refresh"));
-        expect(await readFile(join(rootPath, locked), "utf8")).toBe("recipient edit\n");
-        expect(saved.unsavedPaths).toEqual([locked]);
+      const moments = vi.mocked(store.writeTextFile).mock.calls.length;
+      for (let pass = 0; pass < 3; pass += 1) {
+        await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          restarted.reconcile(lease, requested, "refresh"),
+        );
       }
-      } finally { inspect.mockRestore(); }
-    const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved,
-      updateUnsavedPaths: async (_target, paths) => { saved.unsavedPaths = paths; },
-      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
-      pull: async () => {
-        await store.writeTextFile({ workspaceId: saved.workspaceId, versionId: "main", path: locked,
-          text: "later owner update\n", metadata: { origin: "local-file" } });
-        return { fetched: 1, applied: 1, skipped: 0, refusals: [], refusalCount: 0,
-          changedPaths: [{ path: locked, operation: "write", contentKind: "text" }], nextCursor: 2, commitCursor: async () => undefined };
-      } });
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "settle"));
-    expect(saved!.unsavedPaths).toEqual([]);
-    expect(await store.readTextFile({ workspaceId: saved!.workspaceId, versionId: "main", path: locked })).toMatchObject({ text: "recipient edit\n" });
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => restarted.reconcile(lease, requested, "refresh"));
-    expect(await readFile(join(rootPath, locked), "utf8")).toBe(restriction === "end" ? "recipient edit\n" : "later owner update\n");
-  });
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        restarted.reconcile(lease, requested, "settle"),
+      );
+      expect(saved.unsavedPaths).toEqual([]);
+      expect(saved.unconfirmedChanges).toEqual(registered.unconfirmedChanges);
+      expect(store.listUnconfirmedSharePaths).toHaveBeenCalledOnce();
+      expect(store.writeTextFile).toHaveBeenCalledTimes(moments);
+      expect(await readFile(join(rootPath, yaml), "utf8")).toContain("# Unsent edit");
+      expect(await readFile(join(rootPath, draft), "utf8")).toBe(initial[1]!.text);
+      if (restriction === "narrow") {
+        const ownerText = "later owner update\n";
+        const pulling = createShareViewFiles({
+          ...ports,
+          resolveTarget: () => saved,
+          pull: async () => {
+            await store.writeTextFile({
+              workspaceId: saved.workspaceId,
+              versionId: "main",
+              path: yaml,
+              text: ownerText,
+              metadata: { origin: "sync" },
+            });
+            return {
+              fetched: 1,
+              applied: 1,
+              skipped: 0,
+              refusals: [],
+              refusalCount: 0,
+              changedPaths: [{ path: yaml, operation: "write", contentKind: "text" }],
+              nextCursor: 2,
+              commitCursor: async () => undefined,
+            };
+          },
+        });
+        await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          pulling.reconcile(lease, requested, "refresh"),
+        );
+        expect(await readFile(join(rootPath, yaml), "utf8")).toBe(ownerText);
+        expect(
+          await store.readTextFile({
+            workspaceId: saved.workspaceId,
+            versionId: "main",
+            path: yaml,
+          }),
+        ).toMatchObject({ text: ownerText });
+        expect(
+          await store.getMoment({ workspaceId: saved.workspaceId, momentId: capturedHead }),
+        ).toMatchObject({
+          payload: { after: { path: yaml, text: `${initial[0]!.text}# Unsent edit\n` } },
+        });
+        expect(store.listUnconfirmedSharePaths).toHaveBeenCalledOnce();
+        vi.mocked(store.listUnconfirmedSharePaths).mockRejectedValueOnce(
+          new Error("later check failed"),
+        );
+        const ending = createShareViewFiles({
+          ...ports,
+          resolveTarget: () => saved,
+          markEnded: async (_target, paths, snapshot) => {
+            saved.ended = true;
+            saved.unsavedPaths = paths;
+            saved.unconfirmedChanges = snapshot;
+          },
+        });
+        await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          ending.end(lease, requested, () => undefined),
+        );
+        expect(saved.unconfirmedChanges).toEqual({
+          paths: [yaml, draft],
+          unchecked: true,
+          checked: 0,
+        });
+        expect(saved.unsavedPaths).toEqual([]);
+      }
+    },
+  );
+
+  it.each(["end", "narrow"] as const)(
+    "keeps capture protection unchanged when status fails during %s",
+    async (restriction) => {
+      const rootPath = await workspaceRoot();
+      const path = "notes.md";
+      await writeFile(join(rootPath, path), "local edit\n");
+      const registered = {
+        ...target(rootPath),
+        unsavedPaths: [] as string[] | null,
+        unconfirmedChanges: undefined as
+          | { paths: string[]; unchecked: boolean; checked: number }
+          | undefined,
+      };
+      const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
+      vi.mocked(store.listUnconfirmedSharePaths).mockRejectedValueOnce(
+        new Error("status unavailable"),
+      );
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        markEnded: async (_target, paths, snapshot) => {
+          registered.unsavedPaths = paths!;
+          registered.unconfirmedChanges = snapshot;
+        },
+      });
+      await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+        const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else
+          await files.narrow(
+            lease,
+            requested,
+            () => undefined,
+            async (paths, snapshot) => {
+              registered.unsavedPaths = paths;
+              registered.unconfirmedChanges = snapshot;
+            },
+          );
+      });
+      expect(registered.unsavedPaths).toEqual([]);
+      expect(registered.unconfirmedChanges).toEqual({ paths: [], unchecked: true, checked: 0 });
+      expect(
+        await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path }),
+      ).toMatchObject({ text: "local edit\n" });
+    },
+  );
+
+  it.each(["end", "narrow"] as const)(
+    "preserves a recipient-created record's unreadable edits before %s",
+    async (restriction) => {
+      const rootPath = await workspaceRoot();
+      const path = "tasks/Created.md";
+      const text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\nRecipient draft\n";
+      const registered = {
+        ...target(rootPath),
+        unsavedPaths: undefined as string[] | null | undefined,
+        grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" },
+      };
+      const store = mutableTextStore({ initial: [] });
+      const ports = {
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        markEnded: async (
+          _target: ResolvedShareViewFilesTarget,
+          unsavedPaths?: string[] | null,
+        ) => {
+          registered.ended = true;
+          registered.unsavedPaths = unsavedPaths;
+        },
+      };
+      const files = createShareViewFiles(ports);
+      const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(lease, requested, { kind: "create", path, initialText: text }),
+      );
+      await writeFile(join(rootPath, path), `${text}Unsent edit\n`);
+      const original = fsPromises.lstat;
+      const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
+        if (String(args[0]) === join(rootPath, path))
+          return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
+        return original(...args);
+      });
+      try {
+        await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+          if (restriction === "end") await files.end(lease, requested, () => undefined);
+          else
+            await files.narrow(
+              lease,
+              requested,
+              () => undefined,
+              async (unsavedPaths) => {
+                registered.grantedSelector.access = "view";
+                registered.unsavedPaths = unsavedPaths;
+              },
+            );
+        });
+        expect(registered.unsavedPaths).toEqual([path]);
+        const saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
+        const restarted = createShareViewFiles({ ...ports, resolveTarget: () => saved });
+        await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          restarted.reconcile(lease, requested, "settle"),
+        );
+        expect(await readFile(join(rootPath, path), "utf8")).toBe(`${text}Unsent edit\n`);
+        expect(saved.unsavedPaths).toEqual([path]);
+      } finally {
+        inspect.mockRestore();
+      }
+    },
+  );
+
+  it.each(["end", "narrow"] as const)(
+    "captures an on-disk Edit change before %s and keeps it after a later read",
+    async (restriction) => {
+      const rootPath = await workspaceRoot();
+      const path = "tasks/notes.md";
+      const registered = {
+        ...target(rootPath),
+        grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" },
+      };
+      const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
+      await mkdir(join(rootPath, "tasks"), { recursive: true });
+      await writeFile(join(rootPath, path), "recipient agent edit\n");
+      const markEnded = vi.fn(async () => {
+        registered.ended = true;
+      });
+      const retireTarget = vi.fn(async () => undefined);
+      const pull = vi.fn(unusedReconcilePorts.pull);
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        markEnded,
+        retireTarget,
+        pull,
+      });
+      const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+      await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+        if (restriction === "end") await files.end(lease, requested, () => undefined);
+        else
+          await files.narrow(
+            lease,
+            requested,
+            () => undefined,
+            async () => {
+              registered.grantedSelector.access = "view";
+            },
+          );
+      });
+      expect(store.writeTextFile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path,
+          text: "recipient agent edit\n",
+          metadata: { origin: "local-file" },
+        }),
+      );
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(lease, requested, "settle"),
+      );
+      expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient agent edit\n");
+      expect(
+        await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path }),
+      ).toMatchObject({ text: "recipient agent edit\n" });
+      expect(pull).not.toHaveBeenCalled();
+      if (restriction === "end") {
+        expect(markEnded.mock.invocationCallOrder[0]).toBeLessThan(
+          retireTarget.mock.invocationCallOrder[0]!,
+        );
+        expect(vi.mocked(store.writeTextFile).mock.invocationCallOrder[0]).toBeLessThan(
+          markEnded.mock.invocationCallOrder[0]!,
+        );
+      }
+    },
+  );
+  it.each(["end", "narrow"] as const)(
+    "publishes %s despite unreadable files and retries them after restart and unlock",
+    async (restriction) => {
+      const rootPath = await workspaceRoot();
+      const locked = "tasks/locked.md";
+      const good = "tasks/good.md";
+      const registered = {
+        ...target(rootPath),
+        unsavedPaths: undefined as string[] | null | undefined,
+        grantedSelector: { paths: ["tasks"], versionId: null, access: "edit" as "edit" | "view" },
+      };
+      const store = mutableTextStore({
+        initial: [locked, good].map((path) => ({ path, text: "owner version\n" })),
+      });
+      await mkdir(join(rootPath, "tasks"), { recursive: true });
+      for (const path of [locked, good]) await writeFile(join(rootPath, path), "recipient edit\n");
+      // A pending file's inspection failure formerly threw before markEnded.
+      await seedPendingMaterializationPaths(rootPath, [locked]);
+      const original = fsPromises.lstat;
+      const inspect = vi.spyOn(fsPromises, "lstat").mockImplementation((...args) => {
+        if (String(args[0]) === join(rootPath, locked))
+          return Promise.reject(Object.assign(new Error("locked"), { code: "EACCES" }));
+        return original(...args);
+      });
+      const ports = {
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
+        markEnded: async (
+          _target: ResolvedShareViewFilesTarget,
+          unsavedPaths?: string[] | null,
+        ) => {
+          registered.ended = true;
+          registered.unsavedPaths = unsavedPaths;
+        },
+      };
+      const files = createShareViewFiles(ports);
+      const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
+      let saved: typeof registered;
+      try {
+        await withStaleSensitiveWorkspaceOperation(rootPath, async (lease) => {
+          if (restriction === "end") await files.end(lease, requested, () => undefined);
+          else
+            await files.narrow(
+              lease,
+              requested,
+              () => undefined,
+              async (unsavedPaths) => {
+                registered.grantedSelector.access = "view";
+                registered.unsavedPaths = unsavedPaths;
+              },
+            );
+        });
+        expect(registered.unsavedPaths).toEqual([locked]);
+        expect(store.writeTextFile).toHaveBeenCalledWith(
+          expect.objectContaining({ path: good, text: "recipient edit\n" }),
+        );
+        expect(
+          restriction === "end" ? registered.ended : registered.grantedSelector.access === "view",
+        ).toBe(true);
+        // Reload the persisted record and update/delete/re-add the canonical file.
+        saved = JSON.parse(JSON.stringify(registered)) as typeof registered;
+        const restarted = createShareViewFiles({
+          ...ports,
+          resolveTarget: () => saved,
+          updateUnsavedPaths: async (_target, paths) => {
+            saved.unsavedPaths = paths;
+          },
+          resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+          pull: async () => ({
+            fetched: 1,
+            applied: 1,
+            skipped: 0,
+            refusals: [],
+            refusalCount: 0,
+            changedPaths: [{ path: locked, operation: "write", contentKind: "text" }],
+            nextCursor: 1,
+            commitCursor: async () => undefined,
+          }),
+        });
+        for (const text of ["new owner version\n", null, "owner re-added\n"]) {
+          if (text === null)
+            await store.deleteTextFile({
+              workspaceId: saved.workspaceId,
+              versionId: "main",
+              path: locked,
+              metadata: { origin: "local-file" },
+            });
+          else
+            await store.writeTextFile({
+              workspaceId: saved.workspaceId,
+              versionId: "main",
+              path: locked,
+              text,
+              metadata: { origin: "local-file" },
+            });
+          await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+            restarted.reconcile(lease, requested, "settle"),
+          );
+          expect(await readFile(join(rootPath, locked), "utf8")).toBe("recipient edit\n");
+          await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+            restarted.reconcile(lease, requested, "refresh"),
+          );
+          expect(await readFile(join(rootPath, locked), "utf8")).toBe("recipient edit\n");
+          expect(saved.unsavedPaths).toEqual([locked]);
+        }
+      } finally {
+        inspect.mockRestore();
+      }
+      const restarted = createShareViewFiles({
+        ...ports,
+        resolveTarget: () => saved,
+        updateUnsavedPaths: async (_target, paths) => {
+          saved.unsavedPaths = paths;
+        },
+        resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+        pull: async () => {
+          await store.writeTextFile({
+            workspaceId: saved.workspaceId,
+            versionId: "main",
+            path: locked,
+            text: "later owner update\n",
+            metadata: { origin: "local-file" },
+          });
+          return {
+            fetched: 1,
+            applied: 1,
+            skipped: 0,
+            refusals: [],
+            refusalCount: 0,
+            changedPaths: [{ path: locked, operation: "write", contentKind: "text" }],
+            nextCursor: 2,
+            commitCursor: async () => undefined,
+          };
+        },
+      });
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        restarted.reconcile(lease, requested, "settle"),
+      );
+      expect(saved!.unsavedPaths).toEqual([]);
+      expect(
+        await store.readTextFile({
+          workspaceId: saved!.workspaceId,
+          versionId: "main",
+          path: locked,
+        }),
+      ).toMatchObject({ text: "recipient edit\n" });
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        restarted.reconcile(lease, requested, "refresh"),
+      );
+      expect(await readFile(join(rootPath, locked), "utf8")).toBe(
+        restriction === "end" ? "recipient edit\n" : "later owner update\n",
+      );
+    },
+  );
 
   it("removes a deleted protected path from the persisted exclusions", async () => {
     const rootPath = await workspaceRoot();
@@ -641,13 +981,23 @@ describe("ShareViewFiles", () => {
     await writeFile(join(rootPath, path), "recipient edit\n");
     await rm(join(rootPath, path));
     const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
-    const updateUnsavedPaths = vi.fn(async (_target, paths: string[]) => { registered.unsavedPaths = paths; });
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store, updateUnsavedPaths });
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease,
-      { kind: "standalone", workspaceId: registered.workspaceId }, "settle"));
+    const updateUnsavedPaths = vi.fn(async (_target, paths: string[]) => {
+      registered.unsavedPaths = paths;
+    });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+      updateUnsavedPaths,
+    });
+    await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, { kind: "standalone", workspaceId: registered.workspaceId }, "settle"),
+    );
     expect(updateUnsavedPaths).toHaveBeenCalledWith(expect.anything(), []);
     expect(registered.unsavedPaths).toEqual([]);
-    expect(await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path })).toBeNull();
+    expect(
+      await store.readTextFile({ workspaceId: registered.workspaceId, versionId: "main", path }),
+    ).toBeNull();
     expect(await readdir(rootPath)).not.toContain(path);
   });
 
@@ -655,23 +1005,39 @@ describe("ShareViewFiles", () => {
     const rootPath = await workspaceRoot();
     const path = "notes.md";
     await writeFile(join(rootPath, path), "recipient edit\n");
-    const registered = { ...target(rootPath), unsavedPaths: undefined as string[] | null | undefined };
+    const registered = {
+      ...target(rootPath),
+      unsavedPaths: undefined as string[] | null | undefined,
+    };
     const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
     vi.mocked(store.listTextFileMetadata).mockRejectedValueOnce(new Error("store unavailable"));
     const pull = vi.fn(unusedReconcilePorts.pull);
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store, pull,
-      updateUnsavedPaths: async (_target, paths) => { registered.unsavedPaths = paths; },
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+      pull,
+      updateUnsavedPaths: async (_target, paths) => {
+        registered.unsavedPaths = paths;
+      },
       markEnded: async (_target, unsavedPaths) => {
         registered.ended = true;
         if (unsavedPaths !== undefined) registered.unsavedPaths = unsavedPaths;
-      } });
+      },
+    });
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.end(lease, requested, () => undefined));
+    await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.end(lease, requested, () => undefined),
+    );
     expect(registered).toMatchObject({ ended: true, unsavedPaths: null });
-    await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, requested, "refresh"),
+    );
     expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
     expect(registered.unsavedPaths).toEqual([]);
-    expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path, text: "recipient edit\n" }));
+    expect(store.writeTextFile).toHaveBeenCalledWith(
+      expect.objectContaining({ path, text: "recipient edit\n" }),
+    );
     expect(pull).not.toHaveBeenCalled();
   });
 
@@ -682,23 +1048,31 @@ describe("ShareViewFiles", () => {
       const registered = target(rootPath, "view");
       const store = mutableTextStore();
       const record = await writeRecord(rootPath, "share-collision-record.json", "not json");
-      const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => store,
         resolveRelay: async () => {
           if (failing === "relay") throw new Error("Sign in to your server first.");
           return { baseUrl: "https://relay.example", token: "token" };
         },
         pull: async () => {
           throw new Error("relay unavailable");
-        } });
+        },
+      });
       const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
       const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
-        const failed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+        const failed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.reconcile(lease, requested, "refresh"),
+        );
         expect(failed).toMatchObject({
           kind: "refresh",
           outcome: {
             ok: false,
-            errorMessage: expect.stringContaining(failing === "relay" ? "Sign in to your server first." : "relay unavailable"),
+            errorMessage: expect.stringContaining(
+              failing === "relay" ? "Sign in to your server first." : "relay unavailable",
+            ),
             collisionRecordQuarantined: true,
           },
         });
@@ -716,7 +1090,10 @@ describe("ShareViewFiles", () => {
     const store = mutableTextStore();
     const record = await writeRecord(rootPath, "share-collision-record.json", "not json");
     const retireTarget = vi.fn(async () => undefined);
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
       resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
       pull: async () => {
         throw new ShareUnavailableError();
@@ -724,11 +1101,14 @@ describe("ShareViewFiles", () => {
       markEnded: async () => {
         throw new Error("could not save the ended share");
       },
-      retireTarget });
+      retireTarget,
+    });
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      const failed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+      const failed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(lease, requested, "refresh"),
+      );
       expect(failed).toMatchObject({
         kind: "refresh",
         outcome: {
@@ -751,68 +1131,127 @@ describe("ShareViewFiles", () => {
     await writeFile(join(rootPath, path), "recipient edit\n");
     const registered = { ...target(rootPath, "view"), unsavedPaths: null as string[] | null };
     const store = mutableTextStore({ initial: [{ path, text: "owner version\n" }] });
-    const pull = vi.fn(async () => ({ fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
-      changedPaths: [], nextCursor: 0, commitCursor: async () => undefined }));
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store,
-      updateUnsavedPaths: async (_target, paths) => { registered.unsavedPaths = paths; }, pull,
-      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }) });
+    const pull = vi.fn(async () => ({
+      fetched: 0,
+      applied: 0,
+      skipped: 0,
+      refusals: [],
+      refusalCount: 0,
+      changedPaths: [],
+      nextCursor: 0,
+      commitCursor: async () => undefined,
+    }));
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+      updateUnsavedPaths: async (_target, paths) => {
+        registered.unsavedPaths = paths;
+      },
+      pull,
+      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+    });
     const requested = { kind: "standalone" as const, workspaceId: registered.workspaceId };
     vi.mocked(store.listTextFileMetadata).mockRejectedValueOnce(new Error("store unavailable"));
-    const failed = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    const failed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, requested, "refresh"),
+    );
     expect(failed).toMatchObject({ kind: "refresh", outcome: { ok: false } });
     expect(registered.unsavedPaths).toBeNull();
     expect(pull).not.toHaveBeenCalled();
-    const recovered = await withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(lease, requested, "refresh"));
+    const recovered = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, requested, "refresh"),
+    );
     expect(recovered).toMatchObject({ kind: "refresh", outcome: { ok: true, status: "updated" } });
     expect(registered.unsavedPaths).toEqual([]);
     expect(pull).toHaveBeenCalledOnce();
     expect(await readFile(join(rootPath, path), "utf8")).toBe("recipient edit\n");
   });
 
-  it.each([false, true])("reports the cursor internally only after a successful commit (commit fails: %s)", async commitFails => {
-    const rootPath = await workspaceRoot();
-    const registered = target(rootPath, "view");
-    const committing = deferred();
-    const committed = deferred();
-    const onCursorCommitted = vi.fn();
-    const files = createShareViewFiles({
-      ...unusedReconcilePorts,
-      resolveTarget: () => registered,
-      openStore: () => mutableTextStore(),
-      resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
-      pull: async () => ({
-        fetched: 0, applied: 0, skipped: 0, refusals: [], refusalCount: 0,
-        changedPaths: [], nextCursor: 57,
-        commitCursor: async () => { committing.resolve(); await committed.promise; },
-      }),
-    });
-    const result = withStaleSensitiveWorkspaceOperation(rootPath, lease => files.reconcile(
-      lease, { kind: "standalone", workspaceId: registered.workspaceId }, "refresh", onCursorCommitted,
-    ));
-    await committing.promise;
-    expect(onCursorCommitted).not.toHaveBeenCalled();
-    if (commitFails) committed.reject(new Error("cursor commit failed"));
-    else committed.resolve();
-    const reconciled = await result;
-    expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
-    if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
-    expect(reconciled.outcome).not.toHaveProperty("nextCursor");
-    if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
-    else {
-      expect(onCursorCommitted).toHaveBeenCalledOnce();
-      expect(onCursorCommitted).toHaveBeenCalledWith(57);
-    }
-  });
+  it.each([false, true])(
+    "reports the cursor internally only after a successful commit (commit fails: %s)",
+    async (commitFails) => {
+      const rootPath = await workspaceRoot();
+      const registered = target(rootPath, "view");
+      const committing = deferred();
+      const committed = deferred();
+      const onCursorCommitted = vi.fn();
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: () => registered,
+        openStore: () => mutableTextStore(),
+        resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
+        pull: async () => ({
+          fetched: 0,
+          applied: 0,
+          skipped: 0,
+          refusals: [],
+          refusalCount: 0,
+          changedPaths: [],
+          nextCursor: 57,
+          commitCursor: async () => {
+            committing.resolve();
+            await committed.promise;
+          },
+        }),
+      });
+      const result = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "standalone", workspaceId: registered.workspaceId },
+          "refresh",
+          onCursorCommitted,
+        ),
+      );
+      await committing.promise;
+      expect(onCursorCommitted).not.toHaveBeenCalled();
+      if (commitFails) committed.reject(new Error("cursor commit failed"));
+      else committed.resolve();
+      const reconciled = await result;
+      expect(reconciled).toMatchObject({ kind: "refresh", outcome: { ok: !commitFails } });
+      if (reconciled.kind !== "refresh") throw new Error("Expected a refresh result");
+      expect(reconciled.outcome).not.toHaveProperty("nextCursor");
+      if (commitFails) expect(onCursorCommitted).not.toHaveBeenCalled();
+      else {
+        expect(onCursorCommitted).toHaveBeenCalledOnce();
+        expect(onCursorCommitted).toHaveBeenCalledWith(57);
+      }
+    },
+  );
 
   it("refuses automation saves on mounted shares", async () => {
     const rootPath = await workspaceRoot();
     const initial = "version: 1\nautomations: []\n";
-    const store = mutableTextStore({ initial: [{ path: "Tasks/automations.yaml", text: initial }] });
-    const registered = { ...mountTarget(rootPath), grantedSelector: { paths: ["Tasks"], versionId: null as string | null, access: "edit" as "edit" | "view" | "comment" } };
-    const requested = { kind: "mount" as const, workspaceId: registered.workspaceId, shareId: registered.shareId! };
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
-    const save = (path: string) => withStaleSensitiveWorkspaceOperation(rootPath, lease =>
-      files.change(lease, requested, { kind: "save", path, text: initial, expectedContentHash: createHash("sha256").update(initial).digest("hex") }));
+    const store = mutableTextStore({
+      initial: [{ path: "Tasks/automations.yaml", text: initial }],
+    });
+    const registered = {
+      ...mountTarget(rootPath),
+      grantedSelector: {
+        paths: ["Tasks"],
+        versionId: null as string | null,
+        access: "edit" as "edit" | "view" | "comment",
+      },
+    };
+    const requested = {
+      kind: "mount" as const,
+      workspaceId: registered.workspaceId,
+      shareId: registered.shareId!,
+    };
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => registered,
+      openStore: () => store,
+    });
+    const save = (path: string) =>
+      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(lease, requested, {
+          kind: "save",
+          path,
+          text: initial,
+          expectedContentHash: createHash("sha256").update(initial).digest("hex"),
+        }),
+      );
     await expect(save("Tasks/automations.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
     await expect(save("Tasks/collection.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
     for (const access of ["view", "comment"] as const) {
@@ -871,9 +1310,9 @@ describe("ShareViewFiles", () => {
     }
 
     const forged = {} as ShareViewFilesOwnerCapability;
-    await expect(
-      shareMounts.shareViewFilesMountProjection(forged).create(),
-    ).rejects.toThrow("ownership admission is inactive");
+    await expect(shareMounts.shareViewFilesMountProjection(forged).create()).rejects.toThrow(
+      "ownership admission is inactive",
+    );
     const projection = sharedView.shareViewFilesProjection(forged);
     const rootPath = await workspaceRoot();
     expect(() => projection.markPending(rootPath, ["notes/forged.md"])).toThrow(
@@ -949,20 +1388,14 @@ describe("ShareViewFiles", () => {
           });
           if (failedRecord === "pending") {
             sidecarRenameFailure = {
-              path: join(
-                recordsDir(rootPath),
-                "pending-materialization.json",
-              ),
+              path: join(recordsDir(rootPath), "pending-materialization.json"),
               error: new Error("pending marker persistence failed"),
             };
           }
           await input.recordChangedPaths?.([path]);
           if (failedRecord === "collision") {
             sidecarRenameFailure = {
-              path: join(
-                recordsDir(rootPath),
-                "share-collision-record.json",
-              ),
+              path: join(recordsDir(rootPath), "share-collision-record.json"),
               error: new Error("collision persistence failed"),
             };
           }
@@ -973,9 +1406,7 @@ describe("ShareViewFiles", () => {
             skipped: 0,
             refusals: [],
             refusalCount: 0,
-            changedPaths: [
-              { path, operation: "write" as const, contentKind: "text" as const },
-            ],
+            changedPaths: [{ path, operation: "write" as const, contentKind: "text" as const }],
             nextCursor: 1,
             commitCursor: async () => undefined,
           };
@@ -987,30 +1418,26 @@ describe("ShareViewFiles", () => {
       };
 
       try {
-        const failed = await withStaleSensitiveWorkspaceOperation(
-          rootPath,
-          (lease) => files.reconcile(lease, requested, "refresh"),
+        const failed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.reconcile(lease, requested, "refresh"),
         );
         expect(failed).toMatchObject({
           kind: "refresh",
           outcome: { ok: false },
         });
 
-        const repaired = await withStaleSensitiveWorkspaceOperation(
-          rootPath,
-          (lease) => files.reconcile(lease, requested, "repair"),
+        const repaired = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.reconcile(lease, requested, "repair"),
         );
         expect(repaired).toMatchObject({
           kind: "repair",
           repairedPaths: 0,
           unjournalablePaths: [{ path, reason: "local-collision" }],
         });
-        await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
-          "recipient bytes\n",
-        );
-        await expect(
-          readSharedViewProjectionDebt(rootPath, "share-a"),
-        ).resolves.toMatchObject({ pullInFlight: true });
+        await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("recipient bytes\n");
+        await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+          pullInFlight: true,
+        });
         await expect(
           store.readTextFile!({
             workspaceId: "workspace-a",
@@ -1069,22 +1496,21 @@ describe("ShareViewFiles", () => {
     });
 
     await expect(
-      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
-        files.mount(lease, prepared),
-      ),
+      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) => files.mount(lease, prepared)),
     ).rejects.toThrow("first pull failed");
     expect(registered).toBe(false);
     await expect(lstat(prepared.rootPath)).rejects.toMatchObject({
       code: "ENOENT",
     });
-    await expect(
-      shareViewFilesMountProjection(leakedOwner!).create(),
-    ).rejects.toThrow("ownership admission is inactive");
+    await expect(shareViewFilesMountProjection(leakedOwner!).create()).rejects.toThrow(
+      "ownership admission is inactive",
+    );
     const staleStore = mutableTextStore({
       initial: [{ path: "notes/stale.md", text: "canonical\n" }],
     });
-    const staleChanges = (await import("./shareViewFileChanges"))
-      .createShareViewFileChanges(leakedOwner!);
+    const staleChanges = (await import("./shareViewFileChanges")).createShareViewFileChanges(
+      leakedOwner!,
+    );
     await expect(
       staleChanges.writeText({
         relativePath: "notes/stale.md",
@@ -1137,9 +1563,7 @@ describe("ShareViewFiles", () => {
     });
 
     await expect(
-      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
-        files.mount(lease, prepared),
-      ),
+      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) => files.mount(lease, prepared)),
     ).rejects.toMatchObject({
       name: "ShareViewMountRollbackError",
       rollbackError,
@@ -1173,17 +1597,13 @@ describe("ShareViewFiles", () => {
       openStore: () => mutableTextStore(),
       createMount: async (owner) => {
         await import("./sharedView").then((sharedView) =>
-          sharedView
-            .shareViewFilesProjection(owner)
-            .markPending(otherRoot, ["notes/forged.md"]),
+          sharedView.shareViewFilesProjection(owner).markPending(otherRoot, ["notes/forged.md"]),
         );
       },
     });
 
     await expect(
-      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
-        files.mount(lease, prepared),
-      ),
+      withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) => files.mount(lease, prepared)),
     ).rejects.toThrow("belongs to another target");
     await expect(lstat(recordsDir(otherRoot))).rejects.toMatchObject({
       code: "ENOENT",
@@ -1217,12 +1637,8 @@ describe("ShareViewFiles", () => {
     });
 
     await expect(
-      withExclusiveWorkspaceOperation(otherRoot, (_changed, lease) =>
-        files.mount(lease, prepared),
-      ),
-    ).rejects.toThrow(
-      "Workspace operation lease is inactive or belongs to another root.",
-    );
+      withExclusiveWorkspaceOperation(otherRoot, (_changed, lease) => files.mount(lease, prepared)),
+    ).rejects.toThrow("Workspace operation lease is inactive or belongs to another root.");
     expect(resolveTarget).not.toHaveBeenCalled();
     expect(createMount).not.toHaveBeenCalled();
   });
@@ -1277,9 +1693,8 @@ describe("ShareViewFiles", () => {
       },
     });
 
-    const mounting = withExclusiveWorkspaceOperation(
-      hostRoot,
-      (_changed, lease) => files.mount(lease, prepared),
+    const mounting = withExclusiveWorkspaceOperation(hostRoot, (_changed, lease) =>
+      files.mount(lease, prepared),
     );
     let settled = false;
     void mounting.then(
@@ -1295,9 +1710,9 @@ describe("ShareViewFiles", () => {
     expect(settled).toBe(false);
     releaseRead.resolve();
     await expect(mounting).rejects.toThrow("not registered");
-    await expect(
-      readFile(join(prepared.rootPath, "notes", "detached.md"), "utf8"),
-    ).resolves.toBe("canonical\n");
+    await expect(readFile(join(prepared.rootPath, "notes", "detached.md"), "utf8")).resolves.toBe(
+      "canonical\n",
+    );
   });
 
   it("does not mutate canonical state when the real pending mark fails", async () => {
@@ -1327,9 +1742,7 @@ describe("ShareViewFiles", () => {
               kind: "save",
               path,
               text: "after\n",
-              expectedContentHash: createHash("sha256")
-                .update(before)
-                .digest("hex"),
+              expectedContentHash: createHash("sha256").update(before).digest("hex"),
             },
           ),
         ),
@@ -1346,10 +1759,7 @@ describe("ShareViewFiles", () => {
     const path = "notes/clear-failure.md";
     const before = "before\n";
     const after = "after\n";
-    const pendingPath = join(
-      recordsDir(rootPath),
-      "pending-materialization.json",
-    );
+    const pendingPath = join(recordsDir(rootPath), "pending-materialization.json");
     await mkdir(join(rootPath, "notes"), { recursive: true });
     await writeFile(join(rootPath, path), before, "utf8");
     const store = mutableTextStore({ initial: [{ path, text: before }] });
@@ -1369,44 +1779,34 @@ describe("ShareViewFiles", () => {
     };
 
     try {
-      const changed = await withStaleSensitiveWorkspaceOperation(
-        rootPath,
-        (lease) =>
-          files.change(
-            lease,
-            { kind: "standalone", workspaceId: "workspace-a" },
-            {
-              kind: "save",
-              path,
-              text: after,
-              expectedContentHash: createHash("sha256")
-                .update(before)
-                .digest("hex"),
-            },
-          ),
+      const changed = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: after,
+            expectedContentHash: createHash("sha256").update(before).digest("hex"),
+          },
+        ),
       );
       expect(changed).toMatchObject({
         status: "committed",
         projection: "pending",
       });
-      await expect(
-        readSharedViewProjectionDebt(rootPath, "share-a"),
-      ).resolves.toMatchObject({ pendingPaths: new Set([path]) });
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        pendingPaths: new Set([path]),
+      });
       await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(after);
 
-      const repaired = await withStaleSensitiveWorkspaceOperation(
-        rootPath,
-        (lease) =>
-          files.reconcile(
-            lease,
-            { kind: "standalone", workspaceId: "workspace-a" },
-            "repair",
-          ),
+      const repaired = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "repair"),
       );
       expect(repaired).toMatchObject({ kind: "repair", repairedPaths: 1 });
-      await expect(
-        readSharedViewProjectionDebt(rootPath, "share-a"),
-      ).resolves.toMatchObject({ pendingPaths: new Set() });
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        pendingPaths: new Set(),
+      });
     } finally {
       afterMaterializationWrite = null;
       sidecarRemoveFailure = null;
@@ -1418,10 +1818,7 @@ describe("ShareViewFiles", () => {
     const path = "notes/partial-capture.md";
     const before = "before\n";
     const after = "agent edit\n";
-    const pendingPath = join(
-      recordsDir(rootPath),
-      "pending-materialization.json",
-    );
+    const pendingPath = join(recordsDir(rootPath), "pending-materialization.json");
     await mkdir(join(rootPath, "notes"), { recursive: true });
     await writeFile(join(rootPath, path), after, "utf8");
     await writeRecord(
@@ -1451,11 +1848,7 @@ describe("ShareViewFiles", () => {
     try {
       await expect(
         withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-          files.reconcile(
-            lease,
-            { kind: "standalone", workspaceId: "workspace-a" },
-            "refresh",
-          ),
+          files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "refresh"),
         ),
       ).resolves.toEqual({
         kind: "refresh",
@@ -1467,10 +1860,7 @@ describe("ShareViewFiles", () => {
       });
       expect(pull).not.toHaveBeenCalled();
       await expect(
-        files.read(
-          { kind: "standalone", workspaceId: "workspace-a" },
-          { kind: "text", path },
-        ),
+        files.read({ kind: "standalone", workspaceId: "workspace-a" }, { kind: "text", path }),
       ).resolves.toMatchObject({ text: after });
     } finally {
       sidecarRenameFailure = null;
@@ -1514,9 +1904,7 @@ describe("ShareViewFiles", () => {
           skipped: 0,
           refusals: [],
           refusalCount: 0,
-          changedPaths: [
-            { path, operation: "write" as const, contentKind: "text" as const },
-          ],
+          changedPaths: [{ path, operation: "write" as const, contentKind: "text" as const }],
           nextCursor: 1,
           commitCursor: async () => undefined,
         };
@@ -1531,11 +1919,7 @@ describe("ShareViewFiles", () => {
     };
 
     const refreshing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-      files.reconcile(
-        lease,
-        { kind: "standalone", workspaceId: "workspace-a" },
-        "refresh",
-      ),
+      files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "refresh"),
     );
     let changing: ReturnType<typeof files.change> | null = null;
     try {
@@ -1594,9 +1978,7 @@ describe("ShareViewFiles", () => {
     } finally {
       releaseFirstWrite.resolve();
       materializationWriteSchedule = null;
-      await Promise.allSettled(
-        changing === null ? [refreshing] : [refreshing, changing],
-      );
+      await Promise.allSettled(changing === null ? [refreshing] : [refreshing, changing]);
     }
   });
 
@@ -1624,14 +2006,12 @@ describe("ShareViewFiles", () => {
     });
     await lifecycleHeld.promise;
 
-    const changing = withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      async (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          { kind: "create", path: "notes/new.md", initialText: "" },
-        ),
+    const changing = withStaleSensitiveWorkspaceOperation(rootPath, async (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "create", path: "notes/new.md", initialText: "" },
+      ),
     );
     await admitted.promise;
     current = target(rootPath, "view");
@@ -1667,14 +2047,8 @@ describe("ShareViewFiles", () => {
     });
     await lifecycleHeld.promise;
 
-    const reconciling = withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.reconcile(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          "repair",
-        ),
+    const reconciling = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "repair"),
     );
     await admitted.promise;
     current = null;
@@ -1761,9 +2135,7 @@ describe("ShareViewFiles", () => {
       );
 
       expect(outcomes).toEqual(
-        Array(5).fill(
-          "Workspace operation lease is inactive or belongs to another root.",
-        ),
+        Array(5).fill("Workspace operation lease is inactive or belongs to another root."),
       );
       expect(resolveTarget).not.toHaveBeenCalled();
       expect(removeMount).not.toHaveBeenCalled();
@@ -1810,18 +2182,16 @@ describe("ShareViewFiles", () => {
     const order: string[] = [];
 
     const changing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "save",
-            path,
-            text: "recipient edit\n",
-            expectedContentHash: createHash("sha256")
-              .update(canonical)
-              .digest("hex"),
-          },
-        ),
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        {
+          kind: "save",
+          path,
+          text: "recipient edit\n",
+          expectedContentHash: createHash("sha256").update(canonical).digest("hex"),
+        },
+      ),
     ).then((outcome) => {
       order.push("change");
       return outcome;
@@ -1879,31 +2249,23 @@ describe("ShareViewFiles", () => {
 
     try {
       const changing = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-          files.change(
-            lease,
-            { kind: "standalone", workspaceId: "workspace-a" },
-            {
-              kind: "save",
-              path,
-              text: "saved in app\n",
-              expectedContentHash: createHash("sha256")
-                .update(canonical)
-                .digest("hex"),
-            },
-          ),
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          {
+            kind: "save",
+            path,
+            text: "saved in app\n",
+            expectedContentHash: createHash("sha256").update(canonical).digest("hex"),
+          },
+        ),
       );
       pending.push(changing);
       await saveStored.promise;
       await rm(join(rootPath, path));
 
-      const reconciling = withStaleSensitiveWorkspaceOperation(
-        rootPath,
-        (lease) =>
-          files.reconcile(
-            lease,
-            { kind: "standalone", workspaceId: "workspace-a" },
-            "settle",
-          ),
+      const reconciling = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "settle"),
       );
       pending.push(reconciling);
       await reconcileWaiting.promise;
@@ -1922,9 +2284,7 @@ describe("ShareViewFiles", () => {
         repairedPaths: 0,
       });
       await expect(reconciling).resolves.not.toHaveProperty("collisionRecordQuarantined");
-      expect(await readFile(join(rootPath, path), "utf8")).toBe(
-        "saved in app\n",
-      );
+      expect(await readFile(join(rootPath, path), "utf8")).toBe("saved in app\n");
       expect(store.deleteTextFile).not.toHaveBeenCalled();
     } finally {
       releaseSave.resolve();
@@ -1946,14 +2306,12 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withExclusiveWorkspaceOperation(
-      rootPath,
-      (_markChanged, lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          { kind: "delete", path },
-        ),
+    const outcome = await withExclusiveWorkspaceOperation(rootPath, (_markChanged, lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "delete", path },
+      ),
     );
 
     expect(outcome).toMatchObject({ status: "committed", kind: "delete" });
@@ -1979,14 +2337,8 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.reconcile(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          "repair",
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "repair"),
     );
 
     expect(store.writeTextFile).toHaveBeenCalledWith(expect.objectContaining({ path }));
@@ -2007,27 +2359,17 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.reconcile(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          "repair",
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "repair"),
     );
 
     expect(outcome).toMatchObject({
       kind: "repair",
       repairedPaths: 0,
-      unjournalablePaths: [
-        { path: "docs/note.md", reason: "non-file-replacement" },
-      ],
+      unjournalablePaths: [{ path: "docs/note.md", reason: "non-file-replacement" }],
     });
     expect(outcome).not.toHaveProperty("collisionRecordQuarantined");
-    await expect(readFile(join(trackedPath, "mine.md"), "utf8")).resolves.toBe(
-      "recipient\n",
-    );
+    await expect(readFile(join(trackedPath, "mine.md"), "utf8")).resolves.toBe("recipient\n");
   });
 
   it("repairs an ended view locally without resolving a relay", async () => {
@@ -2047,14 +2389,8 @@ describe("ShareViewFiles", () => {
       resolveRelay,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.reconcile(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          "refresh",
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "refresh"),
     );
 
     expect(outcome).toMatchObject({
@@ -2068,9 +2404,7 @@ describe("ShareViewFiles", () => {
       },
     });
     expect(resolveRelay).not.toHaveBeenCalled();
-    await expect(
-      readFile(join(rootPath, "docs", "note.md"), "utf8"),
-    ).resolves.toBe("canonical\n");
+    await expect(readFile(join(rootPath, "docs", "note.md"), "utf8")).resolves.toBe("canonical\n");
   });
 
   it("repairs an ended mount locally without resolving or pulling a relay", async () => {
@@ -2094,14 +2428,12 @@ describe("ShareViewFiles", () => {
       pull,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.reconcile(
-          lease,
-          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
-          "refresh",
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.reconcile(
+        lease,
+        { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+        "refresh",
+      ),
     );
 
     expect(outcome).toMatchObject({
@@ -2115,9 +2447,7 @@ describe("ShareViewFiles", () => {
     });
     expect(resolveRelay).not.toHaveBeenCalled();
     expect(pull).not.toHaveBeenCalled();
-    await expect(
-      readFile(join(rootPath, "docs", "note.md"), "utf8"),
-    ).resolves.toBe("canonical\n");
+    await expect(readFile(join(rootPath, "docs", "note.md"), "utf8")).resolves.toBe("canonical\n");
   });
 
   it("keeps a mounted file apart across refreshes", async () => {
@@ -2151,31 +2481,23 @@ describe("ShareViewFiles", () => {
           skipped: 0,
           refusals: [],
           refusalCount: 0,
-          changedPaths: [
-            { path, operation: "write" as const, contentKind: "text" as const },
-          ],
+          changedPaths: [{ path, operation: "write" as const, contentKind: "text" as const }],
           nextCursor: 1,
           commitCursor: async () => undefined,
         };
       },
     });
-    const errorLog = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => undefined);
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     try {
-      const result = await withStaleSensitiveWorkspaceOperation(
-        rootPath,
-        (lease) =>
-          files.reconcile(
-            lease,
-            { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
-            "refresh",
-          ),
+      const result = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.reconcile(
+          lease,
+          { kind: "mount", workspaceId: "host-a", shareId: "share-a" },
+          "refresh",
+        ),
       );
-      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
-        "recipient data\n",
-      );
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("recipient data\n");
       await expect(
         files.projectionStatus({
           kind: "mount",
@@ -2210,12 +2532,10 @@ describe("ShareViewFiles", () => {
           "repair",
         ),
       );
-      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
-        "recipient data\n",
-      );
-      await expect(
-        readSharedViewProjectionDebt(rootPath, "share-a"),
-      ).resolves.toMatchObject({ collisionPaths: new Set([path]) });
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("recipient data\n");
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        collisionPaths: new Set([path]),
+      });
       await expect(
         files.projectionStatus({
           kind: "mount",
@@ -2247,12 +2567,10 @@ describe("ShareViewFiles", () => {
         },
       });
       expect(refreshed).not.toHaveProperty("outcome.collisionRecordQuarantined");
-      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
-        "recipient data\n",
-      );
-      await expect(
-        readSharedViewProjectionDebt(rootPath, "share-a"),
-      ).resolves.toMatchObject({ collisionPaths: new Set([path]) });
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("recipient data\n");
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        collisionPaths: new Set([path]),
+      });
 
       await rm(join(rootPath, path));
       // One more refresh restores the absent file and clears its kept path.
@@ -2263,12 +2581,10 @@ describe("ShareViewFiles", () => {
           "refresh",
         ),
       );
-      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe(
-        "granter new\n",
-      );
-      await expect(
-        readSharedViewProjectionDebt(rootPath, "share-a"),
-      ).resolves.toMatchObject({ collisionPaths: new Set() });
+      await expect(readFile(join(rootPath, path), "utf8")).resolves.toBe("granter new\n");
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        collisionPaths: new Set(),
+      });
       await expect(
         files.projectionStatus({
           kind: "mount",
@@ -2351,7 +2667,8 @@ describe("ShareViewFiles", () => {
           ? notExcluded
           : null,
       // The open prepared the folder and could not keep it out of iCloud Drive.
-      localStateOpenAt: async (rootPath) => (rootPath === mounted.rootPath ? { current: () => true } : null),
+      localStateOpenAt: async (rootPath) =>
+        rootPath === mounted.rootPath ? { current: () => true } : null,
     });
     const pull = vi.fn(async (): Promise<never> => {
       throw new Error("Unexpected pull");
@@ -2483,9 +2800,7 @@ describe("ShareViewFiles", () => {
       text: "---\nicon: telescope\n---\ncanonical store\n",
       truncated: false,
     });
-    await expect(
-      files.list({ kind: "standalone", workspaceId: "workspace-a" }),
-    ).resolves.toEqual({
+    await expect(files.list({ kind: "standalone", workspaceId: "workspace-a" })).resolves.toEqual({
       files: [
         { path: "docs/nested/b.md", kind: "file" },
         { path: "notes/a.md", kind: "file", icon: "telescope" },
@@ -2550,9 +2865,7 @@ describe("ShareViewFiles", () => {
         { kind: "text", path: ".env" },
       ),
     ).rejects.toBeInstanceOf(SharedFileReadOnlyError);
-    await expect(
-      files.list({ kind: "standalone", workspaceId: "workspace-a" }),
-    ).resolves.toEqual({
+    await expect(files.list({ kind: "standalone", workspaceId: "workspace-a" })).resolves.toEqual({
       files: [{ path: "notes/a.md", kind: "file" }],
       folders: ["notes"],
     });
@@ -2599,42 +2912,44 @@ describe("ShareViewFiles", () => {
     ["a share id past the wire bound", { shareId: "s".repeat(201) }, SharedFileReadOnlyError],
     ["no recipient", { recipientUserId: undefined }, SharedFileReadOnlyError],
     ["an empty recipient", { recipientUserId: "" }, SharedFileReadOnlyError],
-  ] as const)("admits an Edit write through a registry marker only when it is %s", async (_name, damage, refusal) => {
-    const rootPath = await workspaceRoot();
-    const store = mutableTextStore();
-    const workspace = {
-      workspaceId: "workspace-a",
-      rootPath,
-      shareView: {
-        shareId: "share-a",
-        recipientUserId: "recipient-a",
-        granterEmail: "granter@example.com",
-        grantedSelector: { paths: [], versionId: "main", access: "edit" },
-        ...damage,
-      },
-    };
-    const files = createShareViewFiles({
-      ...unusedReconcilePorts,
-      resolveTarget: (requested) =>
-        resolveRegisteredShareViewFilesTarget(workspace, requested),
-      openStore: () => store,
-    });
+  ] as const)(
+    "admits an Edit write through a registry marker only when it is %s",
+    async (_name, damage, refusal) => {
+      const rootPath = await workspaceRoot();
+      const store = mutableTextStore();
+      const workspace = {
+        workspaceId: "workspace-a",
+        rootPath,
+        shareView: {
+          shareId: "share-a",
+          recipientUserId: "recipient-a",
+          granterEmail: "granter@example.com",
+          grantedSelector: { paths: [], versionId: "main", access: "edit" },
+          ...damage,
+        },
+      };
+      const files = createShareViewFiles({
+        ...unusedReconcilePorts,
+        resolveTarget: (requested) => resolveRegisteredShareViewFilesTarget(workspace, requested),
+        openStore: () => store,
+      });
 
-    const created = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-      files.change(
-        lease,
-        { kind: "standalone", workspaceId: "workspace-a" },
-        { kind: "create", path: "notes/new.md", initialText: "new\n" },
-      ),
-    );
+      const created = withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "create", path: "notes/new.md", initialText: "new\n" },
+        ),
+      );
 
-    if (refusal === null) {
-      await expect(created).resolves.toMatchObject({ status: "committed" });
-      return;
-    }
-    await expect(created).rejects.toBeInstanceOf(refusal);
-    expect(store.writeTextFile).not.toHaveBeenCalled();
-  });
+      if (refusal === null) {
+        await expect(created).resolves.toMatchObject({ status: "committed" });
+        return;
+      }
+      await expect(created).rejects.toBeInstanceOf(refusal);
+      expect(store.writeTextFile).not.toHaveBeenCalled();
+    },
+  );
 
   it("refuses a dynamically chosen import path outside the pinned grant", async () => {
     const rootPath = await workspaceRoot();
@@ -2798,29 +3113,20 @@ describe("ShareViewFiles", () => {
 
   it.each([
     ["an invalid", "not json"],
-    [
-      "a stale",
-      JSON.stringify({ shareId: "share-old", paths: ["notes/stale.md"] }),
-    ],
+    ["a stale", JSON.stringify({ shareId: "share-old", paths: ["notes/stale.md"] })],
   ])(
     "refuses to settle with %s saved list of kept paths and keeps it",
     async (_recordKind, serialized) => {
       const rootPath = await workspaceRoot();
       const metadataPath = recordsDir(rootPath);
-      const collisionPath = await writeRecord(
-        rootPath,
-        "share-collision-record.json",
-        serialized,
-      );
+      const collisionPath = await writeRecord(rootPath, "share-collision-record.json", serialized);
       const store = readStore({ text: "canonical\n" });
       const files = createShareViewFiles({
         ...unusedReconcilePorts,
         resolveTarget: () => target(rootPath),
         openStore: () => store,
       });
-      const errorLog = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => undefined);
+      const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
       try {
         await expect(
           files.projectionStatus({
@@ -2838,18 +3144,12 @@ describe("ShareViewFiles", () => {
           pullInFlight: false,
         });
         await expect(readFile(collisionPath, "utf8")).resolves.toBe(serialized);
-        expect(await readdir(metadataPath)).toEqual([
-          "share-collision-record.json",
-        ]);
+        expect(await readdir(metadataPath)).toEqual(["share-collision-record.json"]);
         expect(errorLog).not.toHaveBeenCalled();
 
         await expect(
           withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-            files.reconcile(
-              lease,
-              { kind: "standalone", workspaceId: "workspace-a" },
-              "settle",
-            ),
+            files.reconcile(lease, { kind: "standalone", workspaceId: "workspace-a" }, "settle"),
           ),
         ).rejects.toThrow(
           "dohc did not update these shared files because it could not read .dohc/local/share-refresh/share-collision-record.json. " +
@@ -2860,9 +3160,7 @@ describe("ShareViewFiles", () => {
         errorLog.mockRestore();
       }
       await expect(readFile(collisionPath, "utf8")).resolves.toBe(serialized);
-      expect(await readdir(metadataPath)).toEqual([
-        "share-collision-record.json",
-      ]);
+      expect(await readdir(metadataPath)).toEqual(["share-collision-record.json"]);
     },
   );
 
@@ -2876,18 +3174,16 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "create",
-            path: "blocked/new.md",
-            initialText: "canonical\n",
-          },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        {
+          kind: "create",
+          path: "blocked/new.md",
+          initialText: "canonical\n",
+        },
+      ),
     );
 
     expect(outcome).toMatchObject({
@@ -2923,14 +3219,12 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          { kind: "create", path: "notes/new.md", initialText: "maybe\n" },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "create", path: "notes/new.md", initialText: "maybe\n" },
+      ),
     );
 
     expect(outcome).toMatchObject({
@@ -2964,14 +3258,12 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          { kind: "create", path: "notes/new.md", initialText: "landed\n" },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "create", path: "notes/new.md", initialText: "landed\n" },
+      ),
     );
 
     expect(outcome).toMatchObject({
@@ -3003,30 +3295,26 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "save",
-            path: "notes/a.md",
-            text: "recipient edit\n",
-            expectedContentHash: createHash("sha256")
-              .update(canonical)
-              .digest("hex"),
-          },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        {
+          kind: "save",
+          path: "notes/a.md",
+          text: "recipient edit\n",
+          expectedContentHash: createHash("sha256").update(canonical).digest("hex"),
+        },
+      ),
     );
 
     expect(outcome).toMatchObject({
       status: "committed",
       projection: "current",
     });
-    await expect(
-      readFile(join(rootPath, "notes", "a.md"), "utf8"),
-    ).resolves.toBe("recipient edit\n");
+    await expect(readFile(join(rootPath, "notes", "a.md"), "utf8")).resolves.toBe(
+      "recipient edit\n",
+    );
   });
 
   it("captures an unmarked agent edit before checking a save conflict", async () => {
@@ -3044,35 +3332,27 @@ describe("ShareViewFiles", () => {
     });
     await writeFile(join(rootPath, "notes", "a.md"), "agent edit\n", "utf8");
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "save",
-            path: "notes/a.md",
-            text: "recipient edit\n",
-            expectedContentHash: createHash("sha256")
-              .update(canonical)
-              .digest("hex"),
-          },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        {
+          kind: "save",
+          path: "notes/a.md",
+          text: "recipient edit\n",
+          expectedContentHash: createHash("sha256").update(canonical).digest("hex"),
+        },
+      ),
     );
 
     expect(outcome).toMatchObject({
       status: "committed",
       value: {
         status: "conflict",
-        currentContentHash: createHash("sha256")
-          .update("agent edit\n")
-          .digest("hex"),
+        currentContentHash: createHash("sha256").update("agent edit\n").digest("hex"),
       },
     });
-    await expect(
-      readFile(join(rootPath, "notes", "a.md"), "utf8"),
-    ).resolves.toBe("agent edit\n");
+    await expect(readFile(join(rootPath, "notes", "a.md"), "utf8")).resolves.toBe("agent edit\n");
     await expect(
       files.read(
         { kind: "standalone", workspaceId: "workspace-a" },
@@ -3103,14 +3383,12 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          { kind: "delete", path: "docs" },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        { kind: "delete", path: "docs" },
+      ),
     );
 
     expect(outcome).toMatchObject({
@@ -3212,9 +3490,9 @@ describe("ShareViewFiles", () => {
 
     expect(store.renameTextFile).not.toHaveBeenCalled();
     await expect(readFile(join(plans, "a.md"), "utf8")).resolves.toBe("a\n");
-    await expect(
-      readSharedViewProjectionDebt(rootPath, "share-a"),
-    ).resolves.toMatchObject({ pendingPaths: new Set() });
+    await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+      pendingPaths: new Set(),
+    });
   });
 
   it("refuses when the physical source disappears before move identity preflight", async () => {
@@ -3239,19 +3517,13 @@ describe("ShareViewFiles", () => {
 
     const originalRealpath = fsPromises.realpath.bind(fsPromises);
     let removedAtSourcePreflight = 0;
-    const realpath = vi
-      .spyOn(fsPromises, "realpath")
-      .mockImplementation(async (path) => {
-        if (
-          metadataReads >= 3 &&
-          removedAtSourcePreflight === 0 &&
-          String(path) === plans
-        ) {
-          removedAtSourcePreflight += 1;
-          await rm(plans, { recursive: true });
-        }
-        return originalRealpath(path);
-      });
+    const realpath = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+      if (metadataReads >= 3 && removedAtSourcePreflight === 0 && String(path) === plans) {
+        removedAtSourcePreflight += 1;
+        await rm(plans, { recursive: true });
+      }
+      return originalRealpath(path);
+    });
     try {
       await expect(
         withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
@@ -3269,9 +3541,9 @@ describe("ShareViewFiles", () => {
 
       expect(removedAtSourcePreflight).toBe(1);
       expect(store.renameTextFile).not.toHaveBeenCalled();
-      await expect(
-        readSharedViewProjectionDebt(rootPath, "share-a"),
-      ).resolves.toMatchObject({ pendingPaths: new Set() });
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        pendingPaths: new Set(),
+      });
     } finally {
       realpath.mockRestore();
     }
@@ -3280,21 +3552,41 @@ describe("ShareViewFiles", () => {
   it("lists folders a fixed number of times through a case-only folder rename", async (context) => {
     const rootPath = await workspaceRoot();
     await mkdir(join(rootPath, "docs", "plans"), { recursive: true });
-    if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
-    const initial = Array.from({ length: 12 }, (_, index) => ({ path: `docs/plans/${index}.md`, text: "body\n" }));
+    if (
+      !(await lstat(join(rootPath, "docs", "Plans")).then(
+        () => true,
+        () => false,
+      ))
+    )
+      context.skip("this disk keeps case apart");
+    const initial = Array.from({ length: 12 }, (_, index) => ({
+      path: `docs/plans/${index}.md`,
+      text: "body\n",
+    }));
     for (const file of initial) await writeFile(join(rootPath, file.path), file.text);
     const listing = vi.spyOn(fsPromises, "readdir");
     const store = mutableTextStore({
       initial,
     });
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
     try {
-      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
-        lease, { kind: "standalone", workspaceId: "workspace-a" },
-        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
-      ));
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+        ),
+      );
       expect(listing.mock.calls.filter(([path]) => String(path) === rootPath)).toHaveLength(3);
-      expect(listing.mock.calls.filter(([path]) => String(path).toLowerCase() === join(rootPath, "docs", "plans").toLowerCase())).toHaveLength(1);
+      expect(
+        listing.mock.calls.filter(
+          ([path]) => String(path).toLowerCase() === join(rootPath, "docs", "plans").toLowerCase(),
+        ),
+      ).toHaveLength(1);
       expect(store.renameTextFile).toHaveBeenCalledTimes(initial.length);
     } finally {
       listing.mockRestore();
@@ -3307,9 +3599,19 @@ describe("ShareViewFiles", () => {
     const toPath = "docs/Résumé";
     await mkdir(join(rootPath, fromPath), { recursive: true });
     await writeFile(join(rootPath, fromPath, "a.md"), "body\n");
-    if (!(await lstat(join(rootPath, toPath)).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    if (
+      !(await lstat(join(rootPath, toPath)).then(
+        () => true,
+        () => false,
+      ))
+    )
+      context.skip("this disk keeps case apart");
     const store = mutableTextStore({ initial: [{ path: `${fromPath}/a.md`, text: "body\n" }] });
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
     const spelling = vi.spyOn(storedNames, "diskSpelling");
     const originalRename = fsPromises.rename.bind(fsPromises);
     const rename = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
@@ -3319,14 +3621,20 @@ describe("ShareViewFiles", () => {
       }
     });
     try {
-      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
-        lease, { kind: "standalone", workspaceId: "workspace-a" }, { kind: "move", fromPath, toPath },
-      ));
-      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
-        expect.objectContaining({ path: `${toPath}/a.md` }),
-      ]);
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "move", fromPath, toPath },
+        ),
+      );
+      expect(
+        await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" }),
+      ).toEqual([expect.objectContaining({ path: `${toPath}/a.md` })]);
       expect(store.renameTextFile).toHaveBeenCalledTimes(1);
-      expect((await readdir(join(rootPath, "docs"))).map((name) => name.normalize("NFC"))).toEqual(["Résumé"]);
+      expect((await readdir(join(rootPath, "docs"))).map((name) => name.normalize("NFC"))).toEqual([
+        "Résumé",
+      ]);
       expect(await readFile(join(rootPath, toPath, "a.md"), "utf8")).toBe("body\n");
     } finally {
       rename.mockRestore();
@@ -3340,9 +3648,19 @@ describe("ShareViewFiles", () => {
     const renamed = join(rootPath, "docs", "Plans");
     await mkdir(plans, { recursive: true });
     await writeFile(join(plans, "a.md"), "body\n");
-    if (!(await lstat(renamed).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    if (
+      !(await lstat(renamed).then(
+        () => true,
+        () => false,
+      ))
+    )
+      context.skip("this disk keeps case apart");
     const store = mutableTextStore({ initial: [{ path: "docs/plans/a.md", text: "body\n" }] });
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
     const listing = vi.spyOn(fsPromises, "readdir");
     const originalRename = fsPromises.rename.bind(fsPromises);
     let postRenameListingFailed = false;
@@ -3356,18 +3674,23 @@ describe("ShareViewFiles", () => {
       }
     });
     try {
-      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
-        lease, { kind: "standalone", workspaceId: "workspace-a" },
-        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
-      ));
+      await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        files.change(
+          lease,
+          { kind: "standalone", workspaceId: "workspace-a" },
+          { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+        ),
+      );
       expect(postRenameListingFailed).toBe(true);
-      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
-        expect.objectContaining({ path: "docs/Plans/a.md" }),
-      ]);
+      expect(
+        await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" }),
+      ).toEqual([expect.objectContaining({ path: "docs/Plans/a.md" })]);
       expect(store.renameTextFile).toHaveBeenCalledTimes(1);
       expect(await readdir(join(rootPath, "docs"))).toEqual(["Plans"]);
       expect(await readFile(join(renamed, "a.md"), "utf8")).toBe("body\n");
-      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(new Set());
+      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(
+        new Set(),
+      );
     } finally {
       rename.mockRestore();
       listing.mockRestore();
@@ -3379,26 +3702,43 @@ describe("ShareViewFiles", () => {
     const plans = join(rootPath, "docs", "plans");
     await mkdir(plans, { recursive: true });
     await writeFile(join(plans, "a.md"), "body\n");
-    if (!(await lstat(join(rootPath, "docs", "Plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    if (
+      !(await lstat(join(rootPath, "docs", "Plans")).then(
+        () => true,
+        () => false,
+      ))
+    )
+      context.skip("this disk keeps case apart");
     const store = mutableTextStore({ initial: [{ path: "docs/plans/a.md", text: "body\n" }] });
-    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => target(rootPath), openStore: () => store });
+    const files = createShareViewFiles({
+      ...unusedReconcilePorts,
+      resolveTarget: () => target(rootPath),
+      openStore: () => store,
+    });
     const originalRename = fsPromises.rename.bind(fsPromises);
     const noOp = vi.spyOn(fsPromises, "rename").mockImplementation(async (from, to) => {
       if (String(from) === plans && String(to) === join(rootPath, "docs", "Plans")) return;
       return originalRename(from, to);
     });
     try {
-      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
-        lease, { kind: "standalone", workspaceId: "workspace-a" },
-        { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
-      ))).rejects.toThrow("This disk kept the name plans");
-      expect(await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" })).toEqual([
-        expect.objectContaining({ path: "docs/plans/a.md" }),
-      ]);
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            { kind: "move", fromPath: "docs/plans", toPath: "docs/Plans" },
+          ),
+        ),
+      ).rejects.toThrow("This disk kept the name plans");
+      expect(
+        await store.listTextFileMetadata({ workspaceId: "workspace-a", versionId: "main" }),
+      ).toEqual([expect.objectContaining({ path: "docs/plans/a.md" })]);
       expect(store.renameTextFile).toHaveBeenCalledTimes(2);
       expect(await readdir(join(rootPath, "docs"))).toEqual(["plans"]);
       expect(await readFile(join(plans, "a.md"), "utf8")).toBe("body\n");
-      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(new Set());
+      expect((await readSharedViewProjectionDebt(rootPath, "share-a")).pendingPaths).toEqual(
+        new Set(),
+      );
     } finally {
       noOp.mockRestore();
     }
@@ -3412,7 +3752,13 @@ describe("ShareViewFiles", () => {
       const plans = join(rootPath, "docs", "plans");
       await mkdir(plans, { recursive: true });
       await writeFile(join(plans, "a.md"), "a\n", "utf8");
-      if (!(await lstat(join(rootPath, to)).then(() => true, () => false))) context.skip("this disk keeps case apart");
+      if (
+        !(await lstat(join(rootPath, to)).then(
+          () => true,
+          () => false,
+        ))
+      )
+        context.skip("this disk keeps case apart");
       const store = mutableTextStore({
         initial: [{ path: "docs/plans/a.md", text: "a\n" }],
       });
@@ -3424,12 +3770,10 @@ describe("ShareViewFiles", () => {
 
       const originalRealpath = fsPromises.realpath.bind(fsPromises);
       // Linux resolves links but keeps lookup case on a disk that ignores it.
-      const realpath = vi
-        .spyOn(fsPromises, "realpath")
-        .mockImplementation(async (path) => {
-          const resolved = await originalRealpath(path);
-          return String(path).startsWith(`${rootPath}${sep}`) ? String(path) : resolved;
-        });
+      const realpath = vi.spyOn(fsPromises, "realpath").mockImplementation(async (path) => {
+        const resolved = await originalRealpath(path);
+        return String(path).startsWith(`${rootPath}${sep}`) ? String(path) : resolved;
+      });
       try {
         await expect(
           withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
@@ -3451,8 +3795,12 @@ describe("ShareViewFiles", () => {
             toPath: kind === "folder" ? "docs/Plans/a.md" : to,
           }),
         );
-        await expect(readdir(kind === "folder" ? join(rootPath, "docs") : plans)).resolves.toEqual([kind === "folder" ? "Plans" : "A.md"]);
-        await expect(readFile(join(rootPath, kind === "folder" ? "docs/Plans/a.md" : to), "utf8")).resolves.toBe("a\n");
+        await expect(readdir(kind === "folder" ? join(rootPath, "docs") : plans)).resolves.toEqual([
+          kind === "folder" ? "Plans" : "A.md",
+        ]);
+        await expect(
+          readFile(join(rootPath, kind === "folder" ? "docs/Plans/a.md" : to), "utf8"),
+        ).resolves.toBe("a\n");
       } finally {
         realpath.mockRestore();
       }
@@ -3464,7 +3812,13 @@ describe("ShareViewFiles", () => {
     const plans = join(rootPath, "docs", "Plans");
     await mkdir(plans, { recursive: true });
     await writeFile(join(plans, "a.md"), "a\n");
-    if (!(await lstat(join(rootPath, "docs", "plans")).then(() => true, () => false))) context.skip("this disk keeps case apart");
+    if (
+      !(await lstat(join(rootPath, "docs", "plans")).then(
+        () => true,
+        () => false,
+      ))
+    )
+      context.skip("this disk keeps case apart");
     const store = mutableTextStore({ initial: [{ path: "docs/Plans/a.md", text: "a\n" }] });
     const files = createShareViewFiles({
       ...unusedReconcilePorts,
@@ -3477,14 +3831,20 @@ describe("ShareViewFiles", () => {
       return String(path).startsWith(`${rootPath}${sep}`) ? String(path) : resolved;
     });
     try {
-      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
-        lease,
-        { kind: "standalone", workspaceId: "workspace-a" },
-        { kind: "move", fromPath: "docs/Plans", toPath: "docs/plans/archive/Deep" },
-      ))).rejects.toThrow("Cannot move a path into itself: docs/Plans");
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            { kind: "move", fromPath: "docs/Plans", toPath: "docs/plans/archive/Deep" },
+          ),
+        ),
+      ).rejects.toThrow("Cannot move a path into itself: docs/Plans");
       expect(store.renameTextFile).not.toHaveBeenCalled();
       await expect(readFile(join(plans, "a.md"), "utf8")).resolves.toBe("a\n");
-      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({ pendingPaths: new Set() });
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        pendingPaths: new Set(),
+      });
     } finally {
       realpath.mockRestore();
     }
@@ -3499,10 +3859,12 @@ describe("ShareViewFiles", () => {
     const store = mutableTextStore({
       initial: [{ path: "docs/before.md", text: "body\n" }],
       afterMetadataRead: (read) => {
-        if (read >= 3) spelling.mockImplementation((path, options) => {
-          if (String(path) === join(rootPath, "docs", "before.md")) throw new Error("identity unavailable");
-          return originalLstat(path, options);
-        });
+        if (read >= 3)
+          spelling.mockImplementation((path, options) => {
+            if (String(path) === join(rootPath, "docs", "before.md"))
+              throw new Error("identity unavailable");
+            return originalLstat(path, options);
+          });
       },
     });
     const files = createShareViewFiles({
@@ -3511,14 +3873,22 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
     try {
-      await expect(withStaleSensitiveWorkspaceOperation(rootPath, (lease) => files.change(
-        lease,
-        { kind: "standalone", workspaceId: "workspace-a" },
-        { kind: "move", fromPath: "docs/before.md", toPath: "docs/after.md" },
-      ))).rejects.toThrow("dohc did not rename docs/before.md to docs/after.md. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.");
+      await expect(
+        withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+          files.change(
+            lease,
+            { kind: "standalone", workspaceId: "workspace-a" },
+            { kind: "move", fromPath: "docs/before.md", toPath: "docs/after.md" },
+          ),
+        ),
+      ).rejects.toThrow(
+        "dohc did not rename docs/before.md to docs/after.md. dohc could not tell which files or folders on disk they are. Check both paths in your file manager before trying again.",
+      );
       expect(store.renameTextFile).not.toHaveBeenCalled();
       await expect(readFile(join(rootPath, "docs", "before.md"), "utf8")).resolves.toBe("body\n");
-      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({ pendingPaths: new Set() });
+      await expect(readSharedViewProjectionDebt(rootPath, "share-a")).resolves.toMatchObject({
+        pendingPaths: new Set(),
+      });
     } finally {
       spelling.mockRestore();
     }
@@ -3543,18 +3913,16 @@ describe("ShareViewFiles", () => {
       openStore: () => store,
     });
 
-    const outcome = await withStaleSensitiveWorkspaceOperation(
-      rootPath,
-      (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-a" },
-          {
-            kind: "move",
-            fromPath: "docs/before.md",
-            toPath: "docs/after.md",
-          },
-        ),
+    const outcome = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      files.change(
+        lease,
+        { kind: "standalone", workspaceId: "workspace-a" },
+        {
+          kind: "move",
+          fromPath: "docs/before.md",
+          toPath: "docs/after.md",
+        },
+      ),
     );
 
     expect(outcome).toMatchObject({
@@ -3598,51 +3966,135 @@ describe("ShareViewFiles", () => {
     ).rejects.toThrow("Cannot move a path into itself");
     expect(store.renameTextFile).not.toHaveBeenCalled();
   });
-
 });
 
 it("keeps link reads inside the share target gate and tracked-path floor, including ended local shares", async () => {
   const rootPath = await workspaceRoot();
   const requested = { kind: "standalone" as const, workspaceId: "workspace-a" };
   let current: ResolvedShareViewFilesTarget | null = { ...target(rootPath), ended: true };
-  const page = { versionId: "main", subject: { path: "notes/a.md", objectId: "a" }, entries: [
-    { source: "notes/b.md", title: "B", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
-    { source: ".env", title: "secret", ordinal: 0, span: [0, 5] as [number, number], line: 1, snippet: "[[a]]", highlightStart: 0, highlightEnd: 5 },
-  ], unchecked: ["notes/c.md", ".env"], nextCursor: null, complete: false, indexBuilding: false, mountsCovered: true };
+  const page = {
+    versionId: "main",
+    subject: { path: "notes/a.md", objectId: "a" },
+    entries: [
+      {
+        source: "notes/b.md",
+        title: "B",
+        ordinal: 0,
+        span: [0, 5] as [number, number],
+        line: 1,
+        snippet: "[[a]]",
+        highlightStart: 0,
+        highlightEnd: 5,
+      },
+      {
+        source: ".env",
+        title: "secret",
+        ordinal: 0,
+        span: [0, 5] as [number, number],
+        line: 1,
+        snippet: "[[a]]",
+        highlightStart: 0,
+        highlightEnd: 5,
+      },
+    ],
+    unchecked: ["notes/c.md", ".env"],
+    nextCursor: null,
+    complete: false,
+    indexBuilding: false,
+    mountsCovered: true,
+  };
   const store = Object.assign(readStore({ text: "" }), {
     incomingLinks: vi.fn(async () => page),
-    resolveLinks: vi.fn(async () => ({ versionId: "main", results: [{ path: "notes/a.md", fragment: null }, { path: ".env", fragment: null }, { path: null, create: "notes/new.md", fragment: null }, { path: null, create: ".env.local", fragment: null }], mountsCovered: true })),
+    resolveLinks: vi.fn(async () => ({
+      versionId: "main",
+      results: [
+        { path: "notes/a.md", fragment: null },
+        { path: ".env", fragment: null },
+        { path: null, create: "notes/new.md", fragment: null },
+        { path: null, create: ".env.local", fragment: null },
+      ],
+      mountsCovered: true,
+    })),
   });
   const openStore = vi.fn(() => store);
-  const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => current, openStore });
-  expect(await files.linksIn(requested, { subject: { path: "notes/a.md" } })).toMatchObject({ entries: [page.entries[0]], unchecked: ["notes/c.md"] });
-  expect(await files.linksResolve(requested, { source: "notes/b.md", literals: [{ kind: "wikilink", literal: "a" }, { kind: "wikilink", literal: ".env" }] })).toMatchObject({ results: [{ path: "notes/a.md", fragment: null }, null, { path: null, create: "notes/new.md", fragment: null }, null] });
-  await expect(files.linksResolve(requested, { source: ".env", literals: [] })).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+  const files = createShareViewFiles({
+    ...unusedReconcilePorts,
+    resolveTarget: () => current,
+    openStore,
+  });
+  expect(await files.linksIn(requested, { subject: { path: "notes/a.md" } })).toMatchObject({
+    entries: [page.entries[0]],
+    unchecked: ["notes/c.md"],
+  });
+  expect(
+    await files.linksResolve(requested, {
+      source: "notes/b.md",
+      literals: [
+        { kind: "wikilink", literal: "a" },
+        { kind: "wikilink", literal: ".env" },
+      ],
+    }),
+  ).toMatchObject({
+    results: [
+      { path: "notes/a.md", fragment: null },
+      null,
+      { path: null, create: "notes/new.md", fragment: null },
+      null,
+    ],
+  });
+  await expect(
+    files.linksResolve(requested, { source: ".env", literals: [] }),
+  ).rejects.toBeInstanceOf(SharedFileReadOnlyError);
   await withShareViewRefreshLifecycleLock(rootPath, async () => {
     const pending = files.linksIn(requested, { subject: { path: "notes/a.md" } });
     current = null;
     return { pending };
-  }).then(async ({ pending }) => { await expect(pending).rejects.toThrow(); });
+  }).then(async ({ pending }) => {
+    await expect(pending).rejects.toThrow();
+  });
   expect(openStore).toHaveBeenCalledTimes(3);
 });
 
 it("filters edge file metadata, both endpoints, and unchecked paths through the projected share lease", async () => {
-  const rootPath=await workspaceRoot();
-  const requested={kind:"standalone" as const,workspaceId:"workspace-a"};
-  let current: ResolvedShareViewFilesTarget | null={...target(rootPath),ended:true};
-  const page={versionId:"main",files:[{objectId:"a",path:"notes/a.md",title:"A"},{objectId:"secret",path:".env",title:"Secret"}],
-    entries:[{source:"notes/a.md",target:"notes/b.md",kind:"markdown" as const,ordinal:0},
-      {source:"notes/a.md",target:".env",kind:"markdown" as const,ordinal:1},
-      {source:".env",target:"notes/a.md",kind:"markdown" as const,ordinal:2}],
-    unchecked:["notes/pending.md",".env"],complete:false,indexBuilding:false,mountsCovered:true,nextCursor:"sealed"};
-  const store=Object.assign(readStore({text:""}),{linkEdges:vi.fn(async()=>page)});
-  const openStore=vi.fn(()=>store);
-  const files=createShareViewFiles({...unusedReconcilePorts,resolveTarget:()=>current,openStore});
-  expect(await files.linksEdges(requested,{})).toEqual({...page,files:[page.files[0]],entries:[page.entries[0]],unchecked:["notes/pending.md"]});
-  await withShareViewRefreshLifecycleLock(rootPath,async()=>{
-    const pending=files.linksEdges(requested,{cursor:"sealed"});
-    current=null;
-    return {pending};
-  }).then(async({pending})=>{await expect(pending).rejects.toThrow();});
+  const rootPath = await workspaceRoot();
+  const requested = { kind: "standalone" as const, workspaceId: "workspace-a" };
+  let current: ResolvedShareViewFilesTarget | null = { ...target(rootPath), ended: true };
+  const page = {
+    versionId: "main",
+    files: [
+      { objectId: "a", path: "notes/a.md", title: "A" },
+      { objectId: "secret", path: ".env", title: "Secret" },
+    ],
+    entries: [
+      { source: "notes/a.md", target: "notes/b.md", kind: "markdown" as const, ordinal: 0 },
+      { source: "notes/a.md", target: ".env", kind: "markdown" as const, ordinal: 1 },
+      { source: ".env", target: "notes/a.md", kind: "markdown" as const, ordinal: 2 },
+    ],
+    unchecked: ["notes/pending.md", ".env"],
+    complete: false,
+    indexBuilding: false,
+    mountsCovered: true,
+    nextCursor: "sealed",
+  };
+  const store = Object.assign(readStore({ text: "" }), { linkEdges: vi.fn(async () => page) });
+  const openStore = vi.fn(() => store);
+  const files = createShareViewFiles({
+    ...unusedReconcilePorts,
+    resolveTarget: () => current,
+    openStore,
+  });
+  expect(await files.linksEdges(requested, {})).toEqual({
+    ...page,
+    files: [page.files[0]],
+    entries: [page.entries[0]],
+    unchecked: ["notes/pending.md"],
+  });
+  await withShareViewRefreshLifecycleLock(rootPath, async () => {
+    const pending = files.linksEdges(requested, { cursor: "sealed" });
+    current = null;
+    return { pending };
+  }).then(async ({ pending }) => {
+    await expect(pending).rejects.toThrow();
+  });
   expect(openStore).toHaveBeenCalledOnce();
 });

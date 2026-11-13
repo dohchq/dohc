@@ -12,7 +12,10 @@ const byPlace = (a: Node, b: Node) =>
 
 // What Tab reaches in document order, and the same stops in screen order, with each shown page at its slot.
 function tabOrders() {
-  const dom = [...modalFocusableElements(document.body), ...document.querySelectorAll<HTMLElement>(`${PAGE} webview, ${PAGE} iframe`)]
+  const dom = [
+    ...modalFocusableElements(document.body),
+    ...document.querySelectorAll<HTMLElement>(`${PAGE} webview, ${PAGE} iframe`),
+  ]
     .filter((item) => !item.closest(`${PAGE}.hidden`))
     .sort(byPlace);
   // Each stop's slot is looked up once, not on every comparison.
@@ -29,12 +32,25 @@ function tabOrders() {
 let entering: HTMLElement | null = null;
 
 export function routeAppTab(event: KeyboardEvent) {
-  if (event.key !== "Tab" || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
+  if (
+    event.key !== "Tab" ||
+    event.defaultPrevented ||
+    event.ctrlKey ||
+    event.altKey ||
+    event.metaKey
+  )
+    return;
   const active = document.activeElement;
-  if (!(active instanceof HTMLElement) || hasBlockingModal() || !document.querySelector(`${PAGE}:not(.hidden)`)) return;
+  if (
+    !(active instanceof HTMLElement) ||
+    hasBlockingModal() ||
+    !document.querySelector(`${PAGE}:not(.hidden)`)
+  )
+    return;
   const { dom, screen } = tabOrders();
   if (!screen.includes(active)) return;
-  const step = (order: HTMLElement[]) => order[(order.indexOf(active) + (event.shiftKey ? order.length - 1 : 1)) % order.length];
+  const step = (order: HTMLElement[]) =>
+    order[(order.indexOf(active) + (event.shiftKey ? order.length - 1 : 1)) % order.length];
   const next = step(screen);
   const page = next.closest(PAGE);
   // Shift+Tab into a page from outside it would land on the page's end stop, which sends focus forward again.

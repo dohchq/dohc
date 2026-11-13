@@ -29,7 +29,7 @@ export default defineConfig({
   build: {
     outDir: resolve(viewerRoot, "dist"),
     emptyOutDir: true,
-    rolldownOptions: { input: VIEWER_PAGES.map(page => resolve(viewerRoot, page)) },
+    rolldownOptions: { input: VIEWER_PAGES.map((page) => resolve(viewerRoot, page)) },
   },
   server: {
     host: "127.0.0.1",

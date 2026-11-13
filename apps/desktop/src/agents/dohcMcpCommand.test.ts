@@ -85,17 +85,31 @@ describe("resolveDohcMcpCommand", () => {
     ];
     for (const resourcesPath of temporary) {
       expect(isTemporaryMacAppPath(resourcesPath)).toBe(true);
-      expect(resolveDohcMcpCommand({ isPackaged: true, resourcesPath, platform: "darwin", env: {} })).toBeNull();
+      expect(
+        resolveDohcMcpCommand({ isPackaged: true, resourcesPath, platform: "darwin", env: {} }),
+      ).toBeNull();
     }
     const installed = "/Applications/dohc.app/Contents/Resources";
     expect(isTemporaryMacAppPath(installed)).toBe(false);
     // An app installed in the Applications folder at a volume's top stays put;
     // one in any deeper folder named Applications does not count.
-    expect(isTemporaryMacAppPath("/Volumes/External/Applications/dohc.app/Contents/Resources")).toBe(false);
-    expect(isTemporaryMacAppPath("/Volumes/dohc 1.2.3/Stuff/Applications/dohc.app/Contents/Resources")).toBe(true);
-    expect(isTemporaryMacAppPath("/Users/sam/Applications/dohc.app/Contents/Resources")).toBe(false);
-    expect(resolveDohcMcpCommand({ isPackaged: true, resourcesPath: installed, platform: "darwin", env: {} }))
-      .toBe(join(resolve(installed), "cli-bin", "dohc-mcp"));
+    expect(
+      isTemporaryMacAppPath("/Volumes/External/Applications/dohc.app/Contents/Resources"),
+    ).toBe(false);
+    expect(
+      isTemporaryMacAppPath("/Volumes/dohc 1.2.3/Stuff/Applications/dohc.app/Contents/Resources"),
+    ).toBe(true);
+    expect(isTemporaryMacAppPath("/Users/sam/Applications/dohc.app/Contents/Resources")).toBe(
+      false,
+    );
+    expect(
+      resolveDohcMcpCommand({
+        isPackaged: true,
+        resourcesPath: installed,
+        platform: "darwin",
+        env: {},
+      }),
+    ).toBe(join(resolve(installed), "cli-bin", "dohc-mcp"));
   });
 
   it("keeps the workspace bin in dev and the DOHC_MCP_COMMAND override everywhere", () => {

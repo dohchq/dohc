@@ -145,7 +145,13 @@ async function measureClusters(page: import("@playwright/test").Page) {
       probe.textContent = `${list.getAttribute("start") ?? "1"}. `;
       probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
       const marker = getComputedStyle(item, "::marker");
-      for (const name of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontVariantNumeric"] as const) {
+      for (const name of [
+        "fontFamily",
+        "fontSize",
+        "fontWeight",
+        "fontStyle",
+        "fontVariantNumeric",
+      ] as const) {
         probe.style[name] = marker[name];
       }
       document.body.append(probe);
@@ -155,7 +161,8 @@ async function measureClusters(page: import("@playwright/test").Page) {
     };
     const cluster = (block: Element | null) => {
       let node = block?.previousElementSibling ?? null;
-      while (node && !node.classList.contains("dohc-block-affordance")) node = node.previousElementSibling;
+      while (node && !node.classList.contains("dohc-block-affordance"))
+        node = node.previousElementSibling;
       const rect = node?.getBoundingClientRect();
       return rect ? { left: rect.left, right: rect.right } : null;
     };
@@ -165,7 +172,9 @@ async function measureClusters(page: import("@playwright/test").Page) {
     const pre = editor.querySelector(":scope > pre");
     const callout = editor.querySelector(":scope > .dohc-callout");
     const table = editor.querySelector(":scope > .tableWrapper");
-    const tableChrome = [...(table?.querySelectorAll(".dohc-table-grip--row, .dohc-table-menu-btn") ?? [])];
+    const tableChrome = [
+      ...(table?.querySelectorAll(".dohc-table-grip--row, .dohc-table-menu-btn") ?? []),
+    ];
     const ordered = editor.querySelector(":scope > ol:not([start])");
     const twoDigits = editor.querySelector(":scope > ol[start='10']");
     const threeDigits = editor.querySelector(":scope > ol[start='100']");
@@ -189,7 +198,9 @@ async function measureClusters(page: import("@playwright/test").Page) {
       callout: cluster(callout),
       calloutLeft: left(callout),
       table: cluster(table),
-      tableChromeLeft: tableChrome.length ? Math.min(...tableChrome.map((el) => el.getBoundingClientRect().left)) : null,
+      tableChromeLeft: tableChrome.length
+        ? Math.min(...tableChrome.map((el) => el.getBoundingClientRect().left))
+        : null,
     };
   });
 }
@@ -217,7 +228,9 @@ function expectClustersClear(
     expect(cluster, `${key} must have a cluster`).not.toBeNull();
     expect(mark, `${key} must have a mark`).not.toBeNull();
     expect.soft(cluster!.right, `${key} cluster clears its mark`).toBeLessThanOrEqual(mark! - 5.5);
-    expect.soft(cluster!.left, `${key} cluster stays in the editor`).toBeGreaterThanOrEqual(clusters.editorLeft);
+    expect
+      .soft(cluster!.left, `${key} cluster stays in the editor`)
+      .toBeGreaterThanOrEqual(clusters.editorLeft);
   }
 }
 
@@ -227,32 +240,54 @@ function expectClustersClear(
 // 8px gap; a cell's text follows the table's 1px border and the cell's 10px
 // padding.
 function expectTextOnEdge({ edges, boxes }: BlockEdges, edge: number) {
-  for (const key of ["h1", "h2", "h3", "bullet", "ordered", "blockquote", "callout", "code"] as const) {
+  for (const key of [
+    "h1",
+    "h2",
+    "h3",
+    "bullet",
+    "ordered",
+    "blockquote",
+    "callout",
+    "code",
+  ] as const) {
     expect(edges[key], `${key} must render text`).not.toBeNull();
-    expect.soft(Math.abs(edges[key]! - edge), `${key} text must sit on the content edge`).toBeLessThanOrEqual(1.5);
+    expect
+      .soft(Math.abs(edges[key]! - edge), `${key} text must sit on the content edge`)
+      .toBeLessThanOrEqual(1.5);
   }
   for (const key of ["pre", "callout"] as const) {
     expect(boxes[key], `${key} frame must render`).not.toBeNull();
-    expect.soft(Math.abs(edge - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`).toBeLessThanOrEqual(1.5);
+    expect
+      .soft(Math.abs(edge - 16 - boxes[key]!.left), `${key} frame overhangs the left gutter`)
+      .toBeLessThanOrEqual(1.5);
   }
   // The code block's toolbar spans its frame.
   expect(boxes.toolbar, "code toolbar must render").not.toBeNull();
   for (const side of ["left", "right"] as const) {
-    expect.soft(Math.abs(boxes.toolbar![side] - boxes.pre![side]), `code toolbar's ${side} edge meets its frame's`).toBeLessThanOrEqual(1.5);
+    expect
+      .soft(
+        Math.abs(boxes.toolbar![side] - boxes.pre![side]),
+        `code toolbar's ${side} edge meets its frame's`,
+      )
+      .toBeLessThanOrEqual(1.5);
   }
   for (const [key, left] of [
     ["checkbox", boxes.checkbox?.left],
     ["table", boxes.table?.left],
   ] as const) {
     expect(left, `${key} must render`).toBeDefined();
-    expect.soft(Math.abs(left! - edge), `${key} starts on the content edge`).toBeLessThanOrEqual(1.5);
+    expect
+      .soft(Math.abs(left! - edge), `${key} starts on the content edge`)
+      .toBeLessThanOrEqual(1.5);
   }
   for (const [key, offset] of [
     ["task", 23],
     ["tableCell", 11],
   ] as const) {
     expect(edges[key], `${key} must render text`).not.toBeNull();
-    expect.soft(Math.abs(edges[key]! - edge - offset), `${key} text sits ${offset}px in`).toBeLessThanOrEqual(1.5);
+    expect
+      .soft(Math.abs(edges[key]! - edge - offset), `${key} text sits ${offset}px in`)
+      .toBeLessThanOrEqual(1.5);
   }
 }
 
@@ -319,21 +354,28 @@ test("every block type's text sits on one shared left content edge", async () =>
       ["var(--font-mono)", 24, "2"],
     ] as const) {
       await test.step(`${font} at ${size}px`, async () => {
-        await page.evaluate(async ([font, size, suffix]) => {
-          const style = document.documentElement.style;
-          style.setProperty("--dohc-editor-font", font);
-          style.setProperty("--dohc-editor-font-size", `${size}px`);
-          if (suffix) style.setProperty("--dohc-editor-number-suffix", suffix);
-          else style.removeProperty("--dohc-editor-number-suffix");
-          await document.fonts.ready;
-        }, [font, size, suffix] as const);
+        await page.evaluate(
+          async ([font, size, suffix]) => {
+            const style = document.documentElement.style;
+            style.setProperty("--dohc-editor-font", font);
+            style.setProperty("--dohc-editor-font-size", `${size}px`);
+            if (suffix) style.setProperty("--dohc-editor-number-suffix", suffix);
+            else style.removeProperty("--dohc-editor-number-suffix");
+            await document.fonts.ready;
+          },
+          [font, size, suffix] as const,
+        );
         const sized = await measure(page);
         expectTextOnEdge(sized, sized.edges.paragraph!);
         expectClustersClear(await measureClusters(page), sized.edges.paragraph!, { bullet: false });
       });
     }
     await page.evaluate(() => {
-      for (const name of ["--dohc-editor-font", "--dohc-editor-font-size", "--dohc-editor-number-suffix"]) {
+      for (const name of [
+        "--dohc-editor-font",
+        "--dohc-editor-font-size",
+        "--dohc-editor-number-suffix",
+      ]) {
         document.documentElement.style.removeProperty(name);
       }
     });
@@ -343,12 +385,17 @@ test("every block type's text sits on one shared left content edge", async () =>
     // click there.
     await page.locator(".dohc-notion-editor > ol:not([start])").hover();
     const handleOnTop = await page.evaluate(() => {
-      let node = document.querySelector(".dohc-notion-editor > ol:not([start])")?.previousElementSibling ?? null;
-      while (node && !node.classList.contains("dohc-block-affordance")) node = node.previousElementSibling;
+      let node =
+        document.querySelector(".dohc-notion-editor > ol:not([start])")?.previousElementSibling ??
+        null;
+      while (node && !node.classList.contains("dohc-block-affordance"))
+        node = node.previousElementSibling;
       const handle = node?.querySelector(".dohc-block-handle");
       if (!handle) throw new Error("list has no handle");
       const rect = handle.getBoundingClientRect();
-      return handle.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.bottom - 0.5));
+      return handle.contains(
+        document.elementFromPoint(rect.left + rect.width / 2, rect.bottom - 0.5),
+      );
     });
     expect(handleOnTop).toBe(true);
   } finally {

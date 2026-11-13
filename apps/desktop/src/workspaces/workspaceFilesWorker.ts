@@ -16,12 +16,21 @@ export function createWorkspaceFilesWorker() {
   let disposed = false;
   function send(request: FilesRequest): Promise<FilesResult> {
     if (disposed) return Promise.reject(new Error("Workspace file reader is closed."));
-    worker ??= new Worker(new URL(import.meta.url.endsWith(".ts")
-      ? "workspaceFilesThread.ts" : "workspace-files-worker.js", import.meta.url));
+    worker ??= new Worker(
+      new URL(
+        import.meta.url.endsWith(".ts") ? "workspaceFilesThread.ts" : "workspace-files-worker.js",
+        import.meta.url,
+      ),
+    );
     const current = worker;
     const id = ++nextId;
     return new Promise((resolve, reject) => {
-      const cleanup = () => { current.off("message", message); current.off("error", failed); current.off("exit", exited); current.unref(); };
+      const cleanup = () => {
+        current.off("message", message);
+        current.off("error", failed);
+        current.off("exit", exited);
+        current.unref();
+      };
       const failed = (error: Error) => {
         cleanup();
         if (worker === current) worker = undefined;
@@ -36,22 +45,29 @@ export function createWorkspaceFilesWorker() {
         else reject(new Error(answer.error ?? "Workspace file read failed."));
       };
       current.ref();
-      current.on("message", message); current.on("error", failed); current.on("exit", exited);
+      current.on("message", message);
+      current.on("error", failed);
+      current.on("exit", exited);
       current.postMessage({ id, request });
     });
   }
   function run(request: FilesRequest): Promise<FilesResult> {
     const result = serial.then(() => send(request));
-    serial = result.then(() => undefined, () => undefined);
+    serial = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   }
   return {
     list: (rootPath: string, scope?: FileLookupScope) => run({ kind: "list", rootPath, scope }),
-    metadata: (rootPath: string, paths: readonly string[]) => run({ kind: "metadata", rootPath, paths }),
+    metadata: (rootPath: string, paths: readonly string[]) =>
+      run({ kind: "metadata", rootPath, paths }),
     async dispose() {
       disposed = true;
       await serial;
-      const current = worker; worker = undefined;
+      const current = worker;
+      worker = undefined;
       if (current) await current.terminate();
     },
   };

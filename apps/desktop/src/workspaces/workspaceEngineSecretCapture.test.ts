@@ -1,8 +1,4 @@
-import {
-  VERSIONED_METHOD,
-  type Request,
-  type Response,
-} from "@dohc/workspace-engine-client";
+import { VERSIONED_METHOD, type Request, type Response } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type { SecretFileMoment } from "@dohc/workspace-contracts/engine";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -140,9 +136,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     const detail = await engine.readMoment(protectedMoments[0].id);
     expect(detail?.protected).toBe(true);
     expect(JSON.stringify(detail).includes(MARKER)).toBe(false);
-    expect(requests.map((request) => request.method)).toContain(
-      VERSIONED_METHOD.secretsMomentsGet,
-    );
+    expect(requests.map((request) => request.method)).toContain(VERSIONED_METHOD.secretsMomentsGet);
 
     // Real change: one more metadata-only moment.
     await write(root, ".env", ENV_B);
@@ -249,9 +243,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     expect(secretChange?.incomingText).toBeUndefined();
     // The comparison the assertions above read was answered by the engine's
     // protected comparison, not by a text diff of a plaintext row.
-    expect(requests.map((request) => request.method)).toContain(
-      VERSIONED_METHOD.secretsCompare,
-    );
+    expect(requests.map((request) => request.method)).toContain(VERSIONED_METHOD.secretsCompare);
     // Absence claim: `currentText`/`incomingText` are the fields a text change
     // carries, so this catches a protected change routed as text.
     expect(JSON.stringify(changes).includes(MARKER)).toBe(false);
@@ -285,9 +277,7 @@ describe("the stand-down marker cleanup must never touch secret paths", () => {
     engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
-    const envReads = trackedReadFile.mock.calls.filter(
-      (call) => call[0] === envAbsolute,
-    );
+    const envReads = trackedReadFile.mock.calls.filter((call) => call[0] === envAbsolute);
     expect(envReads).toHaveLength(0);
     await engine.stop();
   });
@@ -408,11 +398,19 @@ describe("listMoments protected pagination", () => {
       timeline.push(...page.moments);
       cursor = page.nextCursor ?? undefined;
     } while (cursor);
-    expect(timeline.map(moment => moment.id)).toEqual([
-      "text-5", "protected-upper", "text-4", "text-3", "protected-middle", "text-2", "text-1", "protected-lower", "text-0",
+    expect(timeline.map((moment) => moment.id)).toEqual([
+      "text-5",
+      "protected-upper",
+      "text-4",
+      "text-3",
+      "protected-middle",
+      "text-2",
+      "text-1",
+      "protected-lower",
+      "text-0",
     ]);
-    expect(new Set(timeline.map(moment => moment.id)).size).toBe(9);
-    expect(requests.every(request => request.method === VERSIONED_METHOD.historyPage)).toBe(true);
+    expect(new Set(timeline.map((moment) => moment.id)).size).toBe(9);
+    expect(requests.every((request) => request.method === VERSIONED_METHOD.historyPage)).toBe(true);
     await engine.stop();
   });
 
@@ -431,11 +429,7 @@ describe("listMoments protected pagination", () => {
       workspace: "engine-secret-test",
       params: { workspaceId: "engine-secret-test" },
     });
-    const tiedSecret = await writeLoopbackSecret(
-      loopback,
-      "aa-secret",
-      "tie",
-    );
+    const tiedSecret = await writeLoopbackSecret(loopback, "aa-secret", "tie");
     // "aaa-text" is written first, so it holds the lower momentOrder even
     // though its id sorts first.
     const textWrites: ReadonlyArray<[string, number]> = [
@@ -487,11 +481,7 @@ describe("listMoments protected pagination", () => {
       params: { workspaceId: "engine-secret-test" },
     });
     // One reconcile pass, one clock reading, one moment more than a page.
-    const tiedSecret = await writeLoopbackSecret(
-      loopback,
-      "tied-secret",
-      "tie",
-    );
+    const tiedSecret = await writeLoopbackSecret(loopback, "tied-secret", "tie");
     const tiedTextCount = 51;
     for (let index = 0; index < tiedTextCount; index += 1) {
       await loopback.sendRequest({
@@ -522,10 +512,7 @@ describe("listMoments protected pagination", () => {
 
     expect(timeline.filter((moment) => moment.protected)).toHaveLength(1);
     expect(timeline.map((moment) => moment.id)).toEqual([
-      ...Array.from(
-        { length: tiedTextCount },
-        (_, index) => `tied-${tiedTextCount - 1 - index}`,
-      ),
+      ...Array.from({ length: tiedTextCount }, (_, index) => `tied-${tiedTextCount - 1 - index}`),
       "tied-secret",
     ]);
   });

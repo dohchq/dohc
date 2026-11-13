@@ -4,12 +4,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { explorerRow, revealExplorerPath } from "../helpers/workspace";
 import { startCdpCapture } from "./cdpCapture";
-import {
-  launchFixture,
-  editableBigDoc,
-  readRendererMarks,
-  writeProfileArtifact,
-} from "./harness";
+import { launchFixture, editableBigDoc, readRendererMarks, writeProfileArtifact } from "./harness";
 
 test("profiles opening, typing in, and saving the 250 KiB document", async () => {
   const context = await launchFixture("big-docs", "profile-bigdoc");
@@ -30,10 +25,7 @@ test("profiles opening, typing in, and saving the 250 KiB document", async () =>
     await editToggle.click();
     const editor = page.getByTestId("markdown-editor");
     await expect(editor).toBeVisible({ timeout: 120_000 });
-    await expect(editor.locator(".cm-content")).toHaveAttribute(
-      "contenteditable",
-      "true",
-    );
+    await expect(editor.locator(".cm-content")).toHaveAttribute("contenteditable", "true");
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     const typedText = "profilex-0123456789-abcdefghij";
@@ -42,17 +34,13 @@ test("profiles opening, typing in, and saving the 250 KiB document", async () =>
     await page.keyboard.type(typedText);
     const typingDurationMs = performance.now() - typingStartedAt;
     await expect(editToggle).toHaveText("WYSIWYG", { timeout: 10_000 });
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      "saved",
-      { timeout: 30_000 },
-    );
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
+      timeout: 30_000,
+    });
     await expect
       .poll(
         async () =>
-          await readFile(join(context.fixtureRoot, document.path), "utf8").catch(
-            () => "",
-          ),
+          await readFile(join(context.fixtureRoot, document.path), "utf8").catch(() => ""),
         { timeout: 30_000 },
       )
       .toContain(typedText);

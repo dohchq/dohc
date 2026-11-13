@@ -13,7 +13,10 @@ function errnoOf(error: unknown): unknown {
 }
 
 /** Whether a file system error is macOS refusing dohc a folder. */
-export function isPrivacyDenial(error: unknown, platform: NodeJS.Platform = process.platform): boolean {
+export function isPrivacyDenial(
+  error: unknown,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
   if (platform !== "darwin" || !(error instanceof Error)) return false;
   // A worker hands back only the message, which still leads with the code.
   if (errnoOf(error) !== "EPERM" && !error.message.startsWith("EPERM:")) return false;
@@ -28,7 +31,10 @@ export function isPrivacyDenial(error: unknown, platform: NodeJS.Platform = proc
 }
 
 /** The error with the privacy code the renderer explains, or the error itself. */
-export function withPrivacyDenial(error: unknown, platform: NodeJS.Platform = process.platform): unknown {
+export function withPrivacyDenial(
+  error: unknown,
+  platform: NodeJS.Platform = process.platform,
+): unknown {
   return isPrivacyDenial(error, platform)
     ? Object.assign(new Error((error as Error).message, { cause: error }), { code: PRIVACY_DENIED })
     : error;

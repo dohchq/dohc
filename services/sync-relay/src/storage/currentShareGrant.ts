@@ -1,7 +1,10 @@
 import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
 import type { SyncRelayShareGrantRow, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./types";
 
-export type CurrentShareGrantStorage = Pick<SyncRelayStorage, "getShare" | "getShareGrant" | "workspaceIsOwnedBy">;
+export type CurrentShareGrantStorage = Pick<
+  SyncRelayStorage,
+  "getShare" | "getShareGrant" | "workspaceIsOwnedBy"
+>;
 
 /** Who must hold the grant. An owner acting on its own share names none. */
 export type CurrentShareGrantPrincipal = { kind: "link" } | { kind: "user"; userId: string };

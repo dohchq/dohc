@@ -5,8 +5,19 @@ import { useTheme } from "../theme";
 
 // Copy and × on a notice's title line, each a 44pt target that doesn't overlap the other.
 // Without a dismiss label, the × column stays empty so every copy button lines up.
-export function TitleControls({ copyLabel, onCopy, dismissLabel, onDismiss, style, demoCopied = false }: {
-  copyLabel?: string; onCopy?(): void; dismissLabel?: string; onDismiss?(): void; style?: StyleProp<ViewStyle>;
+export function TitleControls({
+  copyLabel,
+  onCopy,
+  dismissLabel,
+  onDismiss,
+  style,
+  demoCopied = false,
+}: {
+  copyLabel?: string;
+  onCopy?(): void;
+  dismissLabel?: string;
+  onDismiss?(): void;
+  style?: StyleProp<ViewStyle>;
   /** Design review only: copy once on mount, to shoot the check. */
   demoCopied?: boolean;
 }) {
@@ -20,22 +31,46 @@ export function TitleControls({ copyLabel, onCopy, dismissLabel, onDismiss, styl
   }, [copied, demoCopied]);
   useEffect(() => {
     if (!demoCopied || !onCopy) return;
-    const timer = setTimeout(() => { onCopy(); setCopied(true); }, 1200);
+    const timer = setTimeout(() => {
+      onCopy();
+      setCopied(true);
+    }, 1200);
     return () => clearTimeout(timer);
     // Once, on mount.
   }, []);
   return (
     <View style={[styles.controls, style]}>
       {copyLabel && onCopy ? (
-        <Pressable onPress={() => { onCopy(); setCopied(true); }} accessibilityRole="button" accessibilityLabel={copyLabel} style={pressedBox}>
-          {copied ? <Check size={17} color={theme.subtle} strokeWidth={2.25} /> : <Copy size={17} color={theme.subtle} strokeWidth={2} />}
+        <Pressable
+          onPress={() => {
+            onCopy();
+            setCopied(true);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel={copyLabel}
+          style={pressedBox}
+        >
+          {copied ? (
+            <Check size={17} color={theme.subtle} strokeWidth={2.25} />
+          ) : (
+            <Copy size={17} color={theme.subtle} strokeWidth={2} />
+          )}
         </Pressable>
-      ) : <View style={styles.box} />}
+      ) : (
+        <View style={styles.box} />
+      )}
       {dismissLabel && onDismiss ? (
-        <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel={dismissLabel} style={pressedBox}>
+        <Pressable
+          onPress={onDismiss}
+          accessibilityRole="button"
+          accessibilityLabel={dismissLabel}
+          style={pressedBox}
+        >
           <X size={17} color={theme.subtle} strokeWidth={2} />
         </Pressable>
-      ) : <View style={styles.box} />}
+      ) : (
+        <View style={styles.box} />
+      )}
     </View>
   );
 }

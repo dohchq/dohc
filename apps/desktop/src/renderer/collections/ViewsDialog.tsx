@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 import { isComposingKey } from "../ui/keys";
-import type {
-  CollectionSchema,
-  ViewDefinition,
-  ViewKind,
-} from "@dohc/workspace-contracts";
+import type { CollectionSchema, ViewDefinition, ViewKind } from "@dohc/workspace-contracts";
 import { Overlay } from "../Overlay";
-import { DangerButton, IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import {
+  DangerButton,
+  IconButton,
+  PrimaryButton,
+  SecondaryButton,
+  SectionLabel,
+} from "../ui/controls";
 import { addView, deleteView, renameView } from "./schemaAuthoring";
 import { useSchemaRun, type SchemaApply } from "./FieldsDialog";
 import { inputClass, selectClass } from "./FieldForm";
@@ -65,7 +67,10 @@ export function ViewsDialog(props: {
     const problem =
       to === from
         ? null
-        : nameProblem(to, viewNames.filter((name) => name !== from));
+        : nameProblem(
+            to,
+            viewNames.filter((name) => name !== from),
+          );
     await run(
       problem,
       (schema) => renameView(schema, from, to),
@@ -133,8 +138,7 @@ export function ViewsDialog(props: {
         <div className="flex flex-col gap-1">
           {props.schema.views.length === 0 ? (
             <span className="text-sm text-muted">
-              No saved views yet. This collection shows a table. Create a view
-              below.
+              No saved views yet. This collection shows a table. Create a view below.
             </span>
           ) : null}
           {props.schema.views.map((view) =>
@@ -157,18 +161,13 @@ export function ViewsDialog(props: {
                 <SecondaryButton disabled={pending} onClick={() => setEditing(null)}>
                   Cancel
                 </SecondaryButton>
-                <PrimaryButton
-                  disabled={pending}
-                  onClick={() => void saveRename(view.name)}
-                >
+                <PrimaryButton disabled={pending} onClick={() => void saveRename(view.name)}>
                   Save view
                 </PrimaryButton>
               </div>
             ) : (
               <div key={view.name} className="flex h-8 items-center gap-2 rounded-md px-2">
-                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
-                  {view.name}
-                </span>
+                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{view.name}</span>
                 <span className="shrink-0 text-[11px] text-subtle">
                   {VIEW_KIND_LABELS[view.kind]}
                 </span>

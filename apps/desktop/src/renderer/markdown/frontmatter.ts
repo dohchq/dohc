@@ -57,7 +57,8 @@ export function markdownEditorBody(markdown: string): string {
 // isn't empty ends with one, as the engine writes it.
 export function mergeMarkdownEditorBody(sourceMarkdown: string, body: string): string {
   const split = splitRawFrontmatter(sourceMarkdown);
-  const separator = split.frontmatter && split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
+  const separator =
+    split.frontmatter && split.body.startsWith("\n") && !body.startsWith("\n") ? "\n" : "";
   const merged = `${split.frontmatter ?? ""}${separator}${body}`;
   return merged === "" || merged.endsWith("\n") ? merged : `${merged}\n`;
 }
@@ -80,7 +81,8 @@ function listProblem(items: readonly unknown[]): string | null {
     if (typeof item !== "string") return "some items aren't text";
     if (/[\r\n]/u.test(item)) return "an item has a line break";
     if (item.includes(",")) return "an item has a comma";
-    if (item === "" || item !== item.trim()) return "an item is blank or starts or ends with a space";
+    if (item === "" || item !== item.trim())
+      return "an item is blank or starts or ends with a space";
   }
   return null;
 }
@@ -109,7 +111,10 @@ function propertyText(value: unknown): Pick<FrontmatterEntry, "value" | "list" |
 
 /** A list's text as its items: split on commas, trimmed, with blank items dropped. */
 export function listItems(text: string): string[] {
-  return text.split(",").map((item) => item.trim()).filter((item) => item !== "");
+  return text
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
 }
 
 /** Entries in the order of `pairs`. An object would list integer-like keys first. */
@@ -131,7 +136,9 @@ export function frontmatterEntriesFromPairs(
 /** The document's properties in the order the file holds them. */
 export function frontmatterEntries(markdown: string): FrontmatterEntry[] {
   const loaded = loadMarkdownFrontmatter(markdown);
-  return loaded ? frontmatterEntriesFromPairs(loaded.keys.map((key) => [key, loaded.meta[key]])) : [];
+  return loaded
+    ? frontmatterEntriesFromPairs(loaded.keys.map((key) => [key, loaded.meta[key]]))
+    : [];
 }
 
 /** Write frontmatter values into a document, keeping the text of every entry whose value did not change. */

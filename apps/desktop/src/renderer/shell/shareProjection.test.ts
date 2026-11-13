@@ -74,12 +74,13 @@ describe("share unmount projection", () => {
 // reporting damage in a separate notice meant the summary replaced it, and
 // the user was left with "Shares refreshed" — the wrong half.
 describe("share refresh summary", () => {
-  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) => ({
-    label: "alex",
-    status: "updated" as const,
-    changedPaths: 0,
-    ...over,
-  }) as Parameters<typeof shareRefreshSummary>[0][number];
+  const row = (over: Partial<{ label: string; status: string; changedPaths: number }>) =>
+    ({
+      label: "alex",
+      status: "updated" as const,
+      changedPaths: 0,
+      ...over,
+    }) as Parameters<typeof shareRefreshSummary>[0][number];
 
   it("states damage and how to fix it, alongside the refresh result", () => {
     const summary = shareRefreshSummary([
@@ -87,10 +88,9 @@ describe("share refresh summary", () => {
       row({ label: "alex", status: "damaged" }),
     ]);
     expect(summary).toContain("Refreshed 1 of 2 shares. 2 files updated.");
-    expect(
-      summary,
-      "the summary replaces the damage notice and the fix is lost",
-    ).toContain("dohc can't read what alex grants. Remove it and add the share again.");
+    expect(summary, "the summary replaces the damage notice and the fix is lost").toContain(
+      "dohc can't read what alex grants. Remove it and add the share again.",
+    );
     expect(summary).not.toContain("grant.");
   });
 
@@ -112,7 +112,9 @@ describe("share refresh summary", () => {
   });
 
   it("says no share refreshed instead of counting none", () => {
-    expect(shareRefreshSummary([row({ status: "failed" })])).toBe("dohc could not refresh 1 share.");
+    expect(shareRefreshSummary([row({ status: "failed" })])).toBe(
+      "dohc could not refresh 1 share.",
+    );
     expect(
       shareRefreshSummary([
         row({ label: "kim", status: "failed" }),
@@ -138,10 +140,9 @@ describe("share refresh summary", () => {
     ]);
     expect(summary).toContain("kim ended");
     // Plural subjects take the plural verb; the singular case keeps "grants".
-    expect(
-      summary,
-      "two shares reading as one — \"what alex, sam grants\"",
-    ).toContain("what alex, sam grant. Remove them and add those shares again.");
+    expect(summary, 'two shares reading as one — "what alex, sam grants"').toContain(
+      "what alex, sam grant. Remove them and add those shares again.",
+    );
   });
 
   it("says so when there is nothing to refresh", () => {

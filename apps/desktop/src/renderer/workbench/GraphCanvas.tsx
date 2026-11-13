@@ -1,7 +1,13 @@
 import { useEffect, useId, useRef } from "react";
 import { cutText } from "@dohc/workspace-contracts/names";
 import { prefersReducedMotion } from "../reducedMotion";
-import { DEFAULT_FORCES, placeNodes, type GraphForces, type LayoutFrame, type LayoutRequest } from "./graphLayout";
+import {
+  DEFAULT_FORCES,
+  placeNodes,
+  type GraphForces,
+  type LayoutFrame,
+  type LayoutRequest,
+} from "./graphLayout";
 
 export type GraphShape = "circle" | "ring" | "diamond" | "square" | "bubble" | "pill";
 
@@ -18,8 +24,18 @@ export function nodeAnnouncement(node: CanvasNode): string {
   return `${node.title}, ${node.kind}, ${node.degree.toLocaleString()} link${node.degree === 1 ? "" : "s"}`;
 }
 
-export type GraphDisplay = { arrows: boolean; textFade: number; nodeSize: number; linkThickness: number };
-export const DEFAULT_DISPLAY: GraphDisplay = { arrows: false, textFade: 0.5, nodeSize: 0.5, linkThickness: 0.5 };
+export type GraphDisplay = {
+  arrows: boolean;
+  textFade: number;
+  nodeSize: number;
+  linkThickness: number;
+};
+export const DEFAULT_DISPLAY: GraphDisplay = {
+  arrows: false,
+  textFade: 0.5,
+  nodeSize: 0.5,
+  linkThickness: 0.5,
+};
 export const GROUP_HUES = ["teal", "amber", "plum", "blue", "rust", "indigo", "rose"] as const;
 
 type Model = {
@@ -90,9 +106,19 @@ function readPalette(surface: "bg" | "panel"): Palette {
 
 // Frames a graph's bounds in a view with a 16 px margin. A node never draws
 // larger than at 100% zoom, so a small graph doesn't blow up to fill the view.
-export function fitCamera(x0: number, y0: number, x1: number, y1: number, width: number, height: number): Camera {
+export function fitCamera(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  width: number,
+  height: number,
+): Camera {
   const margin = 16;
-  const scale = Math.min((width - margin * 2) / Math.max(1, x1 - x0), (height - margin * 2) / Math.max(1, y1 - y0));
+  const scale = Math.min(
+    (width - margin * 2) / Math.max(1, x1 - x0),
+    (height - margin * 2) / Math.max(1, y1 - y0),
+  );
   const k = Math.max(0.02, Math.min(1, scale));
   return { k, tx: width / 2 - ((x0 + x1) / 2) * k, ty: height / 2 - ((y0 + y1) / 2) * k };
 }
@@ -103,7 +129,11 @@ export function fitCamera(x0: number, y0: number, x1: number, y1: number, width:
 export function followCamera(camera: Camera, goal: Camera, cooling: boolean): Camera {
   if (cooling && goal.k < camera.k) return goal;
   const ease = 0.15;
-  return { k: camera.k + (goal.k - camera.k) * ease, tx: camera.tx + (goal.tx - camera.tx) * ease, ty: camera.ty + (goal.ty - camera.ty) * ease };
+  return {
+    k: camera.k + (goal.k - camera.k) * ease,
+    tx: camera.tx + (goal.tx - camera.tx) * ease,
+    ty: camera.ty + (goal.ty - camera.ty) * ease,
+  };
 }
 
 function nodeRadius(degree: number, display: GraphDisplay): number {
@@ -114,7 +144,13 @@ export function shortTitle(title: string): string {
   return cutText(title, 32);
 }
 
-function addShape(ctx: CanvasRenderingContext2D, shape: GraphShape, x: number, y: number, r: number): void {
+function addShape(
+  ctx: CanvasRenderingContext2D,
+  shape: GraphShape,
+  x: number,
+  y: number,
+  r: number,
+): void {
   switch (shape) {
     case "diamond": {
       const e = r * 1.25;
@@ -159,13 +195,19 @@ type Callbacks = {
 };
 
 function sameForces(a: GraphForces, b: GraphForces): boolean {
-  return a.center === b.center && a.repel === b.repel && a.link === b.link && a.distance === b.distance;
+  return (
+    a.center === b.center && a.repel === b.repel && a.link === b.link && a.distance === b.distance
+  );
 }
 
 // Owns the canvas: camera, input and drawing. The layout runs in a worker; see
 // LayoutRequest. React hands it a model and options; everything per frame stays
 // out of React.
-export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "panel", callbacks: Callbacks) {
+export function createGraphRenderer(
+  canvas: HTMLCanvasElement,
+  surface: "bg" | "panel",
+  callbacks: Callbacks,
+) {
   const ctx = canvas.getContext("2d");
   let palette = readPalette(surface);
   let model: Model = { nodes: [], links: [] };
@@ -195,8 +237,12 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let adjacency = new Uint32Array(0);
   const remembered = new Map<string, { x: number; y: number; label: number }>();
 
-  let width = 0, height = 0, dpr = 1;
-  let k = 1, tx = 0, ty = 0;
+  let width = 0,
+    height = 0,
+    dpr = 1;
+  let k = 1,
+    tx = 0,
+    ty = 0;
   let followLayout = true;
   // Set once the person pans, zooms or drags; the camera then stays theirs.
   let cameraMoved = false;
@@ -210,10 +256,19 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   let lit = -1;
   let litSet = new Uint8Array(0);
   let mix = 0;
-  let mixFrom = 0, mixTo = 0, mixStart = 0;
+  let mixFrom = 0,
+    mixTo = 0,
+    mixStart = 0;
 
   type Gesture =
-    | { kind: "node"; index: number; pointerId: number; startX: number; startY: number; moved: boolean }
+    | {
+        kind: "node";
+        index: number;
+        pointerId: number;
+        startX: number;
+        startY: number;
+        moved: boolean;
+      }
     | { kind: "pan"; pointerId: number; startX: number; startY: number; tx: number; ty: number };
   let gesture: Gesture | null = null;
   // Where a dragged node is held, in graph space.
@@ -248,7 +303,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   const py = (i: number) => positions[i * 2 + 1]!;
 
   function remember(): void {
-    for (let i = 0; i < model.nodes.length; i++) remembered.set(model.nodes[i]!.path, { x: px(i), y: py(i), label: labelAlpha[i]! });
+    for (let i = 0; i < model.nodes.length; i++)
+      remembered.set(model.nodes[i]!.path, { x: px(i), y: py(i), label: labelAlpha[i]! });
   }
 
   function setModel(next: Model): void {
@@ -305,13 +361,22 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     held = null;
     // A press on the old model must not open or drag a node of the new one.
     if (gesture) {
-      if (canvas.hasPointerCapture?.(gesture.pointerId)) canvas.releasePointerCapture(gesture.pointerId);
+      if (canvas.hasPointerCapture?.(gesture.pointerId))
+        canvas.releasePointerCapture(gesture.pointerId);
       gesture = null;
       canvas.style.cursor = "";
     }
     layoutSettled = !worker || count === 0;
     send(
-      { type: "model", generation, x: placed.x, y: placed.y, source: source.slice(), target: target.slice(), alpha: placed.alpha },
+      {
+        type: "model",
+        generation,
+        x: placed.x,
+        y: placed.y,
+        source: source.slice(),
+        target: target.slice(),
+        alpha: placed.alpha,
+      },
       [placed.x.buffer, placed.y.buffer],
     );
     litSet = new Uint8Array(count);
@@ -352,7 +417,9 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     const sizeChanged = next.display.nodeSize !== options.display.nodeSize;
     const forcesChanged = !sameForces(next.forces, options.forces);
     options = next;
-    if (sizeChanged) for (let i = 0; i < model.nodes.length; i++) radius[i] = nodeRadius(model.nodes[i]!.degree, next.display);
+    if (sizeChanged)
+      for (let i = 0; i < model.nodes.length; i++)
+        radius[i] = nodeRadius(model.nodes[i]!.degree, next.display);
     if (forcesChanged) {
       send({ type: "forces", forces: next.forces });
       if (model.nodes.length > 0) unsettle();
@@ -384,7 +451,10 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   function fitTarget(): Camera {
     const count = model.nodes.length;
     if (count === 0 || width === 0 || height === 0) return { k: 1, tx: width / 2, ty: height / 2 };
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    let x0 = Infinity,
+      y0 = Infinity,
+      x1 = -Infinity,
+      y1 = -Infinity;
     for (let i = 0; i < count; i++) {
       const r = radius[i]!;
       x0 = Math.min(x0, px(i) - r);
@@ -417,9 +487,13 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     let easing = false;
     if (followLayout) {
       const goal = fitTarget();
-      ({ k, tx, ty } = reduced || snapCamera ? goal : followCamera({ k, tx, ty }, goal, !layoutSettled && !held));
+      ({ k, tx, ty } =
+        reduced || snapCamera ? goal : followCamera({ k, tx, ty }, goal, !layoutSettled && !held));
       snapCamera = false;
-      easing = Math.abs(goal.k - k) > k * 1e-3 || Math.abs(goal.tx - tx) > 0.5 || Math.abs(goal.ty - ty) > 0.5;
+      easing =
+        Math.abs(goal.k - k) > k * 1e-3 ||
+        Math.abs(goal.tx - tx) > 0.5 ||
+        Math.abs(goal.ty - ty) > 0.5;
       if (!easing && layoutSettled) followLayout = options.local;
     }
     let fading = false;
@@ -461,17 +535,31 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     // Links: one batched stroke for the rest, one for the lit node's own.
     // Many links wider than a device pixel stall the GPU for hundreds of
     // milliseconds a frame, so a dense stroke stays a hairline.
-    const lineWidth = Math.max(0.35, Math.min(2.4, (0.4 + display.linkThickness * 1.6) * Math.sqrt(Math.min(k, 2))));
-    const strokeWidth = (links: number, wide: number) => (links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide);
+    const lineWidth = Math.max(
+      0.35,
+      Math.min(2.4, (0.4 + display.linkThickness * 1.6) * Math.sqrt(Math.min(k, 2))),
+    );
+    const strokeWidth = (links: number, wide: number) =>
+      links > DENSE_LINKS ? Math.min(wide, HAIRLINE / dpr) : wide;
     ctx.strokeStyle = palette.edge;
     ctx.globalAlpha = palette.edgeAlpha * linkRest;
     ctx.beginPath();
     let shown = 0;
     for (let l = 0; l < source.length; l++) {
-      const s = source[l]!, t = target[l]!;
+      const s = source[l]!,
+        t = target[l]!;
       if (highlight && (s === lit || t === lit)) continue;
-      const x1 = sx(s), y1 = sy(s), x2 = sx(t), y2 = sy(t);
-      if ((x1 < 0 && x2 < 0) || (y1 < 0 && y2 < 0) || (x1 > width && x2 > width) || (y1 > height && y2 > height)) continue;
+      const x1 = sx(s),
+        y1 = sy(s),
+        x2 = sx(t),
+        y2 = sy(t);
+      if (
+        (x1 < 0 && x2 < 0) ||
+        (y1 < 0 && y2 < 0) ||
+        (x1 > width && x2 > width) ||
+        (y1 > height && y2 > height)
+      )
+        continue;
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
       shown++;
@@ -496,15 +584,20 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       ctx.beginPath();
       const size = Math.max(3, 5 * Math.min(k, 1.5));
       for (let l = 0; l < source.length; l++) {
-        const s = source[l]!, t = target[l]!;
-        const x2 = sx(t), y2 = sy(t);
+        const s = source[l]!,
+          t = target[l]!;
+        const x2 = sx(t),
+          y2 = sy(t);
         if (x2 < -20 || y2 < -20 || x2 > width + 20 || y2 > height + 20) continue;
-        const dx = x2 - sx(s), dy = y2 - sy(s);
+        const dx = x2 - sx(s),
+          dy = y2 - sy(s);
         const length = Math.hypot(dx, dy);
         const r = screenR(t);
         if (length < r + size * 2) continue;
-        const ux = dx / length, uy = dy / length;
-        const tipX = x2 - ux * (r + 1), tipY = y2 - uy * (r + 1);
+        const ux = dx / length,
+          uy = dy / length;
+        const tipX = x2 - ux * (r + 1),
+          tipY = y2 - uy * (r + 1);
         ctx.moveTo(tipX, tipY);
         ctx.lineTo(tipX - ux * size - uy * size * 0.55, tipY - uy * size + ux * size * 0.55);
         ctx.lineTo(tipX - ux * size + uy * size * 0.55, tipY - uy * size - ux * size * 0.55);
@@ -516,7 +609,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     // Nodes: batched by color, rings stroked over their paper fill.
     const visibleNode = (i: number) => {
       const r = screenR(i) * 1.3 + 2;
-      const x = sx(i), y = sy(i);
+      const x = sx(i),
+        y = sy(i);
       return x > -r && y > -r && x < width + r && y < height + r;
     };
     const fillPass = (color: string, alpha: number, include: (i: number) => boolean) => {
@@ -566,7 +660,13 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       ctx.globalAlpha = 1;
       ctx.fillStyle = palette.ink;
       ctx.beginPath();
-      addShape(ctx, model.nodes[active]!.shape === "ring" ? "circle" : model.nodes[active]!.shape, sx(active), sy(active), r);
+      addShape(
+        ctx,
+        model.nodes[active]!.shape === "ring" ? "circle" : model.nodes[active]!.shape,
+        sx(active),
+        sy(active),
+        r,
+      );
       ctx.fill();
       ctx.strokeStyle = palette.ink;
       ctx.lineWidth = 1.5;
@@ -579,7 +679,13 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       ctx.fillStyle = palette.match;
       ctx.beginPath();
       const shape = model.nodes[lit]!.shape;
-      addShape(ctx, shape === "ring" ? "circle" : shape, sx(lit), sy(lit), screenR(lit) * (1 + 0.15 * mix));
+      addShape(
+        ctx,
+        shape === "ring" ? "circle" : shape,
+        sx(lit),
+        sy(lit),
+        screenR(lit) * (1 + 0.15 * mix),
+      );
       ctx.fill();
     }
 
@@ -590,7 +696,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     ctx.lineJoin = "round";
     ctx.lineWidth = 3;
     ctx.strokeStyle = palette.bg;
-    const cols = Math.ceil(width / CELL), rows = Math.ceil(height / CELL);
+    const cols = Math.ceil(width / CELL),
+      rows = Math.ceil(height / CELL);
     if (taken.length < cols * rows) {
       taken = new Uint8Array(cols * rows);
       dots = new Uint8Array(cols * rows);
@@ -601,12 +708,15 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     // The grid cells a node's dot covers, out to a diamond's tips, the widest
     // shape, and the hovered node's larger dot.
     const dotR = (i: number) => 1.25 * screenR(i) * (highlight && i === lit ? 1 + 0.15 * mix : 1);
-    const dotCol = (i: number, side: number) => Math.max(0, Math.min(cols - 1, Math.floor((sx(i) + side * dotR(i)) / CELL)));
-    const dotRow = (i: number, side: number) => Math.max(0, Math.min(rows - 1, Math.floor((sy(i) + side * dotR(i)) / CELL)));
+    const dotCol = (i: number, side: number) =>
+      Math.max(0, Math.min(cols - 1, Math.floor((sx(i) + side * dotR(i)) / CELL)));
+    const dotRow = (i: number, side: number) =>
+      Math.max(0, Math.min(rows - 1, Math.floor((sy(i) + side * dotR(i)) / CELL)));
     for (let i = 0; i < count; i++) {
       if (!visibleNode(i)) continue;
       for (let r = dotRow(i, -1); r <= dotRow(i, 1); r++) {
-        for (let c = dotCol(i, -1); c <= dotCol(i, 1); c++) if (dots[r * cols + c]! < 255) dots[r * cols + c]!++;
+        for (let c = dotCol(i, -1); c <= dotCol(i, 1); c++)
+          if (dots[r * cols + c]! < 255) dots[r * cols + c]!++;
       }
     }
     placed = placed.length < count ? new Uint8Array(count) : placed.fill(0, 0, count);
@@ -618,7 +728,14 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       const own = highlight && litSet[i] === 1;
       const shown = (i === active && options.local) || k * Math.sqrt(radius[i]! / 4) >= fadeAt;
       let fits = (shown || own || labelAlpha[i]! > 0) && drawn < LABEL_LIMIT && visibleNode(i);
-      let title = "", left = 0, top = 0, w = 0, c0 = 0, c1 = 0, r0 = 0, r1 = 0;
+      let title = "",
+        left = 0,
+        top = 0,
+        w = 0,
+        c0 = 0,
+        c1 = 0,
+        r0 = 0,
+        r1 = 0;
       if (fits) {
         title = shortTitle(model.nodes[i]!.title);
         w = labelWidth[i] || (labelWidth[i] = ctx.measureText(title).width);
@@ -630,7 +747,10 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
         r0 = Math.floor(top / CELL);
         r1 = Math.min(rows - 1, Math.floor((top + LABEL_HEIGHT) / CELL));
         // The label may touch its own node's dot, not another's.
-        const a0 = dotCol(i, -1), a1 = dotCol(i, 1), b0 = dotRow(i, -1), b1 = dotRow(i, 1);
+        const a0 = dotCol(i, -1),
+          a1 = dotCol(i, 1),
+          b0 = dotRow(i, -1),
+          b1 = dotRow(i, 1);
         const avoidDots = !own && i !== active;
         for (let r = r0; fits && r <= r1; r++) {
           for (let c = c0; c <= c1; c++) {
@@ -668,9 +788,11 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
   }
 
   function hitTest(x: number, y: number): number {
-    let best = -1, bestDistance = Infinity;
+    let best = -1,
+      bestDistance = Infinity;
     for (let i = 0; i < model.nodes.length; i++) {
-      const dx = px(i) * k + tx - x, dy = py(i) * k + ty - y;
+      const dx = px(i) * k + tx - x,
+        dy = py(i) * k + ty - y;
       const distance = Math.hypot(dx, dy);
       const reach = Math.max(options.local ? 2.5 : 1.25, radius[i]! * k) + 4;
       if (distance <= reach && distance < bestDistance) {
@@ -697,9 +819,17 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     if (event.button !== 0 || gesture) return;
     const point = local(event);
     const index = hitTest(point.x, point.y);
-    gesture = index >= 0
-      ? { kind: "node", index, pointerId: event.pointerId, startX: point.x, startY: point.y, moved: false }
-      : { kind: "pan", pointerId: event.pointerId, startX: point.x, startY: point.y, tx, ty };
+    gesture =
+      index >= 0
+        ? {
+            kind: "node",
+            index,
+            pointerId: event.pointerId,
+            startX: point.x,
+            startY: point.y,
+            moved: false,
+          }
+        : { kind: "pan", pointerId: event.pointerId, startX: point.x, startY: point.y, tx, ty };
     canvas.setPointerCapture?.(event.pointerId);
   }
 
@@ -775,7 +905,9 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     zoomAt(point.x, point.y, Math.exp(-delta * (event.ctrlKey ? 0.01 : 0.0015)));
   }
 
-  const onLeave = () => { if (!gesture) setHover(-1); };
+  const onLeave = () => {
+    if (!gesture) setHover(-1);
+  };
   const onUp = (event: PointerEvent) => onPointerUp(event);
   const onCancel = (event: PointerEvent) => onPointerUp(event, true);
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -787,7 +919,12 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
 
   function resize(nextWidth: number, nextHeight: number): void {
     dpr = window.devicePixelRatio || 1;
-    if (nextWidth === width && nextHeight === height && canvas.width === Math.round(nextWidth * dpr)) return;
+    if (
+      nextWidth === width &&
+      nextHeight === height &&
+      canvas.width === Math.round(nextWidth * dpr)
+    )
+      return;
     // Keep the same world point under the canvas centre.
     tx += (nextWidth - width) / 2;
     ty += (nextHeight - height) / 2;
@@ -821,7 +958,8 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
       relight();
       if (index < 0) return;
       // Bring a focused node into view.
-      const x = px(index) * k + tx, y = py(index) * k + ty;
+      const x = px(index) * k + tx,
+        y = py(index) * k + ty;
       if (x < 24 || y < 24 || x > width - 24 || y > height - 24) {
         tx += width / 2 - x;
         ty += height / 2 - y;
@@ -831,10 +969,12 @@ export function createGraphRenderer(canvas: HTMLCanvasElement, surface: "bg" | "
     },
     // The neighbour that best continues in a direction, for arrow keys.
     neighbourToward(index: number, dx: number, dy: number): number {
-      let best = -1, bestScore = -Infinity;
+      let best = -1,
+        bestScore = -Infinity;
       for (let a = offsets[index]!; a < offsets[index + 1]!; a++) {
         const n = adjacency[a]!;
-        const vx = px(n) - px(index), vy = py(n) - py(index);
+        const vx = px(n) - px(index),
+          vy = py(n) - py(index);
         const length = Math.hypot(vx, vy) || 1;
         const along = (vx * dx + vy * dy) / length;
         if (along <= 0.2) continue;
@@ -912,21 +1052,30 @@ export function GraphCanvas(props: {
     // Size now, so the first frame draws the graph instead of waiting for the observer.
     const rect = canvas.getBoundingClientRect();
     renderer.resize(rect.width, rect.height);
-    const sizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(([entry]) => {
-      if (entry) renderer.resize(entry.contentRect.width, entry.contentRect.height);
-    });
+    const sizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(([entry]) => {
+            if (entry) renderer.resize(entry.contentRect.width, entry.contentRect.height);
+          });
     sizeObserver?.observe(canvas);
     let onScreen = true;
     const sync = () => renderer.setVisible(onScreen && document.visibilityState !== "hidden");
     // Offscreen, as in a hidden tab or a collapsed panel, the graph draws nothing.
-    const viewObserver = typeof IntersectionObserver === "undefined" ? null : new IntersectionObserver(([entry]) => {
-      onScreen = entry?.isIntersecting ?? true;
-      sync();
-    });
+    const viewObserver =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver(([entry]) => {
+            onScreen = entry?.isIntersecting ?? true;
+            sync();
+          });
     viewObserver?.observe(canvas);
     document.addEventListener("visibilitychange", sync);
     const themeObserver = new MutationObserver(() => renderer.retheme());
-    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "data-system-reduced-motion"] });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "data-system-reduced-motion"],
+    });
     const motion = window.matchMedia?.("(prefers-reduced-motion: reduce)");
     const retheme = () => renderer.retheme();
     motion?.addEventListener?.("change", retheme);
@@ -954,7 +1103,11 @@ export function GraphCanvas(props: {
   }, [props.groups]);
 
   useEffect(() => {
-    rendererRef.current?.setOptions({ display: props.display, forces: props.forces, local: props.local });
+    rendererRef.current?.setOptions({
+      display: props.display,
+      forces: props.forces,
+      local: props.local,
+    });
   }, [props.display, props.forces, props.local]);
 
   useEffect(() => {

@@ -10,10 +10,7 @@ describe("filesystem entry identity", () => {
     const after = before + 1n;
     expect(Number(before)).toBe(Number(after));
     expect(
-      sameFsEntry(
-        { ino: before, dev: 4_035_675_872n },
-        { ino: after, dev: 4_035_675_872n },
-      ),
+      sameFsEntry({ ino: before, dev: 4_035_675_872n }, { ino: after, dev: 4_035_675_872n }),
     ).toBe("replaced");
   });
 

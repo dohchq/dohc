@@ -13,7 +13,8 @@ export function compareAppVersions(left: string, right: string): number | null {
     if (difference !== 0) return difference;
   }
   // A release outranks its prereleases.
-  if (a[4] === undefined || b[4] === undefined) return (a[4] === undefined ? 1 : 0) - (b[4] === undefined ? 1 : 0);
+  if (a[4] === undefined || b[4] === undefined)
+    return (a[4] === undefined ? 1 : 0) - (b[4] === undefined ? 1 : 0);
   const leftParts = a[4].split(".");
   const rightParts = b[4].split(".");
   for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
@@ -42,13 +43,17 @@ export async function installedAppVersion(
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "";
   }
-  return deps.readVersion(appPath).then((version) => version.trim(), () => "");
+  return deps.readVersion(appPath).then(
+    (version) => version.trim(),
+    () => "",
+  );
 }
 
 /** Why dohc must not replace the dohc in Applications, or null when it may. */
 export function moveRefusal(runningVersion: string, installed: string | null): string | null {
   if (installed === null) return null;
-  if (installed === "") return "dohc cannot read the version of the dohc already in Applications. Open that copy, or replace it in Finder.";
+  if (installed === "")
+    return "dohc cannot read the version of the dohc already in Applications. Open that copy, or replace it in Finder.";
   return (compareAppVersions(runningVersion, installed) ?? 0) > 0
     ? null
     : `Applications already has dohc ${installed}. Open that copy instead.`;
@@ -106,7 +111,9 @@ export async function offerMoveToApplications(deps: {
     type: "question",
     message: "Move dohc to Applications?",
     detail: [
-      ...(isTemporaryMacAppPath(deps.bundlePath) ? ["dohc is running from a disk image or a temporary copy."] : []),
+      ...(isTemporaryMacAppPath(deps.bundlePath)
+        ? ["dohc is running from a disk image or a temporary copy."]
+        : []),
       "dohc moves itself to Applications and opens again.",
       ...(installed !== null ? [`It replaces the older dohc ${installed} already there.`] : []),
     ].join(" "),

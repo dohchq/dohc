@@ -26,7 +26,11 @@ describe("PostFeedList", () => {
     const content = slot.parentElement!;
     const list = content.parentElement!;
     expect(slot.className.split(" ")).toContain("flex-1");
-    expect(content.style).toMatchObject({ display: "flex", flexDirection: "column", minHeight: "100%" });
+    expect(content.style).toMatchObject({
+      display: "flex",
+      flexDirection: "column",
+      minHeight: "100%",
+    });
     expect([list.style.paddingTop, list.style.paddingBottom]).toEqual(["", ""]);
 
     view.rerender(feed(["First post"]));

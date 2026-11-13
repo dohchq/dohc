@@ -43,7 +43,10 @@ describe("buildChatCollaboration", () => {
     // Display name comes from the email, trimmed.
     expect(collaboration?.displayName).toBe("ada@x.com");
     // The factory yields a real transport for either scope kind.
-    const wsTransport = collaboration?.transportForScope({ kind: "workspace", workspaceId: "ws-a" });
+    const wsTransport = collaboration?.transportForScope({
+      kind: "workspace",
+      workspaceId: "ws-a",
+    });
     expect(typeof wsTransport?.publish).toBe("function");
     expect(typeof wsTransport?.poll).toBe("function");
     expect(typeof wsTransport?.leave).toBe("function");
@@ -104,10 +107,12 @@ beforeEach(() => {
         });
       }),
   );
-  bridgeMock.presenceCancel.mockReset().mockImplementation(async ({ pollId }: { pollId: string }) => {
-    cancelledPollIds.push(pollId);
-    return undefined;
-  });
+  bridgeMock.presenceCancel
+    .mockReset()
+    .mockImplementation(async ({ pollId }: { pollId: string }) => {
+      cancelledPollIds.push(pollId);
+      return undefined;
+    });
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
 
@@ -179,9 +184,7 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       workspaceId: "ws-b",
       clientId: "me",
     });
-    view.rerender(
-      <Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />,
-    );
+    view.rerender(<Harness collaboration={collabB} topic="chat:channel:1" workspaceId="ws-b" />);
     await flush();
 
     // The switch aborted A's in-flight poll over IPC (abort → presenceCancel).
@@ -195,7 +198,17 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
         ok: true,
         snapshot: {
           version: 1,
-          peers: [{ faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+          peers: [
+            {
+              faceToken: "ghost",
+              sessionToken: "cg",
+              isSelf: false,
+              displayName: "Ghost",
+              paletteSlot: 0,
+              state: { displayName: "Ghost" },
+              updatedAtMs: 0,
+            },
+          ],
         },
       });
     });
@@ -211,8 +224,24 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
         snapshot: {
           version: 1,
           peers: [
-            { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "a@x.com", paletteSlot: 0, state: { displayName: "a@x.com" }, updatedAtMs: 0 },
-            { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
+            {
+              faceToken: "me",
+              sessionToken: "me",
+              isSelf: true,
+              displayName: "a@x.com",
+              paletteSlot: 0,
+              state: { displayName: "a@x.com" },
+              updatedAtMs: 0,
+            },
+            {
+              faceToken: "bob",
+              sessionToken: "cb",
+              isSelf: false,
+              displayName: "Bob",
+              paletteSlot: 0,
+              state: { displayName: "Bob" },
+              updatedAtMs: 0,
+            },
           ],
         },
       });
@@ -318,7 +347,17 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
         ok: true,
         snapshot: {
           version: 1,
-          peers: [{ faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+          peers: [
+            {
+              faceToken: "ghost",
+              sessionToken: "cg",
+              isSelf: false,
+              displayName: "Ghost",
+              paletteSlot: 0,
+              state: { displayName: "Ghost" },
+              updatedAtMs: 0,
+            },
+          ],
         },
       });
     });
@@ -334,8 +373,24 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
         snapshot: {
           version: 1,
           peers: [
-            { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "a@x.com", paletteSlot: 0, state: { displayName: "a@x.com" }, updatedAtMs: 0 },
-            { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
+            {
+              faceToken: "me",
+              sessionToken: "me",
+              isSelf: true,
+              displayName: "a@x.com",
+              paletteSlot: 0,
+              state: { displayName: "a@x.com" },
+              updatedAtMs: 0,
+            },
+            {
+              faceToken: "bob",
+              sessionToken: "cb",
+              isSelf: false,
+              displayName: "Bob",
+              paletteSlot: 0,
+              state: { displayName: "Bob" },
+              updatedAtMs: 0,
+            },
           ],
         },
       });

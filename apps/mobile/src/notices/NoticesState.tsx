@@ -3,6 +3,8 @@ import { demoMode } from "../demo";
 import type { PhoneNotice } from "./sample";
 
 // The sample's notices, in a sample build only (src/sampleBuild.ts).
+// src/routes.test.ts reads the next statement as text, on one line.
+// oxfmt-ignore
 const sample = __DEV__ || process.env.EXPO_PUBLIC_DOHC_SAMPLE === "1" ? (require("./sample") as typeof import("./sample")) : null;
 
 interface NoticesState {
@@ -19,12 +21,40 @@ const State = createContext<NoticesState | null>(null);
 // One list for the Notices tab and its badge, so marking read clears both.
 export function NoticesProvider({ children }: { children: ReactNode }) {
   // A signed-in build reads no notices from the server yet: it lists only what failed on this phone.
-  const [notices, setNotices] = useState<readonly PhoneNotice[]>(!sample ? [] :
-    demoMode === "empty" || demoMode === "band-empty" ? [] : demoMode === "notice-end-failed" || demoMode === "notice-clipped" || demoMode === "notice-clipped-open" ? [sample.endFailedSample, ...sample.sampleNotices] : sample.sampleNotices);
-  const add = useCallback((notice: PhoneNotice) => setNotices(previous => [notice, ...previous.filter(entry => entry.id !== notice.id)]), []);
-  const dismiss = useCallback((id: string) => setNotices(previous => previous.filter(notice => notice.id !== id)), []);
-  const markAllRead = useCallback(() => setNotices(previous => previous.map(notice => ({ ...notice, read: true }))), []);
-  const value = useMemo(() => ({ notices, unread: notices.filter(notice => !notice.read).length, add, dismiss, markAllRead }), [notices, add, dismiss, markAllRead]);
+  const [notices, setNotices] = useState<readonly PhoneNotice[]>(
+    !sample
+      ? []
+      : demoMode === "empty" || demoMode === "band-empty"
+        ? []
+        : demoMode === "notice-end-failed" ||
+            demoMode === "notice-clipped" ||
+            demoMode === "notice-clipped-open"
+          ? [sample.endFailedSample, ...sample.sampleNotices]
+          : sample.sampleNotices,
+  );
+  const add = useCallback(
+    (notice: PhoneNotice) =>
+      setNotices((previous) => [notice, ...previous.filter((entry) => entry.id !== notice.id)]),
+    [],
+  );
+  const dismiss = useCallback(
+    (id: string) => setNotices((previous) => previous.filter((notice) => notice.id !== id)),
+    [],
+  );
+  const markAllRead = useCallback(
+    () => setNotices((previous) => previous.map((notice) => ({ ...notice, read: true }))),
+    [],
+  );
+  const value = useMemo(
+    () => ({
+      notices,
+      unread: notices.filter((notice) => !notice.read).length,
+      add,
+      dismiss,
+      markAllRead,
+    }),
+    [notices, add, dismiss, markAllRead],
+  );
   return <State value={value}>{children}</State>;
 }
 

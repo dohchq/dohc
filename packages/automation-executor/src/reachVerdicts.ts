@@ -62,7 +62,13 @@ export const StoredReachVerdictSchema = z.object({
   narrowed: z.literal(true).optional(),
   accountedLinks: z.array(z.string().min(1)).optional(),
   seq: z.number().int().nonnegative(),
-  recipient: z.object({ id: z.string(), name: z.string(), action: z.enum(["post", "notify", "change", "find"]) }).optional(),
+  recipient: z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      action: z.enum(["post", "notify", "change", "find"]),
+    })
+    .optional(),
 });
 
 /**
@@ -119,7 +125,10 @@ export interface ReachRelayRecord {
  * only where this computer has none. Both are for the same definition,
  * since the key names it.
  */
-export function mergedReachVerdict(local: StoredReachVerdict | undefined, taken: StoredReachVerdict): StoredReachVerdict | undefined {
+export function mergedReachVerdict(
+  local: StoredReachVerdict | undefined,
+  taken: StoredReachVerdict,
+): StoredReachVerdict | undefined {
   if (local === undefined) return taken;
   if (local.verdict !== "allowed" || taken.verdict === "allowed") return undefined;
   return taken;
@@ -132,16 +141,29 @@ type Verdict = Pick<StoredReachVerdict, "verdict" | "stoppedFor" | "narrowed" | 
  * says now. `switchedOn` says whether its automation runs, so a step that
  * never ran is not announced as stopped.
  */
-export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach, switchedOn: boolean): Verdict {
+export function nextReachVerdict(
+  previous: Verdict | undefined,
+  reach: StepReach,
+  switchedOn: boolean,
+): Verdict {
   const accounted = previous?.accountedLinks ?? [];
   const kept = accounted.length === 0 ? {} : { accountedLinks: accounted };
   if (!reach.allowed) {
-    const narrowed = switchedOn &&
-      (previous?.verdict === "allowed" || (previous?.verdict === "stopped" && previous.narrowed === true));
-    return { verdict: "stopped", stoppedFor: reach.person ?? null, ...(narrowed ? { narrowed: true } : {}), ...kept };
+    const narrowed =
+      switchedOn &&
+      (previous?.verdict === "allowed" ||
+        (previous?.verdict === "stopped" && previous.narrowed === true));
+    return {
+      verdict: "stopped",
+      stoppedFor: reach.person ?? null,
+      ...(narrowed ? { narrowed: true } : {}),
+      ...kept,
+    };
   }
   const formerStops = reach.formerStops ?? [];
-  const accountedLinks = [...new Set([...accounted, ...formerStops.map((stop) => stop.evidence)])].sort();
+  const accountedLinks = [
+    ...new Set([...accounted, ...formerStops.map((stop) => stop.evidence)]),
+  ].sort();
   const withLinks = accountedLinks.length === 0 ? {} : { accountedLinks };
   if (previous?.verdict === "stopped" || previous?.verdict === "held") {
     return { verdict: "held", stoppedFor: previous.stoppedFor, ...withLinks };
@@ -153,10 +175,23 @@ export function nextReachVerdict(previous: Verdict | undefined, reach: StepReach
 
 /** Whether two verdicts would be saved the same. */
 export function sameReachVerdict(left: Verdict | undefined, right: Verdict): boolean {
-  return left?.verdict === right.verdict && left.stoppedFor === right.stoppedFor && left.narrowed === right.narrowed &&
-    (left.accountedLinks ?? []).join("\n") === (right.accountedLinks ?? []).join("\n");
+  return (
+    left?.verdict === right.verdict &&
+    left.stoppedFor === right.stoppedFor &&
+    left.narrowed === right.narrowed &&
+    (left.accountedLinks ?? []).join("\n") === (right.accountedLinks ?? []).join("\n")
+  );
 }
 
-export function reachVerdictKey(automationId: string, definitionHash: string, step: string, recipient?: string): string {
-  return JSON.stringify(recipient === undefined ? [automationId, definitionHash, step] : [automationId, definitionHash, step, recipient]);
+export function reachVerdictKey(
+  automationId: string,
+  definitionHash: string,
+  step: string,
+  recipient?: string,
+): string {
+  return JSON.stringify(
+    recipient === undefined
+      ? [automationId, definitionHash, step]
+      : [automationId, definitionHash, step, recipient],
+  );
 }

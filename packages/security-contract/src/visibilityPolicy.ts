@@ -4,7 +4,10 @@ export interface VisibilityPolicyRule {
   export?: "included" | "excluded" | "redacted";
 }
 
-export type VisibilityPolicyResult = { visibility: "visible" | "hidden"; export: "included" | "excluded" | "redacted" };
+export type VisibilityPolicyResult = {
+  visibility: "visible" | "hidden";
+  export: "included" | "excluded" | "redacted";
+};
 
 type PolicyGlobValidation = { ok: true } | { ok: false; reason: string };
 
@@ -81,17 +84,20 @@ export function policyGlobMatches(pattern: string, path: string): boolean {
 }
 
 function preparePolicyGlob(pattern: string): (path: string) => boolean {
-  if (pattern === "**") return path => path.length > 0;
-  if (!pattern.includes("*")) return path => path === pattern;
+  if (pattern === "**") return (path) => path.length > 0;
+  if (!pattern.includes("*")) return (path) => path === pattern;
   if (pattern.endsWith("/**") && !pattern.slice(0, -3).includes("*")) {
     const prefix = pattern.slice(0, -2);
-    return path => path.startsWith(prefix);
+    return (path) => path.startsWith(prefix);
   }
   const patternSegments = pattern.split("/");
-  return path => policySegmentsMatch(patternSegments, path.split("/"));
+  return (path) => policySegmentsMatch(patternSegments, path.split("/"));
 }
 
-function policySegmentsMatch(patternSegments: readonly string[], pathSegments: readonly string[]): boolean {
+function policySegmentsMatch(
+  patternSegments: readonly string[],
+  pathSegments: readonly string[],
+): boolean {
   const finalPattern = patternSegments[patternSegments.length - 1];
   if (finalPattern === "**") {
     const prefixSegments = patternSegments.slice(0, -1);
@@ -131,13 +137,27 @@ function evaluateVisibilityPolicy(
 
 /** Prepare matchers once when evaluating the same rules over a complete listing. */
 export function prepareVisibilityPolicy(rules: readonly VisibilityPolicyRule[]) {
-  const matchers = new Map(rules.map(rule => [rule.path, preparePolicyGlob(rule.path)]));
-  return (path: string) => evaluateVisibilityPolicy(path, rules, (pattern, candidate) => matchers.get(pattern)!(candidate));
+  const matchers = new Map(rules.map((rule) => [rule.path, preparePolicyGlob(rule.path)]));
+  return (path: string) =>
+    evaluateVisibilityPolicy(path, rules, (pattern, candidate) =>
+      matchers.get(pattern)!(candidate),
+    );
 }
 
-export function sameVisibilityPolicy(a: readonly VisibilityPolicyRule[], b: readonly VisibilityPolicyRule[]): boolean {
-  return a === b || a.length === b.length && a.every((rule, i) => {
-    const previous = b[i];
-    return rule.path === previous.path && rule.visibility === previous.visibility && rule.export === previous.export;
-  });
+export function sameVisibilityPolicy(
+  a: readonly VisibilityPolicyRule[],
+  b: readonly VisibilityPolicyRule[],
+): boolean {
+  return (
+    a === b ||
+    (a.length === b.length &&
+      a.every((rule, i) => {
+        const previous = b[i];
+        return (
+          rule.path === previous.path &&
+          rule.visibility === previous.visibility &&
+          rule.export === previous.export
+        );
+      }))
+  );
 }

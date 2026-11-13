@@ -7,7 +7,11 @@ export type ShareSubjectKind = "missing" | "damaged" | "chat" | "version" | "pat
 // What a share covers, in words: its name, the folder it sits in, and the
 // whole of it for a title. The Sharing view draws it; Settings search finds it.
 export function shareSubject(row: AccessShareRow): {
-  kind: ShareSubjectKind; name: string; folder: string | null; title: string; path: string | null;
+  kind: ShareSubjectKind;
+  name: string;
+  folder: string | null;
+  title: string;
+  path: string | null;
 } {
   const selector = row.selector;
   // Ended and removed grants come without what they covered; only a damaged
@@ -23,7 +27,8 @@ export function shareSubject(row: AccessShareRow): {
   }
   const [first, ...rest] = selector.paths;
   if (first === undefined) {
-    const version = selector.versionId === null || selector.versionId === "main" ? "Main" : selector.versionId;
+    const version =
+      selector.versionId === null || selector.versionId === "main" ? "Main" : selector.versionId;
     const name = row.subjectName ?? `Version ${version}`;
     return { kind: "version", name, folder: null, title: name, path: null };
   }

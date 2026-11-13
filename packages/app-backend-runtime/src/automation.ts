@@ -1,12 +1,44 @@
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { isDeepStrictEqual } from "node:util";
-import { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES, failure, itemLimitMs, NOT_JSON, notReached, SCOPE_DEPTH, scopeTooDeep, scopeTooLarge, subjectOf } from "./automation-protocol.js";
-import type { AutomationFormula, AutomationOutcome, AutomationScope, AutomationTextPart, AutomationTimeSpent, AutomationWorkerItem, AutomationWorkerReply, AutomationWorkerRequest, CodeStepReturn } from "./automation-protocol.js";
+import {
+  AUTOMATION_LIMITS,
+  AUTOMATION_SCOPE_NAMES,
+  failure,
+  itemLimitMs,
+  NOT_JSON,
+  notReached,
+  SCOPE_DEPTH,
+  scopeTooDeep,
+  scopeTooLarge,
+  subjectOf,
+} from "./automation-protocol.js";
+import type {
+  AutomationFormula,
+  AutomationOutcome,
+  AutomationScope,
+  AutomationTextPart,
+  AutomationTimeSpent,
+  AutomationWorkerItem,
+  AutomationWorkerReply,
+  AutomationWorkerRequest,
+  CodeStepReturn,
+} from "./automation-protocol.js";
 import type { JsonValue } from "./protocol.js";
 
 export { AUTOMATION_LIMITS, AUTOMATION_SCOPE_NAMES } from "./automation-protocol.js";
-export type { AutomationError, AutomationErrorCode, AutomationFormula, AutomationOutcome, AutomationRecordChange, AutomationScope, AutomationTextPart, AutomationTimeSpent, CodeStepReturn, JsonObject } from "./automation-protocol.js";
+export type {
+  AutomationError,
+  AutomationErrorCode,
+  AutomationFormula,
+  AutomationOutcome,
+  AutomationRecordChange,
+  AutomationScope,
+  AutomationTextPart,
+  AutomationTimeSpent,
+  CodeStepReturn,
+  JsonObject,
+} from "./automation-protocol.js";
 export type { JsonValue } from "./protocol.js";
 
 /** Time an item gets beyond its limits before its worker is replaced. */
@@ -29,42 +61,80 @@ export interface AutomationEvaluatorOptions {
  */
 export interface AutomationEvaluator {
   /** Evaluates one run's formulas in one request. Each result is a JSON value or an error. */
-  evaluate(scope: AutomationScope, formulas: readonly AutomationFormula[], spent?: AutomationTimeSpent): Promise<AutomationOutcome<JsonValue>[]>;
+  evaluate(
+    scope: AutomationScope,
+    formulas: readonly AutomationFormula[],
+    spent?: AutomationTimeSpent,
+  ): Promise<AutomationOutcome<JsonValue>[]>;
   /** Runs a code step's function body with a frozen `ctx`. The result says what to change; nothing is written. */
-  runCode(scope: AutomationScope, source: string, spent?: AutomationTimeSpent): Promise<AutomationOutcome<CodeStepReturn>>;
+  runCode(
+    scope: AutomationScope,
+    source: string,
+    spent?: AutomationTimeSpent,
+  ): Promise<AutomationOutcome<CodeStepReturn>>;
   close(): Promise<void>;
 }
 
 /** The guest's date helpers read `now` as a real ISO 8601 time with a UTC offset. */
 function isInstant(value: unknown): boolean {
-  const match = typeof value === "string" ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(value) : null;
+  const match =
+    typeof value === "string"
+      ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/.exec(
+          value,
+        )
+      : null;
   if (!match) return false;
-  const [year, month, day, hour, minute, second, offsetHours, offsetMinutes] = match.slice(1).map(part => Number(part ?? 0));
+  const [year, month, day, hour, minute, second, offsetHours, offsetMinutes] = match
+    .slice(1)
+    .map((part) => Number(part ?? 0));
   const date = new Date(Date.UTC(year!, month! - 1, day!));
-  return date.getUTCMonth() === month! - 1 && date.getUTCDate() === day && hour! < 24 && minute! < 60 && second! < 60 &&
-    offsetMinutes! < 60 && offsetHours! * 60 + offsetMinutes! <= 14 * 60;
+  return (
+    date.getUTCMonth() === month! - 1 &&
+    date.getUTCDate() === day &&
+    hour! < 24 &&
+    minute! < 60 &&
+    second! < 60 &&
+    offsetMinutes! < 60 &&
+    offsetHours! * 60 + offsetMinutes! <= 14 * 60
+  );
 }
 
 /** A binding is read as a name of its own. The worker also refuses names that QuickJS's globals use. */
 const BINDING_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 function scopeProblem(scope: AutomationScope): string | undefined {
   if (!isInstant(scope.now)) return "The automation scope needs `now` with a UTC offset.";
-  if (scope.recordKeys !== undefined && (!Array.isArray(scope.recordKeys) || !scope.recordKeys.every(key => typeof key === "string"))) {
+  if (
+    scope.recordKeys !== undefined &&
+    (!Array.isArray(scope.recordKeys) || !scope.recordKeys.every((key) => typeof key === "string"))
+  ) {
     return "The automation scope's record keys must be a list of names.";
   }
   const unavailable = scope.unavailable ?? {};
-  if (typeof unavailable !== "object" || Array.isArray(unavailable) || !Object.values(unavailable).every(why => typeof why === "string")) {
+  if (
+    typeof unavailable !== "object" ||
+    Array.isArray(unavailable) ||
+    !Object.values(unavailable).every((why) => typeof why === "string")
+  ) {
     return "The automation scope's unavailable names must each say why.";
   }
-  const taken = [...Object.keys(scope.bindings ?? {}), ...Object.keys(unavailable)]
-    .find(name => !BINDING_NAME.test(name) || AUTOMATION_SCOPE_NAMES.includes(name) || (Object.hasOwn(unavailable, name) && Object.hasOwn(scope.bindings ?? {}, name)));
-  return taken === undefined ? undefined : `The automation scope cannot bind the name ${JSON.stringify(taken)}.`;
+  const taken = [...Object.keys(scope.bindings ?? {}), ...Object.keys(unavailable)].find(
+    (name) =>
+      !BINDING_NAME.test(name) ||
+      AUTOMATION_SCOPE_NAMES.includes(name) ||
+      (Object.hasOwn(unavailable, name) && Object.hasOwn(scope.bindings ?? {}, name)),
+  );
+  return taken === undefined
+    ? undefined
+    : `The automation scope cannot bind the name ${JSON.stringify(taken)}.`;
 }
 
 const isTextPart = (part: AutomationTextPart) =>
-  (part.kind === "text" && typeof part.text === "string") || (part.kind === "expression" && typeof part.expression === "string");
-const isFormula = (formula: AutomationFormula) => formula.kind === "expression" ? typeof formula.source === "string"
-  : formula.kind === "text" && Array.isArray(formula.parts) && formula.parts.every(isTextPart);
+  (part.kind === "text" && typeof part.text === "string") ||
+  (part.kind === "expression" && typeof part.expression === "string");
+const isFormula = (formula: AutomationFormula) =>
+  formula.kind === "expression"
+    ? typeof formula.source === "string"
+    : formula.kind === "text" && Array.isArray(formula.parts) && formula.parts.every(isTextPart);
 
 /**
  * The UTF-8 bytes JSON.stringify writes for a string, with its quotes. It stops counting past `limit`.
@@ -76,12 +146,23 @@ function jsonStringBytes(text: string, limit: number): number {
   bytes = 2;
   for (let index = 0; index < text.length && bytes <= limit; index++) {
     const code = text.charCodeAt(index);
-    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) bytes += 2;
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d
+    )
+      bytes += 2;
     else if (code < 0x20) bytes += 6;
     else if (code < 0x80) bytes += 1;
     else if (code < 0x800) bytes += 2;
-    else if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) { bytes += 4; index++; }
-    else if (code >= 0xd800 && code <= 0xdfff) bytes += 6;
+    else if (code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+      bytes += 4;
+      index++;
+    } else if (code >= 0xd800 && code <= 0xdfff) bytes += 6;
     else bytes += 3;
   }
   return bytes;
@@ -90,7 +171,9 @@ function jsonStringBytes(text: string, limit: number): number {
 const typeName = (value: unknown) => {
   if (typeof value !== "object" || value === null) return typeof value;
   const name: unknown = Object.getPrototypeOf(value)?.constructor?.name;
-  return typeof name === "string" && name !== "" ? name : Object.prototype.toString.call(value).slice(8, -1);
+  return typeof name === "string" && name !== ""
+    ? name
+    : Object.prototype.toString.call(value).slice(8, -1);
 };
 
 /**
@@ -99,11 +182,16 @@ const typeName = (value: unknown) => {
  * A value JSON cannot hold, such as a bigint, a date, or an instance of an Array subclass, is a problem for the
  * caller to fix.
  */
-function measureScope(scope: AutomationScope, comparisons: readonly JsonValue[] = []): "fits" | "too_large" | "too_deep" | { problem: string } {
+function measureScope(
+  scope: AutomationScope,
+  comparisons: readonly JsonValue[] = [],
+): "fits" | "too_large" | "too_deep" | { problem: string } {
   const limit = AUTOMATION_LIMITS.scopeBytes;
   let size = 0;
   // Comparisons stay in the host. Charge their values without adding wrapper depth to them or to the scope.
-  const pending: Array<[value: unknown, depth: number, maxDepth: number]> = [[scope, 1, SCOPE_DEPTH]];
+  const pending: Array<[value: unknown, depth: number, maxDepth: number]> = [
+    [scope, 1, SCOPE_DEPTH],
+  ];
   for (const value of comparisons) pending.push([value, 1, AUTOMATION_LIMITS.resultDepth]);
   while (pending.length > 0) {
     const [value, depth, maxDepth] = pending.pop()!;
@@ -115,8 +203,13 @@ function measureScope(scope: AutomationScope, comparisons: readonly JsonValue[] 
     else if (Array.isArray(value) && Object.getPrototypeOf(value) === Array.prototype) {
       if (depth > maxDepth) return "too_deep";
       size += Math.max(2, value.length + 1);
-      for (let index = 0; index < value.length && size <= limit; index++) pending.push([value[index], depth + 1, maxDepth]);
-    } else if (typeof value === "object" && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+      for (let index = 0; index < value.length && size <= limit; index++)
+        pending.push([value[index], depth + 1, maxDepth]);
+    } else if (
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      [Object.prototype, null].includes(Object.getPrototypeOf(value))
+    ) {
       if (depth > maxDepth) return "too_deep";
       let keys = 0;
       for (const key in value) {
@@ -139,11 +232,21 @@ function measureScope(scope: AutomationScope, comparisons: readonly JsonValue[] 
 function tooLarge(item: AutomationWorkerItem): AutomationOutcome<JsonValue> | undefined {
   let length: number;
   if (item.kind === "text") {
-    if (item.parts.length > AUTOMATION_LIMITS.textParts) return failure("too_large", `The message has more than ${AUTOMATION_LIMITS.textParts} parts.`);
+    if (item.parts.length > AUTOMATION_LIMITS.textParts)
+      return failure(
+        "too_large",
+        `The message has more than ${AUTOMATION_LIMITS.textParts} parts.`,
+      );
     length = 0;
-    for (const part of item.parts) length += (part.kind === "text" ? part.text : part.expression).length;
+    for (const part of item.parts)
+      length += (part.kind === "text" ? part.text : part.expression).length;
   } else length = item.source.length;
-  return length > AUTOMATION_LIMITS.sourceBytes ? failure("too_large", `${subjectOf(item)} is longer than ${AUTOMATION_LIMITS.sourceBytes / KiB} KiB.`) : undefined;
+  return length > AUTOMATION_LIMITS.sourceBytes
+    ? failure(
+        "too_large",
+        `${subjectOf(item)} is longer than ${AUTOMATION_LIMITS.sourceBytes / KiB} KiB.`,
+      )
+    : undefined;
 }
 
 /**
@@ -151,8 +254,12 @@ function tooLarge(item: AutomationWorkerItem): AutomationOutcome<JsonValue> | un
  * and each formula runs in its own QuickJS context. A runaway formula returns a timeout error and the worker
  * keeps serving. If the worker stops answering, a new worker evaluates the formulas it did not reach.
  */
-export function createAutomationEvaluator(options: AutomationEvaluatorOptions = {}): AutomationEvaluator {
-  const entryPath = options.entryPath ?? fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/automation-worker"));
+export function createAutomationEvaluator(
+  options: AutomationEvaluatorOptions = {},
+): AutomationEvaluator {
+  const entryPath =
+    options.entryPath ??
+    fileURLToPath(import.meta.resolve("@dohc/app-backend-runtime/automation-worker"));
   const idleMs = options.idleMs ?? IDLE_MS;
   let worker: Promise<Worker> | undefined;
   let idle: NodeJS.Timeout | undefined;
@@ -164,35 +271,57 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
 
   const stop = async (thread: Promise<Worker>) => {
     if (worker === thread) worker = undefined;
-    await thread.then(active => active.terminate(), () => undefined);
+    await thread.then(
+      (active) => active.terminate(),
+      () => undefined,
+    );
   };
 
-  const start = () => new Promise<Worker>((resolve, reject) => {
-    const thread = new Worker(entryPath, { resourceLimits: { maxOldGenerationSizeMb: 96 } });
-    thread.unref();
-    const settle = () => thread.off("message", onReady).off("error", onError).off("exit", onExit);
-    const onReady = () => { settle(); resolve(thread); };
-    const onError = (error: Error) => { settle(); reject(error); };
-    const onExit = () => onError(new Error("The automation worker stopped before it was ready."));
-    thread.on("message", onReady).on("error", onError).on("exit", onExit);
-  });
+  const start = () =>
+    new Promise<Worker>((resolve, reject) => {
+      const thread = new Worker(entryPath, { resourceLimits: { maxOldGenerationSizeMb: 96 } });
+      thread.unref();
+      const settle = () => thread.off("message", onReady).off("error", onError).off("exit", onExit);
+      const onReady = () => {
+        settle();
+        resolve(thread);
+      };
+      const onError = (error: Error) => {
+        settle();
+        reject(error);
+      };
+      const onExit = () => onError(new Error("The automation worker stopped before it was ready."));
+      thread.on("message", onReady).on("error", onError).on("exit", onExit);
+    });
 
   /**
    * Sends items to the worker and reports each result. It adds the time each item took to `spent`, and resolves
    * early when the worker is replaced.
    */
-  async function dispatch(run: Run, items: AutomationWorkerItem[], report: (offset: number, result: AutomationOutcome<JsonValue>) => void, spent: AutomationTimeSpent): Promise<void> {
+  async function dispatch(
+    run: Run,
+    items: AutomationWorkerItem[],
+    report: (offset: number, result: AutomationOutcome<JsonValue>) => void,
+    spent: AutomationTimeSpent,
+  ): Promise<void> {
     if (closed) throw new Error("The automation evaluator is closed.");
     clearTimeout(idle);
-    const thread = worker ??= start();
-    thread.catch(() => { if (worker === thread) worker = undefined; });
+    const thread = (worker ??= start());
+    thread.catch(() => {
+      if (worker === thread) worker = undefined;
+    });
     const active = await thread;
     return new Promise((resolve, reject) => {
-      let received = 0, itemStarted = performance.now();
+      let received = 0,
+        itemStarted = performance.now();
       let watchdog: NodeJS.Timeout | undefined;
       const settle = () => {
         clearTimeout(watchdog);
-        active.off("message", onMessage).off("messageerror", onMessageError).off("error", onFailure).off("exit", onFailure);
+        active
+          .off("message", onMessage)
+          .off("messageerror", onMessageError)
+          .off("error", onFailure)
+          .off("exit", onFailure);
       };
       const rest = () => {
         settle();
@@ -208,7 +337,10 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       const accept = (result: AutomationOutcome<JsonValue>, times?: AutomationTimeSpent) => {
         record(result, times);
         if (received < items.length) arm();
-        else { rest(); resolve(); }
+        else {
+          rest();
+          resolve();
+        }
       };
       // The item in flight fails. The caller sends the items after it to a new worker.
       const replace = (result: AutomationOutcome<JsonValue>) => {
@@ -222,9 +354,18 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
       const arm = () => {
         clearTimeout(watchdog);
         itemStarted = performance.now();
-        const item = items[received]!, limitMs = itemLimitMs(item);
-        watchdog = setTimeout(() => replace(failure("timeout", `${subjectOf(item)} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`)),
-          AUTOMATION_LIMITS.prepareMs + limitMs + WATCHDOG_GRACE_MS);
+        const item = items[received]!,
+          limitMs = itemLimitMs(item);
+        watchdog = setTimeout(
+          () =>
+            replace(
+              failure(
+                "timeout",
+                `${subjectOf(item)} ran longer than ${limitMs} ms, so it stopped. Check it for a loop that never ends.`,
+              ),
+            ),
+          AUTOMATION_LIMITS.prepareMs + limitMs + WATCHDOG_GRACE_MS,
+        );
       };
       const onMessage = (reply: AutomationWorkerReply) => {
         if (reply.kind === "result" && !reply.restart) accept(reply.result, reply);
@@ -239,25 +380,60 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
           void stop(thread);
           // A worker that fails before it finishes any item would fail again, so its items fail instead.
           // The request then has no items left, so the time this took is not counted.
-          if (received === 0) items.forEach((item, offset) => report(offset, failure("runtime", `The evaluator stopped before it ran ${subjectOf(item).toLowerCase()}.`)));
+          if (received === 0)
+            items.forEach((item, offset) =>
+              report(
+                offset,
+                failure(
+                  "runtime",
+                  `The evaluator stopped before it ran ${subjectOf(item).toLowerCase()}.`,
+                ),
+              ),
+            );
           resolve();
+        } else if (reply.kind === "refused") {
+          rest();
+          reject(new Error(reply.message));
         }
-        else if (reply.kind === "refused") { rest(); reject(new Error(reply.message)); }
       };
       // A reply this thread cannot read fails its item. The worker goes on with the next one.
-      const onMessageError = () => accept(failure("invalid_result", `${subjectOf(items[received]!)} produced a value that cannot be read.`));
+      const onMessageError = () =>
+        accept(
+          failure(
+            "invalid_result",
+            `${subjectOf(items[received]!)} produced a value that cannot be read.`,
+          ),
+        );
       const onFailure = () => {
-        if (!closed) return replace(failure("runtime", `The evaluator stopped while it ran ${subjectOf(items[received]!).toLowerCase()}.`));
+        if (!closed)
+          return replace(
+            failure(
+              "runtime",
+              `The evaluator stopped while it ran ${subjectOf(items[received]!).toLowerCase()}.`,
+            ),
+          );
         settle();
         reject(new Error("The automation evaluator is closed."));
       };
-      active.on("message", onMessage).on("messageerror", onMessageError).on("error", onFailure).on("exit", onFailure);
+      active
+        .on("message", onMessage)
+        .on("messageerror", onMessageError)
+        .on("error", onFailure)
+        .on("exit", onFailure);
       arm();
       try {
-        active.postMessage({ kind: "evaluate", runId: run.id, items, spent: { ...spent },
-          ...(run.preparedOn === active ? {} : { scope: run.scope }) } satisfies AutomationWorkerRequest);
+        active.postMessage({
+          kind: "evaluate",
+          runId: run.id,
+          items,
+          spent: { ...spent },
+          ...(run.preparedOn === active ? {} : { scope: run.scope }),
+        } satisfies AutomationWorkerRequest);
         run.preparedOn = active;
-      } catch (error) { rest(); reject(error); }
+      } catch (error) {
+        rest();
+        reject(error);
+      }
     });
   }
 
@@ -268,58 +444,94 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
   function busy(count: number): AutomationOutcome<never>[] | undefined {
     if (closed) throw new Error("The automation evaluator is closed.");
     if (queued < AUTOMATION_LIMITS.queuedRequests) return undefined;
-    return Array.from({ length: count }, () => failure("busy", `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`));
+    return Array.from({ length: count }, () =>
+      failure(
+        "busy",
+        `The evaluator already has ${AUTOMATION_LIMITS.queuedRequests} runs waiting. Try this run again later.`,
+      ),
+    );
   }
 
   /** Called at once after `busy` returns nothing, so the queue cannot fill in between. */
-  async function run(scope: AutomationScope, items: AutomationWorkerItem[], spent: AutomationTimeSpent): Promise<AutomationOutcome<JsonValue>[]> {
+  async function run(
+    scope: AutomationScope,
+    items: AutomationWorkerItem[],
+    spent: AutomationTimeSpent,
+  ): Promise<AutomationOutcome<JsonValue>[]> {
     const problem = scopeProblem(scope);
     if (problem) throw new Error(problem);
     // Dependents share condition objects. Guard references are bounded at admission; charge each value only once.
-    const guards = new Set(items.flatMap(item => "when" in item ? item.when ?? [] : []));
-    const comparisons = [...guards].flatMap(guard => "equals" in guard ? [guard.equals] : []);
+    const guards = new Set(items.flatMap((item) => ("when" in item ? (item.when ?? []) : [])));
+    const comparisons = [...guards].flatMap((guard) => ("equals" in guard ? [guard.equals] : []));
     const measured = measureScope(scope, comparisons);
     if (typeof measured === "object") throw new Error(measured.problem);
-    const results: Array<AutomationOutcome<JsonValue> | undefined> = measured === "too_large" ? items.map(scopeTooLarge)
-      : measured === "too_deep" ? items.map(scopeTooDeep) : items.map(() => undefined);
-    if (results.every(result => result !== undefined)) return results as AutomationOutcome<JsonValue>[];
+    const results: Array<AutomationOutcome<JsonValue> | undefined> =
+      measured === "too_large"
+        ? items.map(scopeTooLarge)
+        : measured === "too_deep"
+          ? items.map(scopeTooDeep)
+          : items.map(() => undefined);
+    if (results.every((result) => result !== undefined))
+      return results as AutomationOutcome<JsonValue>[];
     const context: Run = { id: ++nextRunId, scope: structuredClone(scope) };
     queued++;
-    const done = queue.then(async () => {
-      for (;;) {
-        const waiting: number[] = [];
-        for (const [index, item] of items.entries()) {
-          if (results[index] !== undefined) continue;
-          const guards = "when" in item ? item.when ?? [] : [];
-          // Dispatch the preceding formulas before deciding a dependent branch.
-          if (guards.some(guard => results[guard.index] === undefined)) break;
-          if (guards.some(guard => {
-            const result = results[guard.index]!;
-            return !result.ok || ("truthy" in guard ? Boolean(result.value) !== guard.truthy : !isDeepStrictEqual(result.value, guard.equals));
-          })) {
-            results[index] = { ok: true, value: null };
-            continue;
+    const done = queue
+      .then(async () => {
+        for (;;) {
+          const waiting: number[] = [];
+          for (const [index, item] of items.entries()) {
+            if (results[index] !== undefined) continue;
+            const guards = "when" in item ? (item.when ?? []) : [];
+            // Dispatch the preceding formulas before deciding a dependent branch.
+            if (guards.some((guard) => results[guard.index] === undefined)) break;
+            if (
+              guards.some((guard) => {
+                const result = results[guard.index]!;
+                return (
+                  !result.ok ||
+                  ("truthy" in guard
+                    ? Boolean(result.value) !== guard.truthy
+                    : !isDeepStrictEqual(result.value, guard.equals))
+                );
+              })
+            ) {
+              results[index] = { ok: true, value: null };
+              continue;
+            }
+            // A skipped formula costs no source check, scope preparation, or runtime.
+            const refused = tooLarge(item) ?? notReached(item, spent);
+            if (refused) results[index] = refused;
+            else waiting.push(index);
           }
-          // A skipped formula costs no source check, scope preparation, or runtime.
-          const refused = tooLarge(item) ?? notReached(item, spent);
-          if (refused) results[index] = refused;
-          else waiting.push(index);
+          if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
+          const runnable = waiting.map((index) => {
+            const item = items[index]!;
+            if (!("when" in item)) return item;
+            const { when: _when, ...formula } = item;
+            return formula;
+          });
+          await dispatch(
+            context,
+            runnable,
+            (offset, result) => {
+              results[waiting[offset]!] = result;
+            },
+            spent,
+          );
         }
-        if (waiting.length === 0) return results as AutomationOutcome<JsonValue>[];
-        const runnable = waiting.map(index => {
-          const item = items[index]!;
-          if (!("when" in item)) return item;
-          const { when: _when, ...formula } = item;
-          return formula;
-        });
-        await dispatch(context, runnable, (offset, result) => { results[waiting[offset]!] = result; }, spent);
-      }
-    }).finally(() => {
-      queued--;
-      // Messages to one worker are ordered. End this run before the queue admits the next one.
-      try { context.preparedOn?.postMessage({ kind: "end", runId: context.id } satisfies AutomationWorkerRequest); }
-      catch { /* A replaced or closed worker already released its run. */ }
-    });
+      })
+      .finally(() => {
+        queued--;
+        // Messages to one worker are ordered. End this run before the queue admits the next one.
+        try {
+          context.preparedOn?.postMessage({
+            kind: "end",
+            runId: context.id,
+          } satisfies AutomationWorkerRequest);
+        } catch {
+          /* A replaced or closed worker already released its run. */
+        }
+      });
     queue = done.catch(() => undefined);
     return done;
   }
@@ -328,13 +540,34 @@ export function createAutomationEvaluator(options: AutomationEvaluatorOptions = 
     async evaluate(scope, formulas, spent = { prepareMs: 0, runMs: 0 }) {
       const full = busy(formulas.length);
       if (full) return full;
-      if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch) throw new Error(`One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`);
-      if (!formulas.every(isFormula)) throw new Error("A formula is not an expression or message text parts.");
-      if (!formulas.every((formula, index) => formula.when === undefined || (Array.isArray(formula.when)
-        && formula.when.length <= index && formula.when.every(guard => guard !== null && typeof guard === "object"
-          && Number.isSafeInteger(guard.index) && guard.index >= 0 && guard.index < index
-          && ("truthy" in guard ? typeof guard.truthy === "boolean" && !("equals" in guard) : "equals" in guard && guard.equals !== undefined))))) {
-        throw new Error("A formula guard must refer to an earlier formula and require truthiness or a JSON value.");
+      if (formulas.length > AUTOMATION_LIMITS.formulasPerBatch)
+        throw new Error(
+          `One run can evaluate at most ${AUTOMATION_LIMITS.formulasPerBatch} formulas.`,
+        );
+      if (!formulas.every(isFormula))
+        throw new Error("A formula is not an expression or message text parts.");
+      if (
+        !formulas.every(
+          (formula, index) =>
+            formula.when === undefined ||
+            (Array.isArray(formula.when) &&
+              formula.when.length <= index &&
+              formula.when.every(
+                (guard) =>
+                  guard !== null &&
+                  typeof guard === "object" &&
+                  Number.isSafeInteger(guard.index) &&
+                  guard.index >= 0 &&
+                  guard.index < index &&
+                  ("truthy" in guard
+                    ? typeof guard.truthy === "boolean" && !("equals" in guard)
+                    : "equals" in guard && guard.equals !== undefined),
+              )),
+        )
+      ) {
+        throw new Error(
+          "A formula guard must refer to an earlier formula and require truthiness or a JSON value.",
+        );
       }
       return formulas.length === 0 ? [] : run(scope, [...formulas], spent);
     },

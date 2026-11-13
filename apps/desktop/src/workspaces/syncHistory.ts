@@ -1,5 +1,14 @@
-import { AUTOMATION_COMPUTER_LABEL_MAX_CHARS, AUTOMATION_INSTALL_ID_MAX_CHARS, isNoticeLine } from "@dohc/workspace-contracts/relay";
-import { DOHC_SYNC_HISTORY_GUARD, notAFileRefusal, notARealFolderRefusal, type DohcPathGuard } from "@dohc/workspace-core";
+import {
+  AUTOMATION_COMPUTER_LABEL_MAX_CHARS,
+  AUTOMATION_INSTALL_ID_MAX_CHARS,
+  isNoticeLine,
+} from "@dohc/workspace-contracts/relay";
+import {
+  DOHC_SYNC_HISTORY_GUARD,
+  notAFileRefusal,
+  notARealFolderRefusal,
+  type DohcPathGuard,
+} from "@dohc/workspace-core";
 import { lstat, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { atomicCreateFile, atomicWriteFile } from "../atomicReplaceFile";
@@ -17,7 +26,9 @@ export interface Computer {
 }
 
 /** Who runs a never-synced workspace's schedules, or why dohc cannot say. */
-export type ScheduleComputer = { kind: "computer"; computer: Computer } | { kind: "unreadable"; error: unknown };
+export type ScheduleComputer =
+  | { kind: "computer"; computer: Computer }
+  | { kind: "unreadable"; error: unknown };
 
 interface HistoryRecord {
   synced: boolean;
@@ -28,12 +39,16 @@ interface HistoryRecord {
 }
 
 type Mark = "synced" | "received-share";
-type FileRead = { kind: "text"; text: string } | { kind: "absent" } | { kind: "failed"; error: unknown };
+type FileRead =
+  | { kind: "text"; text: string }
+  | { kind: "absent" }
+  | { kind: "failed"; error: unknown };
 
 // A sync-history path, as a refusal names it.
 const at = (path: string): DohcPathGuard => ({ ...DOHC_SYNC_HISTORY_GUARD, path });
 
-const computerText = ({ installId, label }: Computer) => `${JSON.stringify({ version: 1, installId, label })}\n`;
+const computerText = ({ installId, label }: Computer) =>
+  `${JSON.stringify({ version: 1, installId, label })}\n`;
 
 /**
  * A new workspace that has not synced, whose schedules run on `computer`.
@@ -41,7 +56,11 @@ const computerText = ({ installId, label }: Computer) => `${JSON.stringify({ ver
  */
 export async function recordNeverSynced(rootPath: string, computer: Computer): Promise<void> {
   const metadata = await resolveWorkspaceMetadataDir(rootPath);
-  await createGuardedFileOnce(join(metadata, "sync-history.json"), at(".dohc/sync-history.json"), `${JSON.stringify({ version: 1, synced: false, receivedShare: false, host: computer })}\n`);
+  await createGuardedFileOnce(
+    join(metadata, "sync-history.json"),
+    at(".dohc/sync-history.json"),
+    `${JSON.stringify({ version: 1, synced: false, receivedShare: false, host: computer })}\n`,
+  );
 }
 
 /** The workspace synced or opened as a share. Nothing undoes it. */
@@ -75,10 +94,10 @@ async function marksFolder(rootPath: string): Promise<string> {
   }
   // Something other than a real folder there could lead outside the workspace.
   const stats = await lstat(folder);
-  if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, stats));
+  if (stats.isSymbolicLink() || !stats.isDirectory())
+    throw new Error(notARealFolderRefusal(DOHC_SYNC_HISTORY_GUARD, stats));
   return folder;
 }
-
 
 // Windows can follow a dangling file link even with "wx". Inspect the entry
 // itself before reading or writing; only an absent entry is a missing record.
@@ -93,16 +112,20 @@ export async function guardedFileExists(path: string, guard: DohcPathGuard): Pro
   }
 }
 
-async function createGuardedFileOnce(path: string, guard: DohcPathGuard, text: string): Promise<void> {
+async function createGuardedFileOnce(
+  path: string,
+  guard: DohcPathGuard,
+  text: string,
+): Promise<void> {
   if (await guardedFileExists(path, guard)) return;
-  if (!await atomicCreateFile(path, text, 0o666, { allowDirectWrite: true })) {
+  if (!(await atomicCreateFile(path, text, 0o666, { allowDirectWrite: true }))) {
     await guardedFileExists(path, guard);
   }
 }
 
 export async function readGuardedFile(path: string, guard: DohcPathGuard): Promise<FileRead> {
   try {
-    if (!await guardedFileExists(path, guard)) return { kind: "absent" };
+    if (!(await guardedFileExists(path, guard))) return { kind: "absent" };
     return { kind: "text", text: await readFile(path, "utf8") };
   } catch (error) {
     return { kind: "failed", error };
@@ -128,13 +151,16 @@ export function parseObject(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null;
 }
 
 export function computerOf(value: unknown): Computer | null {
   if (!value || typeof value !== "object") return null;
   const { installId, label } = value as Record<string, unknown>;
-  return isNoticeLine(installId, AUTOMATION_INSTALL_ID_MAX_CHARS) && isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS)
+  return isNoticeLine(installId, AUTOMATION_INSTALL_ID_MAX_CHARS) &&
+    isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS)
     ? { installId, label }
     : null;
 }
@@ -168,7 +194,8 @@ async function readHistory(rootPath: string): Promise<History> {
     // A .dohc that is not a real folder inside the workspace proves nothing.
     return { history: "unknown", record: null, receivedShare: null, marks: null };
   }
-  if (metadata === null) return { history: "absent", record: null, receivedShare: false, marks: null };
+  if (metadata === null)
+    return { history: "absent", record: null, receivedShare: false, marks: null };
   const marks = join(metadata, "sync-history");
   const stats = await lstat(marks).catch(() => null);
   // Nor does a marks folder that is a link or a file.
@@ -176,11 +203,21 @@ async function readHistory(rootPath: string): Promise<History> {
     return { history: "unknown", record: null, receivedShare: null, marks: null };
   }
   const [file, synced, shared] = await Promise.all([
-    readGuardedFile(join(metadata, "sync-history.json"), at(".dohc/sync-history.json")), marked(marks, "synced"), marked(marks, "received-share"),
+    readGuardedFile(join(metadata, "sync-history.json"), at(".dohc/sync-history.json")),
+    marked(marks, "synced"),
+    marked(marks, "received-share"),
   ]);
   const record = file.kind === "text" ? parseRecord(file.text) : null;
-  const receivedShare = shared === false && record?.receivedShare === true ? await keep(rootPath, "received-share") : shared;
-  const answer = (history: SyncHistory, never: HistoryRecord | null = null): History => ({ history, record: never, receivedShare, marks });
+  const receivedShare =
+    shared === false && record?.receivedShare === true
+      ? await keep(rootPath, "received-share")
+      : shared;
+  const answer = (history: SyncHistory, never: HistoryRecord | null = null): History => ({
+    history,
+    record: never,
+    receivedShare,
+    marks,
+  });
   if (synced === null) return answer("unknown");
   if (synced || record?.synced) {
     if (!synced) await keep(rootPath, "synced");
@@ -206,8 +243,11 @@ async function keep(rootPath: string, name: Mark): Promise<true> {
 export async function workspaceMadeBy(rootPath: string): Promise<Computer | null> {
   const metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false }).catch(() => null);
   if (metadata === null) return null;
-  const read = await readGuardedFile(join(metadata, "sync-history.json"), at(".dohc/sync-history.json"));
-  return read.kind === "text" ? parseRecord(read.text)?.host ?? null : null;
+  const read = await readGuardedFile(
+    join(metadata, "sync-history.json"),
+    at(".dohc/sync-history.json"),
+  );
+  return read.kind === "text" ? (parseRecord(read.text)?.host ?? null) : null;
 }
 
 /** What the workspace's history says. */
@@ -222,7 +262,10 @@ export async function readSyncHistory(rootPath: string): Promise<SyncHistory> {
  * over. A record from before dohc named a host belongs to the first
  * computer that reads it, so its only computer keeps running its schedules.
  */
-export async function scheduleComputer(rootPath: string, here: Computer): Promise<ScheduleComputer | null> {
+export async function scheduleComputer(
+  rootPath: string,
+  here: Computer,
+): Promise<ScheduleComputer | null> {
   const { record, marks } = await readHistory(rootPath);
   if (record === null || marks === null) return null;
   const path = join(marks, "schedules.json");
@@ -230,7 +273,14 @@ export async function scheduleComputer(rootPath: string, here: Computer): Promis
   if (read.kind !== "absent") return scheduleComputerOf(read);
   if (record.host !== null) return { kind: "computer", computer: record.host };
   try {
-    if (await atomicCreateFile(join(await marksFolder(rootPath), "schedules.json"), computerText(here), 0o666, { allowDirectWrite: true })) {
+    if (
+      await atomicCreateFile(
+        join(await marksFolder(rootPath), "schedules.json"),
+        computerText(here),
+        0o666,
+        { allowDirectWrite: true },
+      )
+    ) {
       return { kind: "computer", computer: here };
     }
     // Another reader recorded one first: read it, once.
@@ -248,7 +298,10 @@ function scheduleComputerOf(read: Exclude<FileRead, { kind: "absent" }>): Schedu
   const parsed = parseObject(read.text);
   const computer = parsed?.version === 1 ? computerOf(parsed) : null;
   return computer === null
-    ? { kind: "unreadable", error: new Error("The file .dohc/sync-history/schedules.json does not name a computer.") }
+    ? {
+        kind: "unreadable",
+        error: new Error("The file .dohc/sync-history/schedules.json does not name a computer."),
+      }
     : { kind: "computer", computer };
 }
 
@@ -281,7 +334,8 @@ export async function provedNeverShared(
   entry: RegistryEntry,
   remoteChangesApplied: () => Promise<number | null>,
 ): Promise<boolean> {
-  if (entry.remote || entry.shareView || entry.sharedChannels?.length || entry.shareMounts?.length) return false;
+  if (entry.remote || entry.shareView || entry.sharedChannels?.length || entry.shareMounts?.length)
+    return false;
   const { record, receivedShare } = await readHistory(entry.rootPath);
   if (record?.receivedShare !== false || receivedShare !== false) return false;
   return (await remoteChangesApplied()) === 0;

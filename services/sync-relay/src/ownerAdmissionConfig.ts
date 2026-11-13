@@ -1,92 +1,171 @@
-import {openSync,readSync,closeSync} from "node:fs";
-import {isAbsolute} from "node:path";
+import { openSync, readSync, closeSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
-import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
 // The relay builder bundles this declared dependency without publishing its private validator.
-import {liveValidation} from "./liveValidation.js";
-import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
-import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
-import type {SyncRelayStorage} from "./storage.js";
-import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory.js";
-import type {createDeviceControl} from "./deviceControl.js";
-import {configRecord} from "./deviceLiveHostConfig.js";
+import { liveValidation } from "./liveValidation.js";
+import type { OrderedLiveUpdateCutPolicy } from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut.js";
+import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
+import type { SyncRelayStorage } from "./storage.js";
+import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
+import type { createDeviceControl } from "./deviceControl.js";
+import { configRecord } from "./deviceLiveHostConfig.js";
 
-const policyFields = ["maxStructVisits","maxValueNodeVisits","maxDecodedPayloadByteVisits","maxStructClientGroupVisits","maxDeleteClientGroupVisits","maxDeleteIntervalVisits","maxIndexOperations"];
+const policyFields = [
+  "maxStructVisits",
+  "maxValueNodeVisits",
+  "maxDecodedPayloadByteVisits",
+  "maxStructClientGroupVisits",
+  "maxDeleteClientGroupVisits",
+  "maxDeleteIntervalVisits",
+  "maxIndexOperations",
+];
 const positive = (value: unknown) => {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new Error("Invalid private owner admission budget.");
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > 2_147_483_647
+  )
+    throw new Error("Invalid private owner admission budget.");
   return value;
 };
-export function readOwnerAdmissionConfig(path: string,workspaceIds: readonly string[], trustedAccount: OwnerOutboxAdmission["trustedAccount"]) {
-  if (!isAbsolute(path)) throw new Error("Private owner admission configuration path must be absolute.");
-  const fd = openSync(path,"r"), buffer = Buffer.alloc(1_048_577);
+export function readOwnerAdmissionConfig(
+  path: string,
+  workspaceIds: readonly string[],
+  trustedAccount: OwnerOutboxAdmission["trustedAccount"],
+) {
+  if (!isAbsolute(path))
+    throw new Error("Private owner admission configuration path must be absolute.");
+  const fd = openSync(path, "r"),
+    buffer = Buffer.alloc(1_048_577);
   let length = 0;
-  try {while (length < buffer.length) {const read = readSync(fd,buffer,length,buffer.length-length,null); if (!read) break; length += read;}}
-  finally {closeSync(fd);}
-  if (length === buffer.length) throw new Error("Private owner admission configuration is too large.");
-  const row = configRecord(JSON.parse(buffer.subarray(0,length).toString("utf8")),["version","validation","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs"]);
+  try {
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (!read) break;
+      length += read;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  if (length === buffer.length)
+    throw new Error("Private owner admission configuration is too large.");
+  const row = configRecord(JSON.parse(buffer.subarray(0, length).toString("utf8")), [
+    "version",
+    "validation",
+    "maxEntriesPerDrain",
+    "maxBytesPerDrain",
+    "maxDocumentsPerPass",
+    "pollIntervalMs",
+    "passDeadlineMs",
+  ]);
   if (row.version !== 1) throw new Error("Invalid private owner admission version.");
   // The owner's queues of every delivered workspace deliver as that workspace's owner.
-  const admitted = new Set(workspaceIds.map(workspaceId => parseLiveUpdateIdentifier(workspaceId,"workspace ID")));
+  const admitted = new Set(
+    workspaceIds.map((workspaceId) => parseLiveUpdateIdentifier(workspaceId, "workspace ID")),
+  );
   if (!admitted.size) throw new Error("Private owner workspace is not configured.");
-  const validation = configRecord(row.validation,policyFields);
+  const validation = configRecord(row.validation, policyFields);
   const policy: OrderedLiveUpdateCutPolicy = {
-    maxStructVisits: positive(validation.maxStructVisits),maxValueNodeVisits: positive(validation.maxValueNodeVisits),
-    maxDecodedPayloadByteVisits: positive(validation.maxDecodedPayloadByteVisits),maxStructClientGroupVisits: positive(validation.maxStructClientGroupVisits),
-    maxDeleteClientGroupVisits: positive(validation.maxDeleteClientGroupVisits),maxDeleteIntervalVisits: positive(validation.maxDeleteIntervalVisits),
+    maxStructVisits: positive(validation.maxStructVisits),
+    maxValueNodeVisits: positive(validation.maxValueNodeVisits),
+    maxDecodedPayloadByteVisits: positive(validation.maxDecodedPayloadByteVisits),
+    maxStructClientGroupVisits: positive(validation.maxStructClientGroupVisits),
+    maxDeleteClientGroupVisits: positive(validation.maxDeleteClientGroupVisits),
+    maxDeleteIntervalVisits: positive(validation.maxDeleteIntervalVisits),
     maxIndexOperations: positive(validation.maxIndexOperations),
   };
   const validate = liveValidation.validator(policy);
-  const admission: OwnerOutboxAdmission = {trustedAccount,workspaceIds: admitted,maxEntriesPerDrain: positive(row.maxEntriesPerDrain),maxBytesPerDrain: positive(row.maxBytesPerDrain),
-    refusals: new OwnerKnownRefusals(),validate};
-  return {admission,maxDocumentsPerPass: positive(row.maxDocumentsPerPass),pollIntervalMs: positive(row.pollIntervalMs),passDeadlineMs: positive(row.passDeadlineMs)};
+  const admission: OwnerOutboxAdmission = {
+    trustedAccount,
+    workspaceIds: admitted,
+    maxEntriesPerDrain: positive(row.maxEntriesPerDrain),
+    maxBytesPerDrain: positive(row.maxBytesPerDrain),
+    refusals: new OwnerKnownRefusals(),
+    validate,
+  };
+  return {
+    admission,
+    maxDocumentsPerPass: positive(row.maxDocumentsPerPass),
+    pollIntervalMs: positive(row.pollIntervalMs),
+    passDeadlineMs: positive(row.passDeadlineMs),
+  };
 }
 
 /** The private device owner keeps journal progress moving without a public control route. */
 export function startOwnerAdmission(options: {
-  config: ReturnType<typeof readOwnerAdmissionConfig>; storage: SyncRelayStorage; history: LiveJournalHistoryAuthority;
-  control: Pick<ReturnType<typeof createDeviceControl>,"settle">; onError(error: unknown): void;
+  config: ReturnType<typeof readOwnerAdmissionConfig>;
+  storage: SyncRelayStorage;
+  history: LiveJournalHistoryAuthority;
+  control: Pick<ReturnType<typeof createDeviceControl>, "settle">;
+  onError(error: unknown): void;
 }) {
-  let workspaceIndex = 0, afterObject = "", lastError: string | undefined;
-  const stop = new AbortController(), workspaces = [...options.config.admission.workspaceIds];
-  const lifetime = AbortSignal.any([stop.signal,options.storage.unavailable]);
+  let workspaceIndex = 0,
+    afterObject = "",
+    lastError: string | undefined;
+  const stop = new AbortController(),
+    workspaces = [...options.config.admission.workspaceIds];
+  const lifetime = AbortSignal.any([stop.signal, options.storage.unavailable]);
   const store = options.storage.createLiveCommittedDeliveryStore(options.history);
   const pass = async () => {
-    const signal = AbortSignal.any([lifetime,AbortSignal.timeout(options.config.passDeadlineMs)]);
+    const signal = AbortSignal.any([lifetime, AbortSignal.timeout(options.config.passDeadlineMs)]);
     try {
-      let visited = 0, completedWorkspaces = 0;
-      while (!signal.aborted && visited < options.config.maxDocumentsPerPass && completedWorkspaces < workspaces.length) {
+      let visited = 0,
+        completedWorkspaces = 0;
+      while (
+        !signal.aborted &&
+        visited < options.config.maxDocumentsPerPass &&
+        completedWorkspaces < workspaces.length
+      ) {
         const workspaceId = workspaces[workspaceIndex]!;
-        const document = store.nextOwnerDocument(workspaceId,afterObject);
-        if (!document) {afterObject = ""; workspaceIndex = (workspaceIndex+1)%workspaces.length; completedWorkspaces++; continue;}
-        afterObject = document.objectId; visited++;
-        await options.control.settle(document,signal);
+        const document = store.nextOwnerDocument(workspaceId, afterObject);
+        if (!document) {
+          afterObject = "";
+          workspaceIndex = (workspaceIndex + 1) % workspaces.length;
+          completedWorkspaces++;
+          continue;
+        }
+        afterObject = document.objectId;
+        visited++;
+        await options.control.settle(document, signal);
       }
       lastError = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!lifetime.aborted && message !== lastError) {
         lastError = message;
-        try {options.onError(error);} catch { /* Reporting must not stop delivery. */ }
+        try {
+          options.onError(error);
+        } catch {
+          /* Reporting must not stop delivery. */
+        }
       }
     }
   };
-  const pause = Effect.callback<void>(resume => {
-    const timer = setTimeout(() => resume(Effect.void),options.config.pollIntervalMs);
+  const pause = Effect.callback<void>((resume) => {
+    const timer = setTimeout(() => resume(Effect.void), options.config.pollIntervalMs);
     timer.unref();
     return Effect.sync(() => clearTimeout(timer));
   });
   // Keep ownership until settlement finishes, even when it ignores abort.
-  const finished = Effect.runPromiseExit(Effect.gen(function* () {
-    while (true) {
-      yield* Effect.uninterruptible(Effect.promise(pass));
-      yield* pause;
-    }
-  }),{signal: lifetime});
-  return {async close() {
-    stop.abort();
-    const exit = await finished;
-    if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
-  }};
+  const finished = Effect.runPromiseExit(
+    Effect.gen(function* () {
+      while (true) {
+        yield* Effect.uninterruptible(Effect.promise(pass));
+        yield* pause;
+      }
+    }),
+    { signal: lifetime },
+  );
+  return {
+    async close() {
+      stop.abort();
+      const exit = await finished;
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause))
+        throw Cause.squash(exit.cause);
+    },
+  };
 }

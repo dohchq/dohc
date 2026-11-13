@@ -7,4 +7,7 @@ import { vi } from "vitest";
 // longer wait would move fake time further; those waits keep vitest's default.
 const waitFor = vi.waitFor;
 vi.waitFor = (callback, options) =>
-  waitFor(callback, typeof options === "number" || vi.isFakeTimers() ? options : { timeout: 10_000, ...options });
+  waitFor(
+    callback,
+    typeof options === "number" || vi.isFakeTimers() ? options : { timeout: 10_000, ...options },
+  );

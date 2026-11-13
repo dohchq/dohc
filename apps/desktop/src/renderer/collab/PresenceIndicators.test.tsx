@@ -5,8 +5,15 @@ import { PresenceFaces } from "./PresenceIndicators";
 import type { PresencePeer } from "./presenceChannel";
 afterEach(cleanup);
 it("draws faces from disclosed slots, with readable theme classes", () => {
-  const peer = (slot: number): PresencePeer => ({ faceToken: String(slot), sessionToken: String(slot), isSelf: false,
-    displayName: "Same label", paletteSlot: slot, state: null, updatedAtMs: 0 });
+  const peer = (slot: number): PresencePeer => ({
+    faceToken: String(slot),
+    sessionToken: String(slot),
+    isSelf: false,
+    displayName: "Same label",
+    paletteSlot: slot,
+    state: null,
+    updatedAtMs: 0,
+  });
   const { container, rerender } = render(<PresenceFaces others={[peer(0), peer(6)]} />);
   expect(screen.getByRole("status").getAttribute("title")).toBe("Same label, Same label");
   expect(container.querySelectorAll("span")[0]?.className).toContain("text-hue-rust");
@@ -19,9 +26,25 @@ it("draws faces from disclosed slots, with readable theme classes", () => {
 });
 
 it("draws an agent's mark and a person's initial side by side, then how many more", () => {
-  const peer = (id: string, displayName: string, agent = false): PresencePeer => ({ faceToken: id, sessionToken: id, isSelf: false,
-    displayName, paletteSlot: 1, state: agent ? { agent: true } : null, updatedAtMs: 0 });
-  const { container } = render(<PresenceFaces others={[peer("sam", "Sam Rivera"), peer("nova", "Nova", true), peer("kim", "Kim"), peer("lee", "Lee")]} />);
+  const peer = (id: string, displayName: string, agent = false): PresencePeer => ({
+    faceToken: id,
+    sessionToken: id,
+    isSelf: false,
+    displayName,
+    paletteSlot: 1,
+    state: agent ? { agent: true } : null,
+    updatedAtMs: 0,
+  });
+  const { container } = render(
+    <PresenceFaces
+      others={[
+        peer("sam", "Sam Rivera"),
+        peer("nova", "Nova", true),
+        peer("kim", "Kim"),
+        peer("lee", "Lee"),
+      ]}
+    />,
+  );
   const faces = [...container.querySelectorAll(".dohc-presence-faces > span")];
   expect(faces.map((face) => face.textContent)).toEqual(["S", "", "K", "+1"]);
   expect(faces[1]?.getAttribute("title")).toBe("Nova");

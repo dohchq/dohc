@@ -57,7 +57,9 @@ export function contentTypeFor(pathname) {
 }
 
 export async function createMockUpdateServer(options = {}) {
-  const root = resolve(options.root ?? process.env.DOHC_DESKTOP_MOCK_UPDATE_SERVER_ROOT ?? "release");
+  const root = resolve(
+    options.root ?? process.env.DOHC_DESKTOP_MOCK_UPDATE_SERVER_ROOT ?? "release",
+  );
   const host = options.host ?? "127.0.0.1";
   const port = Number(options.port ?? process.env.DOHC_DESKTOP_MOCK_UPDATE_SERVER_PORT ?? 0);
 

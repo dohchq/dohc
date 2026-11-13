@@ -57,5 +57,6 @@ export function useAboutConversation(
   tabPath: string | null,
 ): AboutConversationEntry | undefined {
   return useSyncExternalStore(subscribe, () =>
-    tabPath === null ? undefined : entries.get(keyOf(workspaceId, tabPath)));
+    tabPath === null ? undefined : entries.get(keyOf(workspaceId, tabPath)),
+  );
 }

@@ -112,9 +112,7 @@ async function createVersionViaMenu(page: Page, name: string): Promise<void> {
 
 async function switchVersionViaMenu(page: Page, name: string): Promise<void> {
   await openVersionMenu(page);
-  await page
-    .locator(`[data-testid="version-item"][data-version-name="${name}"]`)
-    .click();
+  await page.locator(`[data-testid="version-item"][data-version-name="${name}"]`).click();
   await expectActiveVersion(page, name);
 }
 
@@ -123,9 +121,7 @@ test("a .env is versioned protected: locked history, versions carry it, search f
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "notes.md", contents: "ordinary findable prose\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "ordinary findable prose\n" }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
@@ -136,9 +132,7 @@ test("a .env is versioned protected: locked history, versions carry it, search f
     // 1. A live.env edit is captured encrypted with a protected
     //    metadata-only moment.
     await writeWorkspaceFiles(temp, [{ path: ".env", contents: ENV_MAIN }]);
-    await expect
-      .poll(() => secretMomentCount(temp.rootPath), { timeout: 30_000 })
-      .toBe(1);
+    await expect.poll(() => secretMomentCount(temp.rootPath), { timeout: 30_000 }).toBe(1);
     const protectedRow = page.locator(
       '[data-testid="engine-moment-open"][data-moment-path=".env"]',
     );
@@ -146,20 +140,14 @@ test("a .env is versioned protected: locked history, versions carry it, search f
     await openHistoryView(page);
     await expect(protectedRow.first()).toBeVisible({ timeout: 20_000 });
     await expect(protectedRow.first()).toContainText("Updated .env");
-    await expect(
-      protectedRow.first().getByTestId("engine-moment-lock"),
-    ).toBeVisible();
+    await expect(protectedRow.first().getByTestId("engine-moment-lock")).toBeVisible();
 
     // 2. The moment's page shows the lock copy and NO contents.
     await protectedRow.first().click();
     await expect(page.getByTestId("engine-moment-diff-page")).toBeVisible();
-    await expect(page.getByTestId("engine-diff-protected")).toContainText(
-      "Contents are protected",
-    );
+    await expect(page.getByTestId("engine-diff-protected")).toContainText("Contents are protected");
     await expect(page.getByTestId("engine-diff-lines")).toHaveCount(0);
-    const diffPageText = await page
-      .getByTestId("engine-moment-diff-page")
-      .textContent();
+    const diffPageText = await page.getByTestId("engine-moment-diff-page").textContent();
     expect(diffPageText ?? "").not.toContain(SECRET_VALUE);
 
     // 3. Secrets follow versions: edit .env in a fork, switch back — the

@@ -2,7 +2,8 @@ import { Lexer } from "marked";
 import { describe, expect, it } from "vitest";
 import { lexesAsH1, opensWithH1 } from "./firstBlock";
 
-const lines = (count: number, word = "Line") => Array.from({ length: count }, (_, line) => `${word} ${line}`).join("\n");
+const lines = (count: number, word = "Line") =>
+  Array.from({ length: count }, (_, line) => `${word} ${line}`).join("\n");
 
 // Each body, and whether the editor's lexer reads its first block as an H1.
 const BODIES: [string, string, boolean][] = [
@@ -73,7 +74,6 @@ describe("opensWithH1", () => {
     const decided = opensWithH1(body);
     expect(typeof decided === "string" ? lexesAsH1(Lexer, decided) : decided).toBe(expected);
   });
-
 
   it("decides a clear ATX heading, and a paragraph with no underline, without lexing", () => {
     expect(opensWithH1("# Plan\nBody\nmore")).toBe(true);

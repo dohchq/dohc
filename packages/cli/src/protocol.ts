@@ -1,6 +1,11 @@
 import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
 import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
-import { byName, distinct, mapNamed, type EnvelopeField } from "@dohc/workspace-contracts/operation-declaration";
+import {
+  byName,
+  distinct,
+  mapNamed,
+  type EnvelopeField,
+} from "@dohc/workspace-contracts/operation-declaration";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import { HeldChange } from "@dohc/workspace-contracts/held-changes";
 import {
@@ -12,18 +17,38 @@ import { CHAT_WORK_STATUSES, isWorkUrl } from "@dohc/workspace-contracts/chat-wo
 import { MAX_CHAT_MESSAGE_BODY_BYTES } from "@dohc/workspace-contracts/chat-message-body";
 import { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
 import {
-  DisconnectRelayShareLinkAgentResult, ListRelayShareLinkAgentsResult, ShareLinkAgentDisconnectInput, ShareLinkAgentsInput,
+  DisconnectRelayShareLinkAgentResult,
+  ListRelayShareLinkAgentsResult,
+  ShareLinkAgentDisconnectInput,
+  ShareLinkAgentsInput,
 } from "@dohc/workspace-contracts/share-link-agents";
-import { AccessAnswer, AccessRefreshResult, ObjectAccessInput, SharingAccessInput } from "@dohc/workspace-contracts/access";
+import {
+  AccessAnswer,
+  AccessRefreshResult,
+  ObjectAccessInput,
+  SharingAccessInput,
+} from "@dohc/workspace-contracts/access";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
-import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
+import type {
+  AutomationDefinitionList,
+  AutomationSwitchResult,
+} from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
 import { DATASET_CAPABILITIES, DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
-import {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "./appResponses";
-import { ServerAccountDeletionPreview, ServerAccountDeleteRequest, ServerAccountDeleteResult } from "./account";
+import { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "./appResponses";
+import {
+  ServerAccountDeletionPreview,
+  ServerAccountDeleteRequest,
+  ServerAccountDeleteResult,
+} from "./account";
 
-import { OperationRecovery, HistoryOperationId, HistoryOperationReadResult, HistoryOperationUndoResult } from "@dohc/workspace-contracts/history-operation";
+import {
+  OperationRecovery,
+  HistoryOperationId,
+  HistoryOperationReadResult,
+  HistoryOperationUndoResult,
+} from "@dohc/workspace-contracts/history-operation";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 
 export const CLI_PROTOCOL_VERSION = 5;
@@ -44,7 +69,10 @@ const requestBase = {
   door: z.enum(["cli", "mcp"]).optional(),
   // The secret of the run dohc started this caller in (DOHC_RUN_SECRET). Only
   // a request that carries it is that run's.
-  runSecret: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  runSecret: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
   // A workspace on this computer, by its id, in place of the one the caller's
   // folder is in. Never a name: other people can change a workspace's name.
   workspaceId: cliWorkspaceIdSchema.optional(),
@@ -60,15 +88,25 @@ const argsBase = {
   agentId: cliAgentIdSchema.optional(),
 };
 // A declared input cannot name a request or args field. Fails the typecheck if ENVELOPE_FIELDS misses one.
-true satisfies [Exclude<keyof typeof requestBase | keyof typeof argsBase, EnvelopeField>] extends [never] ? true : never;
+true satisfies [Exclude<keyof typeof requestBase | keyof typeof argsBase, EnvelopeField>] extends [
+  never,
+]
+  ? true
+  : never;
 
-const historyOperationArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() }).strict();
+const historyOperationArgsSchema = z
+  .object({ ...argsBase, operationId: HistoryOperationId, cursor: z.string().optional() })
+  .strict();
 // A name the calling agent gives itself, recorded as the author of its edits
 // and messages. A slash is refused so no name can pass for an automation's id.
-export const documentAgentNameSchema = z
-  .string()
-  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
-const historyUndoArgsSchema = z.object({ ...argsBase, operationId: HistoryOperationId, agent: documentAgentNameSchema.optional() }).strict();
+export const documentAgentNameSchema = z.string().regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u);
+const historyUndoArgsSchema = z
+  .object({
+    ...argsBase,
+    operationId: HistoryOperationId,
+    agent: documentAgentNameSchema.optional(),
+  })
+  .strict();
 
 const groupsArgsSchema = z.object(argsBase).strict();
 // What a work link names: a Group, DM, or agent chat by name, #slug, or id; a
@@ -90,19 +128,19 @@ const groupCreateArgsSchema = z
     type: z.enum(["posts", "chat", "both"]).optional(),
   })
   .strict();
-const threadsArgsSchema = z
-  .object({ ...argsBase, group: z.string().min(1) })
-  .strict();
+const threadsArgsSchema = z.object({ ...argsBase, group: z.string().min(1) }).strict();
 const inboxArgsSchema = z.object(argsBase).strict();
 const noticesArgsSchema = z.object(argsBase).strict();
 export const CHAT_WATCH_TIMEOUT_MS = 25_000;
 export const CHAT_WATCH_MAX_TIMEOUT_MS = 25_000;
-export const chatWatchInputSchema = z.object({
-  cursor: z.string().min(1).max(1_048_576).optional(),
-  group: z.string().min(1).max(500).optional(),
-  thread: z.string().min(1).max(500).optional(),
-  timeoutMs: z.number().int().min(0).max(CHAT_WATCH_MAX_TIMEOUT_MS).optional(),
-}).strict();
+export const chatWatchInputSchema = z
+  .object({
+    cursor: z.string().min(1).max(1_048_576).optional(),
+    group: z.string().min(1).max(500).optional(),
+    thread: z.string().min(1).max(500).optional(),
+    timeoutMs: z.number().int().min(0).max(CHAT_WATCH_MAX_TIMEOUT_MS).optional(),
+  })
+  .strict();
 const watchArgsSchema = chatWatchInputSchema.extend(argsBase).strict();
 // Where a group's stream page ends: an item's time, lane and id.
 const streamPositionSchema = z
@@ -121,7 +159,9 @@ const streamPageArgs = {
 const showArgsSchema = z
   .object({ ...argsBase, target: z.string().min(1), peek: z.boolean(), ...streamPageArgs })
   .strict();
-const chatRetryArgsSchema = z.object({ ...argsBase, runId: z.string().min(1).optional(), thread: z.string().min(1) }).strict();
+const chatRetryArgsSchema = z
+  .object({ ...argsBase, runId: z.string().min(1).optional(), thread: z.string().min(1) })
+  .strict();
 // One part of what an agent reports about itself: printable text with no
 // surrounding space.
 export const MAX_REPORTED_AGENT_CHARS = 64;
@@ -151,7 +191,13 @@ export type CliReportedAgent = z.infer<typeof chatReportedAgentSchema>;
 export const chatWorkReportSchema = z
   .object({
     status: z.enum(CHAT_WORK_STATUSES),
-    url: z.string().refine(isWorkUrl, { message: "Use an http or https address in plain ASCII with no spaces. Percent-encode other characters." }).optional(),
+    url: z
+      .string()
+      .refine(isWorkUrl, {
+        message:
+          "Use an http or https address in plain ASCII with no spaces. Percent-encode other characters.",
+      })
+      .optional(),
   })
   .strict();
 export type CliWorkReport = z.infer<typeof chatWorkReportSchema>;
@@ -236,29 +282,34 @@ const momentsArgsSchema = z
     path: z.string().min(1).max(4096).optional(),
   })
   .strict();
-const momentArgsSchema = z
-  .object({ ...argsBase, id: z.string().min(1).max(500) })
-  .strict();
-const fileChatsArgsSchema = z
-  .object({ ...argsBase, path: z.string().min(1).max(4096) })
-  .strict();
+const momentArgsSchema = z.object({ ...argsBase, id: z.string().min(1).max(500) }).strict();
+const fileChatsArgsSchema = z.object({ ...argsBase, path: z.string().min(1).max(4096) }).strict();
 const chatArgsSchema = z.union([
   z.object({ ...argsBase, threadId: z.string().min(1).max(200) }).strict(),
   z.object({ ...argsBase, group: z.string().min(1).max(500), ...streamPageArgs }).strict(),
 ]);
 const groupsFullArgsSchema = z.object(argsBase).strict();
 // `dohc chat links` names a Group. The desktop resolves it to the chat's wire id.
-export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true }).extend({
-  group: z.string().min(1).max(500),
-}).strict();
+export const chatLinksGroupInputSchema = ChatLinksInput.omit({ channelWireId: true })
+  .extend({
+    group: z.string().min(1).max(500),
+  })
+  .strict();
 
 // The operations declared in workspace-contracts, by the socket verb each answers.
 type Families = typeof DECLARATION_FAMILIES;
-export type DeclaredOperation = { [Family in keyof Families]: Families[Family][keyof Families[Family]] }[keyof Families];
-const declaredOperations = Object.values(DECLARATION_FAMILIES).flatMap(family => Object.values<DeclaredOperation>(family));
+export type DeclaredOperation = {
+  [Family in keyof Families]: Families[Family][keyof Families[Family]];
+}[keyof Families];
+const declaredOperations = Object.values(DECLARATION_FAMILIES).flatMap((family) =>
+  Object.values<DeclaredOperation>(family),
+);
 export type DeclaredVerb = DeclaredOperation["cli"]["verb"];
-type DeclaredOperationOf<Verb extends DeclaredVerb> = Extract<DeclaredOperation, { readonly cli: { readonly verb: Verb } }>;
-export const DECLARED_VERBS = byName(declaredOperations, operation => operation.cli.verb) as {
+type DeclaredOperationOf<Verb extends DeclaredVerb> = Extract<
+  DeclaredOperation,
+  { readonly cli: { readonly verb: Verb } }
+>;
+export const DECLARED_VERBS = byName(declaredOperations, (operation) => operation.cli.verb) as {
   readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>;
 };
 
@@ -271,19 +322,30 @@ export function isDeclaredVerb(verb: string): verb is DeclaredVerb {
 const DECLARED_ALTERNATE_INPUTS = { chatLinks: chatLinksGroupInputSchema } as const;
 export type DeclaredRequestInput<Verb extends DeclaredVerb> =
   | z.output<DeclaredOperationOf<Verb>["input"]>
-  | (Verb extends keyof typeof DECLARED_ALTERNATE_INPUTS ? z.output<(typeof DECLARED_ALTERNATE_INPUTS)[Verb]> : never);
-type DeclaredArgs<Verb extends DeclaredVerb> = z.output<z.ZodObject<typeof argsBase>> & DeclaredRequestInput<Verb>;
-type DeclaredRequestSchema = { [Verb in DeclaredVerb]: z.ZodObject<
-  typeof requestBase & { verb: z.ZodLiteral<Verb>; args: z.ZodType<DeclaredArgs<Verb>> }, z.core.$strict
-> }[DeclaredVerb];
+  | (Verb extends keyof typeof DECLARED_ALTERNATE_INPUTS
+      ? z.output<(typeof DECLARED_ALTERNATE_INPUTS)[Verb]>
+      : never);
+type DeclaredArgs<Verb extends DeclaredVerb> = z.output<z.ZodObject<typeof argsBase>> &
+  DeclaredRequestInput<Verb>;
+type DeclaredRequestSchema = {
+  [Verb in DeclaredVerb]: z.ZodObject<
+    typeof requestBase & { verb: z.ZodLiteral<Verb>; args: z.ZodType<DeclaredArgs<Verb>> },
+    z.core.$strict
+  >;
+}[DeclaredVerb];
 
 const declaredRequestSchemas = declaredOperations.map(({ cli: { verb }, input }) => {
   const args = input.extend(argsBase).strict();
   const alternate: z.ZodObject | undefined = Object.hasOwn(DECLARED_ALTERNATE_INPUTS, verb)
-    ? DECLARED_ALTERNATE_INPUTS[verb as keyof typeof DECLARED_ALTERNATE_INPUTS] : undefined;
-  return z.object({
-    ...requestBase, verb: z.literal(verb), args: alternate ? z.union([args, alternate.extend(argsBase).strict()]) : args,
-  }).strict();
+    ? DECLARED_ALTERNATE_INPUTS[verb as keyof typeof DECLARED_ALTERNATE_INPUTS]
+    : undefined;
+  return z
+    .object({
+      ...requestBase,
+      verb: z.literal(verb),
+      args: alternate ? z.union([args, alternate.extend(argsBase).strict()]) : args,
+    })
+    .strict();
 }) as DeclaredRequestSchema[];
 
 const documentPathArg = z.string().min(1).max(4096);
@@ -299,9 +361,7 @@ export const documentEditTextSchema = z
   .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
     message: "Document edit text is at most 256 KiB as UTF-8.",
   });
-const documentReadArgsSchema = z
-  .object({ ...argsBase, path: documentPathArg })
-  .strict();
+const documentReadArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 
 // The reads a server's copy of a workspace answers, with the CLI's arguments
 // less who is calling: the server knows that from the credential. These
@@ -309,14 +369,22 @@ const documentReadArgsSchema = z
 // `readText` have no CLI verb.
 const callerArgs = { cwd: true, actor: true, agentId: true } as const;
 export const serverOperationArgsSchemas = {
-  listFiles: z.object({ path: documentPathArg.optional(), recursive: z.boolean().optional() }).strict(),
+  listFiles: z
+    .object({ path: documentPathArg.optional(), recursive: z.boolean().optional() })
+    .strict(),
   readText: z.object({ path: documentPathArg }).strict(),
   groups: groupsArgsSchema.omit(callerArgs).strict(),
   threads: threadsArgsSchema.omit(callerArgs).strict(),
   groupsFull: groupsFullArgsSchema.omit(callerArgs).strict(),
   fileChats: fileChatsArgsSchema.omit(callerArgs).strict(),
-  chat: z.union([chatArgsSchema.options[0].omit(callerArgs).strict(), chatArgsSchema.options[1].omit(callerArgs).strict()]),
-  show: showArgsSchema.omit(callerArgs).extend({ peek: z.literal(true) }).strict(),
+  chat: z.union([
+    chatArgsSchema.options[0].omit(callerArgs).strict(),
+    chatArgsSchema.options[1].omit(callerArgs).strict(),
+  ]),
+  show: showArgsSchema
+    .omit(callerArgs)
+    .extend({ peek: z.literal(true) })
+    .strict(),
   documentRead: documentReadArgsSchema.omit(callerArgs).strict(),
 };
 export type ServerOperation = keyof typeof serverOperationArgsSchemas;
@@ -330,119 +398,175 @@ const phoneOperationIdSchema = z.string().min(1).max(128);
 const phoneTargetIdSchema = z.string().min(1).max(256);
 const phoneChoiceSchema = z.string().min(1).max(200);
 const phoneMessageFields = {
-  body: z.string().min(1).max(2 * MAX_CHAT_MESSAGE_BODY_BYTES),
+  body: z
+    .string()
+    .min(1)
+    .max(2 * MAX_CHAT_MESSAGE_BODY_BYTES),
   needsDecision: z.boolean().optional(),
   options: z.array(phoneChoiceSchema).max(12).optional(),
 };
 export const phoneWriteArgsSchemas = {
-  post: z.object({
-    operationId: phoneOperationIdSchema,
-    groupId: phoneTargetIdSchema,
-    title: z.string().min(1).max(200).optional(),
-    ...phoneMessageFields,
-  }).strict(),
-  send: z.object({ operationId: phoneOperationIdSchema, streamId: phoneTargetIdSchema, ...phoneMessageFields }).strict(),
-  reply: z.object({
-    operationId: phoneOperationIdSchema,
-    threadId: phoneTargetIdSchema,
-    parentMessageId: phoneTargetIdSchema.optional(),
-    resolves: z.object({ messageId: phoneTargetIdSchema, chosenOption: phoneChoiceSchema.optional() }).strict().optional(),
-    ...phoneMessageFields,
-  }).strict(),
-  react: z.object({
-    operationId: phoneOperationIdSchema,
-    messageId: phoneTargetIdSchema,
-    emoji: z.string().min(1).max(32),
-    state: z.enum(["added", "removed"]),
-  }).strict(),
+  post: z
+    .object({
+      operationId: phoneOperationIdSchema,
+      groupId: phoneTargetIdSchema,
+      title: z.string().min(1).max(200).optional(),
+      ...phoneMessageFields,
+    })
+    .strict(),
+  send: z
+    .object({
+      operationId: phoneOperationIdSchema,
+      streamId: phoneTargetIdSchema,
+      ...phoneMessageFields,
+    })
+    .strict(),
+  reply: z
+    .object({
+      operationId: phoneOperationIdSchema,
+      threadId: phoneTargetIdSchema,
+      parentMessageId: phoneTargetIdSchema.optional(),
+      resolves: z
+        .object({ messageId: phoneTargetIdSchema, chosenOption: phoneChoiceSchema.optional() })
+        .strict()
+        .optional(),
+      ...phoneMessageFields,
+    })
+    .strict(),
+  react: z
+    .object({
+      operationId: phoneOperationIdSchema,
+      messageId: phoneTargetIdSchema,
+      emoji: z.string().min(1).max(32),
+      state: z.enum(["added", "removed"]),
+    })
+    .strict(),
 };
 export type PhoneWriteOperation = keyof typeof phoneWriteArgsSchemas;
 // The phone's read mark: the newest message it showed in a thread. It has no
 // operation ID: a repeat, or an older mark, moves nothing.
-export const phoneMarkReadArgsSchema = z.object({ threadId: phoneTargetIdSchema, messageId: phoneTargetIdSchema }).strict();
+export const phoneMarkReadArgsSchema = z
+  .object({ threadId: phoneTargetIdSchema, messageId: phoneTargetIdSchema })
+  .strict();
 // The phone's Try again on an agent wake that didn't start or wasn't
 // confirmed. The wake ID is the server's own; the phone names nothing else.
-export const phoneRetryWakeArgsSchema = z.object({
-  operationId: phoneOperationIdSchema,
-  wakeId: z.string().regex(/^wake-[0-9a-f]{32}$/u),
-}).strict();
+export const phoneRetryWakeArgsSchema = z
+  .object({
+    operationId: phoneOperationIdSchema,
+    wakeId: z.string().regex(/^wake-[0-9a-f]{32}$/u),
+  })
+  .strict();
 // A key the caller chooses for one request. Sent again with the same key,
 // after a timeout for example, the request returns its first result while
 // dohc runs instead of doing its work twice.
-export const requestIdSchema = z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u);
+export const requestIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[\x20-\x7e]+$/u);
 
 export const MAX_FILE_WRITE_BYTES = 10 * 1024 * 1024;
 export const MAX_FILE_WRITE_FILES = 256;
 export const MAX_CLI_REQUEST_BYTES = 14 * 1024 * 1024;
-const fileWriteFileSchema = z.object({
-  path: documentPathArg,
-  contentBase64: z.string(),
-  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
-  createOnly: z.boolean().optional(),
-}).strict();
+const fileWriteFileSchema = z
+  .object({
+    path: documentPathArg,
+    contentBase64: z.string(),
+    expectedSha256: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .optional(),
+    createOnly: z.boolean().optional(),
+  })
+  .strict();
 export type CliFileWrite = z.infer<typeof fileWriteFileSchema>;
-const fileWriteArgsSchema = z.object({
-  ...argsBase,
-  files: z.array(fileWriteFileSchema).min(1).max(MAX_FILE_WRITE_FILES),
-  agent: documentAgentNameSchema.optional(),
-  requestId: requestIdSchema,
-}).strict();
-const fileMoveArgsSchema = z.object({
-  ...argsBase,
-  fromPath: documentPathArg,
-  toPath: documentPathArg,
-  overwrite: z.boolean().optional(),
-  confirmNotVersioned: z.boolean().optional(),
-  agent: documentAgentNameSchema.optional(),
-  requestId: requestIdSchema,
-}).strict();
-const fileDuplicateArgsSchema = z.object({...argsBase, path: documentPathArg, agent: documentAgentNameSchema.optional(), requestId: requestIdSchema}).strict();
-const fileDeleteArgsSchema = z.object({
-  ...argsBase,
-  path: documentPathArg,
-  confirmNotVersioned: z.boolean().optional(),
-  agent: documentAgentNameSchema.optional(),
-  requestId: requestIdSchema,
-}).strict();
+const fileWriteArgsSchema = z
+  .object({
+    ...argsBase,
+    files: z.array(fileWriteFileSchema).min(1).max(MAX_FILE_WRITE_FILES),
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema,
+  })
+  .strict();
+const fileMoveArgsSchema = z
+  .object({
+    ...argsBase,
+    fromPath: documentPathArg,
+    toPath: documentPathArg,
+    overwrite: z.boolean().optional(),
+    confirmNotVersioned: z.boolean().optional(),
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema,
+  })
+  .strict();
+const fileDuplicateArgsSchema = z
+  .object({
+    ...argsBase,
+    path: documentPathArg,
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema,
+  })
+  .strict();
+const fileDeleteArgsSchema = z
+  .object({
+    ...argsBase,
+    path: documentPathArg,
+    confirmNotVersioned: z.boolean().optional(),
+    agent: documentAgentNameSchema.optional(),
+    requestId: requestIdSchema,
+  })
+  .strict();
 
 const versionListArgsSchema = z.object(argsBase).strict();
 // `version` is a version's name or id, as version list prints them.
-const versionCompareArgsSchema = z.object({
-  ...argsBase,
-  version: z.string().min(1).max(200),
-  afterPath: z.string().min(1).max(4096).optional(),
-}).strict();
-const versionConflictsArgsSchema = z.object({ ...argsBase, afterConflictId: z.string().min(1).max(200).optional() }).strict();
+const versionCompareArgsSchema = z
+  .object({
+    ...argsBase,
+    version: z.string().min(1).max(200),
+    afterPath: z.string().min(1).max(4096).optional(),
+  })
+  .strict();
+const versionConflictsArgsSchema = z
+  .object({ ...argsBase, afterConflictId: z.string().min(1).max(200).optional() })
+  .strict();
 // The versions menu's name field takes at most 80 characters.
 export const MAX_VERSION_NAME_LENGTH = 80;
-const versionCreateArgsSchema = z.object({ ...argsBase, name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) }).strict();
-const versionSwitchArgsSchema = z.object({ ...argsBase, version: z.string().min(1).max(200) }).strict();
+const versionCreateArgsSchema = z
+  .object({ ...argsBase, name: z.string().min(1).max(MAX_VERSION_NAME_LENGTH) })
+  .strict();
+const versionSwitchArgsSchema = z
+  .object({ ...argsBase, version: z.string().min(1).max(200) })
+  .strict();
 const versionMergeArgsSchema = versionSwitchArgsSchema;
 // Keep one side of a conflict, or replace both with combined text. Combined
 // text replaces the file, so it has the file write limit.
 export const versionResolutionSchema = z.discriminatedUnion("keep", [
   z.object({ keep: z.enum(["current", "incoming"]) }).strict(),
-  z.object({
-    keep: z.literal("combined"),
-    text: z.string().refine((value) => fitsUtf8Bytes(value, MAX_FILE_WRITE_BYTES), {
-      message: "Combined text is at most 10 MiB as UTF-8.",
-    }),
-  }).strict(),
+  z
+    .object({
+      keep: z.literal("combined"),
+      text: z.string().refine((value) => fitsUtf8Bytes(value, MAX_FILE_WRITE_BYTES), {
+        message: "Combined text is at most 10 MiB as UTF-8.",
+      }),
+    })
+    .strict(),
 ]);
 export type VersionResolution = z.infer<typeof versionResolutionSchema>;
-const versionResolveArgsSchema = z.object({
-  ...argsBase,
-  conflictId: z.string().min(1).max(200),
-  resolution: versionResolutionSchema,
-}).strict();
+const versionResolveArgsSchema = z
+  .object({
+    ...argsBase,
+    conflictId: z.string().min(1).max(200),
+    resolution: versionResolutionSchema,
+  })
+  .strict();
 
 const keptCopiesArgsSchema = z.object(argsBase).strict();
-const saveKeptCopyArgsSchema = z
-  .object({ ...argsBase, id: z.number().int() })
-  .strict();
+const saveKeptCopyArgsSchema = z.object({ ...argsBase, id: z.number().int() }).strict();
 // A protected file's change a sync replaced, kept on this computer under a
 // UUID. Restore writes it back; Discard removes it for good.
-const protectedCopyIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+const protectedCopyIdSchema = z
+  .string()
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const restoreProtectedCopyArgsSchema = z
   .object({ ...argsBase, id: protectedCopyIdSchema })
   .strict();
@@ -467,7 +591,9 @@ const deleteRetainedCopiesArgsSchema = z
 // recovery copy may name one, to save exactly those edits.
 const liveKeptEditsArgsSchema = z.object(argsBase).strict();
 const keptEditsIncidentSchema = z.string().min(1).max(1024);
-const saveRecoveryCopyArgsSchema = z.object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema.optional() }).strict();
+const saveRecoveryCopyArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema.optional() })
+  .strict();
 const retryKeptEditsArgsSchema = z
   .object({ ...argsBase, path: documentPathArg, incident: keptEditsIncidentSchema })
   .strict();
@@ -476,38 +602,73 @@ const stopAgainArgsSchema = retryKeptEditsArgsSchema;
 // documents and Notices give it. Agents read these codes, so each one carries
 // its step in the help and the reference.
 export const LIVE_DOCUMENT_REASON_STEPS = {
-  "document-unavailable": "The file moved or was removed on this computer. Review it in Live documents.",
+  "document-unavailable":
+    "The file moved or was removed on this computer. Review it in Live documents.",
   "workspace-changed": "The workspace changed while live editing ran. Review it in Live documents.",
-  "session-host-refused": "The server stopped live editing. The file and its history are unchanged. Resume tries again.",
-  "session-host-diverged": "The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator.",
-  "live-document-without-lineage": "Live editing can't start until the document is opened once in dohc. Open it, then Resume. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.",
+  "session-host-refused":
+    "The server stopped live editing. The file and its history are unchanged. Resume tries again.",
+  "session-host-diverged":
+    "The server's copy no longer matches the synced one. Resume and Stop can't help. Contact the server's operator.",
+  "live-document-without-lineage":
+    "Live editing can't start until the document is opened once in dohc. Open it, then Resume. A note larger than 256 KB doesn't open as a document in dohc. Make it smaller or split it, then open it.",
   "live-edit-unadmitted": "The server hasn't applied an edit. Resume tries again.",
-  "conflict-parent-withheld": "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
-  "live-history-over-budget": "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume tries again now.",
-  "live-start-failing": "The server can't start live editing and keeps trying. failure.word is the server's reason, and failure.since is when it began. Resume tries now.",
+  "conflict-parent-withheld":
+    "A conflict in the file was resolved, so live editing can't resume. Edits made in dohc may not reach people with the link.",
+  "live-history-over-budget":
+    "The document's edit history is too long for the server to check, so live editing can't start. Edits still sync, but people it is shared with can't edit it live. Resume tries again now.",
+  "live-start-failing":
+    "The server can't start live editing and keeps trying. failure.word is the server's reason, and failure.since is when it began. Resume tries now.",
 } as const;
-const liveDocumentReasonSchema = z.enum(Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [keyof typeof LIVE_DOCUMENT_REASON_STEPS, ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[]]);
+const liveDocumentReasonSchema = z.enum(
+  Object.keys(LIVE_DOCUMENT_REASON_STEPS) as [
+    keyof typeof LIVE_DOCUMENT_REASON_STEPS,
+    ...(keyof typeof LIVE_DOCUMENT_REASON_STEPS)[],
+  ],
+);
 
 // The owner's Live documents list, and its Stop and Resume for one document.
 // The cursor is the list's own nextCursor. A list row's objectId lets Stop
 // reach the server's document when this computer's file moved or is gone.
 const liveDocumentObjectIdSchema = z.string().min(1).max(512);
-const liveDocumentsArgsSchema = z.object({ ...argsBase, cursor: documentPathArg.optional() }).strict();
-const liveStopArgsSchema = z.object({ ...argsBase, path: documentPathArg, objectId: liveDocumentObjectIdSchema.optional() }).strict();
+const liveDocumentsArgsSchema = z
+  .object({ ...argsBase, cursor: documentPathArg.optional() })
+  .strict();
+const liveStopArgsSchema = z
+  .object({ ...argsBase, path: documentPathArg, objectId: liveDocumentObjectIdSchema.optional() })
+  .strict();
 const liveResumeArgsSchema = z.object({ ...argsBase, path: documentPathArg }).strict();
 
 const heldNoteChangeArgsSchema = z.discriminatedUnion("action", [
-  z.object({...argsBase, path: documentPathArg, action: z.literal("review")}).strict(),
-  z.object({...argsBase, path: documentPathArg, action: z.enum(["drop", "undo"]), token: z.string().regex(/^[0-9a-f]{64}$/u)}).strict(),
+  z.object({ ...argsBase, path: documentPathArg, action: z.literal("review") }).strict(),
+  z
+    .object({
+      ...argsBase,
+      path: documentPathArg,
+      action: z.enum(["drop", "undo"]),
+      token: z.string().regex(/^[0-9a-f]{64}$/u),
+    })
+    .strict(),
 ]);
 const heldNoteChangeResultSchema = z.discriminatedUnion("ok", [
-  z.object({ok: z.literal(true), path: z.string(), token: z.string(), authors: z.array(z.unknown()), held: z.boolean(), historyMomentId: z.string().nullable()}).strict(),
-  z.object({ok: z.literal(false), reason: z.string()}).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string(),
+      token: z.string(),
+      authors: z.array(z.unknown()),
+      held: z.boolean(),
+      historyMomentId: z.string().nullable(),
+    })
+    .strict(),
+  z.object({ ok: z.literal(false), reason: z.string() }).strict(),
 ]);
 
 const documentEditArgsSchema = z
   .object({
-    allowLossySourceSha256: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
+    allowLossySourceSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
     ...argsBase,
     agent: documentAgentNameSchema.optional(),
     requestId: requestIdSchema.optional(),
@@ -550,17 +711,16 @@ type CliCollectionWireValue =
   | CliCollectionWireValue[]
   | { [key in string]?: CliCollectionWireValue };
 
-const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> =
-  z.lazy(() =>
-    z.union([
-      z.null(),
-      z.boolean(),
-      z.number(),
-      z.string(),
-      z.array(collectionWireValueSchema),
-      z.record(z.string(), collectionWireValueSchema),
-    ]),
-  );
+const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> = z.lazy(() =>
+  z.union([
+    z.null(),
+    z.boolean(),
+    z.number(),
+    z.string(),
+    z.array(collectionWireValueSchema),
+    z.record(z.string(), collectionWireValueSchema),
+  ]),
+);
 
 const collectionPathArg = z.string().min(1).max(4096);
 const collectionFieldNameArg = z.string().min(1).max(200);
@@ -655,13 +815,14 @@ const collectionCreateRecordArgsSchema = z
       .string()
       .min(1)
       .max(200)
-      .refine(
-        (value) =>
-          !value.includes("/") && !value.includes("\\") && value.trim() === value,
-        { message: "a record name is one file name, not a path" },
-      ),
+      .refine((value) => !value.includes("/") && !value.includes("\\") && value.trim() === value, {
+        message: "a record name is one file name, not a path",
+      }),
     fields: collectionCreateFieldsSchema,
-    recordId: z.string().regex(/^rec_[a-z2-7]{26}$/).optional(),
+    recordId: z
+      .string()
+      .regex(/^rec_[a-z2-7]{26}$/)
+      .optional(),
   })
   .strict();
 
@@ -673,14 +834,28 @@ const automationArgs = {
   automation: z.string().min(1).max(200),
 };
 const automationRunIdArg = z.string().min(1).max(256);
-const automationListArgsSchema = z.object({ ...argsBase, collectionPath: collectionPathArg }).strict();
-const automationSwitchArgsSchema = z.object({ ...automationArgs, enabled: z.boolean(),
-  expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean(), submitId: requestIdSchema,
-}).strict();
+const automationListArgsSchema = z
+  .object({ ...argsBase, collectionPath: collectionPathArg })
+  .strict();
+const automationSwitchArgsSchema = z
+  .object({
+    ...automationArgs,
+    enabled: z.boolean(),
+    expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    reformat: z.boolean(),
+    submitId: requestIdSchema,
+  })
+  .strict();
 // `page` is the `next` of an earlier listing: the runs older than it.
 // `server` reads the runs of the workspace's self-hosted server instead of
 // this computer's.
-const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional(), server: z.boolean().optional() }).strict();
+const automationRunsArgsSchema = z
+  .object({
+    ...automationArgs,
+    page: z.string().min(1).max(512).optional(),
+    server: z.boolean().optional(),
+  })
+  .strict();
 const automationRunArgsSchema = z
   .object({ ...automationArgs, run: automationRunIdArg, server: z.boolean().optional() })
   .strict();
@@ -711,23 +886,101 @@ const accountDeletePreviewArgsSchema = z.object(argsBase).strict();
 const accountDeleteArgsSchema = ServerAccountDeleteRequest.extend(argsBase).strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
-  z.object({ ...requestBase, verb: z.literal("stopSync"), args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict() }).strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("stopSync"),
+      args: z.object({ ...argsBase, agent: documentAgentNameSchema.optional() }).strict(),
+    })
+    .strict(),
   ...declaredRequestSchemas,
-  z.object({ ...requestBase, verb: z.literal("shareCopy"), args: ShareCopyInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("shareAgents"), args: ShareLinkAgentsInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("shareDisconnect"), args: ShareLinkAgentDisconnectInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("accountDeletePreview"), args: accountDeletePreviewArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("accessRefresh"), args: z.object(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("accessObject"), args: ObjectAccessInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("accessSharing"), args: SharingAccessInput.extend(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("shareCopy"),
+      args: ShareCopyInput.extend(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("shareAgents"),
+      args: ShareLinkAgentsInput.extend(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("shareDisconnect"),
+      args: ShareLinkAgentDisconnectInput.extend(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("accountDeletePreview"),
+      args: accountDeletePreviewArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("accountDelete"), args: accountDeleteArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("accessRefresh"), args: z.object(argsBase).strict() })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("accessObject"),
+      args: ObjectAccessInput.extend(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("accessSharing"),
+      args: SharingAccessInput.extend(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("automationButtons"),
+      args: z
+        .object({
+          ...argsBase,
+          collectionPath: collectionPathArg,
+          table: z.string().min(1).max(256).optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("dataset"),
+      args: z.object({ ...argsBase, request: DatasetRequest }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("appPublication"),
+      args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("ownerAppResponses"),
+      args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict(),
+    })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("groups"), args: groupsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("link"), args: linkArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("groupCreate"), args: groupCreateArgsSchema }).strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("groupCreate"), args: groupCreateArgsSchema })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("watch"), args: watchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("inbox"), args: inboxArgsSchema }).strict(),
@@ -735,7 +988,9 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("show"), args: showArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("post"), args: postArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("reply"), args: replyArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("nothingToReport"), args: nothingToReportArgsSchema }).strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("nothingToReport"), args: nothingToReportArgsSchema })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("chatRetry"), args: chatRetryArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("react"), args: reactArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("grep"), args: grepArgsSchema }).strict(),
@@ -744,72 +999,186 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("moment"), args: momentArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChats"), args: fileChatsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("chat"), args: chatArgsSchema }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("groupsFull"),
-    args: groupsFullArgsSchema,
-  }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("collectionQuery"),
-    args: collectionQueryArgsSchema,
-  }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("collectionRecord"),
-    args: collectionRecordArgsSchema,
-  }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("collectionSetFields"),
-    args: collectionSetFieldsArgsSchema,
-  }).strict(),
-  z.object({
-    ...requestBase,
-    verb: z.literal("collectionCreateRecord"),
-    args: collectionCreateRecordArgsSchema,
-  }).strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("groupsFull"),
+      args: groupsFullArgsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("collectionQuery"),
+      args: collectionQueryArgsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("collectionRecord"),
+      args: collectionRecordArgsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("collectionSetFields"),
+      args: collectionSetFieldsArgsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("collectionCreateRecord"),
+      args: collectionCreateRecordArgsSchema,
+    })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("fileWrite"), args: fileWriteArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("historyOperation"), args: historyOperationArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("historyUndo"), args: historyUndoArgsSchema }).strict(),
-  z.object({...requestBase, verb: z.literal("fileDuplicate"), args: fileDuplicateArgsSchema}).strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("historyOperation"),
+      args: historyOperationArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("historyUndo"), args: historyUndoArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("fileDuplicate"), args: fileDuplicateArgsSchema })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("fileMove"), args: fileMoveArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileDelete"), args: fileDeleteArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("documentHeld"), args: documentReadArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionConflicts"), args: versionConflictsArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionCreate"), args: versionCreateArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionSwitch"), args: versionSwitchArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionMerge"), args: versionMergeArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema }).strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("documentRead"), args: documentReadArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("documentHeld"), args: documentReadArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionList"), args: versionListArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionCompare"), args: versionCompareArgsSchema })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("versionConflicts"),
+      args: versionConflictsArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionCreate"), args: versionCreateArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionSwitch"), args: versionSwitchArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionMerge"), args: versionMergeArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("versionResolve"), args: versionResolveArgsSchema })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("keptCopies"), args: keptCopiesArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("collectionsWaiting"), args: z.object(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("sharedFilesHeld"), args: z.object(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("syncFailure"), args: z.object(argsBase).strict() }).strict(),
-  z.object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("restoreProtectedCopy"), args: restoreProtectedCopyArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("discardProtectedCopy"), args: discardProtectedCopyArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("deleteRetainedCopies"), args: deleteRetainedCopiesArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("saveRecoveryCopy"), args: saveRecoveryCopyArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema }).strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("collectionsWaiting"),
+      args: z.object(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("sharedFilesHeld"),
+      args: z.object(argsBase).strict(),
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("syncFailure"), args: z.object(argsBase).strict() })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("saveKeptCopy"), args: saveKeptCopyArgsSchema })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("restoreProtectedCopy"),
+      args: restoreProtectedCopyArgsSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("discardProtectedCopy"),
+      args: discardProtectedCopyArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("retainedCopies"), args: retainedCopiesArgsSchema })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("deleteRetainedCopies"),
+      args: deleteRetainedCopiesArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("liveKeptEdits"), args: liveKeptEditsArgsSchema })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("saveRecoveryCopy"),
+      args: saveRecoveryCopyArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("retryKeptEdits"), args: retryKeptEditsArgsSchema })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("stopAgain"), args: stopAgainArgsSchema }).strict(),
-  z.object({...requestBase, verb: z.literal("heldNoteChange"), args: heldNoteChangeArgsSchema}).strict(),
-  z.object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveDocumentsArgsSchema }).strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("heldNoteChange"), args: heldNoteChangeArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("liveDocuments"), args: liveDocumentsArgsSchema })
+    .strict(),
   z.object({ ...requestBase, verb: z.literal("liveStop"), args: liveStopArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("liveResume"), args: liveResumeArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationRuns"), args: automationRunsArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationList"), args: automationListArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationSwitch"), args: automationSwitchArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationRun"), args: automationRunArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationRetry"), args: automationRetryArgsSchema }).strict(),
-  z.object({ ...requestBase, verb: z.literal("automationPress"), args: automationPressArgsSchema }).strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("documentEdit"), args: documentEditArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("automationRuns"), args: automationRunsArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("automationList"), args: automationListArgsSchema })
+    .strict(),
+  z
+    .object({
+      ...requestBase,
+      verb: z.literal("automationSwitch"),
+      args: automationSwitchArgsSchema,
+    })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("automationRun"), args: automationRunArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("automationRetry"), args: automationRetryArgsSchema })
+    .strict(),
+  z
+    .object({ ...requestBase, verb: z.literal("automationPress"), args: automationPressArgsSchema })
+    .strict(),
 ]);
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
@@ -835,86 +1204,89 @@ export const APP_RESPONSE_CAPABILITIES = {
   undo: "app.responses.undo",
 } as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
 
-export const CLI_CAPABILITIES = distinct(mapNamed(DECLARED_VERBS, operation => [operation.capabilityId]), {
-  stopSync: ["workspace.sync.stop"],
-  link: ["work.reference.make"],
-  shareCopy: ["share.copy.read"],
-  shareAgents: ["share.link.agents.list"],
-  shareDisconnect: ["share.link.agent.disconnect"],
-  accountDeletePreview: ["account.delete.preview"],
-  accountDelete: ["account.delete"],
-  accessRefresh: ["access.refresh"],
-  accessObject: ["access.object.read"],
-  accessSharing: ["access.sharing.read"],
-  groups: ["group.list"],
-  groupCreate: ["group.create"],
-  threads: ["chat.threads.list"],
-  watch: ["chat.inbox.read"],
-  inbox: ["chat.inbox.read"],
-  notices: ["notice.list"],
-  show: ["chat.show"],
-  post: ["chat.post"],
-  reply: ["chat.reply"],
-  nothingToReport: ["chat.reply"],
-  chatRetry: ["agent.run.retry"],
-  react: ["chat.react"],
-  grep: ["chat.search"],
-  export: ["chat.export"],
-  moments: ["history.list"],
-  historyOperation: ["history.operation.read"],
-  historyUndo: ["history.operation.undo"],
-  moment: ["history.read"],
-  fileChats: ["file.chats.list"],
-  chat: ["chat.read"],
-  groupsFull: ["group.list"],
-  collectionQuery: ["collection.query"],
-  collectionRecord: ["collection.record.read"],
-  collectionSetFields: ["collection.record.edit"],
-  collectionCreateRecord: ["collection.record.create"],
-  fileWrite: ["file.write"],
-  fileDuplicate: ["file.duplicate"],
-  fileMove: ["file.move"],
-  fileDelete: ["file.delete"],
-  documentRead: ["document.read"],
-  documentHeld: ["document.held.read"],
-  versionList: ["version.list"],
-  versionCompare: ["version.compare"],
-  versionConflicts: ["version.conflicts.list"],
-  versionCreate: ["version.create"],
-  versionSwitch: ["version.switch"],
-  versionMerge: ["version.merge"],
-  versionResolve: ["version.conflict.resolve"],
-  keptCopies: ["file.kept.list"],
-  collectionsWaiting: ["workspace.status"],
-  sharedFilesHeld: ["workspace.status"],
-  syncFailure: ["workspace.status"],
-  saveKeptCopy: ["file.kept.save"],
-  restoreProtectedCopy: ["file.protected.restore"],
-  discardProtectedCopy: ["file.protected.discard"],
-  retainedCopies: ["file.retained.list"],
-  deleteRetainedCopies: ["file.retained.delete"],
-  liveKeptEdits: ["workspace.status"],
-  saveRecoveryCopy: ["share.live.document.recovery.save"],
-  retryKeptEdits: ["share.live.document.retry"],
-  stopAgain: ["share.live.document.stop"],
-  heldNoteChange: ["document.held.change"],
-  liveDocuments: ["share.live.documents.list"],
-  liveStop: ["share.live.document.stop"],
-  liveResume: ["share.live.document.resume"],
-  documentEdit: ["document.edit"],
-  documentCreate: ["document.create"],
-  fileChatStart: ["file.chat.start"],
-  automationRuns: ["automation.runs.list"],
-  automationList: ["automation.list"],
-  automationSwitch: ["automation.switch"],
-  automationRun: ["automation.run.read"],
-  automationRetry: ["automation.run.retry"],
-  automationPress: ["automation.button.press"],
-  automationButtons: ["automation.buttons.inspect"],
-  dataset: Object.values(DATASET_CAPABILITIES),
-  appPublication: Object.values(APP_PUBLICATION_CAPABILITIES),
-  ownerAppResponses: Object.values(APP_RESPONSE_CAPABILITIES),
-} as const) satisfies Record<CliVerb, readonly CapabilityId[]>;
+export const CLI_CAPABILITIES = distinct(
+  mapNamed(DECLARED_VERBS, (operation) => [operation.capabilityId]),
+  {
+    stopSync: ["workspace.sync.stop"],
+    link: ["work.reference.make"],
+    shareCopy: ["share.copy.read"],
+    shareAgents: ["share.link.agents.list"],
+    shareDisconnect: ["share.link.agent.disconnect"],
+    accountDeletePreview: ["account.delete.preview"],
+    accountDelete: ["account.delete"],
+    accessRefresh: ["access.refresh"],
+    accessObject: ["access.object.read"],
+    accessSharing: ["access.sharing.read"],
+    groups: ["group.list"],
+    groupCreate: ["group.create"],
+    threads: ["chat.threads.list"],
+    watch: ["chat.inbox.read"],
+    inbox: ["chat.inbox.read"],
+    notices: ["notice.list"],
+    show: ["chat.show"],
+    post: ["chat.post"],
+    reply: ["chat.reply"],
+    nothingToReport: ["chat.reply"],
+    chatRetry: ["agent.run.retry"],
+    react: ["chat.react"],
+    grep: ["chat.search"],
+    export: ["chat.export"],
+    moments: ["history.list"],
+    historyOperation: ["history.operation.read"],
+    historyUndo: ["history.operation.undo"],
+    moment: ["history.read"],
+    fileChats: ["file.chats.list"],
+    chat: ["chat.read"],
+    groupsFull: ["group.list"],
+    collectionQuery: ["collection.query"],
+    collectionRecord: ["collection.record.read"],
+    collectionSetFields: ["collection.record.edit"],
+    collectionCreateRecord: ["collection.record.create"],
+    fileWrite: ["file.write"],
+    fileDuplicate: ["file.duplicate"],
+    fileMove: ["file.move"],
+    fileDelete: ["file.delete"],
+    documentRead: ["document.read"],
+    documentHeld: ["document.held.read"],
+    versionList: ["version.list"],
+    versionCompare: ["version.compare"],
+    versionConflicts: ["version.conflicts.list"],
+    versionCreate: ["version.create"],
+    versionSwitch: ["version.switch"],
+    versionMerge: ["version.merge"],
+    versionResolve: ["version.conflict.resolve"],
+    keptCopies: ["file.kept.list"],
+    collectionsWaiting: ["workspace.status"],
+    sharedFilesHeld: ["workspace.status"],
+    syncFailure: ["workspace.status"],
+    saveKeptCopy: ["file.kept.save"],
+    restoreProtectedCopy: ["file.protected.restore"],
+    discardProtectedCopy: ["file.protected.discard"],
+    retainedCopies: ["file.retained.list"],
+    deleteRetainedCopies: ["file.retained.delete"],
+    liveKeptEdits: ["workspace.status"],
+    saveRecoveryCopy: ["share.live.document.recovery.save"],
+    retryKeptEdits: ["share.live.document.retry"],
+    stopAgain: ["share.live.document.stop"],
+    heldNoteChange: ["document.held.change"],
+    liveDocuments: ["share.live.documents.list"],
+    liveStop: ["share.live.document.stop"],
+    liveResume: ["share.live.document.resume"],
+    documentEdit: ["document.edit"],
+    documentCreate: ["document.create"],
+    fileChatStart: ["file.chat.start"],
+    automationRuns: ["automation.runs.list"],
+    automationList: ["automation.list"],
+    automationSwitch: ["automation.switch"],
+    automationRun: ["automation.run.read"],
+    automationRetry: ["automation.run.retry"],
+    automationPress: ["automation.button.press"],
+    automationButtons: ["automation.buttons.inspect"],
+    dataset: Object.values(DATASET_CAPABILITIES),
+    appPublication: Object.values(APP_PUBLICATION_CAPABILITIES),
+    ownerAppResponses: Object.values(APP_RESPONSE_CAPABILITIES),
+  } as const,
+) satisfies Record<CliVerb, readonly CapabilityId[]>;
 
 export type CliRequestWithoutToken = CliRequest extends infer Request
   ? Request extends CliRequest
@@ -953,9 +1325,7 @@ const cliThreadSummarySchema = z
   })
   .strict();
 
-const cliInboxThreadSchema = cliThreadSummarySchema
-  .extend({ group: cliGroupSchema })
-  .strict();
+const cliInboxThreadSchema = cliThreadSummarySchema.extend({ group: cliGroupSchema }).strict();
 
 const cliInboxMentionSchema = z
   .object({
@@ -1043,7 +1413,13 @@ const cliGrepMatchSchema = z
 export type CliGrepMatch = z.infer<typeof cliGrepMatchSchema>;
 
 const groupsResultSchema = z
-  .object({ groups: z.array(cliGroupSchema.extend({ channelWireId: z.string().min(1).max(500).nullable().optional() }).strict()) })
+  .object({
+    groups: z.array(
+      cliGroupSchema
+        .extend({ channelWireId: z.string().min(1).max(500).nullable().optional() })
+        .strict(),
+    ),
+  })
   .strict();
 const threadsResultSchema = z
   .object({
@@ -1057,23 +1433,54 @@ const threadsResultSchema = z
 const cliNoticeOpensSchema = z.discriminatedUnion("to", [
   z.object({ to: z.literal("file"), path: z.string().min(1) }).strict(),
   z.object({ to: z.literal("folder"), path: z.string().min(1) }).strict(),
-  z.object({ to: z.literal("chat"), thread: z.string().min(1), message: z.string().min(1).optional(), run: z.string().min(1).optional() }).strict(),
-  z.object({ to: z.literal("automation"), automation: z.string().min(1), run: z.string().min(1).optional() }).strict(),
-  z.object({ to: z.literal("automation-controls"), automation: z.string().min(1), sharedFile: z.string().min(1).optional() }).strict(),
+  z
+    .object({
+      to: z.literal("chat"),
+      thread: z.string().min(1),
+      message: z.string().min(1).optional(),
+      run: z.string().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      to: z.literal("automation"),
+      automation: z.string().min(1),
+      run: z.string().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      to: z.literal("automation-controls"),
+      automation: z.string().min(1),
+      sharedFile: z.string().min(1).optional(),
+    })
+    .strict(),
 ]);
-const noticesResultSchema = z.object({
-  notices: z.array(z.object({
-    id: z.string().min(1),
-    kind: z.string().min(1),
-    title: z.string(),
-    body: z.string(),
-    sender: z.object({ kind: z.enum(["person", "agent", "automation"]), label: z.string().nullable() }).strict().nullable(),
-    createdAtMs: z.number().int().nonnegative(),
-    read: z.boolean(),
-    opens: cliNoticeOpensSchema.nullable(),
-    note: z.string().optional(),
-  }).strict()),
-}).strict();
+const noticesResultSchema = z
+  .object({
+    notices: z.array(
+      z
+        .object({
+          id: z.string().min(1),
+          kind: z.string().min(1),
+          title: z.string(),
+          body: z.string(),
+          sender: z
+            .object({
+              kind: z.enum(["person", "agent", "automation"]),
+              label: z.string().nullable(),
+            })
+            .strict()
+            .nullable(),
+          createdAtMs: z.number().int().nonnegative(),
+          read: z.boolean(),
+          opens: cliNoticeOpensSchema.nullable(),
+          note: z.string().optional(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
 export type CliNoticeOpens = z.infer<typeof cliNoticeOpensSchema>;
 const inboxResultSchema = z
   .object({
@@ -1081,14 +1488,19 @@ const inboxResultSchema = z
     mentions: z.array(cliInboxMentionSchema),
   })
   .strict();
-const threadDispatchSchema = z.object({
-  paused: z.literal("budget").nullable(),
-  lastRun: z.object({
-    state: z.enum(["running", "completed", "failed"]),
-    failureReason: z.string().nullable(),
-    exitCode: z.number().int().nullable(),
-  }).strict().nullable(),
-}).strict();
+const threadDispatchSchema = z
+  .object({
+    paused: z.literal("budget").nullable(),
+    lastRun: z
+      .object({
+        state: z.enum(["running", "completed", "failed"]),
+        failureReason: z.string().nullable(),
+        exitCode: z.number().int().nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 
 const showThreadResultSchema = z
   .object({
@@ -1101,35 +1513,58 @@ export type CliShowThreadResult = z.infer<typeof showThreadResultSchema>;
 
 // A group's posts and conversation messages in one order, oldest first. A
 // post carries what its thread holds beyond its first message.
-function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(group: Group, message: Message) {
+function streamSchema<Group extends z.ZodType, Message extends z.ZodType>(
+  group: Group,
+  message: Message,
+) {
   return z
     .object({
       group,
-      items: z.array(z.object({
-        position: streamPositionSchema,
-        threadId: z.string().min(1),
-        message,
-        post: z.object({
-          replyCount: z.number().int().nonnegative(),
-          repliers: z.array(z.object({ author: cliAuthorSchema, lastReplyAtMs: z.number().int().nonnegative() }).strict()),
-          lastReplyAtMs: z.number().int().nonnegative().optional(),
-          latestAgentReply: z.object({
-            id: z.string().min(1),
-            author: cliAuthorSchema,
-            createdAtMs: z.number().int().nonnegative(),
-            bodyExcerpt: z.string(),
-          }).strict().optional(),
-          openDecisionCount: z.number().int().nonnegative(),
-          // The thread's Work card: its newest work report.
-          work: z.object({
-            status: z.enum(CHAT_WORK_STATUSES),
-            url: z.string().optional(),
-            messageId: z.string().min(1),
-            author: cliAuthorSchema,
-            reportedAtMs: z.number().int().nonnegative(),
-          }).strict().optional(),
-        }).strict().optional(),
-      }).strict()),
+      items: z.array(
+        z
+          .object({
+            position: streamPositionSchema,
+            threadId: z.string().min(1),
+            message,
+            post: z
+              .object({
+                replyCount: z.number().int().nonnegative(),
+                repliers: z.array(
+                  z
+                    .object({
+                      author: cliAuthorSchema,
+                      lastReplyAtMs: z.number().int().nonnegative(),
+                    })
+                    .strict(),
+                ),
+                lastReplyAtMs: z.number().int().nonnegative().optional(),
+                latestAgentReply: z
+                  .object({
+                    id: z.string().min(1),
+                    author: cliAuthorSchema,
+                    createdAtMs: z.number().int().nonnegative(),
+                    bodyExcerpt: z.string(),
+                  })
+                  .strict()
+                  .optional(),
+                openDecisionCount: z.number().int().nonnegative(),
+                // The thread's Work card: its newest work report.
+                work: z
+                  .object({
+                    status: z.enum(CHAT_WORK_STATUSES),
+                    url: z.string().optional(),
+                    messageId: z.string().min(1),
+                    author: cliAuthorSchema,
+                    reportedAtMs: z.number().int().nonnegative(),
+                  })
+                  .strict()
+                  .optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict(),
+      ),
       // Pass as `before` to read the older page. Null at the oldest item.
       nextBefore: streamPositionSchema.nullable(),
       // The newest item the person has read.
@@ -1162,7 +1597,9 @@ const replyResultSchema = z
   .strict();
 // Try again for a conversation's stopped agent request: queued, or why not.
 const chatRetryResultSchema = z.union([
-  z.object({ ok: z.literal(true), status: z.literal("queued"), threadId: z.string().min(1) }).strict(),
+  z
+    .object({ ok: z.literal(true), status: z.literal("queued"), threadId: z.string().min(1) })
+    .strict(),
   z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
 ]);
 const reactResultSchema = z
@@ -1192,56 +1629,72 @@ const exportResultSchema = z
 
 const rawMomentAuthorSchema = z.union([
   z.object({ kind: z.literal("unattributed") }).strict(),
-  z.object({
-    kind: z.literal("agent"),
-    agentId: z.string().min(1),
-    agentName: z.string().min(1).optional(),
-    onBehalfOf: z.string().min(1).optional(),
-    agentRunId: z.string().min(1).optional(),
-    // Named only past 0, by a run an automation started.
-    depth: z.number().int().positive().optional(),
-  }).strict(),
-  z.object({
-    kind: z.literal("human"),
-    humanId: z.string().min(1),
-    humanName: z.string().min(1).max(500).optional(),
-    relayConfirmed: z.literal(true).optional(),
-    onBehalfOf: z.string().min(1).optional(),
-  }).strict(),
+  z
+    .object({
+      kind: z.literal("agent"),
+      agentId: z.string().min(1),
+      agentName: z.string().min(1).optional(),
+      onBehalfOf: z.string().min(1).optional(),
+      agentRunId: z.string().min(1).optional(),
+      // Named only past 0, by a run an automation started.
+      depth: z.number().int().positive().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("human"),
+      humanId: z.string().min(1),
+      humanName: z.string().min(1).max(500).optional(),
+      relayConfirmed: z.literal(true).optional(),
+      onBehalfOf: z.string().min(1).optional(),
+    })
+    .strict(),
   // A live author snapshot's account holder or link holder, as the relay admitted them.
-  z.object({
-    kind: z.literal("human"),
-    humanId: z.string().min(1),
-    humanName: z.string().min(1),
-  }).strict(),
-  z.object({
-    kind: z.literal("link"),
-    publicPrincipalId: z.string().min(1),
-    label: z.string().min(1),
-  }).strict(),
-  z.object({
-    kind: z.literal("public"),
-    principalId: z.string().min(1),
-    grantId: z.string().min(1),
-  }).strict(),
-  z.object({
-    kind: z.literal("named"),
-    userId: z.string().min(1),
-    grantId: z.string().min(1),
-    grantGeneration: z.number().int().positive(),
-  }).strict(),
-  z.object({
-    kind: z.literal("link"),
-    grantId: z.string().min(1),
-    grantGeneration: z.number().int().positive(),
-    principalId: z.string().min(1),
-  }).strict(),
-  z.object({
-    kind: z.literal("automation"),
-    automationId: z.string().min(1),
-    onBehalfOf: z.string().min(1).optional(),
-    depth: z.number().int().nonnegative(),
-  }).strict(),
+  z
+    .object({
+      kind: z.literal("human"),
+      humanId: z.string().min(1),
+      humanName: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("link"),
+      publicPrincipalId: z.string().min(1),
+      label: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("public"),
+      principalId: z.string().min(1),
+      grantId: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("named"),
+      userId: z.string().min(1),
+      grantId: z.string().min(1),
+      grantGeneration: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("link"),
+      grantId: z.string().min(1),
+      grantGeneration: z.number().int().positive(),
+      principalId: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("automation"),
+      automationId: z.string().min(1),
+      onBehalfOf: z.string().min(1).optional(),
+      depth: z.number().int().nonnegative(),
+    })
+    .strict(),
 ]);
 const rawMomentOperationSchema = z.enum(["write", "rename", "delete"]);
 const rawMomentFileSchema = z
@@ -1277,12 +1730,14 @@ const rawMomentPayloadSnapshotSchema = z
 // dohc can't read the workspace's History rules, so History hides every
 // change. `unreadable` names what to fix; no change's id, path or contents
 // are sent.
-const historyPolicyUnreadableSchema = z.object({
-  ok: z.literal(false),
-  status: z.literal("policy-unreadable"),
-  unreadable: z.array(z.enum(WORKSPACE_POLICY_PATHS)).min(1),
-  reason: z.string().min(1),
-}).strict();
+const historyPolicyUnreadableSchema = z
+  .object({
+    ok: z.literal(false),
+    status: z.literal("policy-unreadable"),
+    unreadable: z.array(z.enum(WORKSPACE_POLICY_PATHS)).min(1),
+    reason: z.string().min(1),
+  })
+  .strict();
 
 const momentsResultSchema = z.union([
   z
@@ -1300,17 +1755,21 @@ const momentResultSchema = z.union([
   z
     .object({
       ok: z.literal(true),
-      change: rawMomentSummarySchema.extend({
-        files: z.array(rawMomentFileSchema),
-        before: rawMomentPayloadSnapshotSchema.nullable(),
-        after: rawMomentPayloadSnapshotSchema,
-      }).strict(),
+      change: rawMomentSummarySchema
+        .extend({
+          files: z.array(rawMomentFileSchema),
+          before: rawMomentPayloadSnapshotSchema.nullable(),
+          after: rawMomentPayloadSnapshotSchema,
+        })
+        .strict(),
     })
     .strict(),
   z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
   // History has the change, but its rules no longer track a file it touched.
   // No path or contents are sent.
-  z.object({ ok: z.literal(false), status: z.literal("untracked"), reason: z.string().min(1) }).strict(),
+  z
+    .object({ ok: z.literal(false), status: z.literal("untracked"), reason: z.string().min(1) })
+    .strict(),
   historyPolicyUnreadableSchema,
 ]);
 
@@ -1336,31 +1795,40 @@ const rawChatMessageSchema = z
     body: z.string(),
     createdAtMs: z.number().int().nonnegative(),
     parentMessageId: rawMessageIdSchema.optional(),
-    attachments: z.array(z.object({
-      objectId: z.string().min(1).optional(),
-      pathHint: z.string().min(1).optional(),
-    }).strict()),
+    attachments: z.array(
+      z
+        .object({
+          objectId: z.string().min(1).optional(),
+          pathHint: z.string().min(1).optional(),
+        })
+        .strict(),
+    ),
     needsDecision: z.boolean(),
     decisionState: z.enum(["open", "resolved"]).optional(),
     options: z.array(z.string()).optional(),
     chosenOption: z.string().optional(),
     resolvedByMessageId: rawMessageIdSchema.optional(),
     // The message's active reactions, oldest first per cell. Absent when it has none.
-    reactions: z.array(z.object({
-      emoji: z.string().min(1),
-      authorId: z.string().min(1),
-      authorKind: z.enum(["human", "agent"]),
-      authorDisplayName: z.string(),
-      atMs: z.number().int().nonnegative(),
-    }).strict()).min(1).optional(),
+    reactions: z
+      .array(
+        z
+          .object({
+            emoji: z.string().min(1),
+            authorId: z.string().min(1),
+            authorKind: z.enum(["human", "agent"]),
+            authorDisplayName: z.string(),
+            atMs: z.number().int().nonnegative(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .optional(),
     agentRequests: z.array(agentRequestSchema).optional(),
     authorReported: chatReportedAgentSchema.optional(),
     work: chatWorkReportSchema.optional(),
   })
   .strict();
-const rawFailureSchema = z
-  .object({ ok: z.literal(false), reason: z.string().min(1) })
-  .strict();
+const rawFailureSchema = z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict();
 
 const fileChatsResultSchema = z.discriminatedUnion("ok", [
   z
@@ -1393,7 +1861,13 @@ const chatResultSchema = z.union([
     .object({
       ok: z.literal(true),
       stream: streamSchema(
-        z.object({ id: rawChannelIdSchema, name: z.string().min(1), kind: z.enum(["group", "dm", "agent"]) }).strict(),
+        z
+          .object({
+            id: rawChannelIdSchema,
+            name: z.string().min(1),
+            kind: z.enum(["group", "dm", "agent"]),
+          })
+          .strict(),
         rawChatMessageSchema,
       ),
     })
@@ -1449,9 +1923,7 @@ const collectionValueValidationSchema = z.discriminatedUnion("status", [
   z
     .object({
       status: z.literal("flagged"),
-      reason: z
-        .object({ code: z.enum(FIELD_VALUE_REASON_CODES), path: z.string() })
-        .strict(),
+      reason: z.object({ code: z.enum(FIELD_VALUE_REASON_CODES), path: z.string() }).strict(),
     })
     .strict(),
   z.object({ status: z.literal("untyped") }).strict(),
@@ -1468,9 +1940,7 @@ const rawCollectionRecordSchema = z
           value: collectionWireValueSchema,
           validation: collectionValueValidationSchema,
           resolvedRelations: z.array(
-            z
-              .object({ recordId: z.string().min(1), label: z.string() })
-              .strict(),
+            z.object({ recordId: z.string().min(1), label: z.string() }).strict(),
           ),
         })
         .strict(),
@@ -1517,12 +1987,15 @@ const collectionRecordResultSchema = z.discriminatedUnion("ok", [
             onBehalfOf: z.string().min(1).nullable(),
             depth: z.number().int().nonnegative().nullable(),
             recordedAtMs: z.number().int().nonnegative(),
-            linkAuthor: z.object({
-              kind: z.literal("link"),
-              grantId: z.string().min(1),
-              grantGeneration: z.number().int().positive(),
-              publicPrincipalId: z.string().min(1),
-            }).strict().nullable(),
+            linkAuthor: z
+              .object({
+                kind: z.literal("link"),
+                grantId: z.string().min(1),
+                grantGeneration: z.number().int().positive(),
+                publicPrincipalId: z.string().min(1),
+              })
+              .strict()
+              .nullable(),
             // The automation run that made the change: its claim, and the automation's name when it ran.
             automationRun: z
               .object({ claimId: z.string().min(1), automationName: z.string().min(1) })
@@ -1560,7 +2033,14 @@ const documentHeldResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 const documentEditResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), path: z.string().min(1), changed: z.boolean(), warning: z.string().optional() }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      changed: z.boolean(),
+      warning: z.string().optional(),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 const documentCreateResultSchema = z.discriminatedUnion("ok", [
@@ -1584,71 +2064,93 @@ const fileChatStartResultSchema = z.discriminatedUnion("ok", [
 // canMergeIntoMain is false for a version made from another version.
 // madeFromVersionId is the version it was made from. Main has none.
 const versionListResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    versions: z.array(z.object({
-      id: z.string().min(1),
-      name: z.string().min(1),
-      kind: z.enum(["main", "named"]),
-      createdAtMs: z.number(),
-      canMergeIntoMain: z.boolean(),
-      madeFromVersionId: z.string().min(1).optional(),
-    }).strict()),
-    activeVersionId: z.string().min(1),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      versions: z.array(
+        z
+          .object({
+            id: z.string().min(1),
+            name: z.string().min(1),
+            kind: z.enum(["main", "named"]),
+            createdAtMs: z.number(),
+            canMergeIntoMain: z.boolean(),
+            madeFromVersionId: z.string().min(1).optional(),
+          })
+          .strict(),
+      ),
+      activeVersionId: z.string().min(1),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 
 // Version rows leave out secret-backed files and paths the workspace's rules
 // don't track, as History does.
 const versionCompareResultSchema = z.union([
-  z.object({
-    ok: z.literal(true),
-    version: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
-    // One page of the files that differ from Main. Pass nextAfterPath back as
-    // afterPath for the next page.
-    files: z.array(z.object({
-      path: z.string().min(1),
-      status: z.enum(["added", "modified", "deleted"]),
-      // Main's side; absent when the file exists only in the version.
-      currentText: z.string().optional(),
-      // The version's side; absent when the file exists only in Main.
-      incomingText: z.string().optional(),
-      // A binary file differs by its bytes, so neither side has text.
-      binary: z.boolean().optional(),
-    }).strict()),
-    nextAfterPath: z.string().min(1).nullable(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      version: z.object({ id: z.string().min(1), name: z.string().min(1) }).strict(),
+      // One page of the files that differ from Main. Pass nextAfterPath back as
+      // afterPath for the next page.
+      files: z.array(
+        z
+          .object({
+            path: z.string().min(1),
+            status: z.enum(["added", "modified", "deleted"]),
+            // Main's side; absent when the file exists only in the version.
+            currentText: z.string().optional(),
+            // The version's side; absent when the file exists only in Main.
+            incomingText: z.string().optional(),
+            // A binary file differs by its bytes, so neither side has text.
+            binary: z.boolean().optional(),
+          })
+          .strict(),
+      ),
+      nextAfterPath: z.string().min(1).nullable(),
+    })
+    .strict(),
   rawFailureSchema,
   historyPolicyUnreadableSchema,
 ]);
 
-const conflictBinarySchema = z.object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1) }).strict().nullable();
+const conflictBinarySchema = z
+  .object({ byteLength: z.number().int().nonnegative(), sha256: z.string().min(1) })
+  .strict()
+  .nullable();
 // One page of open conflicts: from a merge, or from two computers editing
 // the same file while apart (origin "sync"). A side's text is null when that
 // side has no file or holds binary.
 const versionConflictsPage = {
-  conflicts: z.array(z.object({
-    conflictId: z.string().min(1),
-    path: z.string().min(1),
-    sourceVersionId: z.string().min(1),
-    targetVersionId: z.string().min(1),
-    origin: z.enum(["merge", "sync"]),
-    contentKind: z.enum(["text", "binary"]),
-    currentText: z.string().nullable(),
-    incomingText: z.string().nullable(),
-    baseText: z.string().nullable(),
-    currentBinary: conflictBinarySchema.optional(),
-    incomingBinary: conflictBinarySchema.optional(),
-    baseBinary: conflictBinarySchema.optional(),
-    waiting: z.object({
-      code: z.literal("resolve-existing-conflict"),
-      message: z.string().min(1),
-      objectId: z.string().min(1),
-      originId: z.string().min(1),
-      originSeq: z.number().int().nonnegative(),
-    }).strict().optional(),
-  }).strict()),
+  conflicts: z.array(
+    z
+      .object({
+        conflictId: z.string().min(1),
+        path: z.string().min(1),
+        sourceVersionId: z.string().min(1),
+        targetVersionId: z.string().min(1),
+        origin: z.enum(["merge", "sync"]),
+        contentKind: z.enum(["text", "binary"]),
+        currentText: z.string().nullable(),
+        incomingText: z.string().nullable(),
+        baseText: z.string().nullable(),
+        currentBinary: conflictBinarySchema.optional(),
+        incomingBinary: conflictBinarySchema.optional(),
+        baseBinary: conflictBinarySchema.optional(),
+        waiting: z
+          .object({
+            code: z.literal("resolve-existing-conflict"),
+            message: z.string().min(1),
+            objectId: z.string().min(1),
+            originId: z.string().min(1),
+            originSeq: z.number().int().nonnegative(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict(),
+  ),
   nextAfterConflictId: z.string().min(1).nullable(),
 };
 const versionConflictsResultSchema = z.union([
@@ -1664,20 +2166,28 @@ const versionCreateResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 const versionSwitchResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), version: versionNameSchema, changedFileCount: z.number().int().nonnegative() }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      version: versionNameSchema,
+      changedFileCount: z.number().int().nonnegative(),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 // conflictCount counts every conflict the merge left. The page lists the
 // open conflicts, from this merge and earlier ones, as version conflicts does.
 const versionMergeResultSchema = z.union([
-  z.object({
-    ok: z.literal(true),
-    version: versionNameSchema,
-    mergedFileCount: z.number().int().nonnegative(),
-    unchangedFileCount: z.number().int().nonnegative(),
-    conflictCount: z.number().int().nonnegative(),
-    ...versionConflictsPage,
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      version: versionNameSchema,
+      mergedFileCount: z.number().int().nonnegative(),
+      unchangedFileCount: z.number().int().nonnegative(),
+      conflictCount: z.number().int().nonnegative(),
+      ...versionConflictsPage,
+    })
+    .strict(),
   rawFailureSchema,
   historyPolicyUnreadableSchema,
 ]);
@@ -1688,19 +2198,27 @@ const versionResolveResultSchema = versionConflictsResultSchema;
 // them meanwhile. Each waits out of sight until saveKeptCopy moves it to a
 // visible copy beside its file.
 const keptCopiesResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
-    // A protected file's change a sync replaced: [path, id, keptAtMs]. The
-    // text stays on this computer; no answer carries it.
-    protectedCopies: z.array(z.tuple([z.string(), z.string(), z.number().int().nonnegative()])).optional(),
-    keptCopies: z.array(z.object({
-      id: z.number().int(),
-      path: z.string().min(1),
-      keptAtMs: z.number().int().nonnegative(),
-    }).strict()),
-    more: z.boolean(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      outsideWriteCopies: z.array(z.tuple([z.string(), z.string(), z.string()])).optional(),
+      // A protected file's change a sync replaced: [path, id, keptAtMs]. The
+      // text stays on this computer; no answer carries it.
+      protectedCopies: z
+        .array(z.tuple([z.string(), z.string(), z.number().int().nonnegative()]))
+        .optional(),
+      keptCopies: z.array(
+        z
+          .object({
+            id: z.number().int(),
+            path: z.string().min(1),
+            keptAtMs: z.number().int().nonnegative(),
+          })
+          .strict(),
+      ),
+      more: z.boolean(),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 // `saved` with the copy's path; `gone` when nothing is kept under that id any
@@ -1713,44 +2231,54 @@ const saveKeptCopyResultSchema = z.union([
   rawFailureSchema,
 ]);
 const restoreProtectedCopyResultSchema = z.union([
-  z.object({ ok: z.literal(true), status: z.literal("restored"), path: z.string().min(1) }).strict(),
+  z
+    .object({ ok: z.literal(true), status: z.literal("restored"), path: z.string().min(1) })
+    .strict(),
   rawFailureSchema,
 ]);
 const discardProtectedCopyResultSchema = z.union([
-  z.object({ ok: z.literal(true), status: z.literal("discarded"), path: z.string().min(1) }).strict(),
+  z
+    .object({ ok: z.literal(true), status: z.literal("discarded"), path: z.string().min(1) })
+    .strict(),
   rawFailureSchema,
 ]);
 
 // Old file copies kept on a drive that cannot tell dohc whether a program
 // still has one open: how many, and their logical size in bytes. Deleting
 // them may free less disk space than `bytes`.
-const retainedCopiesSummarySchema = z.object({
-  count: z.number().int().nonnegative(),
-  bytes: z.number().int().nonnegative(),
-}).strict();
+const retainedCopiesSummarySchema = z
+  .object({
+    count: z.number().int().nonnegative(),
+    bytes: z.number().int().nonnegative(),
+  })
+  .strict();
 // `copies` names those a delete may remove now, oldest first, each with the
 // revision the delete must match; `more` says there are others past these.
 // `total` counts every one, including copies that changed in the last 30
 // seconds or whose file waits for review.
 const retainedCopiesResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    copies: z.array(retainedCopySchema),
-    more: z.boolean(),
-    total: retainedCopiesSummarySchema,
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      copies: z.array(retainedCopySchema),
+      more: z.boolean(),
+      total: retainedCopiesSummarySchema,
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 // A copy that changed since it was listed, whose file waits for review, or
 // that recovery may still need is skipped and stays.
 const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    deleted: z.number().int().nonnegative(),
-    skipped: z.number().int().nonnegative(),
-    failed: z.number().int().nonnegative(),
-    remaining: retainedCopiesSummarySchema,
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      deleted: z.number().int().nonnegative(),
+      skipped: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative(),
+      remaining: retainedCopiesSummarySchema,
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 
@@ -1766,21 +2294,36 @@ const deleteRetainedCopiesResultSchema = z.discriminatedUnion("ok", [
 // copied or not, which only a recovery copy can reach.
 const keptEditsStoredOnSchema = z.enum(["this-computer", "server"]);
 const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    keptEdits: z.array(z.object({
-      path: z.string().min(1),
-      reason: z.string().min(1),
-      storedOn: keptEditsStoredOnSchema,
-      incident: keptEditsIncidentSchema,
-      recovery: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]),
-      earlier: z.literal(true).optional(),
-      saveOnly: z.literal(true).optional(),
-    }).strict()),
-    // Shared notes whose edits wait on this computer for the server. Each
-    // file holds the text the server last settled until it accepts them.
-    pendingShare: z.array(z.string().min(1)),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      keptEdits: z.array(
+        z
+          .object({
+            path: z.string().min(1),
+            reason: z.string().min(1),
+            storedOn: keptEditsStoredOnSchema,
+            incident: keptEditsIncidentSchema,
+            recovery: z.enum([
+              "paused",
+              "retrying",
+              "stopping",
+              "stopped-kept",
+              "not-written",
+              "cannot-write",
+              "copied",
+              "unreadable",
+            ]),
+            earlier: z.literal(true).optional(),
+            saveOnly: z.literal(true).optional(),
+          })
+          .strict(),
+      ),
+      // Shared notes whose edits wait on this computer for the server. Each
+      // file holds the text the server last settled until it accepts them.
+      pendingShare: z.array(z.string().min(1)),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 // The package always holds every kept edit. `copyPath` is null when dohc
@@ -1789,14 +2332,16 @@ const liveKeptEditsResultSchema = z.discriminatedUnion("ok", [
 // copied once the server may release them, and ended once dohc no longer
 // keeps a Stop's edits it could not write.
 const saveRecoveryCopyResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    copyPath: z.string().min(1).nullable(),
-    packagePath: z.string().min(1),
-    folder: z.string().min(1),
-    storedOn: keptEditsStoredOnSchema,
-    keptEdits: z.enum(["kept", "copied", "ended"]),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      copyPath: z.string().min(1).nullable(),
+      packagePath: z.string().min(1),
+      folder: z.string().min(1),
+      storedOn: keptEditsStoredOnSchema,
+      keptEdits: z.enum(["kept", "copied", "ended"]),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
@@ -1806,17 +2351,32 @@ const retryKeptEditsResultSchema = z.discriminatedUnion("ok", [
 // What the Stop did with the kept edits: wrote them into the file, still
 // keeps them, or kept none.
 const stopAgainResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]) }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      keptEdits: z.enum(["none", "recovered", "kept"]),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 // `already` when the server says the change was already made: live editing was
 // already stopped, or the document already live. Then nothing records who asked.
 const liveStopResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), path: z.string().min(1), keptEdits: z.enum(["none", "recovered", "kept"]), already: z.literal(true).optional() }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      path: z.string().min(1),
+      keptEdits: z.enum(["none", "recovered", "kept"]),
+      already: z.literal(true).optional(),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 const liveResumeResultSchema = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), path: z.string().min(1), already: z.literal(true).optional() }).strict(),
+  z
+    .object({ ok: z.literal(true), path: z.string().min(1), already: z.literal(true).optional() })
+    .strict(),
   rawFailureSchema,
 ]);
 
@@ -1825,25 +2385,48 @@ const liveResumeResultSchema = z.discriminatedUnion("ok", [
 // deferredStop is a Stop that waits for unsent edits. quarantine and the
 // fields after it describe edits the server refused, as kept-edits does.
 const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true),
-    documents: z.array(z.object({
-      path: z.string().min(1),
-      objectId: liveDocumentObjectIdSchema,
-      status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
-      reason: liveDocumentReasonSchema.optional(),
-      failure: z.object({ word: z.string().regex(/^[a-z0-9-]{1,64}$/u), since: z.iso.datetime() }).strict().optional(),
-      canResume: z.boolean(),
-      deferredStop: z.object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() }).strict().optional(),
-      quarantine: z.enum(["paused", "retrying", "stopping", "stopped-kept", "not-written", "cannot-write", "copied", "unreadable"]).optional(),
-      earlier: z.literal(true).optional(),
-      saveOnly: z.literal(true).optional(),
-      sessionEnded: z.literal(true).optional(),
-      storedOn: keptEditsStoredOnSchema.optional(),
-      incident: keptEditsIncidentSchema.optional(),
-    }).strict()),
-    nextCursor: z.string().min(1).nullable(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      documents: z.array(
+        z
+          .object({
+            path: z.string().min(1),
+            objectId: liveDocumentObjectIdSchema,
+            status: z.enum(["ready", "preparing", "paused", "unavailable", "retired"]),
+            reason: liveDocumentReasonSchema.optional(),
+            failure: z
+              .object({ word: z.string().regex(/^[a-z0-9-]{1,64}$/u), since: z.iso.datetime() })
+              .strict()
+              .optional(),
+            canResume: z.boolean(),
+            deferredStop: z
+              .object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() })
+              .strict()
+              .optional(),
+            quarantine: z
+              .enum([
+                "paused",
+                "retrying",
+                "stopping",
+                "stopped-kept",
+                "not-written",
+                "cannot-write",
+                "copied",
+                "unreadable",
+              ])
+              .optional(),
+            earlier: z.literal(true).optional(),
+            saveOnly: z.literal(true).optional(),
+            sessionEnded: z.literal(true).optional(),
+            storedOn: keptEditsStoredOnSchema.optional(),
+            incident: keptEditsIncidentSchema.optional(),
+          })
+          .strict(),
+      ),
+      nextCursor: z.string().min(1).nullable(),
+    })
+    .strict(),
   rawFailureSchema,
 ]);
 
@@ -1853,56 +2436,103 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
 // longer find, the same four for dataset records, and a message or notice
 // it sent. Values are plain JSON.
 const automationDatasetRulesSchema = z
-  .object({ datasetId: z.string(), revision: z.number().int().positive(), revisionSha256: z.string() })
+  .object({
+    datasetId: z.string(),
+    revision: z.number().int().positive(),
+    revisionSha256: z.string(),
+  })
   .strict();
 const automationDatasetRecordIdSchema = z.union([z.string(), z.number()]);
 const automationRunChangeSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("field"), recordId: z.string(), path: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict(),
+  z
+    .object({
+      kind: z.literal("field"),
+      recordId: z.string(),
+      path: z.string(),
+      field: z.string(),
+      before: z.json(),
+      after: z.json(),
+    })
+    .strict(),
   z.object({ kind: z.literal("created"), recordId: z.string(), path: z.string() }).strict(),
-  z.object({ kind: z.literal("kept"), recordId: z.string(), path: z.string(), field: z.string(), planned: z.json(), current: z.json() }).strict(),
-  z.object({ kind: z.literal("skipped"), recordId: z.string(), path: z.string(), reason: z.string() }).strict(),
+  z
+    .object({
+      kind: z.literal("kept"),
+      recordId: z.string(),
+      path: z.string(),
+      field: z.string(),
+      planned: z.json(),
+      current: z.json(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("skipped"),
+      recordId: z.string(),
+      path: z.string(),
+      reason: z.string(),
+    })
+    .strict(),
   // An edit that landed, with the record version it was sent at and the one it left.
-  z.object({
-    kind: z.literal("dataset-edit"),
-    rules: automationDatasetRulesSchema,
-    operationId: z.string(),
-    tableId: z.string(),
-    recordId: automationDatasetRecordIdSchema,
-    expectedVersion: z.number().int().positive(),
-    version: z.number().int().positive(),
-    fields: z.array(z.object({ fieldId: z.string(), field: z.string(), before: z.json(), after: z.json() }).strict()),
-  }).strict(),
+  z
+    .object({
+      kind: z.literal("dataset-edit"),
+      rules: automationDatasetRulesSchema,
+      operationId: z.string(),
+      tableId: z.string(),
+      recordId: automationDatasetRecordIdSchema,
+      expectedVersion: z.number().int().positive(),
+      version: z.number().int().positive(),
+      fields: z.array(
+        z
+          .object({ fieldId: z.string(), field: z.string(), before: z.json(), after: z.json() })
+          .strict(),
+      ),
+    })
+    .strict(),
   // A record the run added. `deletes` are the approved deletes Undo may use on it, as the run recorded them.
-  z.object({
-    kind: z.literal("dataset-created"),
-    rules: automationDatasetRulesSchema,
-    operationId: z.string(),
-    tableId: z.string(),
-    recordId: automationDatasetRecordIdSchema,
-    version: z.number().int().positive(),
-    deletes: z.array(z.string()),
-  }).strict(),
+  z
+    .object({
+      kind: z.literal("dataset-created"),
+      rules: automationDatasetRulesSchema,
+      operationId: z.string(),
+      tableId: z.string(),
+      recordId: automationDatasetRecordIdSchema,
+      version: z.number().int().positive(),
+      deletes: z.array(z.string()),
+    })
+    .strict(),
   // An action that ran, by its label then, and the dataset revision its commit made. When the
   // rules named a reverse action, `reverseOperationId` is it and `undo` is its input; Undo runs that or nothing.
-  z.object({
-    kind: z.literal("dataset-action"),
-    rules: automationDatasetRulesSchema,
-    operationId: z.string(),
-    tableId: z.string(),
-    name: z.string(),
-    revision: z.number().int().nonnegative(),
-    undo: z.json().optional(),
-    reverseOperationId: z.string().optional(),
-  }).strict(),
-  z.object({
-    kind: z.literal("dataset-kept"),
-    recordId: automationDatasetRecordIdSchema,
-    fieldId: z.string(),
-    field: z.string(),
-    planned: z.json(),
-    current: z.json(),
-  }).strict(),
-  z.object({ kind: z.literal("dataset-skipped"), recordId: automationDatasetRecordIdSchema, reason: z.string() }).strict(),
+  z
+    .object({
+      kind: z.literal("dataset-action"),
+      rules: automationDatasetRulesSchema,
+      operationId: z.string(),
+      tableId: z.string(),
+      name: z.string(),
+      revision: z.number().int().nonnegative(),
+      undo: z.json().optional(),
+      reverseOperationId: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("dataset-kept"),
+      recordId: automationDatasetRecordIdSchema,
+      fieldId: z.string(),
+      field: z.string(),
+      planned: z.json(),
+      current: z.json(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("dataset-skipped"),
+      recordId: automationDatasetRecordIdSchema,
+      reason: z.string(),
+    })
+    .strict(),
   z.object({ kind: z.literal("message"), messageId: z.string(), name: z.string() }).strict(),
   z.object({ kind: z.literal("notice"), noticeId: z.string(), name: z.string() }).strict(),
 ]);
@@ -1911,8 +2541,22 @@ const automationRunChangeSchema = z.discriminatedUnion("kind", [
 // A person the owner shared with, or an Edit share link, the relay accepted
 // the change from. A link is its grant, never a person's account.
 const automationSharedAuthorSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("named"), userId: z.string().min(1), grantId: z.string().min(1), grantGeneration: z.number().int().positive() }).strict(),
-  z.object({ kind: z.literal("link"), grantId: z.string().min(1), grantGeneration: z.number().int().positive(), principalId: z.string().min(1) }).strict(),
+  z
+    .object({
+      kind: z.literal("named"),
+      userId: z.string().min(1),
+      grantId: z.string().min(1),
+      grantGeneration: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("link"),
+      grantId: z.string().min(1),
+      grantGeneration: z.number().int().positive(),
+      principalId: z.string().min(1),
+    })
+    .strict(),
 ]);
 const automationTriggerSchema = z
   .object({
@@ -1946,7 +2590,9 @@ const automationRunsResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      runs: z.array(z.object({ ...automationRunFields, changes: z.number().int().nonnegative() }).strict()),
+      runs: z.array(
+        z.object({ ...automationRunFields, changes: z.number().int().nonnegative() }).strict(),
+      ),
       // The `page` that lists the older runs, or null after the oldest.
       next: z.string().min(1).nullable(),
     })
@@ -1957,41 +2603,64 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
   z
     .object({
       ok: z.literal(true),
-      run: z.union([z
-        .object({
-          ...automationRunFields,
-          findMs: z.number().nonnegative().optional(),
-          planMs: z.number().nonnegative().optional(),
-          writeMs: z.number().nonnegative().optional(),
-          writeCount: z.number().int().nonnegative().optional(),
-          // Steps count from 1 in the order the file lists them, including
-          // the steps inside If and Otherwise. A step that changed nothing
-          // is not listed.
-          steps: z.array(
-            z.object({ step: z.number().int().positive(), changes: z.array(automationRunChangeSchema) }).strict(),
-          ),
-          // The step whose change did not land when the run failed. Null
-          // when it did not fail, or failed before any step, such as on a
-          // formula.
-          failedStep: z.number().int().positive().nullable(),
-          // Try again runs it from the first step and needs startOver,
-          // because the automation changed or the run's progress is gone.
-          // Otherwise Try again resumes at failedStep.
-          startsOver: z.boolean(),
-        })
-        .strict(),
-      // A run the server ran, with what it changed there, oldest first.
-      z.object({ ...automationRunFields, server: z.literal(true), changes: z.array(automationRunChangeSchema) }).strict()]),
+      run: z.union([
+        z
+          .object({
+            ...automationRunFields,
+            findMs: z.number().nonnegative().optional(),
+            planMs: z.number().nonnegative().optional(),
+            writeMs: z.number().nonnegative().optional(),
+            writeCount: z.number().int().nonnegative().optional(),
+            // Steps count from 1 in the order the file lists them, including
+            // the steps inside If and Otherwise. A step that changed nothing
+            // is not listed.
+            steps: z.array(
+              z
+                .object({
+                  step: z.number().int().positive(),
+                  changes: z.array(automationRunChangeSchema),
+                })
+                .strict(),
+            ),
+            // The step whose change did not land when the run failed. Null
+            // when it did not fail, or failed before any step, such as on a
+            // formula.
+            failedStep: z.number().int().positive().nullable(),
+            // Try again runs it from the first step and needs startOver,
+            // because the automation changed or the run's progress is gone.
+            // Otherwise Try again resumes at failedStep.
+            startsOver: z.boolean(),
+          })
+          .strict(),
+        // A run the server ran, with what it changed there, oldest first.
+        z
+          .object({
+            ...automationRunFields,
+            server: z.literal(true),
+            changes: z.array(automationRunChangeSchema),
+          })
+          .strict(),
+      ]),
     })
     .strict(),
   rawFailureSchema,
 ]);
 const automationRetryResultSchema = z.union([
   z.object({ ok: z.literal(true), status: z.literal("queued") }).strict(),
-  z.object({
-    ok: z.literal(false), status: z.literal("switched-off"), reason: z.string().min(1),
-    target: z.object({ recovery: z.literal("automation-controls"), automation: z.string().min(1), path: z.string().min(1) }).strict(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      status: z.literal("switched-off"),
+      reason: z.string().min(1),
+      target: z
+        .object({
+          recovery: z.literal("automation-controls"),
+          automation: z.string().min(1),
+          path: z.string().min(1),
+        })
+        .strict(),
+    })
+    .strict(),
   // Running it again starts from the first step and can repeat changes the
   // run already made, so it needs startOver. `repeatsMessages` says posts,
   // direct messages, and notices it sent may be sent again.
@@ -2015,10 +2684,15 @@ const automationRetryResultSchema = z.union([
 
 const fileWriteResultSchema = z.discriminatedUnion("ok", [
   z.object({ ok: z.literal(true), written: z.array(z.string()) }).strict(),
-  z.object({
-    ok: z.literal(false), reason: z.string(), written: z.array(z.string()).optional(),
-    path: z.string().optional(), currentSha256: z.string().nullable().optional(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string(),
+      written: z.array(z.string()).optional(),
+      path: z.string().optional(),
+      currentSha256: z.string().nullable().optional(),
+    })
+    .strict(),
 ]);
 
 // A move is whole or put back. `withoutHistory` names the files the move
@@ -2026,20 +2700,36 @@ const fileWriteResultSchema = z.discriminatedUnion("ok", [
 // a failed move, `deleted` names the files History records as deleted:
 // replaced destination files that could not be restored, and moved files
 // that could not go to either path. Each stays in the workspace trash.
-const replacedPathSchema = z.object({
-  path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
-  withoutHistory: z.array(z.string()),
-}).strict();
+const replacedPathSchema = z
+  .object({
+    path: z.string(),
+    trashed: z.boolean(),
+    trashPath: z.string().optional(),
+    withoutHistory: z.array(z.string()),
+  })
+  .strict();
 
 const fileMoveResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true), ...OperationRecovery.shape, fromPath: z.string(), toPath: z.string(), withoutHistory: z.array(z.string()).optional(),
-    replaced: replacedPathSchema.optional(),
-  }).strict(),
-  z.object({
-    ok: z.literal(false), reason: z.string(), path: z.string().optional(), deleted: z.array(z.string()).optional(),
-    withoutHistory: z.array(z.string()).optional(), replaced: replacedPathSchema.optional(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      ...OperationRecovery.shape,
+      fromPath: z.string(),
+      toPath: z.string(),
+      withoutHistory: z.array(z.string()).optional(),
+      replaced: replacedPathSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string(),
+      path: z.string().optional(),
+      deleted: z.array(z.string()).optional(),
+      withoutHistory: z.array(z.string()).optional(),
+      replaced: replacedPathSchema.optional(),
+    })
+    .strict(),
 ]);
 
 // `trashed` is true when the system trash took the entry; when false,
@@ -2048,14 +2738,25 @@ const fileMoveResultSchema = z.discriminatedUnion("ok", [
 // UTF-8. A folder delete that stops at `path` names the files it already
 // deleted.
 const fileDeleteResultSchema = z.discriminatedUnion("ok", [
-  z.object({
-    ok: z.literal(true), ...OperationRecovery.shape, path: z.string(), trashed: z.boolean(), trashPath: z.string().optional(),
-    withoutHistory: z.array(z.string()).optional(),
-  }).strict(),
-  z.object({
-    ok: z.literal(false), reason: z.string(), deleted: z.array(z.string()).optional(), path: z.string().optional(),
-    withoutHistory: z.array(z.string()).optional(),
-  }).strict(),
+  z
+    .object({
+      ok: z.literal(true),
+      ...OperationRecovery.shape,
+      path: z.string(),
+      trashed: z.boolean(),
+      trashPath: z.string().optional(),
+      withoutHistory: z.array(z.string()).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      ok: z.literal(false),
+      reason: z.string(),
+      deleted: z.array(z.string()).optional(),
+      path: z.string().optional(),
+      withoutHistory: z.array(z.string()).optional(),
+    })
+    .strict(),
 ]);
 
 const automationPressResultSchema = z.union([
@@ -2078,145 +2779,224 @@ const automationPressResultSchema = z.union([
     .object({
       ok: z.literal(false),
       reason: z.string().min(1),
-      confirm: z.array(z.object({ name: z.string().min(1), label: z.string().min(1) }).strict()).min(1),
+      confirm: z
+        .array(z.object({ name: z.string().min(1), label: z.string().min(1) }).strict())
+        .min(1),
     })
     .strict(),
   rawFailureSchema,
 ]);
 
-export const cliResultSchemas = distinct(mapNamed(DECLARED_VERBS, operation => operation.result) as {
-  readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>["result"];
-}, {
-  stopSync: z.union([
-    z.object({ ok: z.literal(true), workspaceId: z.string().min(1), workspaceSynced: z.literal(false),
-      syncPause: WorkspaceSyncPauseStatus.optional() }).strict(),
-    rawFailureSchema,
-  ]),
-  // `link` goes in a message body as it is, and shows as a chip that opens
-  // what it names for anyone who can see it.
-  link: z.object({
-    reference: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-    link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
-    kind: z.enum(["chat", "thread", "message", "file", "collection"]),
-  }).strict(),
-  shareCopy: ShareCopyResult,
-  shareAgents: ListRelayShareLinkAgentsResult,
-  shareDisconnect: DisconnectRelayShareLinkAgentResult,
-  accountDeletePreview: ServerAccountDeletionPreview,
-  accountDelete: ServerAccountDeleteResult,
-  accessRefresh: AccessRefreshResult,
-  accessObject: AccessAnswer,
-  accessSharing: AccessAnswer,
-  automationList: z.discriminatedUnion("ok", [
-    z.object({ ok: z.literal(true), definitions: z.custom<AutomationDefinitionList>(value => value !== null && typeof value === "object" && "file" in value && "canSwitch" in value && "contentHash" in value) }).strict(),
-    z.object({ ok: z.literal(false), reason: z.string() }).strict(),
-  ]),
-  automationSwitch: z.discriminatedUnion("ok", [
-    z.object({ ok: z.literal(true), result: z.custom<AutomationSwitchResult>(value => value !== null && typeof value === "object" && "status" in value) }).strict(),
-    z.object({ ok: z.literal(false), reason: z.string() }).strict(),
-  ]),
-  fileWrite: fileWriteResultSchema,
-  historyOperation: HistoryOperationReadResult,
-  historyUndo: HistoryOperationUndoResult,
-  fileDuplicate: z.discriminatedUnion("ok", [z.object({ok: z.literal(true), ...OperationRecovery.shape, path: z.string(), materialized: z.boolean()}).strict(), z.object({ok: z.literal(false), reason: z.string()}).strict()]),
-  fileMove: fileMoveResultSchema,
-  fileDelete: fileDeleteResultSchema,
-  dataset: DatasetResult,
-  appPublication: OwnerAppPublicationResult,
-  ownerAppResponses: OwnerAppResponsesResult,
-  groups: groupsResultSchema,
-  groupCreate: z.object({ group: cliGroupSchema }).strict(),
-  threads: threadsResultSchema,
-  watch: z.object({ messages: z.array(cliInboxMentionSchema), cursor: z.string().min(1).max(1_048_576) }).strict(),
-  inbox: inboxResultSchema,
-  notices: noticesResultSchema,
-  show: showResultSchema,
-  post: postResultSchema,
-  reply: replyResultSchema,
-  nothingToReport: z.object({ threadId: z.string().min(1), nothingToReport: z.literal(true) }).strict(),
-  chatRetry: chatRetryResultSchema,
-  react: reactResultSchema,
-  grep: grepResultSchema,
-  export: exportResultSchema,
-  moments: momentsResultSchema,
-  moment: momentResultSchema,
-  fileChats: fileChatsResultSchema,
-  chat: chatResultSchema,
-  groupsFull: groupsFullResultSchema,
-  collectionQuery: collectionQueryResultSchema,
-  collectionRecord: collectionRecordResultSchema,
-  collectionSetFields: collectionSetFieldsResultSchema,
-  collectionCreateRecord: collectionCreateRecordResultSchema,
-  documentRead: documentReadResultSchema,
-  documentHeld: documentHeldResultSchema,
-  versionList: versionListResultSchema,
-  versionCompare: versionCompareResultSchema,
-  versionConflicts: versionConflictsResultSchema,
-  versionCreate: versionCreateResultSchema,
-  versionSwitch: versionSwitchResultSchema,
-  versionMerge: versionMergeResultSchema,
-  versionResolve: versionResolveResultSchema,
-  keptCopies: keptCopiesResultSchema,
-  // The engine's answer: Collection updates wait for an unfinished pull.
-  collectionsWaiting: z.discriminatedUnion("ok", [
-    z.object({ ok: z.literal(true), waiting: z.boolean() }).strict(),
-    rawFailureSchema,
-  ]),
-  // Shared files a shared view holds back until a person acts: a file from
-  // this computer in the way, or two shared names this disk treats as one.
-  // `files` holds the first 20 of `count`; `message` says the step for each.
-  sharedFilesHeld: z.discriminatedUnion("ok", [
-    z.object({
-      ok: z.literal(true),
-      heldFiles: z.object({
-        count: z.number().int().positive(),
-        files: z.array(z.object({
-          path: z.string().min(1),
-          reason: z.enum(["local-collision", "spelling-collision"]),
-          owner: z.string().min(1).optional(),
-        }).strict()),
-        message: z.string().min(1),
-      }).strict().nullable(),
-    }).strict(),
-    rawFailureSchema,
-  ]),
-  // Why the last sync pass failed, until a pass succeeds: a stable code, the
-  // sentence a person reads, and the engine's detail for a report.
-  syncFailure: z.discriminatedUnion("ok", [
-    z.object({
-      ok: z.literal(true),
-      syncFailure: z.object({ code: z.string().min(1), message: z.string().min(1), detail: z.string() }).strict().nullable(),
-    }).strict(),
-    rawFailureSchema,
-  ]),
-  saveKeptCopy: saveKeptCopyResultSchema,
-  restoreProtectedCopy: restoreProtectedCopyResultSchema,
-  discardProtectedCopy: discardProtectedCopyResultSchema,
-  retainedCopies: retainedCopiesResultSchema,
-  deleteRetainedCopies: deleteRetainedCopiesResultSchema,
-  liveKeptEdits: liveKeptEditsResultSchema,
-  saveRecoveryCopy: saveRecoveryCopyResultSchema,
-  retryKeptEdits: retryKeptEditsResultSchema,
-  stopAgain: stopAgainResultSchema,
-  heldNoteChange: heldNoteChangeResultSchema,
-  liveDocuments: liveDocumentsResultSchema,
-  liveStop: liveStopResultSchema,
-  liveResume: liveResumeResultSchema,
-  documentEdit: documentEditResultSchema,
-  documentCreate: documentCreateResultSchema,
-  fileChatStart: fileChatStartResultSchema,
-  automationRuns: automationRunsResultSchema,
-  automationRun: automationRunResultSchema,
-  automationRetry: automationRetryResultSchema,
-  automationButtons: z.union([
-    z.object({ ok: z.literal(true), buttons: z.array(z.object({ field: z.string(), table: z.string().optional(), state: z.union([
-      z.object({ kind: z.literal("ready"), automationId: z.string(), irreversible: z.array(z.object({ name: z.string(), label: z.string() })).optional() }),
-      z.object({ kind: z.enum(["disabled", "unchecked", "no-automation"]), reason: z.string() }),
-    ]) })) }),
-    rawFailureSchema,
-  ]),
-  automationPress: automationPressResultSchema,
-} as const);
+export const cliResultSchemas = distinct(
+  mapNamed(DECLARED_VERBS, (operation) => operation.result) as {
+    readonly [Verb in DeclaredVerb]: DeclaredOperationOf<Verb>["result"];
+  },
+  {
+    stopSync: z.union([
+      z
+        .object({
+          ok: z.literal(true),
+          workspaceId: z.string().min(1),
+          workspaceSynced: z.literal(false),
+          syncPause: WorkspaceSyncPauseStatus.optional(),
+        })
+        .strict(),
+      rawFailureSchema,
+    ]),
+    // `link` goes in a message body as it is, and shows as a chip that opens
+    // what it names for anyone who can see it.
+    link: z
+      .object({
+        reference: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        link: z.string().regex(/^@\[work:[A-Za-z0-9_-]{43}\]$/),
+        kind: z.enum(["chat", "thread", "message", "file", "collection"]),
+      })
+      .strict(),
+    shareCopy: ShareCopyResult,
+    shareAgents: ListRelayShareLinkAgentsResult,
+    shareDisconnect: DisconnectRelayShareLinkAgentResult,
+    accountDeletePreview: ServerAccountDeletionPreview,
+    accountDelete: ServerAccountDeleteResult,
+    accessRefresh: AccessRefreshResult,
+    accessObject: AccessAnswer,
+    accessSharing: AccessAnswer,
+    automationList: z.discriminatedUnion("ok", [
+      z
+        .object({
+          ok: z.literal(true),
+          definitions: z.custom<AutomationDefinitionList>(
+            (value) =>
+              value !== null &&
+              typeof value === "object" &&
+              "file" in value &&
+              "canSwitch" in value &&
+              "contentHash" in value,
+          ),
+        })
+        .strict(),
+      z.object({ ok: z.literal(false), reason: z.string() }).strict(),
+    ]),
+    automationSwitch: z.discriminatedUnion("ok", [
+      z
+        .object({
+          ok: z.literal(true),
+          result: z.custom<AutomationSwitchResult>(
+            (value) => value !== null && typeof value === "object" && "status" in value,
+          ),
+        })
+        .strict(),
+      z.object({ ok: z.literal(false), reason: z.string() }).strict(),
+    ]),
+    fileWrite: fileWriteResultSchema,
+    historyOperation: HistoryOperationReadResult,
+    historyUndo: HistoryOperationUndoResult,
+    fileDuplicate: z.discriminatedUnion("ok", [
+      z
+        .object({
+          ok: z.literal(true),
+          ...OperationRecovery.shape,
+          path: z.string(),
+          materialized: z.boolean(),
+        })
+        .strict(),
+      z.object({ ok: z.literal(false), reason: z.string() }).strict(),
+    ]),
+    fileMove: fileMoveResultSchema,
+    fileDelete: fileDeleteResultSchema,
+    dataset: DatasetResult,
+    appPublication: OwnerAppPublicationResult,
+    ownerAppResponses: OwnerAppResponsesResult,
+    groups: groupsResultSchema,
+    groupCreate: z.object({ group: cliGroupSchema }).strict(),
+    threads: threadsResultSchema,
+    watch: z
+      .object({
+        messages: z.array(cliInboxMentionSchema),
+        cursor: z.string().min(1).max(1_048_576),
+      })
+      .strict(),
+    inbox: inboxResultSchema,
+    notices: noticesResultSchema,
+    show: showResultSchema,
+    post: postResultSchema,
+    reply: replyResultSchema,
+    nothingToReport: z
+      .object({ threadId: z.string().min(1), nothingToReport: z.literal(true) })
+      .strict(),
+    chatRetry: chatRetryResultSchema,
+    react: reactResultSchema,
+    grep: grepResultSchema,
+    export: exportResultSchema,
+    moments: momentsResultSchema,
+    moment: momentResultSchema,
+    fileChats: fileChatsResultSchema,
+    chat: chatResultSchema,
+    groupsFull: groupsFullResultSchema,
+    collectionQuery: collectionQueryResultSchema,
+    collectionRecord: collectionRecordResultSchema,
+    collectionSetFields: collectionSetFieldsResultSchema,
+    collectionCreateRecord: collectionCreateRecordResultSchema,
+    documentRead: documentReadResultSchema,
+    documentHeld: documentHeldResultSchema,
+    versionList: versionListResultSchema,
+    versionCompare: versionCompareResultSchema,
+    versionConflicts: versionConflictsResultSchema,
+    versionCreate: versionCreateResultSchema,
+    versionSwitch: versionSwitchResultSchema,
+    versionMerge: versionMergeResultSchema,
+    versionResolve: versionResolveResultSchema,
+    keptCopies: keptCopiesResultSchema,
+    // The engine's answer: Collection updates wait for an unfinished pull.
+    collectionsWaiting: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true), waiting: z.boolean() }).strict(),
+      rawFailureSchema,
+    ]),
+    // Shared files a shared view holds back until a person acts: a file from
+    // this computer in the way, or two shared names this disk treats as one.
+    // `files` holds the first 20 of `count`; `message` says the step for each.
+    sharedFilesHeld: z.discriminatedUnion("ok", [
+      z
+        .object({
+          ok: z.literal(true),
+          heldFiles: z
+            .object({
+              count: z.number().int().positive(),
+              files: z.array(
+                z
+                  .object({
+                    path: z.string().min(1),
+                    reason: z.enum(["local-collision", "spelling-collision"]),
+                    owner: z.string().min(1).optional(),
+                  })
+                  .strict(),
+              ),
+              message: z.string().min(1),
+            })
+            .strict()
+            .nullable(),
+        })
+        .strict(),
+      rawFailureSchema,
+    ]),
+    // Why the last sync pass failed, until a pass succeeds: a stable code, the
+    // sentence a person reads, and the engine's detail for a report.
+    syncFailure: z.discriminatedUnion("ok", [
+      z
+        .object({
+          ok: z.literal(true),
+          syncFailure: z
+            .object({ code: z.string().min(1), message: z.string().min(1), detail: z.string() })
+            .strict()
+            .nullable(),
+        })
+        .strict(),
+      rawFailureSchema,
+    ]),
+    saveKeptCopy: saveKeptCopyResultSchema,
+    restoreProtectedCopy: restoreProtectedCopyResultSchema,
+    discardProtectedCopy: discardProtectedCopyResultSchema,
+    retainedCopies: retainedCopiesResultSchema,
+    deleteRetainedCopies: deleteRetainedCopiesResultSchema,
+    liveKeptEdits: liveKeptEditsResultSchema,
+    saveRecoveryCopy: saveRecoveryCopyResultSchema,
+    retryKeptEdits: retryKeptEditsResultSchema,
+    stopAgain: stopAgainResultSchema,
+    heldNoteChange: heldNoteChangeResultSchema,
+    liveDocuments: liveDocumentsResultSchema,
+    liveStop: liveStopResultSchema,
+    liveResume: liveResumeResultSchema,
+    documentEdit: documentEditResultSchema,
+    documentCreate: documentCreateResultSchema,
+    fileChatStart: fileChatStartResultSchema,
+    automationRuns: automationRunsResultSchema,
+    automationRun: automationRunResultSchema,
+    automationRetry: automationRetryResultSchema,
+    automationButtons: z.union([
+      z.object({
+        ok: z.literal(true),
+        buttons: z.array(
+          z.object({
+            field: z.string(),
+            table: z.string().optional(),
+            state: z.union([
+              z.object({
+                kind: z.literal("ready"),
+                automationId: z.string(),
+                irreversible: z.array(z.object({ name: z.string(), label: z.string() })).optional(),
+              }),
+              z.object({
+                kind: z.enum(["disabled", "unchecked", "no-automation"]),
+                reason: z.string(),
+              }),
+            ]),
+          }),
+        ),
+      }),
+      rawFailureSchema,
+    ]),
+    automationPress: automationPressResultSchema,
+  } as const,
+);
 
 export type CliResultByVerb = {
   [Verb in keyof typeof cliResultSchemas]: z.infer<(typeof cliResultSchemas)[Verb]>;

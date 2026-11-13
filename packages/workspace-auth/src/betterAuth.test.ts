@@ -2,15 +2,19 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { createPostgresCredentialFence } from "./credentialFence";
-import { createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
+import {
+  createPostgresAccountSessions,
+  createSessionActorResolver,
+  UnauthorizedError,
+  type ResolveActor,
+} from "./session";
 import type { SignUpAdmission } from "./signUp";
 import type { EmailMessage } from "./smtp";
 
 // Runs against the live dev Postgres (same requirement as workspace-postgres
 // conformance tests): pnpm dev:postgres first. The 0001_better_auth migration
 // must be applied (test setup applies it idempotently).
-const POSTGRES_URL =
-  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
+const POSTGRES_URL = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 
 let pool: Pool;
 let auth: WorkspaceAuth;
@@ -98,15 +102,21 @@ if (pgAvailable) {
     pool = new Pool({ connectionString: POSTGRES_URL });
     const { readFile } = await import("node:fs/promises");
     const migration = await readFile(
-      new URL(
-        "../../workspace-postgres/src/db/migrations/0001_better_auth.sql",
-        import.meta.url,
-      ),
+      new URL("../../workspace-postgres/src/db/migrations/0001_better_auth.sql", import.meta.url),
       "utf8",
     );
     await pool.query(migration);
-    for (const migration of ["0004_account_deletion.sql", "0005_credential_fences.sql", "0006_session_created_on_database_clock.sql"]) {
-      await pool.query(await readFile(new URL(`../../workspace-postgres/src/db/migrations/${migration}`, import.meta.url), "utf8"));
+    for (const migration of [
+      "0004_account_deletion.sql",
+      "0005_credential_fences.sql",
+      "0006_session_created_on_database_clock.sql",
+    ]) {
+      await pool.query(
+        await readFile(
+          new URL(`../../workspace-postgres/src/db/migrations/${migration}`, import.meta.url),
+          "utf8",
+        ),
+      );
     }
     auth = createWorkspaceAuth({
       pool,
@@ -147,7 +157,9 @@ describeWithPostgres("closed sign-up", () => {
     const email = `${unique()}@dohc.test`;
     const asked: string[] = [];
     await expect(
-      closedAuth("refused", asked).api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } }),
+      closedAuth("refused", asked).api.signUpEmail({
+        body: { email, password: PASSWORD, name: "Test User" },
+      }),
     ).rejects.toMatchObject({ statusCode: 403, body: { code: "SIGN_UP_CLOSED" } });
     expect(asked).toEqual([email]);
     expect(await accountExists(email)).toBe(false);
@@ -159,16 +171,26 @@ describeWithPostgres("closed sign-up", () => {
   }
 
   /** Opens the newest emailed link the way the reset page does. */
-  async function choosePassword(closed: WorkspaceAuth, email: string, newPassword: string): Promise<void> {
+  async function choosePassword(
+    closed: WorkspaceAuth,
+    email: string,
+    newPassword: string,
+  ): Promise<void> {
     const message = lastEmailTo(email);
     expect(message.subject).toBe("Choose your dohc password");
     const link = linkIn(message);
     expect(link.pathname).toBe("/account/reset-password");
-    await closed.api.resetPassword({ body: { newPassword, token: link.searchParams.get("token") ?? "" } });
+    await closed.api.resetPassword({
+      body: { newPassword, token: link.searchParams.get("token") ?? "" },
+    });
   }
 
   /** Submits the set-password form over HTTP with the newest emailed link's token. */
-  async function submitResetPage(closed: WorkspaceAuth, email: string, body: Record<string, string>): Promise<Response> {
+  async function submitResetPage(
+    closed: WorkspaceAuth,
+    email: string,
+    body: Record<string, string>,
+  ): Promise<Response> {
     const token = linkIn(lastEmailTo(email)).searchParams.get("token") ?? "";
     return closed.handler(
       new Request("http://localhost:1786/api/auth/reset-password", {
@@ -180,7 +202,8 @@ describeWithPostgres("closed sign-up", () => {
   }
 
   async function nameOf(userId: string): Promise<string | undefined> {
-    return (await pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [userId])).rows[0]?.name;
+    return (await pool.query<{ name: string }>('SELECT name FROM "user" WHERE id = $1', [userId]))
+      .rows[0]?.name;
   }
 
   it("creates an account the server admitted, with no session until its owner chooses a password from the emailed link", async () => {
@@ -191,7 +214,12 @@ describeWithPostgres("closed sign-up", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         // The closed sign-up page has no name field.
-        body: JSON.stringify({ email, password: PASSWORD, name: "", callbackURL: "/device?user_code=ABCD-EFGH" }),
+        body: JSON.stringify({
+          email,
+          password: PASSWORD,
+          name: "",
+          callbackURL: "/device?user_code=ABCD-EFGH",
+        }),
       }),
     );
     expect(response.status).toBe(200);
@@ -202,11 +230,15 @@ describeWithPostgres("closed sign-up", () => {
     expect(linkIn(lastEmailTo(email)).searchParams.get("next")).toBe("/device?user_code=ABCD-EFGH");
 
     const emailsBeforeSignIn = emailsTo(email).length;
-    await expect(closed.api.signInEmail({ body: { email, password: PASSWORD } })).rejects.toMatchObject({
+    await expect(
+      closed.api.signInEmail({ body: { email, password: PASSWORD } }),
+    ).rejects.toMatchObject({
       statusCode: 403,
       body: { code: "EMAIL_NOT_VERIFIED" },
     });
-    await expect(closed.api.signInEmail({ body: { email, password: "wrong-password-1" } })).rejects.toMatchObject({
+    await expect(
+      closed.api.signInEmail({ body: { email, password: "wrong-password-1" } }),
+    ).rejects.toMatchObject({
       statusCode: 401,
       body: { code: "INVALID_EMAIL_OR_PASSWORD" },
     });
@@ -216,7 +248,10 @@ describeWithPostgres("closed sign-up", () => {
     // sign-in completes as on an open server.
     const chosen = "chosen-from-the-link-123";
     await choosePassword(closed, email, chosen);
-    const signin = await closed.api.signInEmail({ body: { email, password: chosen }, returnHeaders: true });
+    const signin = await closed.api.signInEmail({
+      body: { email, password: chosen },
+      returnHeaders: true,
+    });
     const cookie = signin.headers.get("set-cookie")?.split(";")[0] ?? "";
     const device = await closed.api.deviceCode({ body: { client_id: "dohc-desktop" } });
     await closed.api.deviceVerify({ query: { user_code: device.user_code }, headers: { cookie } });
@@ -228,7 +263,9 @@ describeWithPostgres("closed sign-up", () => {
         client_id: "dohc-desktop",
       },
     });
-    const session = await closed.api.getSession({ headers: { authorization: `Bearer ${token.access_token}` } });
+    const session = await closed.api.getSession({
+      headers: { authorization: `Bearer ${token.access_token}` },
+    });
     expect(session?.user.email).toBe(email);
   });
 
@@ -241,17 +278,23 @@ describeWithPostgres("closed sign-up", () => {
     await closed.api.signUpEmail({ body: { email, password: attackerPassword, name: "Attacker" } });
     // The owner's own sign-up gets the generic answer and a fresh link.
     const before = emailsTo(email).length;
-    const duplicate = await closed.api.signUpEmail({ body: { email, password: ownerPassword, name: "Owner" } });
+    const duplicate = await closed.api.signUpEmail({
+      body: { email, password: ownerPassword, name: "Owner" },
+    });
     expect(duplicate.token).toBeNull();
     expect(emailsTo(email).length).toBe(before + 1);
     // Asking for a new link sends the same kind of link, never a plain verification.
     await closed.api.sendVerificationEmail({ body: { email } });
     expect(emailsTo(email).length).toBe(before + 2);
-    expect(emailsTo(email).every((message) => linkIn(message).pathname === "/account/reset-password")).toBe(true);
+    expect(
+      emailsTo(email).every((message) => linkIn(message).pathname === "/account/reset-password"),
+    ).toBe(true);
 
     await choosePassword(closed, email, ownerPassword);
 
-    await expect(closed.api.signInEmail({ body: { email, password: attackerPassword } })).rejects.toMatchObject({
+    await expect(
+      closed.api.signInEmail({ body: { email, password: attackerPassword } }),
+    ).rejects.toMatchObject({
       statusCode: 401,
     });
     const signin = await closed.api.signInEmail({ body: { email, password: ownerPassword } });
@@ -261,11 +304,18 @@ describeWithPostgres("closed sign-up", () => {
   it("takes the account's name from the owner's emailed link, never from an earlier sign-up", async () => {
     const email = `${unique()}@dohc.test`;
     const closed = closedAuth("admitted");
-    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
-    await closed.api.signUpEmail({ body: { email, password: "owner-password-bbb", name: "Owner" } });
+    const { user } = await closed.api.signUpEmail({
+      body: { email, password: "attacker-password-aaa", name: "Mallory" },
+    });
+    await closed.api.signUpEmail({
+      body: { email, password: "owner-password-bbb", name: "Owner" },
+    });
     expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBe("1");
 
-    const response = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "  Ada   Lovelace " });
+    const response = await submitResetPage(closed, email, {
+      newPassword: "owner-password-bbb",
+      name: "  Ada   Lovelace ",
+    });
     expect(response.status).toBe(200);
     expect(await nameOf(user.id)).toBe("Ada Lovelace");
   });
@@ -274,8 +324,12 @@ describeWithPostgres("closed sign-up", () => {
     const closed = closedAuth("admitted");
     const named = `${unique()}@dohc.test`;
     const unnamed = `${unique()}@dohc.test`;
-    const first = await closed.api.signUpEmail({ body: { email: named, password: "attacker-password-aaa", name: "Mallory" } });
-    const second = await closed.api.signUpEmail({ body: { email: unnamed, password: "attacker-password-aaa", name: "Trudy" } });
+    const first = await closed.api.signUpEmail({
+      body: { email: named, password: "attacker-password-aaa", name: "Mallory" },
+    });
+    const second = await closed.api.signUpEmail({
+      body: { email: unnamed, password: "attacker-password-aaa", name: "Trudy" },
+    });
 
     const responses = await Promise.all([
       submitResetPage(closed, named, { newPassword: "owner-password-bbb", name: "Ada" }),
@@ -289,13 +343,18 @@ describeWithPostgres("closed sign-up", () => {
   it("never renames a verified account from a password reset, even with a name in the request", async () => {
     const email = `${unique()}@dohc.test`;
     const closed = closedAuth("admitted");
-    const { user } = await closed.api.signUpEmail({ body: { email, password: PASSWORD, name: "" } });
+    const { user } = await closed.api.signUpEmail({
+      body: { email, password: PASSWORD, name: "" },
+    });
     await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "Ada" });
 
     await closed.api.requestPasswordReset({ body: { email } });
     expect(linkIn(lastEmailTo(email)).searchParams.get("setup")).toBeNull();
     // A setup flag added to the page's address only makes the page send a name.
-    const response = await submitResetPage(closed, email, { newPassword: "another-password-ddd", name: "Mallory" });
+    const response = await submitResetPage(closed, email, {
+      newPassword: "another-password-ddd",
+      name: "Mallory",
+    });
     expect(response.status).toBe(200);
     expect(await nameOf(user.id)).toBe("Ada");
   });
@@ -310,9 +369,13 @@ describeWithPostgres("closed sign-up", () => {
     const closed = closedAuth("admitted");
     await closed.api.requestPasswordReset({ body: { email } });
     const { internalAdapter } = await closed.$context;
-    const verify = vi.spyOn(internalAdapter, "updateUser").mockRejectedValueOnce(new Error("The database went away."));
+    const verify = vi
+      .spyOn(internalAdapter, "updateUser")
+      .mockRejectedValueOnce(new Error("The database went away."));
     try {
-      await expect(choosePassword(closed, email, "owner-password-ccc")).rejects.toThrow("The database went away.");
+      await expect(choosePassword(closed, email, "owner-password-ccc")).rejects.toThrow(
+        "The database went away.",
+      );
       expect(verify).toHaveBeenCalledWith(user.id, { name: "", emailVerified: true });
     } finally {
       verify.mockRestore();
@@ -330,11 +393,15 @@ describeWithPostgres("closed sign-up", () => {
     const email = `${unique()}@dohc.test`;
     await signUp(email);
     const token = linkIn(lastEmailTo(email)).searchParams.get("token") ?? "";
-    await expect(closedAuth("admitted").api.verifyEmail({ query: { token } })).rejects.toMatchObject({
+    await expect(
+      closedAuth("admitted").api.verifyEmail({ query: { token } }),
+    ).rejects.toMatchObject({
       statusCode: 403,
       body: { code: "PASSWORD_LINK_REQUIRED" },
     });
-    await expect(auth.api.signInEmail({ body: { email, password: PASSWORD } })).resolves.toMatchObject({
+    await expect(
+      auth.api.signInEmail({ body: { email, password: PASSWORD } }),
+    ).resolves.toMatchObject({
       user: { emailVerified: false },
     });
   });
@@ -342,15 +409,15 @@ describeWithPostgres("closed sign-up", () => {
   it("asks the person to try again when the server cannot check invites", async () => {
     const email = `${unique()}@dohc.test`;
     await expect(
-      closedAuth("unavailable").api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } }),
+      closedAuth("unavailable").api.signUpEmail({
+        body: { email, password: PASSWORD, name: "Test User" },
+      }),
     ).rejects.toMatchObject({ statusCode: 503, body: { code: "SIGN_UP_CHECK_UNAVAILABLE" } });
     expect(await accountExists(email)).toBe(false);
   });
-
 });
 
 describeWithPostgres("account email", () => {
-
   it("starts a session after a password change that consent counts as current", async () => {
     // Better Auth leaves the session's start on this database's clock to Postgres.
     const email = `${unique()}@dohc.test`;
@@ -358,10 +425,17 @@ describeWithPostgres("account email", () => {
     await auth.api.requestPasswordReset({ body: { email } });
     const link = linkIn(lastEmailTo(email));
     const newPassword = "another-real-password-456";
-    await auth.api.resetPassword({ body: { newPassword, token: link.searchParams.get("token") ?? "" } });
+    await auth.api.resetPassword({
+      body: { newPassword, token: link.searchParams.get("token") ?? "" },
+    });
     const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
-    const session = await pool.query<{ id: string }>(`select id from "session" where token = $1`, [signin.token]);
-    const credentials = await createPostgresCredentialFence(pool).readConsentCredentials(user.id, session.rows[0]!.id);
+    const session = await pool.query<{ id: string }>(`select id from "session" where token = $1`, [
+      signin.token,
+    ]);
+    const credentials = await createPostgresCredentialFence(pool).readConsentCredentials(
+      user.id,
+      session.rows[0]!.id,
+    );
     expect(credentials?.epoch).toBeGreaterThan(0);
     expect(credentials?.sessionCurrent).toBe(true);
   });
@@ -374,7 +448,6 @@ describeWithPostgres("account email", () => {
 });
 
 describeWithPostgres("device authorization flow (desktop login)", () => {
-
   it("denies the token when the user denies the code", async () => {
     const email = `${unique()}@dohc.test`;
     await signUp(email);
@@ -403,7 +476,6 @@ describeWithPostgres("device authorization flow (desktop login)", () => {
 });
 
 describeWithPostgres("session validation middleware shape", () => {
-
   it("ResolveActor maps a Bearer session to the downstream Actor and 401s everything else", async () => {
     const email = `${unique()}@dohc.test`;
     const signup = await signUp(email);
@@ -438,17 +510,35 @@ describe("Better Auth's session list", () => {
   it("answers 404, because its answer would carry every session's token", async () => {
     // The disabled path answers before any database read, so this pool never connects.
     const idle = new Pool({ connectionString: "postgres://nobody@127.0.0.1:1/none" });
-    const offline = createWorkspaceAuth({ pool: idle, baseURL: "http://localhost:1786", secret: "test-secret-0123456789abcdef0123456789abcdef" });
-    const response = await offline.handler(new Request("http://localhost:1786/api/auth/list-sessions", { headers: { authorization: "Bearer any" } }));
+    const offline = createWorkspaceAuth({
+      pool: idle,
+      baseURL: "http://localhost:1786",
+      secret: "test-secret-0123456789abcdef0123456789abcdef",
+    });
+    const response = await offline.handler(
+      new Request("http://localhost:1786/api/auth/list-sessions", {
+        headers: { authorization: "Bearer any" },
+      }),
+    );
     expect(response.status).toBe(404);
-    expect((await offline.handler(new Request("http://localhost:1786/api/auth/revoke-sessions", { method: "POST" }))).status, "a neighbouring route").toBe(401);
+    expect(
+      (
+        await offline.handler(
+          new Request("http://localhost:1786/api/auth/revoke-sessions", { method: "POST" }),
+        )
+      ).status,
+      "a neighbouring route",
+    ).toBe(401);
     await idle.end();
   });
 });
 
 describeWithPostgres("an account's sessions", () => {
   async function signIn(email: string, userAgent: string) {
-    return auth.api.signInEmail({ body: { email, password: PASSWORD }, headers: { "user-agent": userAgent } });
+    return auth.api.signInEmail({
+      body: { email, password: PASSWORD },
+      headers: { "user-agent": userAgent },
+    });
   }
 
   it("lists the account's sessions with their client and no token", async () => {
@@ -458,8 +548,13 @@ describeWithPostgres("an account's sessions", () => {
     const desktop = await signIn(email, "dohc-desktop/1");
     const phone = await signIn(email, "dohc-mobile/1");
     const listed = await createPostgresAccountSessions(pool).list(user.id);
-    expect(listed.map(session => Object.keys(session).sort())).toEqual([["createdAtMs", "sessionId", "userAgent"], ["createdAtMs", "sessionId", "userAgent"]]);
-    expect(new Set(listed.map(session => session.userAgent))).toEqual(new Set(["dohc-desktop/1", "dohc-mobile/1"]));
+    expect(listed.map((session) => Object.keys(session).sort())).toEqual([
+      ["createdAtMs", "sessionId", "userAgent"],
+      ["createdAtMs", "sessionId", "userAgent"],
+    ]);
+    expect(new Set(listed.map((session) => session.userAgent))).toEqual(
+      new Set(["dohc-desktop/1", "dohc-mobile/1"]),
+    );
     expect(JSON.stringify(listed)).not.toContain(desktop.token);
     expect(JSON.stringify(listed)).not.toContain(phone.token);
   });
@@ -470,22 +565,39 @@ describeWithPostgres("an account's sessions", () => {
     const benEmail = `${unique()}@dohc.test`;
     const { user: ben } = await signUp(benEmail);
     const sessions = createPostgresAccountSessions(pool);
-    const sessionOf = async (token: string) => (await auth.api.getSession({ headers: { authorization: `Bearer ${token}` } }))?.session.id;
+    const sessionOf = async (token: string) =>
+      (await auth.api.getSession({ headers: { authorization: `Bearer ${token}` } }))?.session.id;
     const anaPhone = await signIn(anaEmail, "phone");
     const anaDesktop = await signIn(anaEmail, "desktop");
     const benPhone = await signIn(benEmail, "phone");
-    const [phoneId, desktopId, benId] = [await sessionOf(anaPhone.token), await sessionOf(anaDesktop.token), await sessionOf(benPhone.token)];
+    const [phoneId, desktopId, benId] = [
+      await sessionOf(anaPhone.token),
+      await sessionOf(anaDesktop.token),
+      await sessionOf(benPhone.token),
+    ];
 
-    expect(await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: benId! })).toBe(false);
+    expect(
+      await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: benId! }),
+    ).toBe(false);
     expect(await sessionOf(benPhone.token)).toBe(benId);
-    expect(await sessions.revoke({ userId: ben.id, callerSessionId: phoneId!, sessionId: benId! }), "a caller from another account").toBe(false);
+    expect(
+      await sessions.revoke({ userId: ben.id, callerSessionId: phoneId!, sessionId: benId! }),
+      "a caller from another account",
+    ).toBe(false);
     expect(await sessionOf(benPhone.token)).toBe(benId);
 
-    expect(await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: desktopId! })).toBe(true);
+    expect(
+      await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: desktopId! }),
+    ).toBe(true);
     expect(await sessionOf(anaDesktop.token)).toBeUndefined();
-    expect(await sessions.revoke({ userId: ana.id, callerSessionId: desktopId!, sessionId: phoneId! }), "a signed-out caller").toBe(false);
+    expect(
+      await sessions.revoke({ userId: ana.id, callerSessionId: desktopId!, sessionId: phoneId! }),
+      "a signed-out caller",
+    ).toBe(false);
 
-    expect(await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: phoneId! })).toBe(true);
+    expect(
+      await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: phoneId! }),
+    ).toBe(true);
     expect(await sessionOf(anaPhone.token)).toBeUndefined();
   });
 
@@ -496,15 +608,26 @@ describeWithPostgres("an account's sessions", () => {
     const sessions = createPostgresAccountSessions(pool);
     const current = await signIn(email, "current");
     const expired = await signIn(email, "expired");
-    const idOf = async (token: string) => (await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [token])).rows[0]!.id;
+    const idOf = async (token: string) =>
+      (await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [token]))
+        .rows[0]!.id;
     const [currentId, expiredId] = [await idOf(current.token), await idOf(expired.token)];
-    await pool.query(`update "session" set "expiresAt" = now() - interval '1 minute' where "id" = $1`, [expiredId]);
-    const exists = async (id: string) => (await pool.query('select 1 from "session" where "id" = $1', [id])).rowCount === 1;
+    await pool.query(
+      `update "session" set "expiresAt" = now() - interval '1 minute' where "id" = $1`,
+      [expiredId],
+    );
+    const exists = async (id: string) =>
+      (await pool.query('select 1 from "session" where "id" = $1', [id])).rowCount === 1;
 
-    expect((await sessions.list(user.id)).map(session => session.sessionId)).toEqual([currentId]);
-    expect(await sessions.revoke({ userId: user.id, callerSessionId: currentId, sessionId: expiredId })).toBe(false);
+    expect((await sessions.list(user.id)).map((session) => session.sessionId)).toEqual([currentId]);
+    expect(
+      await sessions.revoke({ userId: user.id, callerSessionId: currentId, sessionId: expiredId }),
+    ).toBe(false);
     expect(await exists(expiredId)).toBe(true);
-    expect(await sessions.revoke({ userId: user.id, callerSessionId: expiredId, sessionId: currentId }), "an expired caller").toBe(false);
+    expect(
+      await sessions.revoke({ userId: user.id, callerSessionId: expiredId, sessionId: currentId }),
+      "an expired caller",
+    ).toBe(false);
     expect(await exists(currentId)).toBe(true);
   });
 });

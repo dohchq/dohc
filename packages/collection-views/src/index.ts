@@ -10,15 +10,8 @@ export {
 export { useCollectionStore } from "./useCollectionStore";
 export { deriveColumns } from "./columns";
 export { recordLabel } from "./recordLabel";
-export {
-  RelationPicker,
-  type RelationPickerProps,
-} from "./relation/RelationPicker";
-export {
-  FieldCell,
-  fieldDisplayText,
-  type FieldCellProps,
-} from "./table/cells";
+export { RelationPicker, type RelationPickerProps } from "./relation/RelationPicker";
+export { FieldCell, fieldDisplayText, type FieldCellProps } from "./table/cells";
 export {
   TableView,
   type CollectionCellChange,
@@ -34,6 +27,4 @@ export {
   type CalendarRecordEvent,
   type CalendarViewProps,
 } from "./calendar/CalendarView";
-export {
-  RecordProperties,
-} from "./record/RecordProperties";
+export { RecordProperties } from "./record/RecordProperties";

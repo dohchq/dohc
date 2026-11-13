@@ -1,4 +1,10 @@
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 export interface RuntimeLimits {
   sourceBytes: number;
@@ -73,7 +79,10 @@ export interface AppOperationFile {
   sha256: string;
 }
 
-export interface AppOperationRefusal { code: string; message: string }
+export interface AppOperationRefusal {
+  code: string;
+  message: string;
+}
 
 export class AppBackendRuntimeError extends Error {
   readonly code = "operation_refused";
@@ -86,12 +95,17 @@ export class AppBackendRuntimeError extends Error {
 }
 
 /** Public package entrypoints can contain separate bundled copies of the error class. */
-export function isAppBackendRuntimeError(error:unknown):error is AppBackendRuntimeError {
-  if(!(error instanceof Error)) return false;
-  const value=error as Partial<AppBackendRuntimeError>;
-  return value.name==="AppBackendRuntimeError" && value.code==="operation_refused" &&
-    typeof value.refusal?.code==="string" && /^[a-z][a-z0-9_]{0,63}$/.test(value.refusal.code) &&
-    typeof value.refusal.message==="string" && Buffer.byteLength(value.refusal.message)<=1024;
+export function isAppBackendRuntimeError(error: unknown): error is AppBackendRuntimeError {
+  if (!(error instanceof Error)) return false;
+  const value = error as Partial<AppBackendRuntimeError>;
+  return (
+    value.name === "AppBackendRuntimeError" &&
+    value.code === "operation_refused" &&
+    typeof value.refusal?.code === "string" &&
+    /^[a-z][a-z0-9_]{0,63}$/.test(value.refusal.code) &&
+    typeof value.refusal.message === "string" &&
+    Buffer.byteLength(value.refusal.message) <= 1024
+  );
 }
 
 export interface InitializeAppDatabaseInput {
@@ -132,44 +146,73 @@ export type ChildRequest = {
   directory: string;
   limits: RuntimeLimits;
   tables: string[];
-} & ({ kind: "initialize"; schemaSql: string; journaled?:boolean } | {kind:"validate"; schemaSql:string; database:Uint8Array; journaled?:boolean} | {
-  kind: "evaluate";
-  source: string;
-  operation: string;
-  callerJson: string;
-  inputJson: string;
-  nowMs: number;
-  requestId: string;
-  secret: string;
-  database: Uint8Array;
-  readOnly: boolean;
-  files: AppOperationFile[];
-});
+} & (
+  | { kind: "initialize"; schemaSql: string; journaled?: boolean }
+  | { kind: "validate"; schemaSql: string; database: Uint8Array; journaled?: boolean }
+  | {
+      kind: "evaluate";
+      source: string;
+      operation: string;
+      callerJson: string;
+      inputJson: string;
+      nowMs: number;
+      requestId: string;
+      secret: string;
+      database: Uint8Array;
+      readOnly: boolean;
+      files: AppOperationFile[];
+    }
+);
 
-export type ChildReply = { ok: true; resultJson: string; database: Uint8Array; changed: boolean; changeset: Uint8Array; attachedFileIds: string[] }
+export type ChildReply =
+  | {
+      ok: true;
+      resultJson: string;
+      database: Uint8Array;
+      changed: boolean;
+      changeset: Uint8Array;
+      attachedFileIds: string[];
+    }
   | { ok: false; error: string; refusal?: AppOperationRefusal };
 
 export function runtimeLimits(input: Partial<RuntimeLimits> = {}): RuntimeLimits {
   const limits = { ...DEFAULT_LIMITS };
   for (const [key, value] of Object.entries(input)) {
-    if (!(key in limits) || !Number.isSafeInteger(value) || value! < 1 || value! > DEFAULT_LIMITS[key as keyof RuntimeLimits]) {
+    if (
+      !(key in limits) ||
+      !Number.isSafeInteger(value) ||
+      value! < 1 ||
+      value! > DEFAULT_LIMITS[key as keyof RuntimeLimits]
+    ) {
       throw new Error("Invalid app runtime limit.");
     }
     limits[key as keyof RuntimeLimits] = value!;
   }
   // QuickJS needs 16 MiB of memory to start. Whole MiB let an operation's error name its limit exactly.
-  if (limits.memoryBytes < 16 * 1024 * 1024 || limits.memoryBytes % (1024 * 1024)) throw new Error("Invalid app runtime limit.");
+  if (limits.memoryBytes < 16 * 1024 * 1024 || limits.memoryBytes % (1024 * 1024))
+    throw new Error("Invalid app runtime limit.");
   return limits;
 }
 
 export function boundedText(value: string, maxBytes: number, label: string): string {
-  if (typeof value !== "string" || Buffer.byteLength(value) > maxBytes) throw new Error(`${label} exceeds the app runtime limit.`);
+  if (typeof value !== "string" || Buffer.byteLength(value) > maxBytes)
+    throw new Error(`${label} exceeds the app runtime limit.`);
   return value;
 }
 
 export function approvedTables(tables: string[]): string[] {
-  if (!Array.isArray(tables) || tables.length < 1 || tables.length > 64 ||
-    tables.some(table => typeof table !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(table) || /^(sqlite|dohc)_/i.test(table)) ||
-    new Set(tables.map(table => table.toLowerCase())).size !== tables.length) throw new Error("Invalid approved app tables.");
+  if (
+    !Array.isArray(tables) ||
+    tables.length < 1 ||
+    tables.length > 64 ||
+    tables.some(
+      (table) =>
+        typeof table !== "string" ||
+        !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(table) ||
+        /^(sqlite|dohc)_/i.test(table),
+    ) ||
+    new Set(tables.map((table) => table.toLowerCase())).size !== tables.length
+  )
+    throw new Error("Invalid approved app tables.");
   return [...tables];
 }

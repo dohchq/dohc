@@ -25,16 +25,11 @@ interface DesktopRendererWorkspaceRetirementDependencies<
 > extends SenderRetirementPorts<Sender> {
   sitePreviews: {
     cancelSender(senderId: number): void;
-    stopWorkspace(workspace: {
-      workspaceId: string;
-      attachmentId: symbol;
-    }): Promise<void>;
+    stopWorkspace(workspace: { workspaceId: string; attachmentId: symbol }): Promise<void>;
   };
   onCleanupError(
     owner: string,
-    scope:
-      | { kind: "sender"; senderId: number }
-      | { kind: "workspace"; workspaceId: string },
+    scope: { kind: "sender"; senderId: number } | { kind: "workspace"; workspaceId: string },
     error: unknown,
   ): void;
 }
@@ -46,12 +41,8 @@ interface CleanupArm {
 
 async function drainCleanup(
   arms: readonly CleanupArm[],
-  scope:
-    | { kind: "sender"; senderId: number }
-    | { kind: "workspace"; workspaceId: string },
-  onCleanupError: DesktopRendererWorkspaceRetirementDependencies<RendererWorkspaceSender>[
-    "onCleanupError"
-  ],
+  scope: { kind: "sender"; senderId: number } | { kind: "workspace"; workspaceId: string },
+  onCleanupError: DesktopRendererWorkspaceRetirementDependencies<RendererWorkspaceSender>["onCleanupError"],
 ): Promise<void> {
   const drains = arms.map(({ owner, run }) => {
     try {
@@ -67,25 +58,17 @@ async function drainCleanup(
 }
 
 /** Maps the renderer lease onto the domain owners without taking their state. */
-export function createDesktopRendererWorkspaceRetirement<
-  Sender extends RendererWorkspaceSender,
->(
+export function createDesktopRendererWorkspaceRetirement<Sender extends RendererWorkspaceSender>(
   dependencies: DesktopRendererWorkspaceRetirementDependencies<Sender>,
 ): RendererWorkspaceRetirement<Sender> {
   return {
-    retireSender(
-      session: RendererWorkspaceSession<Sender>,
-    ): RendererWorkspaceSenderRetirement {
+    retireSender(session: RendererWorkspaceSession<Sender>): RendererWorkspaceSenderRetirement {
       const scope = { kind: "sender" as const, senderId: session.senderId };
       const detached = drainCleanup(
         [
           {
             owner: "engine Y.Doc sessions",
-            run: () =>
-              dependencies.engineYDoc.retireSender(
-                session.sender,
-                session.generation,
-              ),
+            run: () => dependencies.engineYDoc.retireSender(session.sender, session.generation),
           },
           {
             owner: "presence mutations",
@@ -103,8 +86,7 @@ export function createDesktopRendererWorkspaceRetirement<
           },
           {
             owner: "workspace search",
-            run: () =>
-              dependencies.workspaceSearch.disposeSender(session.senderId),
+            run: () => dependencies.workspaceSearch.disposeSender(session.senderId),
           },
           {
             owner: "presence polls",

@@ -9,5 +9,9 @@ export const USAGE_DECISION = {
     { capabilityId: "chat.export", question: "removal", requiresNecessityJudgment: false },
     { capabilityId: "version.compare", question: "placement", requiresNecessityJudgment: false },
     { capabilityId: "file.kept.save", question: "placement", requiresNecessityJudgment: true },
-  ] satisfies Array<{ capabilityId: CapabilityId; question: "removal" | "placement"; requiresNecessityJudgment: boolean }>,
+  ] satisfies Array<{
+    capabilityId: CapabilityId;
+    question: "removal" | "placement";
+    requiresNecessityJudgment: boolean;
+  }>,
 } as const;

@@ -51,14 +51,27 @@ function notice(overrides: Partial<NoticeRow> = {}): NoticeRow {
 }
 
 function workspace(workspaceId: string, extra: Partial<WorkspaceSummary> = {}): WorkspaceSummary {
-  return { workspaceId, rootPath: `/home/ana/${workspaceId}`, kind: "personal", mode: "local-first", ...extra };
+  return {
+    workspaceId,
+    rootPath: `/home/ana/${workspaceId}`,
+    kind: "personal",
+    mode: "local-first",
+    ...extra,
+  };
 }
 
 const RECEIVED = {
   found: true as const,
   share: {
-    shareId: "share-1", granterEmail: "owner@example.com", genericChatWritable: false, grantId: "g1",
-    generation: 1, createdAtMs: 1, shareCode: "code-1", selector: { paths: ["Trips"], versionId: null }, access: "edit" as const,
+    shareId: "share-1",
+    granterEmail: "owner@example.com",
+    genericChatWritable: false,
+    grantId: "g1",
+    generation: 1,
+    createdAtMs: 1,
+    shareCode: "code-1",
+    selector: { paths: ["Trips"], versionId: null },
+    access: "edit" as const,
   },
 };
 
@@ -66,16 +79,35 @@ const getRelayReceivedShare = vi.fn();
 const retryAutomationNotice = vi.fn();
 const listChatChannels = vi.fn();
 const listChannelThreads = vi.fn();
-const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }));
-const IDLE: ChatDispatchStateForThreadResult = { liveRunId: null, liveTriggerMessageId: null, pendingCount: 0, paused: false };
-const chatDispatchStateForThread = vi.fn(async (_payload: ChatDispatchStateForThreadPayload) => IDLE);
+const retryCollectionAutomation = vi.fn(async (): Promise<RetryCollectionAutomationResult> => ({
+  status: "queued",
+  press: false,
+}));
+const IDLE: ChatDispatchStateForThreadResult = {
+  liveRunId: null,
+  liveTriggerMessageId: null,
+  pendingCount: 0,
+  paused: false,
+};
+const chatDispatchStateForThread = vi.fn(
+  async (_payload: ChatDispatchStateForThreadPayload) => IDLE,
+);
 const retryStoppedRun = vi.fn(async (): Promise<RetryStoppedRunResult> => ({ queued: true }));
 const chatRunRecordsForThread = vi.fn(async () => ({ runs: {} }));
 const listChatMessages = vi.fn(async () => ({ messages: [] }));
-beforeEach(() => vi.stubGlobal("dohcDesktop", {
-  getRelayReceivedShare, retryAutomationNotice, retryCollectionAutomation, listChatChannels, listChannelThreads,
-  chatDispatchStateForThread, retryStoppedRun, chatRunRecordsForThread, listChatMessages,
-}));
+beforeEach(() =>
+  vi.stubGlobal("dohcDesktop", {
+    getRelayReceivedShare,
+    retryAutomationNotice,
+    retryCollectionAutomation,
+    listChatChannels,
+    listChannelThreads,
+    chatDispatchStateForThread,
+    retryStoppedRun,
+    chatRunRecordsForThread,
+    listChatMessages,
+  }),
+);
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -111,8 +143,19 @@ function setup(
   const opens = {
     openFile: vi.fn(),
     openFolder: vi.fn(),
-    openAutomation: vi.fn(async (_automationId: string, _run: string | null, _signal: AbortSignal): Promise<string | null> => null),
-    openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
+    openAutomation: vi.fn(
+      async (
+        _automationId: string,
+        _run: string | null,
+        _signal: AbortSignal,
+      ): Promise<string | null> => null,
+    ),
+    openAutomationControls: vi.fn(
+      async (
+        _automationId: string,
+        _options: { sharedFile?: string; signal: AbortSignal },
+      ): Promise<string | null> => null,
+    ),
     openChat: vi.fn((_nav: ChatsNav) => undefined),
     openChatsInvitation: vi.fn(),
     openAgentsSettings: vi.fn(),
@@ -120,8 +163,12 @@ function setup(
   // The shell's resolver, down to the steps these tests watch.
   const openTarget = async (target: NoticeTarget, signal: AbortSignal): Promise<string | null> => {
     switch (target.to) {
-      case "file": opens.openFile(target.path); return null;
-      case "folder": opens.openFolder(target.path); return null;
+      case "file":
+        opens.openFile(target.path);
+        return null;
+      case "folder":
+        opens.openFolder(target.path);
+        return null;
       case "chat": {
         const place = await findNoticeChat(workspaceId, target);
         if (signal.aborted) return null;
@@ -130,12 +177,21 @@ function setup(
         opens.openChat(place.nav);
         return null;
       }
-      case "chats-invitation": opens.openChatsInvitation({ shareId: target.shareId, inputs: target.inputs }); return null;
-      case "agents-settings": opens.openAgentsSettings(target.agent ?? null); return null;
-      case "automation": return opens.openAutomation(target.automation, target.run ?? null, signal);
+      case "chats-invitation":
+        opens.openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
+        return null;
+      case "agents-settings":
+        opens.openAgentsSettings(target.agent ?? null);
+        return null;
+      case "automation":
+        return opens.openAutomation(target.automation, target.run ?? null, signal);
       case "automation-controls":
-        return opens.openAutomationControls(target.automation, { ...(target.sharedFile === undefined ? {} : { sharedFile: target.sharedFile }), signal });
-      default: throw new Error(`Unexpected target ${target.to}`);
+        return opens.openAutomationControls(target.automation, {
+          ...(target.sharedFile === undefined ? {} : { sharedFile: target.sharedFile }),
+          signal,
+        });
+      default:
+        throw new Error(`Unexpected target ${target.to}`);
     }
   };
   const input = {
@@ -153,34 +209,62 @@ function setup(
 }
 
 describe("opening a sent notice", () => {
-  it.each(["sync-refusal", "markdown-write-held"])("leaves this workspace's %s row and toast to the shell", kind => {
-    const held = notice({ kind, store: "local", workspaceId: "notes", recipientShareId: null });
-    const { result } = setup([held], [workspace("notes")], "notes", { toast: held });
-    expect(result.current.sentNotices).toEqual([]);
-    expect(result.current.sentNoticeToast).toBeNull();
-  });
+  it.each(["sync-refusal", "markdown-write-held"])(
+    "leaves this workspace's %s row and toast to the shell",
+    (kind) => {
+      const held = notice({ kind, store: "local", workspaceId: "notes", recipientShareId: null });
+      const { result } = setup([held], [workspace("notes")], "notes", { toast: held });
+      expect(result.current.sentNotices).toEqual([]);
+      expect(result.current.sentNoticeToast).toBeNull();
+    },
+  );
 
-  it.each(["sync-refusal", "markdown-write-held"])("keeps another workspace's %s row and toast", kind => {
-    const held = notice({ kind, store: "local", workspaceId: "other", recipientShareId: null });
-    const { result } = setup([held], [workspace("notes"), workspace("other")], "notes", { toast: held });
-    expect(result.current.sentNotices.map(row => row.notice)).toEqual([held]);
-    expect(result.current.sentNoticeToast?.notice).toEqual(held);
-  });
+  it.each(["sync-refusal", "markdown-write-held"])(
+    "keeps another workspace's %s row and toast",
+    (kind) => {
+      const held = notice({ kind, store: "local", workspaceId: "other", recipientShareId: null });
+      const { result } = setup([held], [workspace("notes"), workspace("other")], "notes", {
+        toast: held,
+      });
+      expect(result.current.sentNotices.map((row) => row.notice)).toEqual([held]);
+      expect(result.current.sentNoticeToast?.notice).toEqual(held);
+    },
+  );
 
   it("keeps other and removed workspace refusals reachable while this shell shows its own", () => {
-    const notices = ["notes", "other", "removed"].map(workspaceId => notice({kind: "sync-refusal", store: "local", workspaceId, recipientShareId: null, noticeId: workspaceId}));
-    const {result} = setup(notices, [workspace("notes"), workspace("other")]);
-    expect(result.current.sentNotices.map(row => row.notice.workspaceId)).toEqual(["other", "removed"]);
+    const notices = ["notes", "other", "removed"].map((workspaceId) =>
+      notice({
+        kind: "sync-refusal",
+        store: "local",
+        workspaceId,
+        recipientShareId: null,
+        noticeId: workspaceId,
+      }),
+    );
+    const { result } = setup(notices, [workspace("notes"), workspace("other")]);
+    expect(result.current.sentNotices.map((row) => row.notice.workspaceId)).toEqual([
+      "other",
+      "removed",
+    ]);
   });
   it("opens the page of a personal agent that signed in through another workspace's link", async () => {
     const grok = `p-${"g".repeat(26)}`;
     const signedIn = notice({
-      kind: "personal-agent-signed-in", workspaceId: "other", recipientShareId: null,
-      senderKind: "agent", senderLabel: "Grok Bot", title: "Grok Bot signed in as your agent",
+      kind: "personal-agent-signed-in",
+      workspaceId: "other",
+      recipientShareId: null,
+      senderKind: "agent",
+      senderLabel: "Grok Bot",
+      title: "Grok Bot signed in as your agent",
       target: { settings: "agents", agent: grok },
     });
-    const { result, sentNotices, openAgentsSettings, onSwitchWorkspace, onOpenShare } = setup([signedIn], [workspace("notes"), workspace("other")]);
-    expect(result.current.sentNotices).toEqual([{ notice: signedIn, folder: null, openable: true, retryable: false }]);
+    const { result, sentNotices, openAgentsSettings, onSwitchWorkspace, onOpenShare } = setup(
+      [signedIn],
+      [workspace("notes"), workspace("other")],
+    );
+    expect(result.current.sentNotices).toEqual([
+      { notice: signedIn, folder: null, openable: true, retryable: false },
+    ]);
     await expect(result.current.onOpenSentNotice(signedIn, live())).resolves.toBeNull();
     expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "n1" }]);
     // Settings › Agents finds the agent's page by its id, which a rename keeps, or shows the list.
@@ -192,20 +276,31 @@ describe("opening a sent notice", () => {
 
   it("opens the list in Settings › Agents when the notice names no agent", async () => {
     const unnamed = notice({
-      kind: "personal-agent-signed-in", workspaceId: "other", recipientShareId: null,
-      senderKind: "agent", senderLabel: "Grok Bot", title: "Grok Bot signed in as your agent",
+      kind: "personal-agent-signed-in",
+      workspaceId: "other",
+      recipientShareId: null,
+      senderKind: "agent",
+      senderLabel: "Grok Bot",
+      title: "Grok Bot signed in as your agent",
       target: { settings: "agents" },
     });
-    const { result, openAgentsSettings } = setup([unnamed], [workspace("notes"), workspace("other")]);
+    const { result, openAgentsSettings } = setup(
+      [unnamed],
+      [workspace("notes"), workspace("other")],
+    );
     await expect(result.current.onOpenSentNotice(unnamed, live())).resolves.toBeNull();
     expect(openAgentsSettings).toHaveBeenCalledWith(null);
   });
 
   it("marks it read and opens its file in this workspace's shared-with-me, naming its folder", async () => {
-    const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
+    const here = workspace("notes", {
+      shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }],
+    });
     const { result, sentNotices, openFile, onSwitchWorkspace } = setup([notice()], [here]);
     // The file comes from someone else's workspace, so the row says where.
-    expect(result.current.sentNotices).toEqual([{ notice: notice(), folder: "Japan", openable: true, retryable: false }]);
+    expect(result.current.sentNotices).toEqual([
+      { notice: notice(), folder: "Japan", openable: true, retryable: false },
+    ]);
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "n1" }]);
     expect(openFile).toHaveBeenCalledWith("shared-with-me/owner/Trips/Japan/report.md");
@@ -213,7 +308,9 @@ describe("opening a sent notice", () => {
   });
 
   it("opens a share already mounted here at its folder in Files when the notice names no file", async () => {
-    const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
+    const here = workspace("notes", {
+      shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }],
+    });
     const shared = notice({ target: {} });
     const { result, openFolder, openFile } = setup([shared], [here]);
     expect(result.current.sentNotices[0]?.openable).toBe(true);
@@ -223,7 +320,9 @@ describe("opening a sent notice", () => {
   });
 
   it("names the shared-with-me folder when the file has no Collection folder", () => {
-    const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
+    const here = workspace("notes", {
+      shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }],
+    });
     const { result } = setup([notice({ target: { path: "report.md" } })], [here]);
     expect(result.current.sentNotices[0]?.folder).toBe("owner");
   });
@@ -239,7 +338,10 @@ describe("opening a sent notice", () => {
     const { result, onSwitchWorkspace } = setup([notice()], [workspace("notes"), view]);
     expect(result.current.sentNotices[0]?.folder).toBe("Japan");
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-    expect(onSwitchWorkspace).toHaveBeenCalledWith(view, { to: "file", path: "Trips/Japan/report.md" });
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(view, {
+      to: "file",
+      path: "Trips/Japan/report.md",
+    });
   });
 
   it("offers to add a share this computer does not hold, with the notice's file", async () => {
@@ -269,10 +371,19 @@ describe("opening a sent notice", () => {
   it("reports a failed share lookup with its cause, and Try again opens the share", async () => {
     const cause = new Error("relay unreachable");
     getRelayReceivedShare.mockRejectedValueOnce(cause);
-    const { result, onOpenShare, reportShellError, clearShellError } = setup([notice()], [workspace("notes")]);
+    const { result, onOpenShare, reportShellError, clearShellError } = setup(
+      [notice()],
+      [workspace("notes")],
+    );
     await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
     expect(onOpenShare).not.toHaveBeenCalled();
-    expect(reportShellError).toHaveBeenCalledWith(SHARE_LOOKUP_FAILED_NOTE, cause, expect.any(Function), undefined, OPEN_ERROR);
+    expect(reportShellError).toHaveBeenCalledWith(
+      SHARE_LOOKUP_FAILED_NOTE,
+      cause,
+      expect.any(Function),
+      undefined,
+      OPEN_ERROR,
+    );
     expect(clearShellError).not.toHaveBeenCalled();
     getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
     await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
@@ -284,12 +395,23 @@ describe("opening a sent notice", () => {
     await result.current.onOpenSentNotice(notice(), live());
     getRelayReceivedShare.mockResolvedValueOnce({ found: false });
     await act(async () => vi.mocked(reportShellError).mock.calls[1]?.[2]?.());
-    await waitFor(() => expect(reportShellError).toHaveBeenLastCalledWith(ACCESS_ENDED_NOTE, expect.any(Error), null, undefined, OPEN_ERROR));
+    await waitFor(() =>
+      expect(reportShellError).toHaveBeenLastCalledWith(
+        ACCESS_ENDED_NOTE,
+        expect.any(Error),
+        null,
+        undefined,
+        OPEN_ERROR,
+      ),
+    );
   });
 
   it("takes back a failed Open's error when the notice's Open later succeeds", async () => {
     getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
-    const { result, onOpenShare, reportShellError, clearShellError } = setup([notice()], [workspace("notes")]);
+    const { result, onOpenShare, reportShellError, clearShellError } = setup(
+      [notice()],
+      [workspace("notes")],
+    );
     await result.current.onOpenSentNotice(notice(), live());
     expect(reportShellError).toHaveBeenCalledTimes(1);
     getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
@@ -300,7 +422,10 @@ describe("opening a sent notice", () => {
 
   it("lets only the notice's latest Open act, so an older Try again can't take back a newer error", async () => {
     getRelayReceivedShare.mockRejectedValueOnce(new Error("relay unreachable"));
-    const { result, onOpenShare, reportShellError, clearShellError } = setup([notice()], [workspace("notes")]);
+    const { result, onOpenShare, reportShellError, clearShellError } = setup(
+      [notice()],
+      [workspace("notes")],
+    );
     await result.current.onOpenSentNotice(notice(), live());
     // Try again waits on a slow lookup while Open on the row fails again.
     const slow = deferred<typeof RECEIVED>();
@@ -330,13 +455,22 @@ describe("opening a sent notice", () => {
 
   describe("a Group invitation or message request", () => {
     const INVITATION = { found: true as const, chats: true as const };
-    const view = workspace("trip-view", { shareView: { shareId: "trip-share", granterEmail: null }, lastOpenedAt: 9 });
+    const view = workspace("trip-view", {
+      shareView: { shareId: "trip-share", granterEmail: null },
+      lastOpenedAt: 9,
+    });
 
     it("opens Chats in this workspace at the invitation, where it waits with Join", async () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
-      const { result, openChatsInvitation, onOpenShare, onSwitchWorkspace } = setup([notice()], [workspace("notes")]);
+      const { result, openChatsInvitation, onOpenShare, onSwitchWorkspace } = setup(
+        [notice()],
+        [workspace("notes")],
+      );
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1", inputs: inputCount() });
+      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith({
+        shareId: "share-1",
+        inputs: inputCount(),
+      });
       expect(onOpenShare).not.toHaveBeenCalled();
       expect(onSwitchWorkspace).not.toHaveBeenCalled();
     });
@@ -345,9 +479,17 @@ describe("opening a sent notice", () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
       const older = workspace("notes", { lastOpenedAt: 1 });
       const latest = workspace("trip", { lastOpenedAt: 5 });
-      const { result, openChatsInvitation, onSwitchWorkspace } = setup([notice()], [older, latest, view], "trip-view");
+      const { result, openChatsInvitation, onSwitchWorkspace } = setup(
+        [notice()],
+        [older, latest, view],
+        "trip-view",
+      );
       await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBeNull();
-      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, { to: "chats-invitation", shareId: "share-1", inputs: inputCount() });
+      expect(onSwitchWorkspace).toHaveBeenCalledWith(latest, {
+        to: "chats-invitation",
+        shareId: "share-1",
+        inputs: inputCount(),
+      });
       expect(openChatsInvitation).not.toHaveBeenCalled();
     });
 
@@ -361,7 +503,10 @@ describe("opening a sent notice", () => {
       lookup.resolve(INVITATION);
       await expect(opened).resolves.toBeNull();
       expect(inputCount()).toBe(pressed + 1);
-      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1", inputs: pressed });
+      expect(openChatsInvitation).toHaveBeenCalledExactlyOnceWith({
+        shareId: "share-1",
+        inputs: pressed,
+      });
     });
 
     it("switches nowhere when the person left the workspace before the lookup answered, from Open or Try again", async () => {
@@ -393,8 +538,14 @@ describe("opening a sent notice", () => {
 
     it("says on the row to create a workspace when they have none of their own", async () => {
       getRelayReceivedShare.mockResolvedValueOnce(INVITATION);
-      const { result, openChatsInvitation, onSwitchWorkspace } = setup([notice()], [view], "trip-view");
-      await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(NO_OWN_WORKSPACE_NOTE);
+      const { result, openChatsInvitation, onSwitchWorkspace } = setup(
+        [notice()],
+        [view],
+        "trip-view",
+      );
+      await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(
+        NO_OWN_WORKSPACE_NOTE,
+      );
       expect(onSwitchWorkspace).not.toHaveBeenCalled();
       expect(openChatsInvitation).not.toHaveBeenCalled();
     });
@@ -403,13 +554,20 @@ describe("opening a sent notice", () => {
   it("says access ended when the target was cleared or the share is gone", async () => {
     const ended = notice({ target: null });
     const { result, sentNotices, openFile } = setup([ended], [workspace("notes")]);
-    expect(result.current.sentNotices[0]).toEqual({ notice: ended, folder: null, openable: true, retryable: false });
+    expect(result.current.sentNotices[0]).toEqual({
+      notice: ended,
+      folder: null,
+      openable: true,
+      retryable: false,
+    });
     await expect(result.current.onOpenSentNotice(ended, live())).resolves.toBe(ACCESS_ENDED_NOTE);
     expect(sentNotices.read).toHaveBeenCalledTimes(1);
     expect(openFile).not.toHaveBeenCalled();
 
     getRelayReceivedShare.mockResolvedValueOnce({ found: false });
-    await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(ACCESS_ENDED_NOTE);
+    await expect(result.current.onOpenSentNotice(notice(), live())).resolves.toBe(
+      ACCESS_ENDED_NOTE,
+    );
   });
 
   it("says when the workspace is not on this computer", async () => {
@@ -419,7 +577,13 @@ describe("opening a sent notice", () => {
   });
 
   it("has no Open for a notice about no workspace", () => {
-    const server = notice({ store: "local", workspaceId: null, recipientShareId: null, senderKind: null, target: {} });
+    const server = notice({
+      store: "local",
+      workspaceId: null,
+      recipientShareId: null,
+      senderKind: null,
+      target: {},
+    });
     const { result } = setup([server], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.openable).toBe(false);
   });
@@ -432,7 +596,11 @@ describe("opening a sent notice", () => {
     vi.mocked(sentNotices.read).mockRejectedValueOnce(new Error("disk full"));
     await act(async () => result.current.onReadAllSentNotices());
     expect(sentNotices.read).toHaveBeenCalledWith([{ store: "account", noticeId: "a" }]);
-    expect(reportShellError).toHaveBeenCalledWith("dohc could not mark notices read.", expect.any(Error), expect.any(Function));
+    expect(reportShellError).toHaveBeenCalledWith(
+      "dohc could not mark notices read.",
+      expect.any(Error),
+      expect.any(Function),
+    );
     const retry = vi.mocked(reportShellError).mock.calls[0]?.[2];
     await act(async () => retry?.());
     expect(sentNotices.read).toHaveBeenCalledTimes(2);
@@ -448,24 +616,51 @@ describe("opening a sent notice", () => {
 describe("a failed run's notice", () => {
   it("opens a run in the DM of whichever agent ran it", async () => {
     const chat = (id: string, agentId: string) => ({
-      id, name: agentId, slug: id, kind: "agent" as const, agentId, createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0,
+      id,
+      name: agentId,
+      slug: id,
+      kind: "agent" as const,
+      agentId,
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      threadCount: 1,
+      unreadCount: 0,
     });
     const thread = (id: string, channelId: string) => ({
-      id, channelId, title: id, createdAtMs: 0, updatedAtMs: 0, messageCount: 1, lastReadSequence: 0, unreadCount: 0,
+      id,
+      channelId,
+      title: id,
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      messageCount: 1,
+      lastReadSequence: 0,
+      unreadCount: 0,
     });
-    listChatChannels.mockResolvedValue({ channels: [chat("chat-default", "default"), chat("chat-scout", "scout")], fileThreads: [] });
+    listChatChannels.mockResolvedValue({
+      channels: [chat("chat-default", "default"), chat("chat-scout", "scout")],
+      fileThreads: [],
+    });
     listChannelThreads.mockImplementation(async ({ channelId }: { channelId: string }) => ({
       threads: [thread(channelId === "chat-scout" ? "thread-scout" : "thread-default", channelId)],
     }));
     const run = notice({
-      store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
-      title: "Your agent finished", target: { thread: "thread-scout", run: "run-1" },
+      store: "local",
+      kind: "agent-run",
+      workspaceId: "notes",
+      recipientShareId: null,
+      postedHere: true,
+      title: "Your agent finished",
+      target: { thread: "thread-scout", run: "run-1" },
     });
     const { result, openChat, openFile, reportShellError } = setup([run], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.openable).toBe(true);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
     // An agent DM is one conversation, so the run opens the DM, not a thread view.
-    expect(openChat).toHaveBeenCalledWith({ level: "channel", channel: chat("chat-scout", "scout"), lane: "chat" });
+    expect(openChat).toHaveBeenCalledWith({
+      level: "channel",
+      channel: chat("chat-scout", "scout"),
+      lane: "chat",
+    });
     expect(openFile).not.toHaveBeenCalled();
 
     // A thread that is gone says so on the row. A read that fails goes to
@@ -476,7 +671,13 @@ describe("a failed run's notice", () => {
     const cause = new Error("The workspace engine is not running.");
     listChatChannels.mockRejectedValueOnce(cause);
     await expect(result.current.onOpenSentNotice(run, live())).resolves.toBeNull();
-    expect(reportShellError).toHaveBeenCalledWith(RUN_THREAD_LOOKUP_FAILED_NOTE, cause, expect.any(Function), undefined, "sent-notice-open:local:n1");
+    expect(reportShellError).toHaveBeenCalledWith(
+      RUN_THREAD_LOOKUP_FAILED_NOTE,
+      cause,
+      expect.any(Function),
+      undefined,
+      "sent-notice-open:local:n1",
+    );
     expect(openChat).not.toHaveBeenCalled();
     await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
     await waitFor(() => expect(openChat).toHaveBeenCalledTimes(1));
@@ -490,22 +691,63 @@ describe("a failed run's notice", () => {
   });
 
   it("lands on the reply it names, or on the stopped run's last message, or at the end when the run left none", async () => {
-    const dm = { id: "chat-default", name: "default", slug: "chat-default", kind: "agent" as const, agentId: "default",
-      createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0 };
+    const dm = {
+      id: "chat-default",
+      name: "default",
+      slug: "chat-default",
+      kind: "agent" as const,
+      agentId: "default",
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      threadCount: 1,
+      unreadCount: 0,
+    };
     listChatChannels.mockResolvedValue({ channels: [dm], fileThreads: [] });
-    listChannelThreads.mockResolvedValue({ threads: [{ id: "thread-1", channelId: dm.id, title: "t", createdAtMs: 0, updatedAtMs: 0,
-      messageCount: 3, lastReadSequence: 0, unreadCount: 0 }] });
-    chatRunRecordsForThread.mockResolvedValue({ runs: { "m-1": { runId: "run-1" }, "m-2": { runId: "run-1" }, "m-3": { runId: "run-2" } } } as never);
-    listChatMessages.mockResolvedValue({ messages: [{ id: "m-1" }, { id: "m-2" }, { id: "m-3" }] } as never);
-    const reply = notice({ store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
-      target: { thread: "thread-1", message: "m-3", run: "run-2" } });
+    listChannelThreads.mockResolvedValue({
+      threads: [
+        {
+          id: "thread-1",
+          channelId: dm.id,
+          title: "t",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          messageCount: 3,
+          lastReadSequence: 0,
+          unreadCount: 0,
+        },
+      ],
+    });
+    chatRunRecordsForThread.mockResolvedValue({
+      runs: { "m-1": { runId: "run-1" }, "m-2": { runId: "run-1" }, "m-3": { runId: "run-2" } },
+    } as never);
+    listChatMessages.mockResolvedValue({
+      messages: [{ id: "m-1" }, { id: "m-2" }, { id: "m-3" }],
+    } as never);
+    const reply = notice({
+      store: "local",
+      kind: "agent-run",
+      workspaceId: "notes",
+      recipientShareId: null,
+      postedHere: true,
+      target: { thread: "thread-1", message: "m-3", run: "run-2" },
+    });
     const { result, openChat } = setup([reply], [workspace("notes")]);
     await result.current.onOpenSentNotice(reply, live());
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, lane: "chat", focusMessageId: "m-3" });
+    expect(openChat).toHaveBeenLastCalledWith({
+      level: "channel",
+      channel: dm,
+      lane: "chat",
+      focusMessageId: "m-3",
+    });
 
     const stopped = { ...reply, target: { thread: "thread-1", run: "run-1" } };
     await result.current.onOpenSentNotice(stopped, live());
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: dm, lane: "chat", focusMessageId: "m-2" });
+    expect(openChat).toHaveBeenLastCalledWith({
+      level: "channel",
+      channel: dm,
+      lane: "chat",
+      focusMessageId: "m-2",
+    });
 
     const silent = { ...reply, target: { thread: "thread-1", run: "run-9" } };
     await result.current.onOpenSentNotice(silent, live());
@@ -515,52 +757,135 @@ describe("a failed run's notice", () => {
   });
 
   it("finds a conversation in a chat lane and opens it there, and a post as its thread", async () => {
-    const group = { id: "group-1", name: "trip", slug: "trip", kind: "channel" as const, type: "both" as const,
-      createdAtMs: 0, updatedAtMs: 0, threadCount: 2, unreadCount: 0 };
-    const record = (id: string) => ({ id, channelId: group.id, title: id, createdAtMs: 0, updatedAtMs: 0,
-      messageCount: 1, lastReadSequence: 0, unreadCount: 0 });
+    const group = {
+      id: "group-1",
+      name: "trip",
+      slug: "trip",
+      kind: "channel" as const,
+      type: "both" as const,
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      threadCount: 2,
+      unreadCount: 0,
+    };
+    const record = (id: string) => ({
+      id,
+      channelId: group.id,
+      title: id,
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      messageCount: 1,
+      lastReadSequence: 0,
+      unreadCount: 0,
+    });
     listChatChannels.mockResolvedValue({ channels: [group], fileThreads: [] });
-    listChannelThreads.mockImplementation(async ({ lane }: { lane?: "posts" | "chat" }) =>
-      ({ threads: [record(lane === "chat" ? "lane-thread" : "post-thread")] }));
-    const reply = (thread: string) => notice({ store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null,
-      postedHere: true, target: { thread, message: "m-1" } });
+    listChannelThreads.mockImplementation(async ({ lane }: { lane?: "posts" | "chat" }) => ({
+      threads: [record(lane === "chat" ? "lane-thread" : "post-thread")],
+    }));
+    const reply = (thread: string) =>
+      notice({
+        store: "local",
+        kind: "agent-run",
+        workspaceId: "notes",
+        recipientShareId: null,
+        postedHere: true,
+        target: { thread, message: "m-1" },
+      });
     const { result, openChat } = setup([reply("lane-thread")], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(reply("lane-thread"), live())).resolves.toBeNull();
-    expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: group, lane: "chat", focusMessageId: "m-1" });
+    expect(openChat).toHaveBeenLastCalledWith({
+      level: "channel",
+      channel: group,
+      lane: "chat",
+      focusMessageId: "m-1",
+    });
     await expect(result.current.onOpenSentNotice(reply("post-thread"), live())).resolves.toBeNull();
-    expect(openChat).toHaveBeenLastCalledWith({ level: "thread", channel: group, thread: record("post-thread"), focusMessageId: "m-1" });
+    expect(openChat).toHaveBeenLastCalledWith({
+      level: "thread",
+      channel: group,
+      thread: record("post-thread"),
+      focusMessageId: "m-1",
+    });
     // With no message, as when an agent's replies paused, it still opens the chat lane.
-    const paused = notice({ store: "local", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
-      target: { thread: "lane-thread" } });
+    const paused = notice({
+      store: "local",
+      kind: "agent-run",
+      workspaceId: "notes",
+      recipientShareId: null,
+      postedHere: true,
+      target: { thread: "lane-thread" },
+    });
     await expect(result.current.onOpenSentNotice(paused, live())).resolves.toBeNull();
     expect(openChat).toHaveBeenLastCalledWith({ level: "channel", channel: group, lane: "chat" });
     listChannelThreads.mockReset();
   });
 
   it("opens a mention in a conversation at its message, and a mention in a file at the file", async () => {
-    const dm = { id: "chat-default", name: "default", slug: "chat-default", kind: "agent" as const, agentId: "default",
-      createdAtMs: 0, updatedAtMs: 0, threadCount: 1, unreadCount: 0 };
+    const dm = {
+      id: "chat-default",
+      name: "default",
+      slug: "chat-default",
+      kind: "agent" as const,
+      agentId: "default",
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      threadCount: 1,
+      unreadCount: 0,
+    };
     listChatChannels.mockResolvedValue({ channels: [dm], fileThreads: [] });
-    listChannelThreads.mockResolvedValue({ threads: [{ id: "thread-1", channelId: dm.id, title: "t", createdAtMs: 0, updatedAtMs: 0,
-      messageCount: 1, lastReadSequence: 0, unreadCount: 0 }] });
-    const inChat = notice({ kind: "mention", workspaceId: "notes", recipientShareId: null, target: { thread: "thread-1", message: "m-1" } });
-    const inFile = notice({ kind: "mention", workspaceId: "notes", recipientShareId: null, target: { path: "Trip/plan.md" } });
+    listChannelThreads.mockResolvedValue({
+      threads: [
+        {
+          id: "thread-1",
+          channelId: dm.id,
+          title: "t",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 0,
+        },
+      ],
+    });
+    const inChat = notice({
+      kind: "mention",
+      workspaceId: "notes",
+      recipientShareId: null,
+      target: { thread: "thread-1", message: "m-1" },
+    });
+    const inFile = notice({
+      kind: "mention",
+      workspaceId: "notes",
+      recipientShareId: null,
+      target: { path: "Trip/plan.md" },
+    });
     const { result, openChat, openFile } = setup([inChat, inFile], [workspace("notes")]);
     expect(result.current.sentNotices.map((row) => row.openable)).toEqual([true, true]);
     await result.current.onOpenSentNotice(inChat, live());
-    expect(openChat).toHaveBeenCalledExactlyOnceWith({ level: "channel", channel: dm, lane: "chat", focusMessageId: "m-1" });
+    expect(openChat).toHaveBeenCalledExactlyOnceWith({
+      level: "channel",
+      channel: dm,
+      lane: "chat",
+      focusMessageId: "m-1",
+    });
     await result.current.onOpenSentNotice(inFile, live());
     expect(openFile).toHaveBeenCalledExactlyOnceWith("Trip/plan.md");
     listChannelThreads.mockReset();
   });
 
   const failed = notice({
-    kind: "automation-failed", workspaceId: "notes", recipientShareId: null, postedHere: true,
+    kind: "automation-failed",
+    workspaceId: "notes",
+    recipientShareId: null,
+    postedHere: true,
     target: { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" },
   });
 
   it("opens its automation in the panel, here or once it switched there", async () => {
-    const { result, openAutomation, openFile, onSwitchWorkspace } = setup([failed], [workspace("notes")]);
+    const { result, openAutomation, openFile, onSwitchWorkspace } = setup(
+      [failed],
+      [workspace("notes")],
+    );
     // The shell opens nothing once the Open's signal aborts.
     const open = new AbortController();
     await expect(result.current.onOpenSentNotice(failed, open.signal)).resolves.toBeNull();
@@ -568,82 +893,154 @@ describe("a failed run's notice", () => {
     // Another computer ran it, so its run is not here to open.
     openAutomation.mockClear();
     await result.current.onOpenSentNotice({ ...failed, postedHere: false }, live());
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", null, expect.any(AbortSignal));
+    expect(openAutomation).toHaveBeenCalledWith(
+      "collection:Tasks#stamp",
+      null,
+      expect.any(AbortSignal),
+    );
     expect(openFile).not.toHaveBeenCalled();
     cleanup();
     const trip = workspace("trip");
     const elsewhere = setup([failed], [workspace("notes"), trip], "trip");
     await elsewhere.result.current.onOpenSentNotice(failed, live());
-    expect(elsewhere.onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), { to: "automation", automation: "collection:Tasks#stamp", run: "atc_1" });
+    expect(elsewhere.onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), {
+      to: "automation",
+      automation: "collection:Tasks#stamp",
+      run: "atc_1",
+    });
     expect(onSwitchWorkspace).not.toHaveBeenCalled();
   });
 
   it("says so on its row when this computer no longer has the automation's Collection", async () => {
-    const { result, openAutomation, openFile, reportShellError } = setup([failed], [workspace("notes")]);
+    const { result, openAutomation, openFile, reportShellError } = setup(
+      [failed],
+      [workspace("notes")],
+    );
     openAutomation.mockResolvedValueOnce(AUTOMATION_NOT_HERE_NOTE);
-    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBe(AUTOMATION_NOT_HERE_NOTE);
+    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBe(
+      AUTOMATION_NOT_HERE_NOTE,
+    );
     // A lookup that fails goes to the shell's errors, whose Try again opens it.
     const cause = new Error("The workspace engine is not running.");
     openAutomation.mockRejectedValueOnce(cause);
     await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
-    expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_LOOKUP_FAILED_NOTE, cause, expect.any(Function), undefined, OPEN_ERROR);
+    expect(reportShellError).toHaveBeenCalledWith(
+      AUTOMATION_LOOKUP_FAILED_NOTE,
+      cause,
+      expect.any(Function),
+      undefined,
+      OPEN_ERROR,
+    );
     openAutomation.mockClear();
     await act(async () => vi.mocked(reportShellError).mock.calls[0]?.[2]?.());
-    await waitFor(() => expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1", expect.any(AbortSignal)));
+    await waitFor(() =>
+      expect(openAutomation).toHaveBeenCalledWith(
+        "collection:Tasks#stamp",
+        "atc_1",
+        expect.any(AbortSignal),
+      ),
+    );
     expect(openFile).not.toHaveBeenCalled();
   });
 
   it("asks main to run it again for the list's account, and confirms first when it would start over", async () => {
     retryAutomationNotice.mockImplementation(async ({ startOver }: { startOver: boolean }) =>
-      startOver ? { status: "queued", press: false } : { status: "definition-changed", repeatsMessages: false });
-    const { result, reportShellError } = setup([failed], [workspace("notes")], "notes", { account: "account-1" });
+      startOver
+        ? { status: "queued", press: false }
+        : { status: "definition-changed", repeatsMessages: false },
+    );
+    const { result, reportShellError } = setup([failed], [workspace("notes")], "notes", {
+      account: "account-1",
+    });
     function Dialog() {
       return <>{result.current.retryDialog}</>;
     }
     await act(async () => result.current.onRetrySentNotice(failed));
-    expect(retryAutomationNotice).toHaveBeenCalledWith({ account: "account-1", notice: { store: "account", noticeId: "n1" }, startOver: false });
+    expect(retryAutomationNotice).toHaveBeenCalledWith({
+      account: "account-1",
+      notice: { store: "account", noticeId: "n1" },
+      startOver: false,
+    });
     render(<Dialog />);
     await act(async () => screen.getByTestId("automation-start-over-confirm").click());
-    expect(retryAutomationNotice).toHaveBeenLastCalledWith({ account: "account-1", notice: { store: "account", noticeId: "n1" }, startOver: true });
+    expect(retryAutomationNotice).toHaveBeenLastCalledWith({
+      account: "account-1",
+      notice: { store: "account", noticeId: "n1" },
+      startOver: true,
+    });
     expect(reportShellError).not.toHaveBeenCalled();
   });
 
   const controls = {
-    recovery: "automation-controls" as const, automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml",
+    recovery: "automation-controls" as const,
+    automation: "collection:Tasks#stamp",
+    path: "Tasks/automations.yaml",
   };
 
   it("opens a switched-off automation on its switch, not at its run", async () => {
     const switchedOff = { ...failed, target: { ...controls, run: "atc_1" } };
-    const { result, openAutomation, openAutomationControls } = setup([switchedOff], [workspace("notes")]);
+    const { result, openAutomation, openAutomationControls } = setup(
+      [switchedOff],
+      [workspace("notes")],
+    );
     await expect(result.current.onOpenSentNotice(switchedOff, live())).resolves.toBeNull();
-    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) });
+    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+      signal: expect.any(AbortSignal),
+    });
     expect(openAutomation).not.toHaveBeenCalled();
   });
 
   it("takes Try again to the switch when main finds the automation switched off, and says so when it cannot open", async () => {
     retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
-    const { result, openAutomation, openAutomationControls, reportShellError, sentNotices } = setup([failed], [workspace("notes")]);
+    const { result, openAutomation, openAutomationControls, reportShellError, sentNotices } = setup(
+      [failed],
+      [workspace("notes")],
+    );
     await act(async () => result.current.onRetrySentNotice(failed));
-    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) }));
+    await waitFor(() =>
+      expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+        signal: expect.any(AbortSignal),
+      }),
+    );
     expect(openAutomation).not.toHaveBeenCalled();
     expect(reportShellError).not.toHaveBeenCalled();
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
 
     openAutomationControls.mockResolvedValueOnce(AUTOMATION_NOT_HERE_NOTE);
     await act(async () => result.current.onRetrySentNotice(failed));
-    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith(AUTOMATION_NOT_HERE_NOTE, expect.any(Error), null, undefined, OPEN_ERROR));
+    await waitFor(() =>
+      expect(reportShellError).toHaveBeenCalledWith(
+        AUTOMATION_NOT_HERE_NOTE,
+        expect.any(Error),
+        null,
+        undefined,
+        OPEN_ERROR,
+      ),
+    );
   });
 
   it("carries the switch through a switch to the workspace that holds it, for Open and Try again", async () => {
     const switchedOff = { ...failed, target: { ...controls, run: "atc_1" } };
     retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
-    const { result, onSwitchWorkspace, openAutomationControls, openFile } = setup([switchedOff], [workspace("notes"), workspace("trip")], "trip");
+    const { result, onSwitchWorkspace, openAutomationControls, openFile } = setup(
+      [switchedOff],
+      [workspace("notes"), workspace("trip")],
+      "trip",
+    );
     await result.current.onOpenSentNotice(switchedOff, live());
-    expect(onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), { to: "automation-controls", automation: "collection:Tasks#stamp" });
+    expect(onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), {
+      to: "automation-controls",
+      automation: "collection:Tasks#stamp",
+    });
     onSwitchWorkspace.mockClear();
     // The owner's own run, tried again from another workspace.
     await act(async () => result.current.onRetrySentNotice(failed));
-    await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), { to: "automation-controls", automation: "collection:Tasks#stamp" }));
+    await waitFor(() =>
+      expect(onSwitchWorkspace).toHaveBeenCalledWith(workspace("notes"), {
+        to: "automation-controls",
+        automation: "collection:Tasks#stamp",
+      }),
+    );
     expect(openAutomationControls).not.toHaveBeenCalled();
     expect(openFile).not.toHaveBeenCalled();
   });
@@ -653,29 +1050,50 @@ describe("a failed run's notice", () => {
     const { result, openAutomationControls } = setup([copy], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.retryable).toBe(false);
     await result.current.onOpenSentNotice(copy, live());
-    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) });
+    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("opens a share's switched-off automation on its switch through that share's automations.yaml", async () => {
     // A copy for someone who reaches the Collection through a share.
-    const copy = notice({ kind: "automation-failed", workspaceId: null, recipientShareId: "share-1", target: controls });
-    const mounted = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
+    const copy = notice({
+      kind: "automation-failed",
+      workspaceId: null,
+      recipientShareId: "share-1",
+      target: controls,
+    });
+    const mounted = workspace("notes", {
+      shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }],
+    });
     const inMount = setup([copy], [mounted]);
     const open = new AbortController();
     await expect(inMount.result.current.onOpenSentNotice(copy, open.signal)).resolves.toBeNull();
-    expect(inMount.openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { sharedFile: "shared-with-me/owner/Tasks/automations.yaml", signal: open.signal });
+    expect(inMount.openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+      sharedFile: "shared-with-me/owner/Tasks/automations.yaml",
+      signal: open.signal,
+    });
     cleanup();
 
-    const view = workspace("trip-view", { shareView: { shareId: "share-1", granterEmail: null, access: "edit" } });
+    const view = workspace("trip-view", {
+      shareView: { shareId: "share-1", granterEmail: null, access: "edit" },
+    });
     const inView = setup([copy], [workspace("notes"), view], "trip-view");
     await inView.result.current.onOpenSentNotice(copy, live());
-    expect(inView.openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { sharedFile: "Tasks/automations.yaml", signal: expect.any(AbortSignal) });
+    expect(inView.openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+      sharedFile: "Tasks/automations.yaml",
+      signal: expect.any(AbortSignal),
+    });
     cleanup();
 
     // Only a separate Edit view can switch it, so Open goes there before this workspace's read-only folder.
     const toView = setup([copy], [mounted, view]);
     await toView.result.current.onOpenSentNotice(copy, live());
-    expect(toView.onSwitchWorkspace).toHaveBeenCalledWith(view, { to: "automation-controls", automation: "collection:Tasks#stamp", sharedFile: "Tasks/automations.yaml" });
+    expect(toView.onSwitchWorkspace).toHaveBeenCalledWith(view, {
+      to: "automation-controls",
+      automation: "collection:Tasks#stamp",
+      sharedFile: "Tasks/automations.yaml",
+    });
     cleanup();
 
     // A share this computer has not added carries the switch through Open a share.
@@ -683,8 +1101,14 @@ describe("a failed run's notice", () => {
     const notAdded = setup([copy], [workspace("notes")]);
     await notAdded.result.current.onOpenSentNotice(copy, live());
     expect(notAdded.onOpenShare).toHaveBeenCalledWith({
-      resolvedShare: { shareId: "share-1", shareCode: "code-1" }, liveEditing: true, path: "Tasks/automations.yaml",
-      controls: { to: "automation-controls", automation: "collection:Tasks#stamp", sharedFile: "Tasks/automations.yaml" },
+      resolvedShare: { shareId: "share-1", shareCode: "code-1" },
+      liveEditing: true,
+      path: "Tasks/automations.yaml",
+      controls: {
+        to: "automation-controls",
+        automation: "collection:Tasks#stamp",
+        sharedFile: "Tasks/automations.yaml",
+      },
     });
     expect(notAdded.openAutomationControls).not.toHaveBeenCalled();
     for (const shown of [inMount, inView, toView, notAdded]) {
@@ -698,54 +1122,100 @@ describe("a failed run's notice", () => {
     retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
     const { result, openAutomation, openAutomationControls } = setup([cut], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(cut, live())).resolves.toBeNull();
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1", expect.any(AbortSignal));
+    expect(openAutomation).toHaveBeenCalledWith(
+      "collection:Tasks#stamp",
+      "atc_1",
+      expect.any(AbortSignal),
+    );
     expect(openAutomationControls).not.toHaveBeenCalled();
     await act(async () => result.current.onRetrySentNotice(cut));
-    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) }));
+    await waitFor(() =>
+      expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it("reports why main did not run it, as on another computer", async () => {
-    retryAutomationNotice.mockResolvedValue({ status: "refused", reason: "Only the computer this run failed on can try it again." });
+    retryAutomationNotice.mockResolvedValue({
+      status: "refused",
+      reason: "Only the computer this run failed on can try it again.",
+    });
     const { result, reportShellError } = setup([failed], [workspace("notes")]);
     await act(async () => result.current.onRetrySentNotice(failed));
-    expect(reportShellError).toHaveBeenCalledWith("Only the computer this run failed on can try it again.", expect.any(Error));
+    expect(reportShellError).toHaveBeenCalledWith(
+      "Only the computer this run failed on can try it again.",
+      expect.any(Error),
+    );
   });
 });
 
 describe("the list itself", () => {
   it("holds back All clear until the first list answers", () => {
-    expect(setup([], [workspace("notes")], "notes", { settled: false }).result.current.sentNoticesLoading).toBe(true);
+    expect(
+      setup([], [workspace("notes")], "notes", { settled: false }).result.current
+        .sentNoticesLoading,
+    ).toBe(true);
     cleanup();
     expect(setup([], [workspace("notes")]).result.current.sentNoticesLoading).toBe(false);
   });
 
   it("reports a list main could not read, with Try again that lists again", () => {
     const error = new Error("notices file unreadable");
-    const { reportShellError, sentNotices } = setup([], [workspace("notes")], "notes", { listFailure: { error } });
-    expect(reportShellError).toHaveBeenCalledWith("dohc could not read notices sent to you.", error, sentNotices.relist);
+    const { reportShellError, sentNotices } = setup([], [workspace("notes")], "notes", {
+      listFailure: { error },
+    });
+    expect(reportShellError).toHaveBeenCalledWith(
+      "dohc could not read notices sent to you.",
+      error,
+      sentNotices.relist,
+    );
   });
 });
 
 describe("Try again on a failed run of the owner's server", () => {
-  const failed = (overrides: Partial<NoticeRow> = {}) => notice({
-    noticeId: "server-automation-failed:abc", kind: "automation-failed", workspaceId: "notes", recipientShareId: null,
-    target: { path: "Tasks", automation: "collection:Tasks#stamp", run: "claim-1" }, ...overrides,
-  });
+  const failed = (overrides: Partial<NoticeRow> = {}) =>
+    notice({
+      noticeId: "server-automation-failed:abc",
+      kind: "automation-failed",
+      workspaceId: "notes",
+      recipientShareId: null,
+      target: { path: "Tasks", automation: "collection:Tasks#stamp", run: "claim-1" },
+      ...overrides,
+    });
 
   it("runs it again on the server from this workspace", async () => {
     const { result } = setup([failed()], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.retryable).toBe(true);
     await act(async () => result.current.onRetrySentNotice(failed()));
-    expect(retryCollectionAutomation).toHaveBeenCalledWith({ workspaceId: "notes", startOver: false, automationId: "collection:Tasks#stamp", claimId: "claim-1", onServer: true });
+    expect(retryCollectionAutomation).toHaveBeenCalledWith({
+      workspaceId: "notes",
+      startOver: false,
+      automationId: "collection:Tasks#stamp",
+      claimId: "claim-1",
+      onServer: true,
+    });
   });
 
   it("goes to the switch when the server finds the automation switched off", async () => {
-    retryCollectionAutomation.mockResolvedValueOnce({ status: "switched-off", target: {
-      recovery: "automation-controls", automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml",
-    } });
-    const { result, openAutomationControls, reportShellError } = setup([failed()], [workspace("notes")]);
+    retryCollectionAutomation.mockResolvedValueOnce({
+      status: "switched-off",
+      target: {
+        recovery: "automation-controls",
+        automation: "collection:Tasks#stamp",
+        path: "Tasks/automations.yaml",
+      },
+    });
+    const { result, openAutomationControls, reportShellError } = setup(
+      [failed()],
+      [workspace("notes")],
+    );
     await act(async () => result.current.onRetrySentNotice(failed()));
-    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) }));
+    await waitFor(() =>
+      expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", {
+        signal: expect.any(AbortSignal),
+      }),
+    );
     expect(reportShellError).not.toHaveBeenCalled();
   });
 
@@ -759,25 +1229,54 @@ describe("Try again on a failed run of the owner's server", () => {
       failed({ target: { path: "Tasks", automation: "collection:Tasks#stamp" } }),
     ];
     const { result } = setup(others, [workspace("notes"), workspace("home")]);
-    expect(result.current.sentNotices.map((row) => row.retryable)).toEqual([false, false, false, false, false, false]);
-    retryAutomationNotice.mockResolvedValue({ status: "refused", reason: "Another computer holds this run." });
-    await act(async () => { for (const other of others) result.current.onRetrySentNotice(other); });
+    expect(result.current.sentNotices.map((row) => row.retryable)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    retryAutomationNotice.mockResolvedValue({
+      status: "refused",
+      reason: "Another computer holds this run.",
+    });
+    await act(async () => {
+      for (const other of others) result.current.onRetrySentNotice(other);
+    });
     expect(retryCollectionAutomation).not.toHaveBeenCalled();
   });
 });
 
 describe("Try again on a failed agent run", () => {
-  const stoppedRun = (threadId: string, runId: string, overrides: Partial<NoticeRow> = {}) => notice({
-    store: "local", noticeId: `agent-run:notes:${runId}`, kind: "agent-run", workspaceId: "notes", recipientShareId: null,
-    senderKind: "agent", postedHere: true, target: { thread: threadId, run: runId }, ...overrides,
-  });
+  const stoppedRun = (threadId: string, runId: string, overrides: Partial<NoticeRow> = {}) =>
+    notice({
+      store: "local",
+      noticeId: `agent-run:notes:${runId}`,
+      kind: "agent-run",
+      workspaceId: "notes",
+      recipientShareId: null,
+      senderKind: "agent",
+      postedHere: true,
+      target: { thread: threadId, run: runId },
+      ...overrides,
+    });
   // Each conversation's dispatch state, as main reads it.
   let states: Record<string, ChatDispatchStateForThreadResult>;
-  const stopped = (runId: string, retryable = true): ChatDispatchStateForThreadResult =>
-    ({ ...IDLE, failedRun: { runId, triggerMessageId: `ask-${runId}`, words: "Nova didn't reply. dohc quit during its run.", retryable } });
+  const stopped = (runId: string, retryable = true): ChatDispatchStateForThreadResult => ({
+    ...IDLE,
+    failedRun: {
+      runId,
+      triggerMessageId: `ask-${runId}`,
+      words: "Nova didn't reply. dohc quit during its run.",
+      retryable,
+    },
+  });
   beforeEach(() => {
     states = {};
-    chatDispatchStateForThread.mockImplementation(async ({ threadId }) => (threadId === null ? IDLE : states[threadId] ?? IDLE));
+    chatDispatchStateForThread.mockImplementation(async ({ threadId }) =>
+      threadId === null ? IDLE : (states[threadId] ?? IDLE),
+    );
     retryStoppedRun.mockResolvedValue({ queued: true });
   });
 
@@ -786,12 +1285,19 @@ describe("Try again on a failed agent run", () => {
     const run = stoppedRun("thread-1", "run-1");
     const { result, reportShellError } = setup([run], [workspace("notes")]);
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
-    expect(chatDispatchStateForThread).toHaveBeenCalledWith({ workspaceId: "notes", threadId: "thread-1" });
+    expect(chatDispatchStateForThread).toHaveBeenCalledWith({
+      workspaceId: "notes",
+      threadId: "thread-1",
+    });
 
     // Back in line, the conversation shows the request waiting instead.
     states["thread-1"] = { ...IDLE, pendingCount: 1 };
     await act(async () => result.current.onRetrySentNotice(run));
-    expect(retryStoppedRun).toHaveBeenCalledWith({ workspaceId: "notes", threadId: "thread-1", runId: "run-1" });
+    expect(retryStoppedRun).toHaveBeenCalledWith({
+      workspaceId: "notes",
+      threadId: "thread-1",
+      runId: "run-1",
+    });
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(false));
     expect(retryAutomationNotice).not.toHaveBeenCalled();
     expect(reportShellError).not.toHaveBeenCalled();
@@ -809,13 +1315,23 @@ describe("Try again on a failed agent run", () => {
     ];
     const { result } = setup(notices, [workspace("notes"), workspace("home")]);
     await waitFor(() => expect(chatDispatchStateForThread).toHaveBeenCalledTimes(2));
-    expect(chatDispatchStateForThread.mock.calls.map(([payload]) => payload.threadId).sort()).toEqual(["thread-1", "thread-2"]);
-    expect(result.current.sentNotices.map((row) => row.retryable)).toEqual([false, false, false, false]);
+    expect(
+      chatDispatchStateForThread.mock.calls.map(([payload]) => payload.threadId).sort(),
+    ).toEqual(["thread-1", "thread-2"]);
+    expect(result.current.sentNotices.map((row) => row.retryable)).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
   });
 
   it("offers none when main can't read the conversation, and says nothing about it", async () => {
     chatDispatchStateForThread.mockRejectedValue(new Error("The workspace engine is not running."));
-    const { result, reportShellError } = setup([stoppedRun("thread-1", "run-1")], [workspace("notes")]);
+    const { result, reportShellError } = setup(
+      [stoppedRun("thread-1", "run-1")],
+      [workspace("notes")],
+    );
     await waitFor(() => expect(chatDispatchStateForThread).toHaveBeenCalled());
     expect(result.current.sentNotices[0]?.retryable).toBe(false);
     expect(reportShellError).not.toHaveBeenCalled();
@@ -840,7 +1356,9 @@ describe("Try again on a failed agent run", () => {
     const { result, reportShellError } = setup([run], [workspace("notes")]);
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
     states["thread-1"] = { ...IDLE, pendingCount: 1 };
-    retryStoppedRun.mockResolvedValueOnce({ queued: true }).mockResolvedValueOnce({ queued: false });
+    retryStoppedRun
+      .mockResolvedValueOnce({ queued: true })
+      .mockResolvedValueOnce({ queued: false });
     await act(async () => {
       result.current.onRetrySentNotice(run);
       result.current.onRetrySentNotice(run);
@@ -858,22 +1376,46 @@ describe("Try again on a failed agent run", () => {
     const { result, reportShellError } = setup([run], [workspace("notes")]);
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
     await act(async () => result.current.onRetrySentNotice(run));
-    await waitFor(() => expect(reportShellError).toHaveBeenCalledWith("dohc could not start your agent's run again.", error, expect.any(Function)));
+    await waitFor(() =>
+      expect(reportShellError).toHaveBeenCalledWith(
+        "dohc could not start your agent's run again.",
+        error,
+        expect.any(Function),
+      ),
+    );
     const again = vi.mocked(reportShellError).mock.calls[0]?.[2];
     await act(async () => again?.());
     expect(retryStoppedRun).toHaveBeenCalledTimes(2);
-    expect(retryStoppedRun).toHaveBeenLastCalledWith({ workspaceId: "notes", threadId: "thread-1", runId: "run-1" });
+    expect(retryStoppedRun).toHaveBeenLastCalledWith({
+      workspaceId: "notes",
+      threadId: "thread-1",
+      runId: "run-1",
+    });
   });
 });
 
 describe("an agent run's notice while its chat is on screen", () => {
-  const ran = (target: NoticeRow["target"], overrides: Partial<NoticeRow> = {}) => notice({
-    store: "local", noticeId: "n1", kind: "agent-run", workspaceId: "notes", recipientShareId: null, postedHere: true,
-    title: "Nova replied", target, ...overrides,
-  });
-  const failed = () => ran({ thread: "thread-1", run: "run-1" }, {
-    noticeId: "agent-run:notes:run-1", title: "Nova didn't reply", body: "Its run ended with an error.",
-  });
+  const ran = (target: NoticeRow["target"], overrides: Partial<NoticeRow> = {}) =>
+    notice({
+      store: "local",
+      noticeId: "n1",
+      kind: "agent-run",
+      workspaceId: "notes",
+      recipientShareId: null,
+      postedHere: true,
+      title: "Nova replied",
+      target,
+      ...overrides,
+    });
+  const failed = () =>
+    ran(
+      { thread: "thread-1", run: "run-1" },
+      {
+        noticeId: "agent-run:notes:run-1",
+        title: "Nova didn't reply",
+        body: "Its run ended with an error.",
+      },
+    );
   let shown: HTMLElement;
   let hide: () => void;
   beforeEach(() => {
@@ -892,27 +1434,43 @@ describe("an agent run's notice while its chat is on screen", () => {
     const reply = ran({ thread: "thread-1", run: "run-1", message: "m-reply" });
     const { result, sentNotices } = setup([reply], [workspace("notes")], "notes", { toast: reply });
     expect(result.current.sentNoticeToast).toBeNull();
-    await waitFor(() => expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "local", noticeId: "n1" }));
+    await waitFor(() =>
+      expect(sentNotices.dismiss).toHaveBeenCalledWith({ store: "local", noticeId: "n1" }),
+    );
     expect(sentNotices.hideToast).toHaveBeenCalledOnce();
     expect(sentNotices.read).not.toHaveBeenCalled();
   });
 
   it("skips a failed run's toast and keeps its row, read", async () => {
     const failure = failed();
-    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", { toast: failure });
+    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", {
+      toast: failure,
+    });
     expect(result.current.sentNoticeToast).toBeNull();
-    await waitFor(() => expect(sentNotices.read).toHaveBeenCalledWith([{ store: "local", noticeId: "agent-run:notes:run-1" }]));
+    await waitFor(() =>
+      expect(sentNotices.read).toHaveBeenCalledWith([
+        { store: "local", noticeId: "agent-run:notes:run-1" },
+      ]),
+    );
     expect(sentNotices.hideToast).toHaveBeenCalledOnce();
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
     expect(result.current.sentNotices.map((row) => row.notice)).toEqual([failure]);
   });
 
   it("keeps Try again on the row of a run dohc's quit stopped", async () => {
-    chatDispatchStateForThread.mockResolvedValueOnce({ ...IDLE, failedRun: {
-      runId: "run-1", triggerMessageId: "ask-run-1", words: "Nova didn't reply. dohc quit during its run.", retryable: true,
-    } });
+    chatDispatchStateForThread.mockResolvedValueOnce({
+      ...IDLE,
+      failedRun: {
+        runId: "run-1",
+        triggerMessageId: "ask-run-1",
+        words: "Nova didn't reply. dohc quit during its run.",
+        retryable: true,
+      },
+    });
     const failure = { ...failed(), body: "dohc quit during its run." };
-    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", { toast: failure });
+    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", {
+      toast: failure,
+    });
     expect(result.current.sentNoticeToast).toBeNull();
     await waitFor(() => expect(result.current.sentNotices[0]?.retryable).toBe(true));
     expect(sentNotices.read).toHaveBeenCalledOnce();
@@ -920,16 +1478,26 @@ describe("an agent run's notice while its chat is on screen", () => {
 
   it.each([
     ["the window isn't focused", () => tellWindowFocused(false)],
-    ["the chat's view is hidden", () => { shown.checkVisibility = () => false; }],
+    [
+      "the chat's view is hidden",
+      () => {
+        shown.checkVisibility = () => false;
+      },
+    ],
     ["the chat's view is gone", () => hide()],
-    ["another chat is on screen", () => {
-      hide();
-      hide = showChat("thread-2", shown);
-    }],
+    [
+      "another chat is on screen",
+      () => {
+        hide();
+        hide = showChat("thread-2", shown);
+      },
+    ],
   ])("toasts a failed run while %s", (_case, leave) => {
     leave();
     const failure = failed();
-    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", { toast: failure });
+    const { result, sentNotices } = setup([failure], [workspace("notes")], "notes", {
+      toast: failure,
+    });
     expect(result.current.sentNoticeToast?.notice).toBe(failure);
     expect(sentNotices.hideToast).not.toHaveBeenCalled();
     expect(sentNotices.read).not.toHaveBeenCalled();
@@ -938,7 +1506,9 @@ describe("an agent run's notice while its chat is on screen", () => {
 
   it("toasts a run that ended without a reply or a reason", () => {
     const stopped = ran({ thread: "thread-1", run: "run-1" }, { title: "Stopped Nova's run" });
-    const { result, sentNotices } = setup([stopped], [workspace("notes")], "notes", { toast: stopped });
+    const { result, sentNotices } = setup([stopped], [workspace("notes")], "notes", {
+      toast: stopped,
+    });
     expect(result.current.sentNoticeToast?.notice).toBe(stopped);
     expect(sentNotices.read).not.toHaveBeenCalled();
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
@@ -954,18 +1524,37 @@ describe("an agent run's notice while its chat is on screen", () => {
 
 // Being in a share reads its "Shared … with you" row, wherever it opened from.
 describe("a share this workspace holds", () => {
-  const shared = (noticeId: string, recipientShareId: string, readAtMs: number | null = null) => notice({
-    noticeId, kind: "share-received", recipientShareId, senderKind: "person", title: "Ana shared Trip with you",
-    body: "Edit access · From Ana", target: { share: recipientShareId }, readAtMs,
-  });
-  const rows = [shared("s1", "share-1"), shared("s2", "share-2"), notice({ noticeId: "report" }), shared("old", "share-1", 5)];
+  const shared = (noticeId: string, recipientShareId: string, readAtMs: number | null = null) =>
+    notice({
+      noticeId,
+      kind: "share-received",
+      recipientShareId,
+      senderKind: "person",
+      title: "Ana shared Trip with you",
+      body: "Edit access · From Ana",
+      target: { share: recipientShareId },
+      readAtMs,
+    });
+  const rows = [
+    shared("s1", "share-1"),
+    shared("s2", "share-2"),
+    notice({ noticeId: "report" }),
+    shared("old", "share-1", 5),
+  ];
 
   it.each([
     ["its own view", workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })],
-    ["shared-with-me", workspace("trip", { shareMounts: [{ shareId: "share-1", label: "ana", granterEmail: null }] })],
+    [
+      "shared-with-me",
+      workspace("trip", {
+        shareMounts: [{ shareId: "share-1", label: "ana", granterEmail: null }],
+      }),
+    ],
   ])("reads only that share's unread row while this workspace holds it as %s", (_where, trip) => {
     const { sentNotices } = setup(rows, [trip], "trip");
-    expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([{ store: "account", noticeId: "s1" }]);
+    expect(sentNotices.read).toHaveBeenCalledExactlyOnceWith([
+      { store: "account", noticeId: "s1" },
+    ]);
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
   });
 
@@ -976,7 +1565,10 @@ describe("a share this workspace holds", () => {
   });
 
   it("asks once for a row whose read fails, which the list then shows unread", async () => {
-    const listNotices = vi.fn(async () => ({ account: "ana@example.com", notices: [shared("s1", "share-1")] }));
+    const listNotices = vi.fn(async () => ({
+      account: "ana@example.com",
+      notices: [shared("s1", "share-1")],
+    }));
     const marks: ReturnType<typeof deferred<void>>[] = [];
     const markNotices = vi.fn(() => {
       const mark = deferred<void>();
@@ -984,11 +1576,33 @@ describe("a share this workspace holds", () => {
       return mark.promise;
     });
     vi.stubGlobal("dohcDesktop", {
-      ...(Reflect.get(globalThis, "dohcDesktop") as object), listNotices, markNotices, onNoticesChanged: () => () => undefined,
+      ...(Reflect.get(globalThis, "dohcDesktop") as object),
+      listNotices,
+      markNotices,
+      onNoticesChanged: () => () => undefined,
     });
-    const { workspaces, workspaceId, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError } =
-      setup([], [workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })], "trip");
-    const input = { workspaces, workspaceId, openTarget, onSwitchWorkspace, onOpenShare, reportShellError, clearShellError };
+    const {
+      workspaces,
+      workspaceId,
+      openTarget,
+      onSwitchWorkspace,
+      onOpenShare,
+      reportShellError,
+      clearShellError,
+    } = setup(
+      [],
+      [workspace("trip", { shareView: { shareId: "share-1", granterEmail: null } })],
+      "trip",
+    );
+    const input = {
+      workspaces,
+      workspaceId,
+      openTarget,
+      onSwitchWorkspace,
+      onOpenShare,
+      reportShellError,
+      clearShellError,
+    };
     const { result } = renderHook(() => {
       const sentNotices = useSentNotices(true);
       useSentNoticeProps({ ...input, sentNotices });

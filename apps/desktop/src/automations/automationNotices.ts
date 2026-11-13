@@ -1,8 +1,16 @@
 import { reportAutomationFailure } from "@dohc/automation-executor/automation-failure-reporting";
 import type { SwitchedOffBy } from "@dohc/automation-executor/automation-history";
-export { whoChangedLast, whoSwitchedOff, type AutomationsFileHistory, type SwitchedOffBy } from "@dohc/automation-executor/automation-history";
+export {
+  whoChangedLast,
+  whoSwitchedOff,
+  type AutomationsFileHistory,
+  type SwitchedOffBy,
+} from "@dohc/automation-executor/automation-history";
 import { createHash } from "node:crypto";
-import { NOTICE_TITLE_MAX_CHARS, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
+import {
+  NOTICE_TITLE_MAX_CHARS,
+  type AutomationControlsTarget,
+} from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/workspace-contracts/names";
 import {
   automationFailedNoticeId,
@@ -43,18 +51,29 @@ export async function sendFailureNotices(
   workspaceId: string,
   report: AutomationFailureReport,
 ): Promise<void> {
-  return reportAutomationFailure({
-    ...dependencies,
-    post: (notice) => dependencies.notices.postNotice(notice),
-    withdraw: async () => {
-      if (report.replaces !== null) {
-        await dependencies.notices.withdraw(automationFailedNoticeId({ workspaceId, installId: dependencies.computer.installId, failure: report.replaces }));
-      }
+  return reportAutomationFailure(
+    {
+      ...dependencies,
+      post: (notice) => dependencies.notices.postNotice(notice),
+      withdraw: async () => {
+        if (report.replaces !== null) {
+          await dependencies.notices.withdraw(
+            automationFailedNoticeId({
+              workspaceId,
+              installId: dependencies.computer.installId,
+              failure: report.replaces,
+            }),
+          );
+        }
+      },
     },
-  }, workspaceId, report);
+    workspaceId,
+    report,
+  );
 }
 export const RETRY_NO_RUN = "This notice has no run to try again.";
-export const RETRY_ELSEWHERE = "Only the computer this run failed on can try it again. The notice names that computer.";
+export const RETRY_ELSEWHERE =
+  "Only the computer this run failed on can try it again. The notice names that computer.";
 
 /**
  * Try again on a failed run's notice. Only the computer that ran it holds
@@ -65,14 +84,20 @@ export const RETRY_ELSEWHERE = "Only the computer this run failed on can try it 
 export async function retryFromFailureNotice(
   dependencies: {
     notices: Pick<NoticeStore, "list" | "mark">;
-    retry(notice: NoticeRow, input: { automationId: string; claimId: string; startOver: boolean }): Promise<CollectionAutomationRetry>;
+    retry(
+      notice: NoticeRow,
+      input: { automationId: string; claimId: string; startOver: boolean },
+    ): Promise<CollectionAutomationRetry>;
   },
   input: { notice: NoticeRef; account: string | null; startOver: boolean },
 ): Promise<CollectionAutomationRetry> {
   const listed = await dependencies.notices.list();
-  const notice = listed.account === input.account
-    ? listed.notices.find((row) => row.store === input.notice.store && row.noticeId === input.notice.noticeId)
-    : undefined;
+  const notice =
+    listed.account === input.account
+      ? listed.notices.find(
+          (row) => row.store === input.notice.store && row.noticeId === input.notice.noticeId,
+        )
+      : undefined;
   const target = notice?.target;
   if (!notice || notice.kind !== "automation-failed" || !target?.automation || !target.run) {
     return { status: "refused", reason: RETRY_NO_RUN };
@@ -83,7 +108,8 @@ export async function retryFromFailureNotice(
     claimId: target.run,
     startOver: input.startOver,
   });
-  if (result.status === "queued") await dependencies.notices.mark([input.notice], "dismissed", input.account);
+  if (result.status === "queued")
+    await dependencies.notices.mark([input.notice], "dismissed", input.account);
   return result;
 }
 
@@ -108,7 +134,11 @@ export async function retryAutomationRun(
     /** Whether this computer's executor holds the run's claim. */
     holds(run: { automationId: string; claimId: string }): Promise<boolean>;
     recovery(automationId: string): Promise<AutomationControlsTarget | null>;
-    retry(input: { automationId: string; claimId: string; startOver: boolean }): Promise<CollectionAutomationRetry>;
+    retry(input: {
+      automationId: string;
+      claimId: string;
+      startOver: boolean;
+    }): Promise<CollectionAutomationRetry>;
   },
   input: { workspaceId: string; automationId: string; claimId: string; startOver: boolean },
 ): Promise<AutomationRunRetry> {
@@ -116,9 +146,17 @@ export async function retryAutomationRun(
   if (!(await dependencies.holds(run))) {
     const recovery = await dependencies.recovery(run.automationId);
     if (recovery !== null) return { status: "switched-off", target: recovery };
-    const sent = await dependencies.notices.sentFailure({ workspaceId, automationId: run.automationId, claimId: run.claimId });
+    const sent = await dependencies.notices.sentFailure({
+      workspaceId,
+      automationId: run.automationId,
+      claimId: run.claimId,
+    });
     if (sent !== null && sent.originInstallId !== dependencies.installId) {
-      return { status: "refused", reason: RETRY_ELSEWHERE, notice: { title: sent.title, body: sent.body } };
+      return {
+        status: "refused",
+        reason: RETRY_ELSEWHERE,
+        notice: { title: sent.title, body: sent.body },
+      };
     }
   }
   return await dependencies.retry(run);

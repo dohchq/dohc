@@ -1,12 +1,5 @@
 import { spawn } from "node:child_process";
-import {
-  watch,
-  readFileSync,
-  writeFileSync,
-  appendFileSync,
-  mkdirSync,
-  existsSync,
-} from "node:fs";
+import { watch, readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { createConnection } from "node:net";
 import { once } from "node:events";
 import * as Y from "yjs";
@@ -51,25 +44,20 @@ class ObservedConnection implements EngineClientConnection {
   ) {}
   write(bytes: Buffer): boolean {
     for (const frame of this.outgoing.push(bytes))
-      if (frame.kind === "control")
-        this.requests.push(JSON.parse(frame.payload.toString("utf8")));
+      if (frame.kind === "control") this.requests.push(JSON.parse(frame.payload.toString("utf8")));
     return this.base.write(bytes);
   }
   onData(handler: (bytes: Buffer | Uint8Array) => void): void {
     const wrapped = (bytes: Buffer | Uint8Array) => {
       for (const frame of this.incoming.push(bytes)) {
         if (frame.kind === "control") {
-          const envelope = JSON.parse(
-            frame.payload.toString("utf8"),
-          ) as Envelope;
+          const envelope = JSON.parse(frame.payload.toString("utf8")) as Envelope;
           this.responses.push(envelope);
           if (this.observe(envelope)) {
             this.base.close();
             return;
           }
-          handler(
-            encodeFrame(FrameType.Control, 0, frame.payload, 1024 * 1024),
-          );
+          handler(encodeFrame(FrameType.Control, 0, frame.payload, 1024 * 1024));
         } else
           handler(
             encodeFrame(
@@ -185,22 +173,23 @@ async function launch(
   child.stderr.on("data", (bytes) => appendFileSync(log, bytes));
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("close", (code) => {
-      if (!existsSync(endpointPath))
-        fail(Error("Fixture exited before endpoint"));
+      if (!existsSync(endpointPath)) fail(Error("Fixture exited before endpoint"));
       resolve(code);
     });
-    child.once("error", (error) => { fail(error); reject(error); });
+    child.once("error", (error) => {
+      fail(error);
+      reject(error);
+    });
   });
   void exited.catch(() => undefined);
-  const timer = setTimeout(
-    () => fail(Error("Fixture endpoint timeout")),
-    30000,
-  );
+  const timer = setTimeout(() => fail(Error("Fixture endpoint timeout")), 30000);
   let endpoint;
   try {
     endpoint = await endpointPromise;
     expect(endpoint.pid).toBe(child.pid);
-    expect(Number.isSafeInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535).toBe(true);
+    expect(Number.isSafeInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535).toBe(
+      true,
+    );
     expect(resolve(endpoint.databasePath)).toBe(resolve(packet, "host/.dohc/engine/engine.db"));
   } catch (error) {
     child.kill();
@@ -212,13 +201,16 @@ async function launch(
   }
   const socket = createConnection({ host: "127.0.0.1", port: endpoint.port });
   socket.setTimeout(30000, () => socket.destroy(new Error("Fixture connection timeout")));
-  try { await once(socket, "connect"); }
-  catch (error) { socket.destroy(); child.kill(); await exited; throw error; }
+  try {
+    await once(socket, "connect");
+  } catch (error) {
+    socket.destroy();
+    child.kill();
+    await exited;
+    throw error;
+  }
   socket.setTimeout(0);
-  const connection = new ObservedConnection(
-    new DuplexEngineClientConnection(socket),
-    observe,
-  );
+  const connection = new ObservedConnection(new DuplexEngineClientConnection(socket), observe);
   const client = new EngineClient(connection, {
     authToken: "consumer-fixture",
     protocolVersion: 2,
@@ -229,8 +221,14 @@ async function launch(
       maxUploads: 1,
     },
   });
-  try { await client.ready(); }
-  catch (error) { client.close(); child.kill(); await exited; throw error; }
+  try {
+    await client.ready();
+  } catch (error) {
+    client.close();
+    child.kill();
+    await exited;
+    throw error;
+  }
   return {
     client,
     connection,
@@ -238,9 +236,16 @@ async function launch(
     async close() {
       client.close();
       let forced = false;
-      const timeout = setTimeout(() => { forced = true; child.kill(); }, 30000);
+      const timeout = setTimeout(() => {
+        forced = true;
+        child.kill();
+      }, 30000);
       let code;
-      try { code = await exited; } finally { clearTimeout(timeout); }
+      try {
+        code = await exited;
+      } finally {
+        clearTimeout(timeout);
+      }
       writeFileSync(
         dir + "/closed.json",
         JSON.stringify(
@@ -271,10 +276,7 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
   for (let sequence = 1; sequence <= 3; sequence++)
     expect(
       f.storage.commitLiveUpdateJournal(
-        f.capture(
-          f.update("title", "version-" + sequence),
-          "event-" + sequence,
-        ),
+        f.capture(f.update("title", "version-" + sequence), "event-" + sequence),
       ).result.kind,
     ).toBe("accepted");
   const document = f.input.evidence.document;
@@ -290,19 +292,17 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
   let active: Awaited<ReturnType<typeof launch>> | undefined;
   let arm = false;
   const original = DatabaseSync.prototype.exec;
-  const uncertain = vi
-    .spyOn(DatabaseSync.prototype, "exec")
-    .mockImplementation(function (
-      this: InstanceType<typeof DatabaseSync>,
-      sql: string,
-    ) {
-      const result = original.call(this, sql);
-      if (arm && sql === "COMMIT") {
-        arm = false;
-        throw Error("lost relay edge COMMIT response");
-      }
-      return result;
-    });
+  const uncertain = vi.spyOn(DatabaseSync.prototype, "exec").mockImplementation(function (
+    this: InstanceType<typeof DatabaseSync>,
+    sql: string,
+  ) {
+    const result = original.call(this, sql);
+    if (arm && sql === "COMMIT") {
+      arm = false;
+      throw Error("lost relay edge COMMIT response");
+    }
+    return result;
+  });
   try {
     for (let round = 1; round <= 4; round++) {
       if (round > 1) {
@@ -319,11 +319,7 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
         };
         if (round === 1 && result.status === "bootstrapped") return true;
         if (round === 2 && result.status === "applied") return true;
-        if (
-          round === 3 &&
-          result.status === "applied" &&
-          result.ack?.deliveryId === "event-2"
-        )
+        if (round === 3 && result.status === "applied" && result.ack?.deliveryId === "event-2")
           arm = true;
         return false;
       });
@@ -350,18 +346,12 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
       active = undefined;
       const engine = new DatabaseSync(databasePath);
       try {
-        const bootstraps = engine
-          .prepare("SELECT * FROM live_device_bootstraps")
-          .all();
+        const bootstraps = engine.prepare("SELECT * FROM live_device_bootstraps").all();
         const applications = engine
-          .prepare(
-            "SELECT * FROM live_device_update_applications ORDER BY journal_cursor",
-          )
+          .prepare("SELECT * FROM live_device_update_applications ORDER BY journal_cursor")
           .all();
         const edges = raw
-          .prepare(
-            "SELECT * FROM sync_relay_live_delivery_edges ORDER BY journal_cursor",
-          )
+          .prepare("SELECT * FROM sync_relay_live_delivery_edges ORDER BY journal_cursor")
           .all();
         const relayBootstrap = raw
           .prepare("SELECT * FROM sync_relay_live_delivery_bootstraps")
@@ -375,23 +365,30 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
         expect(applications.slice(0, originalApplications.length)).toEqual(originalApplications);
         originalApplications = applications;
         expect(edges).toHaveLength(round <= 2 ? 0 : round - 1);
-        expect(
-          engine.prepare("SELECT COUNT(*) n FROM file_objects").get()!.n,
-        ).toBe(1);
+        expect(engine.prepare("SELECT COUNT(*) n FROM file_objects").get()!.n).toBe(1);
         expect(engine.prepare("SELECT COUNT(*) n FROM moments").get()!.n).toBe(1);
         expect(engine.prepare("SELECT COUNT(*) n FROM snapshots").get()!.n).toBe(1);
-        expect(
-          engine.prepare("SELECT head_update_seq FROM ydoc_docs").get()!
-            .head_update_seq,
-        ).toBe(round - 1);
+        expect(engine.prepare("SELECT head_update_seq FROM ydoc_docs").get()!.head_update_seq).toBe(
+          round - 1,
+        );
         const restored = new Y.Doc();
         try {
-          const baseline = engine.prepare("SELECT bytes FROM binary_blobs WHERE sha256=?").get(document.lineageClaimId)!;
+          const baseline = engine
+            .prepare("SELECT bytes FROM binary_blobs WHERE sha256=?")
+            .get(document.lineageClaimId)!;
           Y.applyUpdate(restored, baseline.bytes as Uint8Array);
-          const updates = engine.prepare("SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 ORDER BY u.seq").all();
+          const updates = engine
+            .prepare(
+              "SELECT b.bytes FROM ydoc_updates u JOIN binary_blobs b ON b.sha256=u.update_blob_sha256 ORDER BY u.seq",
+            )
+            .all();
           for (const update of updates) Y.applyUpdate(restored, update.bytes as Uint8Array);
-          expect(restored.getMap("frontmatter").get("title")).toBe(round === 1 ? undefined : `version-${round - 1}`);
-        } finally { restored.destroy(); }
+          expect(restored.getMap("frontmatter").get("title")).toBe(
+            round === 1 ? undefined : `version-${round - 1}`,
+          );
+        } finally {
+          restored.destroy();
+        }
         if (round === 2)
           expect(responses).toContainEqual(
             expect.objectContaining({
@@ -424,23 +421,21 @@ it("reopens both durable stores after dropped host ACKs and an uncertain relay e
         engine.close();
       }
     }
-    writeFileSync(
-      packet + "/result.json",
-      JSON.stringify({ verdict: "PASS", results }, null, 2),
-    );
+    writeFileSync(packet + "/result.json", JSON.stringify({ verdict: "PASS", results }, null, 2));
   } catch (error) {
     writeFileSync(
       packet + "/result.json",
-      JSON.stringify(
-        { verdict: "FAIL", error: String(error), results },
-        null,
-        2,
-      ),
+      JSON.stringify({ verdict: "FAIL", error: String(error), results }, null, 2),
     );
     throw error;
   } finally {
     uncertain.mockRestore();
-    try { await active?.close(); }
-    finally { raw.close(); relay.close(); f.doc.destroy(); }
+    try {
+      await active?.close();
+    } finally {
+      raw.close();
+      relay.close();
+      f.doc.destroy();
+    }
   }
 }, 180000);

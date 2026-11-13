@@ -22,11 +22,19 @@ const composers: { name: string; render: (sending: boolean, value?: string) => R
   {
     name: "a group, DM or comment composer",
     render: (sending, value = "Hello") => (
-      <MentionComposer testIdPrefix="chats" composerId="chats-composer" value={value} sending={sending}
-        placeholder="Message" sendLabel="Send message" candidates={[]} onChange={noop} onSend={noop} />
+      <MentionComposer
+        testIdPrefix="chats"
+        composerId="chats-composer"
+        value={value}
+        sending={sending}
+        placeholder="Message"
+        sendLabel="Send message"
+        candidates={[]}
+        onChange={noop}
+        onSend={noop}
+      />
     ),
   },
-
 ];
 
 const send = () => screen.getByRole("button", { name: "Send message" });
@@ -87,11 +95,20 @@ describe.each(composers)("the send control in $name", ({ render: composer }) => 
   });
 });
 
-
 it("does not show a composer that cannot send yet as sending", () => {
   render(
-    <MentionComposer testIdPrefix="chats" composerId="chats-composer" value="Hello" sending={false} disabled
-      placeholder="Message" sendLabel="Send message" candidates={[]} onChange={noop} onSend={noop} />,
+    <MentionComposer
+      testIdPrefix="chats"
+      composerId="chats-composer"
+      value="Hello"
+      sending={false}
+      disabled
+      placeholder="Message"
+      sendLabel="Send message"
+      candidates={[]}
+      onChange={noop}
+      onSend={noop}
+    />,
   );
   act(() => vi.advanceTimersByTime(2000));
   expect((send() as HTMLButtonElement).disabled).toBe(true);

@@ -10,8 +10,18 @@ export default function Search() {
   const theme = useTheme();
   const { current } = useWorkspaces();
   return (
-    <ScrollView contentInsetAdjustmentBehavior="automatic" alwaysBounceVertical={false} style={{ backgroundColor: theme.bg }} contentContainerStyle={{ flexGrow: 1 }}>
-      <Stack.Screen options={{ title: "Search", headerSearchBarOptions: { placeholder: current ? `Search ${current.name}` : "Search" } }} />
+    <ScrollView
+      contentInsetAdjustmentBehavior="automatic"
+      alwaysBounceVertical={false}
+      style={{ backgroundColor: theme.bg }}
+      contentContainerStyle={{ flexGrow: 1 }}
+    >
+      <Stack.Screen
+        options={{
+          title: "Search",
+          headerSearchBarOptions: { placeholder: current ? `Search ${current.name}` : "Search" },
+        }}
+      />
       {syncProblem ? <SyncBand problem={syncProblem} /> : null}
       <NotYet symbol="magnifyingglass" title="Search" />
     </ScrollView>

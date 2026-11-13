@@ -1,6 +1,11 @@
 import { useMemo } from "react";
 import { shortcutName, shortcutShown } from "../../shortcuts/shortcutNames";
-import { SHORTCUTS, shortcutChords, type ShortcutId, type ShortcutOwner } from "../../shortcuts/shortcutRegistry";
+import {
+  SHORTCUTS,
+  shortcutChords,
+  type ShortcutId,
+  type ShortcutOwner,
+} from "../../shortcuts/shortcutRegistry";
 import { SettingRow, SettingsSection } from "./SettingRow";
 
 // A heading says where its keys work, so a chord with two meanings, such as
@@ -28,7 +33,10 @@ type KeyboardRow = { name: string; ids: ShortcutId[]; chords: (readonly string[]
 
 // The shortcuts Settings lists on this platform, under their headings in
 // registry order. Shortcuts that share a name under a heading share a row.
-export function keyboardGroups(platform: string | undefined, devTools: boolean): { heading: Heading; rows: KeyboardRow[] }[] {
+export function keyboardGroups(
+  platform: string | undefined,
+  devTools: boolean,
+): { heading: Heading; rows: KeyboardRow[] }[] {
   const groups = HEADINGS.map((heading) => ({ heading, rows: [] as KeyboardRow[] }));
   for (const id of Object.keys(SHORTCUTS) as ShortcutId[]) {
     if (!shortcutShown(id, platform, devTools)) continue;
@@ -51,11 +59,21 @@ export function keyboardGroups(platform: string | undefined, devTools: boolean):
  * keys. A Settings search that names shortcuts, such as "bold", shows only
  * theirs; one that found the page another way, such as "keys", shows them all.
  */
-export function KeyboardSettings(props: { platform: string | undefined; devTools: boolean; query?: string }) {
-  const groups = useMemo(() => keyboardGroups(props.platform, props.devTools), [props.platform, props.devTools]);
+export function KeyboardSettings(props: {
+  platform: string | undefined;
+  devTools: boolean;
+  query?: string;
+}) {
+  const groups = useMemo(
+    () => keyboardGroups(props.platform, props.devTools),
+    [props.platform, props.devTools],
+  );
   const query = (props.query ?? "").trim().toLowerCase();
   const named = groups
-    .map((group) => ({ ...group, rows: group.rows.filter((row) => row.name.toLowerCase().includes(query)) }))
+    .map((group) => ({
+      ...group,
+      rows: group.rows.filter((row) => row.name.toLowerCase().includes(query)),
+    }))
     .filter((group) => group.rows.length > 0);
   return (
     <>
@@ -68,7 +86,10 @@ export function KeyboardSettings(props: { platform: string | undefined; devTools
                   <span key={keys.join("+")} className="flex items-center gap-1">
                     {index > 0 ? <span className="sr-only">or</span> : null}
                     {keys.map((key) => (
-                      <kbd key={key} className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-muted">
+                      <kbd
+                        key={key}
+                        className="rounded border border-line bg-bg px-1 font-sans text-[11px] text-muted"
+                      >
                         {key}
                       </kbd>
                     ))}

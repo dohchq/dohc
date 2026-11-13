@@ -13,11 +13,29 @@ vi.mock("@legendapp/list/react", () => ({
   LegendList: function LegendList(props: LegendListProps<ChatMessageRecord>) {
     // Reuse unchanged row renders so this test isolates focus-neighbor work.
     // Browser tests cover the real list's mounting and native Tab behavior.
-    const rows = useMemo(() => props.data?.map((item, index) =>
-      props.renderItem?.({ item, index, data: props.data!, extraData: props.extraData, type: undefined })),
-    [props.data, props.renderItem, props.extraData]);
-    return <div role="list" data-pinned={props.alwaysRender?.indices?.join(",")}
-      onFocusCapture={props.onFocusCapture} onBlurCapture={props.onBlurCapture}>{rows}</div>;
+    const rows = useMemo(
+      () =>
+        props.data?.map((item, index) =>
+          props.renderItem?.({
+            item,
+            index,
+            data: props.data!,
+            extraData: props.extraData,
+            type: undefined,
+          }),
+        ),
+      [props.data, props.renderItem, props.extraData],
+    );
+    return (
+      <div
+        role="list"
+        data-pinned={props.alwaysRender?.indices?.join(",")}
+        onFocusCapture={props.onFocusCapture}
+        onBlurCapture={props.onBlurCapture}
+      >
+        {rows}
+      </div>
+    );
   },
 }));
 
@@ -26,7 +44,8 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-const messages: ChatMessageRecord[] = Array.from({ length: 7 }, (_, index) => ({ presentation: { group: "fixture", hue: null, self: false },
+const messages: ChatMessageRecord[] = Array.from({ length: 7 }, (_, index) => ({
+  presentation: { group: "fixture", hue: null, self: false },
   id: `m-${index}`,
   threadId: "thread",
   authorKind: "human",
@@ -43,8 +62,16 @@ function focus(button: HTMLElement) {
 
 describe("chat focus neighbors", () => {
   it("reuses sparse file-link indices while focus moves and refreshes them when a body changes", () => {
-    const { rerender } = render(<ChatMessageList testIdPrefix="focus" messages={messages}
-      loading={false} emptyLabel="Empty" onOpenPath={onOpenPath} reactionControls={readOnly} />);
+    const { rerender } = render(
+      <ChatMessageList
+        testIdPrefix="focus"
+        messages={messages}
+        loading={false}
+        emptyLabel="Empty"
+        onOpenPath={onOpenPath}
+        reactionControls={readOnly}
+      />,
+    );
     const links = screen.getAllByTestId("focus-message-body-file-mention");
     vi.mocked(scanChatLinks).mockClear();
 
@@ -56,10 +83,19 @@ describe("chat focus neighbors", () => {
     expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("6,3");
     expect(scanChatLinks).not.toHaveBeenCalled();
 
-    const changed = messages.map((message, index) => index === 1
-      ? { ...message, body: "See @[notes/new.md]." } : message);
-    rerender(<ChatMessageList testIdPrefix="focus" messages={changed}
-      loading={false} emptyLabel="Empty" onOpenPath={onOpenPath} reactionControls={readOnly} />);
+    const changed = messages.map((message, index) =>
+      index === 1 ? { ...message, body: "See @[notes/new.md]." } : message,
+    );
+    rerender(
+      <ChatMessageList
+        testIdPrefix="focus"
+        messages={changed}
+        loading={false}
+        emptyLabel="Empty"
+        onOpenPath={onOpenPath}
+        reactionControls={readOnly}
+      />,
+    );
     vi.mocked(scanChatLinks).mockClear();
     focus(screen.getAllByTestId("focus-message-body-file-mention")[1]!);
     expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("1,0,3");
@@ -67,9 +103,16 @@ describe("chat focus neighbors", () => {
   });
 
   it("pins adjacent messages when every row has a reaction button", () => {
-    render(<ChatMessageList testIdPrefix="focus" messages={messages}
-      loading={false} emptyLabel="Empty" onOpenPath={onOpenPath}
-      reactionControls={{ ...readOnly, readOnly: false }} />);
+    render(
+      <ChatMessageList
+        testIdPrefix="focus"
+        messages={messages}
+        loading={false}
+        emptyLabel="Empty"
+        onOpenPath={onOpenPath}
+        reactionControls={{ ...readOnly, readOnly: false }}
+      />,
+    );
     vi.mocked(scanChatLinks).mockClear();
     focus(screen.getAllByRole("button", { name: "Add reaction" })[3]!);
     expect(screen.getByRole("list").getAttribute("data-pinned")).toBe("3,2,4");

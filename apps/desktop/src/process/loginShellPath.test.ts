@@ -22,8 +22,12 @@ const SHELLS = "# List of acceptable shells\n/bin/bash\n/bin/zsh\n";
 
 describe("parseShellPath", () => {
   it("reads only what sits between the markers, and only absolute entries", () => {
-    expect(parseShellPath("Welcome: /fake/bin\nMARK/opt/homebrew/bin:relative/bin::/usr/bin\nMARKbye", "MARK"))
-      .toEqual(["/opt/homebrew/bin", "/usr/bin"]);
+    expect(
+      parseShellPath(
+        "Welcome: /fake/bin\nMARK/opt/homebrew/bin:relative/bin::/usr/bin\nMARKbye",
+        "MARK",
+      ),
+    ).toEqual(["/opt/homebrew/bin", "/usr/bin"]);
   });
 
   it("refuses output without both markers or without an absolute entry", () => {
@@ -35,8 +39,9 @@ describe("parseShellPath", () => {
 
 describe("mergeShellPath", () => {
   it("puts the login shell's entries first and keeps the rest of launchd's PATH once", () => {
-    expect(mergeShellPath(LAUNCHD_PATH, ["/opt/homebrew/bin", "/usr/bin", "/Users/sam/.local/bin"]))
-      .toBe("/opt/homebrew/bin:/usr/bin:/Users/sam/.local/bin:/bin:/usr/sbin:/sbin");
+    expect(
+      mergeShellPath(LAUNCHD_PATH, ["/opt/homebrew/bin", "/usr/bin", "/Users/sam/.local/bin"]),
+    ).toBe("/opt/homebrew/bin:/usr/bin:/Users/sam/.local/bin:/bin:/usr/sbin:/sbin");
     expect(mergeShellPath(undefined, ["/opt/homebrew/bin"])).toBe("/opt/homebrew/bin");
     expect(mergeShellPath("::relative:/bin", ["/usr/bin"])).toBe("/usr/bin:/bin");
   });
@@ -55,11 +60,17 @@ describe("needsLoginShellPath", () => {
 describe("hasControllingTerminal", () => {
   it("is true only when /dev/tty opens", () => {
     const opened: string[] = [];
-    expect(hasControllingTerminal((path) => { opened.push(path); })).toBe(true);
+    expect(
+      hasControllingTerminal((path) => {
+        opened.push(path);
+      }),
+    ).toBe(true);
     expect(opened).toEqual(["/dev/tty"]);
-    expect(hasControllingTerminal(() => {
-      throw Object.assign(new Error("No such device or address"), { code: "ENXIO" });
-    })).toBe(false);
+    expect(
+      hasControllingTerminal(() => {
+        throw Object.assign(new Error("No such device or address"), { code: "ENXIO" });
+      }),
+    ).toBe(false);
   });
 });
 
@@ -75,23 +86,54 @@ describe("registeredLoginShell", () => {
 
 describe("loginShellEnvironment", () => {
   it("passes the account's home and shell, a few facts, and nothing that steers the shell", () => {
-    expect(loginShellEnvironment({
-      HOME: "/tmp/elsewhere", USER: "sam", LOGNAME: "sam", TMPDIR: "/var/folders/x/T/", LANG: "en_US.UTF-8",
-      PATH: LAUNCHD_PATH, SHELL: "/tmp/other", BASH_ENV: "/tmp/payload", ZDOTDIR: "/tmp/z", ENV: "/tmp/e",
-      NODE_OPTIONS: "--require /tmp/x.js", TERM: "xterm",
-    }, { shell: "/bin/zsh", homedir: "/Users/sam" })).toEqual({
-      HOME: "/Users/sam", USER: "sam", LOGNAME: "sam", TMPDIR: "/var/folders/x/T/", LANG: "en_US.UTF-8",
-      SHELL: "/bin/zsh", TERM: "dumb",
+    expect(
+      loginShellEnvironment(
+        {
+          HOME: "/tmp/elsewhere",
+          USER: "sam",
+          LOGNAME: "sam",
+          TMPDIR: "/var/folders/x/T/",
+          LANG: "en_US.UTF-8",
+          PATH: LAUNCHD_PATH,
+          SHELL: "/tmp/other",
+          BASH_ENV: "/tmp/payload",
+          ZDOTDIR: "/tmp/z",
+          ENV: "/tmp/e",
+          NODE_OPTIONS: "--require /tmp/x.js",
+          TERM: "xterm",
+        },
+        { shell: "/bin/zsh", homedir: "/Users/sam" },
+      ),
+    ).toEqual({
+      HOME: "/Users/sam",
+      USER: "sam",
+      LOGNAME: "sam",
+      TMPDIR: "/var/folders/x/T/",
+      LANG: "en_US.UTF-8",
+      SHELL: "/bin/zsh",
+      TERM: "dumb",
     });
   });
 });
 
 describe("adoptLoginShellPath", () => {
   it("reads the account's registered shell with the minimal environment and merges its PATH", async () => {
-    const env: NodeJS.ProcessEnv = { HOME: "/tmp/elsewhere", SHELL: "/tmp/other", BASH_ENV: "/tmp/payload", PATH: LAUNCHD_PATH };
+    const env: NodeJS.ProcessEnv = {
+      HOME: "/tmp/elsewhere",
+      SHELL: "/tmp/other",
+      BASH_ENV: "/tmp/payload",
+      PATH: LAUNCHD_PATH,
+    };
     const read = vi.fn(async () => ["/opt/homebrew/bin"]);
-    await adoptLoginShellPath(env, { account: () => ({ shell: "/bin/zsh", homedir: "/Users/sam" }), readShells: () => SHELLS, read });
-    expect(read).toHaveBeenCalledWith({ shell: "/bin/zsh", env: { HOME: "/Users/sam", SHELL: "/bin/zsh", TERM: "dumb" } });
+    await adoptLoginShellPath(env, {
+      account: () => ({ shell: "/bin/zsh", homedir: "/Users/sam" }),
+      readShells: () => SHELLS,
+      read,
+    });
+    expect(read).toHaveBeenCalledWith({
+      shell: "/bin/zsh",
+      env: { HOME: "/Users/sam", SHELL: "/bin/zsh", TERM: "dumb" },
+    });
     expect(env.PATH).toBe(`/opt/homebrew/bin:${LAUNCHD_PATH}`);
   });
 
@@ -99,12 +141,34 @@ describe("adoptLoginShellPath", () => {
     const read = vi.fn(async () => ["/opt/homebrew/bin"]);
     const env: NodeJS.ProcessEnv = { PATH: LAUNCHD_PATH };
     const account = () => ({ shell: "/bin/zsh", homedir: "/Users/sam" });
-    await adoptLoginShellPath(env, { account: () => ({ shell: "/tmp/evil-shell", homedir: "/Users/sam" }), readShells: () => SHELLS, read });
-    await adoptLoginShellPath(env, { account, readShells: () => { throw new Error("EACCES"); }, read });
-    await adoptLoginShellPath(env, { account: () => { throw new Error("no passwd entry"); }, readShells: () => SHELLS, read });
+    await adoptLoginShellPath(env, {
+      account: () => ({ shell: "/tmp/evil-shell", homedir: "/Users/sam" }),
+      readShells: () => SHELLS,
+      read,
+    });
+    await adoptLoginShellPath(env, {
+      account,
+      readShells: () => {
+        throw new Error("EACCES");
+      },
+      read,
+    });
+    await adoptLoginShellPath(env, {
+      account: () => {
+        throw new Error("no passwd entry");
+      },
+      readShells: () => SHELLS,
+      read,
+    });
     expect(read).not.toHaveBeenCalled();
     await adoptLoginShellPath(env, { account, readShells: () => SHELLS, read: async () => null });
-    await adoptLoginShellPath(env, { account, readShells: () => SHELLS, read: async () => { throw new Error("spawn EACCES"); } });
+    await adoptLoginShellPath(env, {
+      account,
+      readShells: () => SHELLS,
+      read: async () => {
+        throw new Error("spawn EACCES");
+      },
+    });
     expect(env.PATH).toBe(LAUNCHD_PATH);
   });
 });
@@ -132,7 +196,10 @@ function readFake(shell: ReturnType<typeof fakeShell>, timeoutMs = 60_000) {
   const kill = vi.fn((_pid: number, _signal: NodeJS.Signals) => undefined);
   let command = "";
   const read = readLoginShellPath({
-    shell: "/bin/zsh", env: {}, timeoutMs, kill,
+    shell: "/bin/zsh",
+    env: {},
+    timeoutMs,
+    kill,
     spawn: (_shell, text): ShellProcess => {
       command = text;
       return shell;
@@ -211,34 +278,45 @@ describe.skipIf(process.platform === "win32")("readLoginShellPath", () => {
 
   function readProfile(dir: string, timeoutMs?: number): Promise<string[] | null> {
     return readLoginShellPath({
-      shell: "/bin/bash", env: { HOME: dir, SHELL: "/bin/bash" }, ...(timeoutMs === undefined ? {} : { timeoutMs }),
-      spawn: (shell, command, env) => spawn(shell, ["--noprofile", "-ilc", `. "$HOME/.bash_profile"; ${command}`], {
-        env, stdio: ["ignore", "pipe", "ignore"], detached: true,
-      }),
+      shell: "/bin/bash",
+      env: { HOME: dir, SHELL: "/bin/bash" },
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      spawn: (shell, command, env) =>
+        spawn(shell, ["--noprofile", "-ilc", `. "$HOME/.bash_profile"; ${command}`], {
+          env,
+          stdio: ["ignore", "pipe", "ignore"],
+          detached: true,
+        }),
     });
   }
 
   it("reads the PATH a login profile sets, past the profile's own output", async () => {
-    const dir = profile([
-      'echo "Last login: today on ttys000: /not/a/path"',
-      'export PATH="/opt/dohc-test/bin:relative/bin:$PATH"',
-      "",
-    ].join("\n"));
+    const dir = profile(
+      [
+        'echo "Last login: today on ttys000: /not/a/path"',
+        'export PATH="/opt/dohc-test/bin:relative/bin:$PATH"',
+        "",
+      ].join("\n"),
+    );
     const entries = await readProfile(dir);
     expect(entries?.[0]).toBe("/opt/dohc-test/bin");
     expect(entries).not.toContain("relative/bin");
     expect(entries).not.toContain("/not/a/path");
-    expect(mergeShellPath(LAUNCHD_PATH, entries ?? []).startsWith("/opt/dohc-test/bin:")).toBe(true);
+    expect(mergeShellPath(LAUNCHD_PATH, entries ?? []).startsWith("/opt/dohc-test/bin:")).toBe(
+      true,
+    );
   });
 
   it("keeps the PATH and ends a shell whose exit trap never returns", async () => {
     // The trap runs in the shell itself, so the shell never exits on its own.
-    const dir = profile([
-      'echo $$ > "$HOME/shell.pid"',
-      'export PATH="/opt/dohc-test/bin:$PATH"',
-      "trap 'while :; do :; done' EXIT",
-      "",
-    ].join("\n"));
+    const dir = profile(
+      [
+        'echo $$ > "$HOME/shell.pid"',
+        'export PATH="/opt/dohc-test/bin:$PATH"',
+        "trap 'while :; do :; done' EXIT",
+        "",
+      ].join("\n"),
+    );
     const started = Date.now();
     const entries = await readProfile(dir, 10_000);
     expect(entries?.[0]).toBe("/opt/dohc-test/bin");

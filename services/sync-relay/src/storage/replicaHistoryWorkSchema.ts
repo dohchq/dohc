@@ -1,13 +1,17 @@
-import type {SqliteDb} from "./types";
-import {currentShareGrantSql} from "./currentShareGrant";
-import {replicaTextCleanupSql} from "./replicaTextStorage";
+import type { SqliteDb } from "./types";
+import { currentShareGrantSql } from "./currentShareGrant";
+import { replicaTextCleanupSql } from "./replicaTextStorage";
 
-export const historyPinDue = "max(min(changed_at_ms+30000,dirty_since_ms+300000),coalesce(last_nonstructural_at_ms+30000,0))";
+export const historyPinDue =
+  "max(min(changed_at_ms+30000,dirty_since_ms+300000),coalesce(last_nonstructural_at_ms+30000,0))";
 const migration = "replica-history-incremental-v1";
-const pinBytes = (row: string) => `${row}.byte_length+length(CAST(${row}.authors_json AS BLOB))+length(CAST(${row}.path AS BLOB))+256`;
-const purge = (workspace: string) => `DELETE FROM sync_relay_replica_cuts WHERE workspace_id=${workspace}
+const pinBytes = (row: string) =>
+  `${row}.byte_length+length(CAST(${row}.authors_json AS BLOB))+length(CAST(${row}.path AS BLOB))+256`;
+const purge = (
+  workspace: string,
+) => `DELETE FROM sync_relay_replica_cuts WHERE workspace_id=${workspace}
   AND NOT EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
-    WHERE s.workspace_id=${workspace} AND ${currentShareGrantSql("g","s")});
+    WHERE s.workspace_id=${workspace} AND ${currentShareGrantSql("g", "s")});
   ${replicaTextCleanupSql(workspace).join("; ")};`;
 const captureFloors = (workspace: string) => `INSERT OR REPLACE INTO sync_relay_history_grant_floors
   SELECT g.grant_id,w.workspace_id,w.replication_epoch,w.stream_identity,
@@ -15,7 +19,7 @@ const captureFloors = (workspace: string) => `INSERT OR REPLACE INTO sync_relay_
     coalesce((SELECT max(journal_cursor) FROM sync_relay_live_update_journal WHERE workspace_id=w.workspace_id),0)
   FROM sync_relay_share_grants g JOIN sync_relay_shares s ON s.share_id=g.share_id
     JOIN sync_relay_workspaces w ON w.workspace_id=s.workspace_id
-  WHERE w.workspace_id=${workspace} AND ${currentShareGrantSql("g","s")};`;
+  WHERE w.workspace_id=${workspace} AND ${currentShareGrantSql("g", "s")};`;
 const addUsage = (row: string) => `INSERT INTO sync_relay_history_pin_usage
   SELECT ${row}.workspace_id,1,${pinBytes(row)} WHERE ${row}.superseded_at_ms IS NOT NULL
   ON CONFLICT(workspace_id) DO UPDATE SET pin_count=pin_count+1,total_bytes=total_bytes+excluded.total_bytes;`;
@@ -34,7 +38,7 @@ export function initializeReplicaHistoryWorkSchema(db: SqliteDb) {
     UPDATE sync_relay_history_pins SET superseded_at_ms=CAST(unixepoch('subsec')*1000 AS INTEGER)
       WHERE superseded_at_ms IS NULL AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut WHERE cut.workspace_id=sync_relay_history_pins.workspace_id)
       AND EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
-        WHERE s.workspace_id=sync_relay_history_pins.workspace_id AND ${currentShareGrantSql("g","s")});
+        WHERE s.workspace_id=sync_relay_history_pins.workspace_id AND ${currentShareGrantSql("g", "s")});
     DELETE FROM sync_relay_history_pins AS c WHERE superseded_at_ms IS NULL AND NOT EXISTS (
       SELECT 1 FROM sync_relay_replica_cut_files f WHERE f.workspace_id=c.workspace_id AND f.version_id=c.version_id AND f.object_id=c.object_id)
       AND NOT EXISTS (SELECT 1 FROM sync_relay_replica_cuts cut,json_each(cut.omitted_json) o WHERE cut.workspace_id=c.workspace_id
@@ -68,8 +72,13 @@ export function initializeReplicaHistoryWorkSchema(db: SqliteDb) {
       WHEN OLD.replication_epoch IS NOT NEW.replication_epoch OR OLD.stream_identity IS NOT NEW.stream_identity
       BEGIN ${captureFloors("NEW.workspace_id")} END;`);
   // Existing mismatched floors can resume only from the migration's current positions.
-  db.exec(captureFloors("w.workspace_id").replace(/;$/,` AND EXISTS (
+  db.exec(
+    captureFloors("w.workspace_id").replace(
+      /;$/,
+      ` AND EXISTS (
     SELECT 1 FROM sync_relay_history_grant_floors f WHERE f.grant_id=g.grant_id
-      AND (f.replication_epoch IS NOT w.replication_epoch OR f.stream_identity IS NOT w.stream_identity));`));
-  db.prepare("INSERT INTO sync_relay_migrations VALUES (?,?)").run(migration,Date.now());
+      AND (f.replication_epoch IS NOT w.replication_epoch OR f.stream_identity IS NOT w.stream_identity));`,
+    ),
+  );
+  db.prepare("INSERT INTO sync_relay_migrations VALUES (?,?)").run(migration, Date.now());
 }

@@ -27,7 +27,10 @@ export function splitName(name: string): { start: string; end: string } {
   // space touches it. The end then keeps its spaces inside, where they show
   // as they do in one line.
   while (cut > 0 && (SPACE.test(stem[cut - 1]!) || SPACE.test(stem[cut]!))) cut -= 1;
-  return { start: stem.slice(0, cut).join(""), end: stem.slice(cut).join("") + name.slice(extensionStart) };
+  return {
+    start: stem.slice(0, cut).join(""),
+    end: stem.slice(cut).join("") + name.slice(extensionStart),
+  };
 }
 
 export function MiddleCutName(props: { name: string }) {
@@ -35,8 +38,12 @@ export function MiddleCutName(props: { name: string }) {
   if (!start) return <span className="min-w-0 flex-1 truncate">{props.name}</span>;
   return (
     <span className="flex min-w-0 flex-1 overflow-hidden whitespace-nowrap">
-      <span data-name-start="" className="min-w-0 truncate">{start}</span>
-      <span data-name-end="" className="shrink-0">{end}</span>
+      <span data-name-start="" className="min-w-0 truncate">
+        {start}
+      </span>
+      <span data-name-end="" className="shrink-0">
+        {end}
+      </span>
     </span>
   );
 }

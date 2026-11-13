@@ -8,7 +8,10 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   // install. Use its browser build instead: index.js installs crypto first.
   if (moduleName === "lib0/webcrypto") {
     const random = context.resolveRequest(context, "lib0/random", platform);
-    return { type: "sourceFile", filePath: path.join(path.dirname(random.filePath), "webcrypto.js") };
+    return {
+      type: "sourceFile",
+      filePath: path.join(path.dirname(random.filePath), "webcrypto.js"),
+    };
   }
   // dohc's shared packages ship TypeScript source and import siblings as "./name.js".
   // Metro looks for a real .js file, so retry the import as its .ts source.

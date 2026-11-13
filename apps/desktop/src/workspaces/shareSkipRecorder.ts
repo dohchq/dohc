@@ -15,9 +15,7 @@ import { mergeShareSkippedOps, type ShareSkippedOps } from "./registryStore";
  * It cannot notify: it is handed a writer and nothing else. The pull sites
  * notify once, when the pull settles, success or failure.
  */
-export function createShareSkipRecorder<
-  T extends { skippedOps?: ShareSkippedOps },
->(target: {
+export function createShareSkipRecorder<T extends { skippedOps?: ShareSkippedOps }>(target: {
   /**
    * Applies `change` to the record as it stands when written, so an
    * acknowledgement or removal made meanwhile is kept. Writes nothing when

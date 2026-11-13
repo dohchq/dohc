@@ -12,16 +12,11 @@ type InMemoryAgentIntegrationOptions = Omit<
   localPersonId?: () => string;
   installId?: () => string;
   rootFor(workspaceId: string): string | null;
-  setAgentRun(
-    workspaceId: string,
-    run: ActiveAgentRun | null,
-  ): void | Promise<void>;
+  setAgentRun(workspaceId: string, run: ActiveAgentRun | null): void | Promise<void>;
 };
 
 /** Test-only authority adapter for AgentIntegration's attachment-owned state. */
-export function createInMemoryAgentIntegration(
-  options: InMemoryAgentIntegrationOptions,
-) {
+export function createInMemoryAgentIntegration(options: InMemoryAgentIntegrationOptions) {
   const states = new Map<string, AgentIntegrationState>();
   return createAgentIntegration({
     localPersonId: () => "person-local",

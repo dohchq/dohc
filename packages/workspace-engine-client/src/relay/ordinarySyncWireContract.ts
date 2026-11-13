@@ -3,12 +3,21 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import {
-  canonicalJson, canonicalRetainedContribution, decodeReleasedLineageBinding, decodeRetainedContribution,
-  mergedContributionsCommitment, releasedLineageBindingDigest, releasedTailContributionsCommitment,
-  type ReleasedLineageBinding, type RetainedContribution,
+  canonicalJson,
+  canonicalRetainedContribution,
+  decodeReleasedLineageBinding,
+  decodeRetainedContribution,
+  mergedContributionsCommitment,
+  releasedLineageBindingDigest,
+  releasedTailContributionsCommitment,
+  type ReleasedLineageBinding,
+  type RetainedContribution,
 } from "./releasedLineageBinding";
 
-export { releasedLineageBindingDigest, type ReleasedLineageBinding } from "./releasedLineageBinding";
+export {
+  releasedLineageBindingDigest,
+  type ReleasedLineageBinding,
+} from "./releasedLineageBinding";
 
 const Text = Schema.String.check(Schema.isMinLength(1));
 const Count = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
@@ -56,20 +65,23 @@ const OrdinarySyncResultSchemas = {
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
   }),
   "sync.fetchPull": mutableStruct({ pageToken: Text }),
-  "sync.applyPull": Schema.Union([mutableStruct({status: Schema.Literal("retry")}), mutableStruct({
-    status: Schema.Literal("complete"),
-    fetched: Count,
-    applied: Count,
-    refused: Count,
-    skipped: Count,
-    conflictsOpened: Count,
-    nextCursor: Count,
-    hasMore: Schema.Boolean,
-    pendingCursor: mutableStruct({ kind: Schema.Literal("relay"), token: Text }),
-    changedPaths: Schema.mutable(Schema.Array(ChangedPath)),
-    refusals: Schema.mutable(Schema.Array(Refusal)),
-    sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
-  })]),
+  "sync.applyPull": Schema.Union([
+    mutableStruct({ status: Schema.Literal("retry") }),
+    mutableStruct({
+      status: Schema.Literal("complete"),
+      fetched: Count,
+      applied: Count,
+      refused: Count,
+      skipped: Count,
+      conflictsOpened: Count,
+      nextCursor: Count,
+      hasMore: Schema.Boolean,
+      pendingCursor: mutableStruct({ kind: Schema.Literal("relay"), token: Text }),
+      changedPaths: Schema.mutable(Schema.Array(ChangedPath)),
+      refusals: Schema.mutable(Schema.Array(Refusal)),
+      sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
+    }),
+  ]),
   "sync.commitCursor": mutableStruct({
     committed: Schema.Literal(true),
     sharingDeclined: Schema.mutable(Schema.Array(SharingDeclined)),
@@ -110,14 +122,20 @@ const StagePublication = Schema.Union([
     outcome: Schema.Literals(["written", "no-op", "lost"]),
     threadId: Text,
     winnerMessageId: Schema.optionalKey(Text),
-    coordinates: Schema.mutable(Schema.Array(mutableStruct({
-      originId: Text,
-      originSeq: Count,
-      state: Schema.Literals(["pushed", "pending", "refused"]),
-    }))),
+    coordinates: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          originId: Text,
+          originSeq: Count,
+          state: Schema.Literals(["pushed", "pending", "refused"]),
+        }),
+      ),
+    ),
   }),
 ]);
-const OrdinaryPublicationStateSchema = mutableStruct({ stages: Schema.mutable(Schema.Array(StagePublication)) });
+const OrdinaryPublicationStateSchema = mutableStruct({
+  stages: Schema.mutable(Schema.Array(StagePublication)),
+});
 
 export type OrdinaryPublicationState = (typeof OrdinaryPublicationStateSchema)["Type"];
 
@@ -127,20 +145,33 @@ export type OrdinaryPublicationState = (typeof OrdinaryPublicationStateSchema)["
  * lost stage names a winner, and exactly the written stages list journal
  * rows: a written stage with none would never reach another copy.
  */
-export function decodeOrdinaryPublicationState(value: unknown, stageKeys: readonly string[]): OrdinaryPublicationState {
+export function decodeOrdinaryPublicationState(
+  value: unknown,
+  stageKeys: readonly string[],
+): OrdinaryPublicationState {
   const method = ORDINARY_PUBLICATION_STATE_METHOD;
-  const decoded = Schema.decodeUnknownResult(OrdinaryPublicationStateSchema, { onExcessProperty: "error" })(value);
+  const decoded = Schema.decodeUnknownResult(OrdinaryPublicationStateSchema, {
+    onExcessProperty: "error",
+  })(value);
   if (Result.isFailure(decoded)) {
     throw new ProtocolShapeError(`${method} result: ${decoded.failure.message}`);
   }
   const { stages } = decoded.success;
-  if (stages.length !== stageKeys.length || stages.some((stage, index) => stage.stageKey !== stageKeys[index])) {
+  if (
+    stages.length !== stageKeys.length ||
+    stages.some((stage, index) => stage.stageKey !== stageKeys[index])
+  ) {
     throw new ProtocolShapeError(`${method} result: stages do not match the stage keys asked`);
   }
   for (const stage of stages) {
-    if (stage.state === "present" && ((stage.winnerMessageId !== undefined && stage.outcome !== "lost") ||
-      ((stage.outcome === "written") !== (stage.coordinates.length > 0)))) {
-      throw new ProtocolShapeError(`${method} result: ${stage.outcome} stage does not match its receipt`);
+    if (
+      stage.state === "present" &&
+      ((stage.winnerMessageId !== undefined && stage.outcome !== "lost") ||
+        (stage.outcome === "written") !== stage.coordinates.length > 0)
+    ) {
+      throw new ProtocolShapeError(
+        `${method} result: ${stage.outcome} stage does not match its receipt`,
+      );
     }
   }
   return decoded.success;
@@ -160,21 +191,51 @@ const HeldDocumentFields = {
 
 // What holds a hosted document from being ready, with the fields its reason names.
 const HostedHold = Schema.Union([
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-path-held"), path: Text, heldBy: Text }),
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-conflict-parent-withheld"), conflictId: Text }),
+  mutableStruct({
+    objectId: Text,
+    reason: Schema.Literal("hosted-backfill-path-held"),
+    path: Text,
+    heldBy: Text,
+  }),
+  mutableStruct({
+    objectId: Text,
+    reason: Schema.Literal("hosted-conflict-parent-withheld"),
+    conflictId: Text,
+  }),
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-backfill-work-waiting") }),
-  mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-scope-path-mismatch"), scopePath: Text, headPath: Schema.NullOr(Text) }),
+  mutableStruct({
+    objectId: Text,
+    reason: Schema.Literal("hosted-scope-path-mismatch"),
+    scopePath: Text,
+    headPath: Schema.NullOr(Text),
+  }),
   // The host refused a live edit its session never admitted, so its copy is incomplete.
   mutableStruct({ objectId: Text, reason: Schema.Literal("hosted-live-edit-unadmitted") }),
   // An update that could destroy work a released activation retains, held as discovery lists it. Its
   // binding, whose tails are unbounded, never rides a pull.
-  mutableStruct({ reason: Schema.Literal("released-lineage-unsettled"), ...HeldDocumentFields, binding: Schema.optionalKey(Schema.Never) }),
+  mutableStruct({
+    reason: Schema.Literal("released-lineage-unsettled"),
+    ...HeldDocumentFields,
+    binding: Schema.optionalKey(Schema.Never),
+  }),
 ]);
 // A document a pass moved from ready to held, with only what holding it needs.
 const NewlyHeld = Schema.Union([
-  mutableStruct({ objectId: Text, reason: Schema.Literals(["hosted-backfill-path-held", "hosted-conflict-parent-withheld",
-    "hosted-backfill-work-waiting", "hosted-scope-path-mismatch", "hosted-live-edit-unadmitted"]) }),
-  mutableStruct({ objectId: Text, reason: Schema.Literal("released-lineage-unsettled"), bindingDigest: Digest }),
+  mutableStruct({
+    objectId: Text,
+    reason: Schema.Literals([
+      "hosted-backfill-path-held",
+      "hosted-conflict-parent-withheld",
+      "hosted-backfill-work-waiting",
+      "hosted-scope-path-mismatch",
+      "hosted-live-edit-unadmitted",
+    ]),
+  }),
+  mutableStruct({
+    objectId: Text,
+    reason: Schema.Literal("released-lineage-unsettled"),
+    bindingDigest: Digest,
+  }),
 ]);
 const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text });
 
@@ -183,18 +244,46 @@ const RetirementError = mutableStruct({ code: Text, message: Text, retry: Text }
 const Departed = Schema.mutable(Schema.Array(Text));
 
 // A journal cursor or outbox sequence: both count from one.
-const Coordinate = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER));
+const Coordinate = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(1),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
 // Where a finding's contribution is, without who made it.
 const ContributionLocatorSchema = Schema.Union([
-  mutableStruct({ kind: Schema.Literal("carried"), deliveryId: Text, updateDigest: Digest, journalCursor: Coordinate }),
-  mutableStruct({ kind: Schema.Literal("outbox"), outboxId: Text, sequence: Coordinate, deliveryId: Text, updateDigest: Digest }),
+  mutableStruct({
+    kind: Schema.Literal("carried"),
+    deliveryId: Text,
+    updateDigest: Digest,
+    journalCursor: Coordinate,
+  }),
+  mutableStruct({
+    kind: Schema.Literal("outbox"),
+    outboxId: Text,
+    sequence: Coordinate,
+    deliveryId: Text,
+    updateDigest: Digest,
+  }),
 ]);
 // Best to worst: a preservation's status is its worst reason's.
-const PRESERVATION_STATUSES = ["complete", "pending-dependencies", "missing-evidence", "invalid-evidence"] as const;
+const PRESERVATION_STATUSES = [
+  "complete",
+  "pending-dependencies",
+  "missing-evidence",
+  "invalid-evidence",
+] as const;
 const PreservationStatus = Schema.Literals(PRESERVATION_STATUSES);
 // In the engine's order, which the answer lists them in.
-const PRESERVATION_REASONS = ["source-missing", "pending-head-dependencies", "pending-contribution-dependencies",
-  "digest-mismatch", "malformed-update", "contradictory-evidence", "missing-feed-identity", "malformed-authorship"] as const;
+const PRESERVATION_REASONS = [
+  "source-missing",
+  "pending-head-dependencies",
+  "pending-contribution-dependencies",
+  "digest-mismatch",
+  "malformed-update",
+  "contradictory-evidence",
+  "missing-feed-identity",
+  "malformed-authorship",
+] as const;
 // The most findings the engine lists for one reason.
 const MAX_REASON_EXAMPLES = 8;
 // Whether merged state keeps every retained contribution, and why not: each
@@ -205,16 +294,24 @@ const MAX_REASON_EXAMPLES = 8;
 // nor its length is named, and the merged commitment and the rest still answer.
 const Preservation = mutableStruct({
   status: PreservationStatus,
-  reasons: Schema.mutable(Schema.Array(mutableStruct({
-    reason: Schema.Literals(PRESERVATION_REASONS),
-    status: PreservationStatus,
-    total: Count,
-    omitted: Count,
-    examples: Schema.mutable(Schema.Array(mutableStruct({
-      namespace: Schema.NullOr(Text),
-      contribution: Schema.NullOr(ContributionLocatorSchema),
-    }))),
-  }))),
+  reasons: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        reason: Schema.Literals(PRESERVATION_REASONS),
+        status: PreservationStatus,
+        total: Count,
+        omitted: Count,
+        examples: Schema.mutable(
+          Schema.Array(
+            mutableStruct({
+              namespace: Schema.NullOr(Text),
+              contribution: Schema.NullOr(ContributionLocatorSchema),
+            }),
+          ),
+        ),
+      }),
+    ),
+  ),
   mergedContributions: mutableStruct({ count: Count, digest: Digest }),
   contributionsSha256: Schema.NullOr(Digest),
   contributionsByteLength: Schema.NullOr(Count),
@@ -277,12 +374,14 @@ const HostedSyncResultSchemas = {
     hasMore: Schema.Boolean,
   }),
   // Null when nothing is held there. A stale binding claims nothing, so it carries no preservation.
-  "sync.heldDocument": Schema.NullOr(mutableStruct({
-    ...HeldDocumentFields,
-    status: Schema.Literals(["current", "stale"]),
-    preservation: Schema.NullOr(Preservation),
-    resolution: Schema.Null,
-  })),
+  "sync.heldDocument": Schema.NullOr(
+    mutableStruct({
+      ...HeldDocumentFields,
+      status: Schema.Literals(["current", "stale"]),
+      preservation: Schema.NullOr(Preservation),
+      resolution: Schema.Null,
+    }),
+  ),
 } as const;
 
 export type HostedSyncMethod = keyof typeof HostedSyncResultSchemas;
@@ -302,23 +401,41 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
   if (method === "sync.pullHosted") {
     const pass = result as HostedSyncMethodResultMap["sync.pullHosted"];
     // A list that stops early stops at the last document it lists.
-    if (!pagedList(pass.held.map(hold => hold.objectId), pass.heldThrough) || !ascending(pass.newlyHeld.map(hold => hold.objectId))) {
-      throw new ProtocolShapeError(`hosted ${method} result: held documents do not match where their list stops`);
+    if (
+      !pagedList(
+        pass.held.map((hold) => hold.objectId),
+        pass.heldThrough,
+      ) ||
+      !ascending(pass.newlyHeld.map((hold) => hold.objectId))
+    ) {
+      throw new ProtocolShapeError(
+        `hosted ${method} result: held documents do not match where their list stops`,
+      );
     }
     if (!pagedList(pass.departed, pass.departedThrough)) {
-      throw new ProtocolShapeError(`hosted ${method} result: departed documents do not match where their list stops`);
+      throw new ProtocolShapeError(
+        `hosted ${method} result: departed documents do not match where their list stops`,
+      );
     }
   } else if (method === "sync.commitCursor") {
     const commit = result as HostedSyncMethodResultMap["sync.commitCursor"];
     // Unread, it stops nowhere.
-    if (commit.departed === null ? commit.departedThrough !== null : !pagedList(commit.departed, commit.departedThrough)) {
-      throw new ProtocolShapeError(`hosted ${method} result: departed documents do not match where their list stops`);
+    if (
+      commit.departed === null
+        ? commit.departedThrough !== null
+        : !pagedList(commit.departed, commit.departedThrough)
+    ) {
+      throw new ProtocolShapeError(
+        `hosted ${method} result: departed documents do not match where their list stops`,
+      );
     }
   } else if (method === "sync.heldDocuments") {
     const page = result as HostedSyncMethodResultMap["sync.heldDocuments"];
     // The next page starts after the last document listed, so one that claims more lists one.
     if (page.hasMore && page.documents.length === 0) {
-      throw new ProtocolShapeError(`hosted ${method} result: a page that claims more lists nothing`);
+      throw new ProtocolShapeError(
+        `hosted ${method} result: a page that claims more lists nothing`,
+      );
     }
   } else if (method === "sync.heldDocument") {
     const inspected = result as HostedSyncMethodResultMap["sync.heldDocument"];
@@ -328,9 +445,12 @@ export function decodeHostedSyncResult<M extends HostedSyncMethod>(
 }
 
 // The engine orders object IDs by their UTF-8 bytes.
-const compareObjectIds = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-const ascending = (ids: readonly string[]) => ids.every((id, index) => index === 0 || compareObjectIds(ids[index - 1]!, id) < 0);
-const pagedList = (ids: readonly string[], through: string | null) => ascending(ids) && (through === null || through === ids.at(-1));
+const compareObjectIds = (a: string, b: string) =>
+  Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+const ascending = (ids: readonly string[]) =>
+  ids.every((id, index) => index === 0 || compareObjectIds(ids[index - 1]!, id) < 0);
+const pagedList = (ids: readonly string[], through: string | null) =>
+  ascending(ids) && (through === null || through === ids.at(-1));
 
 /**
  * Where a hosted pass's held or departed list runs: after `after`, from the
@@ -340,15 +460,20 @@ export type HostedWindow = { readonly after: string | undefined; readonly throug
 
 /** Whether a list speaks for the document: inside its window, a document it does not list is not held, or not departed. */
 export function hostedWindowCovers(window: HostedWindow, objectId: string): boolean {
-  return (window.after === undefined || compareObjectIds(objectId, window.after) > 0) &&
-    (window.through === null || compareObjectIds(objectId, window.through) <= 0);
+  return (
+    (window.after === undefined || compareObjectIds(objectId, window.after) > 0) &&
+    (window.through === null || compareObjectIds(objectId, window.through) <= 0)
+  );
 }
 
 export type HeldDocumentInspection = NonNullable<HostedSyncMethodResultMap["sync.heldDocument"]>;
 
 type HeldPreservation = NonNullable<HeldDocumentInspection["preservation"]>;
 // The status each reason holds preservation at.
-const REASON_STATUS: Record<HeldPreservation["reasons"][number]["reason"], HeldPreservation["status"]> = {
+const REASON_STATUS: Record<
+  HeldPreservation["reasons"][number]["reason"],
+  HeldPreservation["status"]
+> = {
   "source-missing": "missing-evidence",
   "pending-head-dependencies": "pending-dependencies",
   "pending-contribution-dependencies": "pending-dependencies",
@@ -373,20 +498,34 @@ const NOTHING_MERGED = mergedContributionsCommitment([]).digest;
 function checkHeldInspection(inspected: HeldDocumentInspection): void {
   const method = "sync.heldDocument";
   const preservation = inspected.preservation;
-  const invalid = () => new ProtocolShapeError(`hosted ${method} result: preservation does not match its status`);
-  if ((inspected.status === "current") !== (preservation !== null) || (inspected.bindingStale && inspected.status !== "stale")) {
+  const invalid = () =>
+    new ProtocolShapeError(`hosted ${method} result: preservation does not match its status`);
+  if (
+    (inspected.status === "current") !== (preservation !== null) ||
+    (inspected.bindingStale && inspected.status !== "stale")
+  ) {
     throw invalid();
   }
   if (preservation === null) return;
   let worst = 0;
   preservation.reasons.forEach((found, index) => {
     const before = preservation.reasons[index - 1];
-    if (found.status !== REASON_STATUS[found.reason] || found.total < 1 || found.examples.length > MAX_REASON_EXAMPLES ||
+    if (
+      found.status !== REASON_STATUS[found.reason] ||
+      found.total < 1 ||
+      found.examples.length > MAX_REASON_EXAMPLES ||
       found.examples.length + found.omitted !== found.total ||
-      (before && PRESERVATION_REASONS.indexOf(before.reason) >= PRESERVATION_REASONS.indexOf(found.reason))) throw invalid();
+      (before &&
+        PRESERVATION_REASONS.indexOf(before.reason) >= PRESERVATION_REASONS.indexOf(found.reason))
+    )
+      throw invalid();
     worst = Math.max(worst, PRESERVATION_STATUSES.indexOf(found.status));
   });
-  const { mergedContributions: merged, contributionsSha256: sha256, contributionsByteLength: byteLength } = preservation;
+  const {
+    mergedContributions: merged,
+    contributionsSha256: sha256,
+    contributionsByteLength: byteLength,
+  } = preservation;
   if ((merged.count === 0) !== (merged.digest === NOTHING_MERGED)) throw invalid();
   if (preservation.contributionsTooLarge) {
     if (sha256 !== null || byteLength !== null) throw invalid();
@@ -394,13 +533,20 @@ function checkHeldInspection(inspected: HeldDocumentInspection): void {
     throw invalid();
   }
   const complete = preservation.status === "complete";
-  if (preservation.status !== PRESERVATION_STATUSES[worst] || complete !== (preservation.markdownSha256 !== null) ||
+  if (
+    preservation.status !== PRESERVATION_STATUSES[worst] ||
+    complete !== (preservation.markdownSha256 !== null) ||
     (preservation.markdownSha256 === null) !== (preservation.markdownByteLength === null) ||
-    (!complete && preservation.markdown !== null)) throw invalid();
+    (!complete && preservation.markdown !== null)
+  )
+    throw invalid();
   if (preservation.markdown !== null) {
     const bytes = Buffer.from(preservation.markdown, "utf8");
-    if (bytes.length !== preservation.markdownByteLength ||
-      createHash("sha256").update(bytes).digest("hex") !== preservation.markdownSha256) throw invalid();
+    if (
+      bytes.length !== preservation.markdownByteLength ||
+      createHash("sha256").update(bytes).digest("hex") !== preservation.markdownSha256
+    )
+      throw invalid();
   }
 }
 
@@ -425,12 +571,21 @@ const CONTRIBUTIONS_KEYS = "binding,coveredContributions,mergedContributionIds,v
  * that tail commits to; and the merged contributions in canonical order,
  * each covered, committing as the inspection says.
  */
-export function decodeHeldContributions(bytes: Uint8Array, inspected: HeldDocumentInspection): HeldContributions {
+export function decodeHeldContributions(
+  bytes: Uint8Array,
+  inspected: HeldDocumentInspection,
+): HeldContributions {
   const preservation = inspected.preservation;
-  const invalid = () => new ProtocolShapeError("held document contributions do not match their inspection");
-  if (inspected.status !== "current" || preservation === null || preservation.contributionsTooLarge ||
+  const invalid = () =>
+    new ProtocolShapeError("held document contributions do not match their inspection");
+  if (
+    inspected.status !== "current" ||
+    preservation === null ||
+    preservation.contributionsTooLarge ||
     bytes.length !== preservation.contributionsByteLength ||
-    createHash("sha256").update(bytes).digest("hex") !== preservation.contributionsSha256) throw invalid();
+    createHash("sha256").update(bytes).digest("hex") !== preservation.contributionsSha256
+  )
+    throw invalid();
   const committed = preservation.mergedContributions;
   let text: string, parsed: unknown;
   try {
@@ -439,19 +594,39 @@ export function decodeHeldContributions(bytes: Uint8Array, inspected: HeldDocume
   } catch {
     throw invalid();
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || canonicalJson(parsed) !== text ||
-    Object.keys(parsed).sort().join() !== CONTRIBUTIONS_KEYS) throw invalid();
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    canonicalJson(parsed) !== text ||
+    Object.keys(parsed).sort().join() !== CONTRIBUTIONS_KEYS
+  )
+    throw invalid();
   const row = parsed as Record<string, unknown>;
-  if (row.version !== 1 || !Array.isArray(row.coveredContributions) || !Array.isArray(row.mergedContributionIds)) throw invalid();
+  if (
+    row.version !== 1 ||
+    !Array.isArray(row.coveredContributions) ||
+    !Array.isArray(row.mergedContributionIds)
+  )
+    throw invalid();
   let decoded: HeldContributions;
   try {
     decoded = {
       binding: decodeReleasedLineageBinding(row.binding),
       coveredContributions: row.coveredContributions.map((tail: unknown) => {
         const listed = tail as Record<string, unknown>;
-        if (typeof tail !== "object" || tail === null || Object.keys(tail).sort().join() !== "contributions,namespace" ||
-          typeof listed.namespace !== "string" || !Array.isArray(listed.contributions)) throw invalid();
-        return { namespace: listed.namespace, contributions: listed.contributions.map(decodeRetainedContribution) };
+        if (
+          typeof tail !== "object" ||
+          tail === null ||
+          Object.keys(tail).sort().join() !== "contributions,namespace" ||
+          typeof listed.namespace !== "string" ||
+          !Array.isArray(listed.contributions)
+        )
+          throw invalid();
+        return {
+          namespace: listed.namespace,
+          contributions: listed.contributions.map(decodeRetainedContribution),
+        };
       }),
       mergedContributionIds: row.mergedContributionIds.map(decodeRetainedContribution),
     };
@@ -459,19 +634,31 @@ export function decodeHeldContributions(bytes: Uint8Array, inspected: HeldDocume
     throw invalid();
   }
   const { binding, coveredContributions, mergedContributionIds } = decoded;
-  if (releasedLineageBindingDigest(binding) !== inspected.bindingDigest || binding.objectId !== inspected.objectId) throw invalid();
-  const valid = (binding.tails ?? []).filter(tail => tail.unproven !== null);
+  if (
+    releasedLineageBindingDigest(binding) !== inspected.bindingDigest ||
+    binding.objectId !== inspected.objectId
+  )
+    throw invalid();
+  const valid = (binding.tails ?? []).filter((tail) => tail.unproven !== null);
   if (coveredContributions.length !== valid.length) throw invalid();
   const every = new Set<string>();
   coveredContributions.forEach(({ namespace, contributions }, index) => {
     const tail = valid[index]!;
     const committed = tail.unproven!;
-    const commitment = contributions.length === 0 ? null : releasedTailContributionsCommitment(contributions);
-    if (namespace !== tail.namespace || commitment === null || commitment.count !== committed.count ||
-      commitment.digest !== committed.digest) throw invalid();
-    for (const contribution of contributions) every.add(canonicalRetainedContribution(contribution));
+    const commitment =
+      contributions.length === 0 ? null : releasedTailContributionsCommitment(contributions);
+    if (
+      namespace !== tail.namespace ||
+      commitment === null ||
+      commitment.count !== committed.count ||
+      commitment.digest !== committed.digest
+    )
+      throw invalid();
+    for (const contribution of contributions)
+      every.add(canonicalRetainedContribution(contribution));
   });
-  if (mergedContributionIds.some(merged => !every.has(canonicalRetainedContribution(merged)))) throw invalid();
+  if (mergedContributionIds.some((merged) => !every.has(canonicalRetainedContribution(merged))))
+    throw invalid();
   let merged;
   try {
     merged = mergedContributionsCommitment(mergedContributionIds);

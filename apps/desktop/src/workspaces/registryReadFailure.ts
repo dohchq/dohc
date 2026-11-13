@@ -14,7 +14,11 @@ export const REGISTRY_NEWER = "registry-newer";
 export class RegistryReadError extends Error {
   readonly code: typeof REGISTRY_NEWER | undefined;
 
-  constructor(message: string, readonly registryFile: string, newer = false) {
+  constructor(
+    message: string,
+    readonly registryFile: string,
+    newer = false,
+  ) {
     super(message);
     this.code = newer ? REGISTRY_NEWER : undefined;
   }

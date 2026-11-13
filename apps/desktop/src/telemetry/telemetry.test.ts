@@ -34,7 +34,10 @@ const readCode = vi.fn(async (path: string) => {
 const ON = { usageReports: true, errorReports: true };
 const OFF = { usageReports: false, errorReports: false };
 
-interface Call { url: string; init: RequestInit }
+interface Call {
+  url: string;
+  init: RequestInit;
+}
 
 let dir: string;
 let calls: Call[];
@@ -62,8 +65,13 @@ afterEach(() => {
 });
 
 const FACTS = () => ({
-  atMs: nowMs, version: "1.2.3", channel: "latest", os: "Windows_NT", osVersion: "10.0.22631",
-  arch: "x64", electron: "43.3.0",
+  atMs: nowMs,
+  version: "1.2.3",
+  channel: "latest",
+  os: "Windows_NT",
+  osVersion: "10.0.22631",
+  arch: "x64",
+  electron: "43.3.0",
 });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -73,7 +81,9 @@ const INSTALL_ID = "6f1c1c55-6a52-4a40-8d38-1b2d2e1c1f10";
 
 function telemetry(
   reporting: Reporting | null = REPORTING,
-  overrides: Partial<Pick<Parameters<typeof createTelemetry>[0], "facts" | "locate" | "statePath">> = {},
+  overrides: Partial<
+    Pick<Parameters<typeof createTelemetry>[0], "facts" | "locate" | "statePath">
+  > = {},
 ) {
   return createTelemetry({
     reporting,
@@ -92,7 +102,10 @@ function telemetry(
 }
 
 // A telemetry whose person already saw a notice naming both reports on an earlier launch.
-function shown(reporting: Reporting | null = REPORTING, overrides: Parameters<typeof telemetry>[1] = {}) {
+function shown(
+  reporting: Reporting | null = REPORTING,
+  overrides: Parameters<typeof telemetry>[1] = {},
+) {
   writeFileSync(statePath(), JSON.stringify({ usage: { installId: INSTALL_ID }, errors: true }));
   return telemetry(reporting, overrides);
 }
@@ -124,15 +137,24 @@ interface SentException {
   mechanism: Record<string, unknown>;
   stacktrace?: { type: string; frames: SentFrame[] };
 }
-const sentBody = (call: Call) => JSON.parse(String(call.init.body)) as { api_key: string; batch: SentEvent[] } & Record<string, unknown>;
-const isErrorCall = (call: Call) => sentBody(call).batch.some((event) => event.event === "$exception");
+const sentBody = (call: Call) =>
+  JSON.parse(String(call.init.body)) as { api_key: string; batch: SentEvent[] } & Record<
+    string,
+    unknown
+  >;
+const isErrorCall = (call: Call) =>
+  sentBody(call).batch.some((event) => event.event === "$exception");
 const usageCalls = () => calls.filter((call) => !isErrorCall(call));
 const errorCalls = () => calls.filter(isErrorCall);
 const exceptionEvent = (call: Call) => sentBody(call).batch[0]!;
-const exceptions = (call: Call) => exceptionEvent(call).properties.$exception_list as SentException[];
+const exceptions = (call: Call) =>
+  exceptionEvent(call).properties.$exception_list as SentException[];
 
 function privateError(): Error {
-  const cause = Object.assign(new Error(`could not read C:\\Users\\sam\\${SECRET}.md`), { code: "ENOENT", path: SECRET });
+  const cause = Object.assign(new Error(`could not read C:\\Users\\sam\\${SECRET}.md`), {
+    code: "ENOENT",
+    path: SECRET,
+  });
   const error = new TypeError(`${SECRET} failed`, { cause });
   error.stack = [
     `TypeError: ${SECRET} failed`,
@@ -160,7 +182,10 @@ describe("reports wait for the notice and the switches", () => {
     expect(calls).toEqual([]);
 
     reports.acknowledgeNotice({ usage: true, errors: true });
-    expect(savedState()).toEqual({ usage: { installId: expect.stringMatching(/^[0-9a-f-]{36}$/) }, errors: true });
+    expect(savedState()).toEqual({
+      usage: { installId: expect.stringMatching(/^[0-9a-f-]{36}$/) },
+      errors: true,
+    });
     expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
     expect(usageCalls()).toHaveLength(1);
@@ -173,15 +198,23 @@ describe("reports wait for the notice and the switches", () => {
     expect(body.batch[0]!.event).toBe("app_launched");
     expect(body.batch[0]!.distinct_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(body.batch[0]!.properties).toEqual({
-      $process_person_profile: false, $geoip_disable: true, $lib: "dohc-desktop",
-      app_version: "1.2.3", channel: "latest", os: "Windows_NT", arch: "x64",
+      $process_person_profile: false,
+      $geoip_disable: true,
+      $lib: "dohc-desktop",
+      app_version: "1.2.3",
+      channel: "latest",
+      os: "Windows_NT",
+      arch: "x64",
     });
   });
 
   it("drops what waited when the saved switches are off at startup", async () => {
     const reports = shown();
     reports.track({ name: "app_launched" });
-    reports.reportError({ kind: "crash", event: { kind: "main-exception", error: new Error("x"), origin: "uncaughtException" } });
+    reports.reportError({
+      kind: "crash",
+      event: { kind: "main-exception", error: new Error("x"), origin: "uncaughtException" },
+    });
     reports.setPrivacy(OFF);
     reports.track({ name: "workspace_opened" });
     await reports.flush();
@@ -193,7 +226,11 @@ describe("reports wait for the notice and the switches", () => {
     const reports = shown();
     reports.setPrivacy({ usageReports: false, errorReports: true });
     reports.track({ name: "chat_message_sent" });
-    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `at x (${BUNDLE}:1:2)` } });
+    reports.reportError({
+      kind: "renderer",
+      origin: "uncaught",
+      error: { name: "TypeError", stack: `at x (${BUNDLE}:1:2)` },
+    });
     await settle();
     expect(usageCalls()).toHaveLength(0);
     expect(errorCalls()).toHaveLength(1);
@@ -211,13 +248,15 @@ describe("reports wait for the notice and the switches", () => {
     const reports = shown();
     reports.setPrivacy(ON);
     let aborted = false;
-    respond = (call) => new Promise((_resolve, reject) => {
-      call.init.signal?.addEventListener("abort", () => {
-        aborted = true;
-        reject(new Error("aborted"));
+    respond = (call) =>
+      new Promise((_resolve, reject) => {
+        call.init.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(new Error("aborted"));
+        });
       });
-    });
-    for (let index = 0; index < REPORT_LIMITS.usageBatch + 5; index += 1) reports.track({ name: "workspace_opened" });
+    for (let index = 0; index < REPORT_LIMITS.usageBatch + 5; index += 1)
+      reports.track({ name: "workspace_opened" });
     expect(usageCalls()).toHaveLength(1);
     reports.setPrivacy({ usageReports: false, errorReports: true });
     await vi.advanceTimersByTimeAsync(0);
@@ -269,7 +308,10 @@ describe("each kind of report waits for a notice that names it", () => {
 
   it.each([
     ["damaged JSON", "{"],
-    ["an install ID that is not random", JSON.stringify({ usage: { installId: "sam" }, errors: true })],
+    [
+      "an install ID that is not random",
+      JSON.stringify({ usage: { installId: "sam" }, errors: true }),
+    ],
   ])("names both kinds again after a state file with %s", async (_label, text) => {
     writeFileSync(statePath(), text);
     const reports = telemetry();
@@ -302,10 +344,11 @@ describe("each kind of report waits for a notice that names it", () => {
 describe("reports at quit", () => {
   function heldResponses() {
     const held: Array<{ call: Call; answer: (response: Response) => void }> = [];
-    respond = (call) => new Promise((resolve, reject) => {
-      held.push({ call, answer: resolve });
-      call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-    });
+    respond = (call) =>
+      new Promise((resolve, reject) => {
+        held.push({ call, answer: resolve });
+        call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
     return held;
   }
 
@@ -313,11 +356,14 @@ describe("reports at quit", () => {
     const reports = shown();
     reports.setPrivacy(ON);
     const held = heldResponses();
-    for (const name of ["TypeError", "RangeError", "SyntaxError", "EvalError"]) reports.reportError(anError(name));
+    for (const name of ["TypeError", "RangeError", "SyntaxError", "EvalError"])
+      reports.reportError(anError(name));
     reports.track({ name: "app_launched" });
 
     let done = false;
-    const flushing = reports.flush().then(() => { done = true; });
+    const flushing = reports.flush().then(() => {
+      done = true;
+    });
     // The first send of each kind takes half the deadline; the next error's send never finishes.
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.shutdownTimeoutMs / 2);
     expect(held).toHaveLength(2);
@@ -346,7 +392,9 @@ describe("reports at quit", () => {
     reports.reportError(anError("RangeError"));
 
     let done = false;
-    const flushing = reports.flush().then(() => { done = true; });
+    const flushing = reports.flush().then(() => {
+      done = true;
+    });
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.shutdownTimeoutMs - 1);
     expect(done).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
@@ -366,13 +414,22 @@ describe("what an error report holds", () => {
   });
 
   it("sends PostHog only allowlisted facts, through one request per problem", async () => {
-    const listeners = ["uncaughtException", "unhandledRejection"].map((name) => process.listenerCount(name));
+    const listeners = ["uncaughtException", "unhandledRejection"].map((name) =>
+      process.listenerCount(name),
+    );
     const reports = shown();
     reports.setPrivacy(ON);
-    reports.reportError({ kind: "crash", event: { kind: "main-exception", error: privateError(), origin: "uncaughtException" } });
     reports.reportError({
-      kind: "renderer", origin: "boundary",
-      error: { name: `${SECRET}Error`, stack: `at x (C:\\Users\\sam\\${SECRET}.js:1:1)\n    at y (${BUNDLE}:5:6)` },
+      kind: "crash",
+      event: { kind: "main-exception", error: privateError(), origin: "uncaughtException" },
+    });
+    reports.reportError({
+      kind: "renderer",
+      origin: "boundary",
+      error: {
+        name: `${SECRET}Error`,
+        stack: `at x (C:\\Users\\sam\\${SECRET}.js:1:1)\n    at y (${BUNDLE}:5:6)`,
+      },
     });
     await reports.flush();
     expect(errorCalls()).toHaveLength(2);
@@ -390,85 +447,174 @@ describe("what an error report holds", () => {
       expect(sentBody(call).api_key).toBe(KEY);
       expect(sentBody(call).batch).toHaveLength(1);
       const event = exceptionEvent(call);
-      expect(Object.keys(event).sort()).toEqual(["distinct_id", "event", "properties", "timestamp", "uuid"]);
+      expect(Object.keys(event).sort()).toEqual([
+        "distinct_id",
+        "event",
+        "properties",
+        "timestamp",
+        "uuid",
+      ]);
       // A new random ID for each problem, never the installation's.
       expect(event.distinct_id).toMatch(UUID);
       expect(event.timestamp).toBe(new Date(nowMs).toISOString());
       expect(event.properties).toMatchObject({
-        $process_person_profile: false, $geoip_disable: true, $exception_level: "error", $lib: "posthog-node",
-        app_version: "1.2.3", channel: "latest", dist: "win-x64", os: "Windows_NT", os_version: "10.0.22631",
-        arch: "x64", electron: "43.3.0",
+        $process_person_profile: false,
+        $geoip_disable: true,
+        $exception_level: "error",
+        $lib: "posthog-node",
+        app_version: "1.2.3",
+        channel: "latest",
+        dist: "win-x64",
+        os: "Windows_NT",
+        os_version: "10.0.22631",
+        arch: "x64",
+        electron: "43.3.0",
       });
     }
-    expect(exceptionEvent(errorCalls()[0]!).distinct_id).not.toBe(exceptionEvent(errorCalls()[1]!).distinct_id);
+    expect(exceptionEvent(errorCalls()[0]!).distinct_id).not.toBe(
+      exceptionEvent(errorCalls()[1]!).distinct_id,
+    );
     // Nothing installed a handler of its own.
-    expect(["uncaughtException", "unhandledRejection"].map((name) => process.listenerCount(name))).toEqual(listeners);
+    expect(
+      ["uncaughtException", "unhandledRejection"].map((name) => process.listenerCount(name)),
+    ).toEqual(listeners);
 
     const main = exceptionEvent(errorCalls()[0]!);
     expect(Object.keys(main.properties).sort()).toEqual([
-      "$exception_level", "$exception_list", "$geoip_disable", "$is_server", "$lib", "$lib_version",
-      "$process_person_profile", "app_version", "arch", "channel", "dist", "electron", "origin", "os", "os_version", "process",
+      "$exception_level",
+      "$exception_list",
+      "$geoip_disable",
+      "$is_server",
+      "$lib",
+      "$lib_version",
+      "$process_person_profile",
+      "app_version",
+      "arch",
+      "channel",
+      "dist",
+      "electron",
+      "origin",
+      "os",
+      "os_version",
+      "process",
     ]);
     expect(main.properties).toMatchObject({ process: "main", origin: "uncaughtException" });
     // The error comes first, then its cause; each stack runs oldest call first.
     const app = (lineno: number, colno: number) => ({
-      filename: "app:///dist/main/App-Ab12.js", function: "?", lineno, colno, in_app: true, chunk_id: MAIN_CHUNK, platform: "node:javascript",
+      filename: "app:///dist/main/App-Ab12.js",
+      function: "?",
+      lineno,
+      colno,
+      in_app: true,
+      chunk_id: MAIN_CHUNK,
+      platform: "node:javascript",
     });
-    const withheld = { filename: "<withheld>", function: "?", in_app: false, platform: "node:javascript" };
+    const withheld = {
+      filename: "<withheld>",
+      function: "?",
+      in_app: false,
+      platform: "node:javascript",
+    };
     expect(exceptions(errorCalls()[0]!)).toEqual([
       {
-        type: "TypeError", value: "<message withheld>",
+        type: "TypeError",
+        value: "<message withheld>",
         mechanism: { type: "generic", handled: false, synthetic: false, exception_id: 0 },
         stacktrace: { type: "raw", frames: [app(3, 4), withheld, app(10, 20)] },
       },
       {
-        type: "Error", value: "<message withheld> (code ENOENT)",
-        mechanism: { type: "chained", source: "cause", synthetic: false, exception_id: 1, parent_id: 0 },
+        type: "Error",
+        value: "<message withheld> (code ENOENT)",
+        mechanism: {
+          type: "chained",
+          source: "cause",
+          synthetic: false,
+          exception_id: 1,
+          parent_id: 0,
+        },
         stacktrace: { type: "raw", frames: [withheld] },
       },
     ]);
     const renderer = errorCalls()[1]!;
-    expect(exceptionEvent(renderer).properties).toMatchObject({ process: "renderer", origin: "boundary" });
-    expect(exceptions(renderer)).toEqual([{
-      type: "<withheld>", value: "<message withheld>",
-      mechanism: { type: "generic", handled: true, synthetic: false, exception_id: 0 },
-      stacktrace: { type: "raw", frames: [app(5, 6), withheld] },
-    }]);
+    expect(exceptionEvent(renderer).properties).toMatchObject({
+      process: "renderer",
+      origin: "boundary",
+    });
+    expect(exceptions(renderer)).toEqual([
+      {
+        type: "<withheld>",
+        value: "<message withheld>",
+        mechanism: { type: "generic", handled: true, synthetic: false, exception_id: 0 },
+        stacktrace: { type: "raw", frames: [app(5, 6), withheld] },
+      },
+    ]);
     // Each file's chunk ID is read once.
     expect(readCode).toHaveBeenCalledTimes(1);
   });
 
   it.each([
     // The SDK prefers POSTHOG_RELEASE_ID to the injected release.
-    { label: "another release's ID in the environment", injected: RELEASE, env: FOREIGN_RELEASE, sent: RELEASE },
-    { label: "an injected value that is not a release ID", injected: SECRET, env: FOREIGN_RELEASE, sent: undefined },
-  ])("names only the release the build's injected files name, with $label", async ({ injected, env, sent }) => {
-    (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = injected;
-    vi.stubEnv("POSTHOG_RELEASE_ID", env);
-    const reports = shown();
-    reports.setPrivacy(ON);
-    reports.reportError(anError());
-    await reports.flush();
-    const { properties } = exceptionEvent(errorCalls()[0]!);
-    if (sent) expect(properties.$release_id).toBe(sent);
-    else expect(properties).not.toHaveProperty("$release_id");
-    const body = String(errorCalls()[0]!.init.body);
-    for (const leaked of [env, injected]) {
-      if (typeof leaked === "string" && leaked !== sent) expect(body).not.toContain(leaked);
-    }
-  });
+    {
+      label: "another release's ID in the environment",
+      injected: RELEASE,
+      env: FOREIGN_RELEASE,
+      sent: RELEASE,
+    },
+    {
+      label: "an injected value that is not a release ID",
+      injected: SECRET,
+      env: FOREIGN_RELEASE,
+      sent: undefined,
+    },
+  ])(
+    "names only the release the build's injected files name, with $label",
+    async ({ injected, env, sent }) => {
+      (globalThis as { _posthogReleaseId?: unknown })._posthogReleaseId = injected;
+      vi.stubEnv("POSTHOG_RELEASE_ID", env);
+      const reports = shown();
+      reports.setPrivacy(ON);
+      reports.reportError(anError());
+      await reports.flush();
+      const { properties } = exceptionEvent(errorCalls()[0]!);
+      if (sent) expect(properties.$release_id).toBe(sent);
+      else expect(properties).not.toHaveProperty("$release_id");
+      const body = String(errorCalls()[0]!.init.body);
+      for (const leaked of [env, injected]) {
+        if (typeof leaked === "string" && leaked !== sent) expect(body).not.toContain(leaked);
+      }
+    },
+  );
 
   it("keeps an engine message only when it matches a known template", async () => {
     const reports = shown();
     reports.setPrivacy(ON);
     reports.reportError({
       kind: "crash",
-      event: { kind: "engine", stage: "restarting", error: new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3.") },
+      event: {
+        kind: "engine",
+        stage: "restarting",
+        error: new EngineDaemonUnavailableError(
+          "Rust engine daemon exited unexpectedly with code 3.",
+        ),
+      },
     });
-    reports.reportError({ kind: "crash", event: { kind: "process-gone", source: "gpu", name: null, reason: "crashed", exitCode: 5 } });
+    reports.reportError({
+      kind: "crash",
+      event: { kind: "process-gone", source: "gpu", name: null, reason: "crashed", exitCode: 5 },
+    });
     await reports.flush();
-    expect(errorCalls().map((call) => exceptions(call).map(({ type, value, stacktrace }) => ({ type, value, stacktrace })))).toEqual([
-      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3.", stacktrace: undefined }],
+    expect(
+      errorCalls().map((call) =>
+        exceptions(call).map(({ type, value, stacktrace }) => ({ type, value, stacktrace })),
+      ),
+    ).toEqual([
+      [
+        {
+          type: "EngineDaemonUnavailableError",
+          value: "Rust engine daemon exited unexpectedly with code 3.",
+          stacktrace: undefined,
+        },
+      ],
       [{ type: "ProcessGone", value: "gpu crashed (exit code 5)", stacktrace: undefined }],
     ]);
     expect(errorCalls().map((call) => exceptionEvent(call).properties)).toMatchObject([
@@ -481,24 +627,44 @@ describe("what an error report holds", () => {
     const reports = shown();
     reports.setPrivacy(ON);
     const error = privateError();
-    for (const link of [error, error.cause as Error]) Object.assign(link, { stack: { toString: () => `at x (C:\\Users\\sam\\${SECRET}.js:1:1)` } });
-    reports.reportError({ kind: "crash", event: { kind: "main-exception", error, origin: "uncaughtException" } });
+    for (const link of [error, error.cause as Error])
+      Object.assign(link, { stack: { toString: () => `at x (C:\\Users\\sam\\${SECRET}.js:1:1)` } });
+    reports.reportError({
+      kind: "crash",
+      event: { kind: "main-exception", error, origin: "uncaughtException" },
+    });
     reports.reportError({
       kind: "crash",
       event: {
         kind: "engine",
         stage: "restarting",
-        error: Object.assign(new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3."), { stack: 42 }),
+        error: Object.assign(
+          new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3."),
+          { stack: 42 },
+        ),
       },
     });
-    reports.reportError({ kind: "crash", event: { kind: "engine", stage: "startup", error: undefined } });
+    reports.reportError({
+      kind: "crash",
+      event: { kind: "engine", stage: "startup", error: undefined },
+    });
     await reports.flush();
-    expect(errorCalls().map((call) => exceptions(call).map(({ type, value, stacktrace }) => ({ type, value, stacktrace })))).toEqual([
+    expect(
+      errorCalls().map((call) =>
+        exceptions(call).map(({ type, value, stacktrace }) => ({ type, value, stacktrace })),
+      ),
+    ).toEqual([
       [
         { type: "TypeError", value: "<message withheld>", stacktrace: undefined },
         { type: "Error", value: "<message withheld> (code ENOENT)", stacktrace: undefined },
       ],
-      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3.", stacktrace: undefined }],
+      [
+        {
+          type: "EngineDaemonUnavailableError",
+          value: "Rust engine daemon exited unexpectedly with code 3.",
+          stacktrace: undefined,
+        },
+      ],
       [{ type: "ThrownValue", value: "a value of type undefined", stacktrace: undefined }],
     ]);
     for (const call of errorCalls()) {
@@ -510,13 +676,17 @@ describe("what an error report holds", () => {
 });
 
 describe("limits", () => {
-
   it("holds at most a bounded queue while it waits", async () => {
     const reports = shown();
-    for (let index = 0; index < REPORT_LIMITS.usageQueue + 50; index += 1) reports.track({ name: "workspace_opened" });
+    for (let index = 0; index < REPORT_LIMITS.usageQueue + 50; index += 1)
+      reports.track({ name: "workspace_opened" });
     reports.setPrivacy(ON);
     await reports.flush();
-    const sent = usageCalls().reduce((total, call) => total + (JSON.parse(String(call.init.body)) as { batch: unknown[] }).batch.length, 0);
+    const sent = usageCalls().reduce(
+      (total, call) =>
+        total + (JSON.parse(String(call.init.body)) as { batch: unknown[] }).batch.length,
+      0,
+    );
     expect(sent).toBe(REPORT_LIMITS.usageQueue);
   });
 
@@ -551,7 +721,10 @@ describe("error reports through the SDK's capture v1", () => {
   it("sends the same allowlisted report, in one request per problem", async () => {
     const reports = shown();
     reports.setPrivacy(ON);
-    reports.reportError({ kind: "crash", event: { kind: "main-exception", error: privateError(), origin: "uncaughtException" } });
+    reports.reportError({
+      kind: "crash",
+      event: { kind: "main-exception", error: privateError(), origin: "uncaughtException" },
+    });
     await reports.flush();
     expect(calls).toHaveLength(1);
     const [call] = calls;
@@ -562,16 +735,31 @@ describe("error reports through the SDK's capture v1", () => {
     const body = String(call!.init.body);
     for (const leaked of [SECRET, "sam", INSTALL_ID]) expect(body).not.toContain(leaked);
     expect(body).not.toMatch(/Users/i);
-    const sent = JSON.parse(body) as { batch: Array<SentEvent & { options: Record<string, unknown> }> };
+    const sent = JSON.parse(body) as {
+      batch: Array<SentEvent & { options: Record<string, unknown> }>;
+    };
     expect(sent.batch).toHaveLength(1);
     const [event] = sent.batch;
     expect(event!.event).toBe("$exception");
     expect(event!.distinct_id).toMatch(UUID);
     expect(event!.options).toEqual({ process_person_profile: false });
-    expect(event!.properties).toMatchObject({ $geoip_disable: true, process: "main", origin: "uncaughtException", dist: "win-x64" });
+    expect(event!.properties).toMatchObject({
+      $geoip_disable: true,
+      process: "main",
+      origin: "uncaughtException",
+      dist: "win-x64",
+    });
     const [error, cause] = event!.properties.$exception_list as SentException[];
-    expect(error).toMatchObject({ type: "TypeError", value: "<message withheld>", mechanism: { handled: false } });
-    expect(error!.stacktrace!.frames.map((frame) => frame.chunk_id ?? frame.filename)).toEqual([MAIN_CHUNK, "<withheld>", MAIN_CHUNK]);
+    expect(error).toMatchObject({
+      type: "TypeError",
+      value: "<message withheld>",
+      mechanism: { handled: false },
+    });
+    expect(error!.stacktrace!.frames.map((frame) => frame.chunk_id ?? frame.filename)).toEqual([
+      MAIN_CHUNK,
+      "<withheld>",
+      MAIN_CHUNK,
+    ]);
     expect(cause).toMatchObject({ type: "Error", value: "<message withheld> (code ENOENT)" });
   });
 
@@ -579,10 +767,11 @@ describe("error reports through the SDK's capture v1", () => {
     const reports = shown();
     reports.setPrivacy(ON);
     const held: Call[] = [];
-    respond = (call) => new Promise((_resolve, reject) => {
-      held.push(call);
-      call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
-    });
+    respond = (call) =>
+      new Promise((_resolve, reject) => {
+        held.push(call);
+        call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      });
     reports.reportError(anError());
     reports.reportError(anError("RangeError"));
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
@@ -600,8 +789,11 @@ describe("the switches in effect", () => {
     const settings = { privacy: ON };
     expect(privacyInEffect({ settings, source: "stored" })).toEqual(ON);
     expect(privacyInEffect({ settings, source: "recovered" })).toEqual(OFF);
-    expect(privacyInEffect({ settings, source: "stored", ignored: [{ key: "privacy.usageReports" }] }))
-      .toEqual({ usageReports: false, errorReports: true });
-    expect(privacyInEffect({ settings, source: "stored", ignored: [{ key: "privacy" }] })).toEqual(OFF);
+    expect(
+      privacyInEffect({ settings, source: "stored", ignored: [{ key: "privacy.usageReports" }] }),
+    ).toEqual({ usageReports: false, errorReports: true });
+    expect(privacyInEffect({ settings, source: "stored", ignored: [{ key: "privacy" }] })).toEqual(
+      OFF,
+    );
   });
 });

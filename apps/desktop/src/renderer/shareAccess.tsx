@@ -45,7 +45,13 @@ export function ShareAccessMenu(props: {
         onSelect: () => props.onPick(option.value),
       }))}
       trigger={(trigger) => (
-        <button {...trigger} type="button" data-testid={props.testId} disabled={props.disabled} className={ACCESS_TRIGGER}>
+        <button
+          {...trigger}
+          type="button"
+          data-testid={props.testId}
+          disabled={props.disabled}
+          className={ACCESS_TRIGGER}
+        >
           {SHARE_ACCESS_WORDS[props.access]}
           <ChevronDown size={12} aria-hidden className="text-subtle" />
         </button>

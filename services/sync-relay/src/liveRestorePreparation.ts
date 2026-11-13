@@ -1,17 +1,33 @@
-import {encodeNativeRestoreInput,DEFAULT_MAX_BLOB_BYTES} from "@dohc/workspace-engine-client/daemon";
-import type {OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
-import {configRecord} from "./deviceLiveHostConfig";
-import {liveValidation} from "./liveValidation.js";
-import {LiveRestoreBusy, type LiveRestoreValidator} from "./liveRestoreValidation.js";
-import {authorityInteger} from "./storage/liveDocumentAuthority";
-import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup, type StopRestoreOutcome} from "./liveRestoreDelivery";
-import type {StopRestoreContinuation} from "./storage/liveRestoreOperation";
-import {parseLiveUpdateDigest} from "@dohc/live-session-contract/live-update-admission";
-import {snapshotHostCoordinate} from "./liveTicketInputs";
+import {
+  encodeNativeRestoreInput,
+  DEFAULT_MAX_BLOB_BYTES,
+} from "@dohc/workspace-engine-client/daemon";
+import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/restore-proof";
+import { configRecord } from "./deviceLiveHostConfig";
+import { liveValidation } from "./liveValidation.js";
+import { LiveRestoreBusy, type LiveRestoreValidator } from "./liveRestoreValidation.js";
+import { authorityInteger } from "./storage/liveDocumentAuthority";
+import {
+  cancelStopRestore,
+  deliverStopRestore,
+  snapshotStopRestoreLookup,
+  type StopRestoreOutcome,
+} from "./liveRestoreDelivery";
+import type { StopRestoreContinuation } from "./storage/liveRestoreOperation";
+import { parseLiveUpdateDigest } from "@dohc/live-session-contract/live-update-admission";
+import { snapshotHostCoordinate } from "./liveTicketInputs";
 
-const policyKeys = ["maxStructVisits", "maxValueNodeVisits", "maxDecodedPayloadByteVisits", "maxStructClientGroupVisits",
-  "maxDeleteClientGroupVisits", "maxDeleteIntervalVisits", "maxIndexOperations"] as const;
-const reservationBytes = (maxBytes: number, workingReserveBytes: number) => 16 * maxBytes + workingReserveBytes;
+const policyKeys = [
+  "maxStructVisits",
+  "maxValueNodeVisits",
+  "maxDecodedPayloadByteVisits",
+  "maxStructClientGroupVisits",
+  "maxDeleteClientGroupVisits",
+  "maxDeleteIntervalVisits",
+  "maxIndexOperations",
+] as const;
+const reservationBytes = (maxBytes: number, workingReserveBytes: number) =>
+  16 * maxBytes + workingReserveBytes;
 // Timers hold at most a signed 32-bit delay.
 const deadline = (deadlineMs: unknown) => Math.min(authorityInteger(deadlineMs, 1), 2_147_483_647);
 /** One deadline for every run of a validation job. */
@@ -21,7 +37,14 @@ const validationSignal = (signal: AbortSignal | undefined, deadlineMs: unknown) 
 /** Private operator limits. No public restore permission or shipping default is implied. */
 export function parseLiveRestoreConfig(value: unknown) {
   if (value === undefined) return undefined;
-  const row = configRecord(value, ["maxBytes", "maxEvents", "aggregateBytes", "workingReserveBytes", "maxOperations", "validation"]);
+  const row = configRecord(value, [
+    "maxBytes",
+    "maxEvents",
+    "aggregateBytes",
+    "workingReserveBytes",
+    "maxOperations",
+    "validation",
+  ]);
   const validation = configRecord(row.validation, [...policyKeys]);
   const policy: OrderedLiveUpdateCutPolicy = Object.freeze({
     maxStructVisits: authorityInteger(validation.maxStructVisits, 1),
@@ -32,16 +55,29 @@ export function parseLiveRestoreConfig(value: unknown) {
     maxDeleteIntervalVisits: authorityInteger(validation.maxDeleteIntervalVisits, 1),
     maxIndexOperations: authorityInteger(validation.maxIndexOperations, 1),
   });
-  const maxBytes = authorityInteger(row.maxBytes, 5), maxEvents = authorityInteger(row.maxEvents, 1);
-  const aggregateBytes = authorityInteger(row.aggregateBytes, 1), workingReserveBytes = authorityInteger(row.workingReserveBytes, 1);
+  const maxBytes = authorityInteger(row.maxBytes, 5),
+    maxEvents = authorityInteger(row.maxEvents, 1);
+  const aggregateBytes = authorityInteger(row.aggregateBytes, 1),
+    workingReserveBytes = authorityInteger(row.workingReserveBytes, 1);
   const maxOperations = authorityInteger(row.maxOperations, 1);
   // Byte spans cover transport output, storage copies, both history captures and content validation.
   // The operator reserve covers parsed metadata and CRDT working allocations; this is not an RSS cap.
   const charge = reservationBytes(maxBytes, workingReserveBytes);
-  if (maxBytes > DEFAULT_MAX_BLOB_BYTES || !Number.isSafeInteger(charge) || charge > aggregateBytes) {
+  if (
+    maxBytes > DEFAULT_MAX_BLOB_BYTES ||
+    !Number.isSafeInteger(charge) ||
+    charge > aggregateBytes
+  ) {
     throw new TypeError("Restore preparation exceeds its configured aggregate budget.");
   }
-  return Object.freeze({maxBytes, maxEvents, aggregateBytes, workingReserveBytes, maxOperations, validation: policy});
+  return Object.freeze({
+    maxBytes,
+    maxEvents,
+    aggregateBytes,
+    workingReserveBytes,
+    maxOperations,
+    validation: policy,
+  });
 }
 export type LiveRestoreConfig = NonNullable<ReturnType<typeof parseLiveRestoreConfig>>;
 
@@ -54,22 +90,30 @@ export class LiveRestorePreparation {
   readonly #validator: LiveRestoreValidator;
   constructor(config: LiveRestoreConfig, validator?: LiveRestoreValidator) {
     this.config = parseLiveRestoreConfig(config)!;
-    this.#reservationBytes = reservationBytes(this.config.maxBytes, this.config.workingReserveBytes);
+    this.#reservationBytes = reservationBytes(
+      this.config.maxBytes,
+      this.config.workingReserveBytes,
+    );
     this.#validator = validator ?? liveValidation.restore(this.config.validation);
   }
 
   #reserve(signal: AbortSignal | undefined): () => void {
     const config = this.config;
     if (signal?.aborted) throw signal.reason;
-    if (this.#operations >= config.maxOperations || this.#reservationBytes > config.aggregateBytes - this.#bytes) {
+    if (
+      this.#operations >= config.maxOperations ||
+      this.#reservationBytes > config.aggregateBytes - this.#bytes
+    ) {
       throw new LiveRestoreBusy("Restore preparation capacity is full.");
     }
-    this.#bytes += this.#reservationBytes; this.#operations++;
+    this.#bytes += this.#reservationBytes;
+    this.#operations++;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.#bytes -= this.#reservationBytes; this.#operations--;
+      this.#bytes -= this.#reservationBytes;
+      this.#operations--;
     };
   }
 
@@ -77,55 +121,102 @@ export class LiveRestorePreparation {
     const release = this.#reserve(signal);
     try {
       return await run();
-    } finally {release();}
+    } finally {
+      release();
+    }
   }
 
   // Ends a restore that Decline or its departed path ended, through the fencing host's cancellation.
-  async #end(options: Parameters<typeof deliverStopRestore>[0], continuation: Exclude<StopRestoreContinuation, "continue">): Promise<Extract<StopRestoreOutcome, {kind: "pending"}>> {
+  async #end(
+    options: Parameters<typeof deliverStopRestore>[0],
+    continuation: Exclude<StopRestoreContinuation, "continue">,
+  ): Promise<Extract<StopRestoreOutcome, { kind: "pending" }>> {
     if (continuation === "cancel") {
-      const ended = await cancelStopRestore({...options, lookup: snapshotStopRestoreLookup(options.lookup)});
+      const ended = await cancelStopRestore({
+        ...options,
+        lookup: snapshotStopRestoreLookup(options.lookup),
+      });
       if (ended.kind === "pending") return ended;
       if (ended.kind === "refused") throw new Error(ended.reason);
     }
-    return {kind: "pending", reason: "The restore was declined."};
+    return { kind: "pending", reason: "The restore was declined." };
   }
 
   async prepare(options: Parameters<typeof deliverStopRestore>[0]) {
-    const config = this.config, lookup = snapshotStopRestoreLookup(options.lookup), signal = options.signal;
-    const check = () => {if (signal?.aborted) throw signal.reason;};
-    const {store, connection} = options;
-    const input = {...lookup, host: connection.host, maxBytes: config.maxBytes, maxEvents: config.maxEvents};
+    const config = this.config,
+      lookup = snapshotStopRestoreLookup(options.lookup),
+      signal = options.signal;
+    const check = () => {
+      if (signal?.aborted) throw signal.reason;
+    };
+    const { store, connection } = options;
+    const input = {
+      ...lookup,
+      host: connection.host,
+      maxBytes: config.maxBytes,
+      maxEvents: config.maxEvents,
+    };
     return this.#reserved(signal, async () => {
       let continuation = store.continueStopRestore(input, Date.now());
       if (continuation !== "continue") return this.#end(options, continuation);
-      const stopped = await deliverStopRestore({...options, lookup});
+      const stopped = await deliverStopRestore({ ...options, lookup });
       check();
       if (stopped.kind === "pending") return stopped;
-      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue") return this.#end(options, continuation);
+      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue")
+        return this.#end(options, continuation);
       const validation = () => validationSignal(signal, connection.deadlineMs);
       const saved = await store.readStopRestoreProposal(input, this.#validator, validation());
-      if (saved) return {kind: "prepared" as const, proposalDigest: saved.proposalDigest,
-        candidateDigest: saved.candidateDigest, recordedAtMs: saved.recordedAtMs, replayed: true};
+      if (saved)
+        return {
+          kind: "prepared" as const,
+          proposalDigest: saved.proposalDigest,
+          candidateDigest: saved.candidateDigest,
+          recordedAtMs: saved.recordedAtMs,
+          replayed: true,
+        };
       const selected = await store.resolveStopRestorePoint(input, this.#validator, validation());
-      const json = JSON.stringify({fence: stopped.receipt, point: selected.point});
+      const json = JSON.stringify({ fence: stopped.receipt, point: selected.point });
       const bytes = encodeNativeRestoreInput(Buffer.from(json), config.maxBytes);
-      const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
-        deadlineMs: connection.deadlineMs}, "prepare", bytes, config.maxBytes, signal);
+      const output = await connection.client.sendLiveRestore(
+        {
+          id: connection.nextRequestId(),
+          workspace: connection.workspace,
+          deadlineMs: connection.deadlineMs,
+        },
+        "prepare",
+        bytes,
+        config.maxBytes,
+        signal,
+      );
       check();
-      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue") return this.#end(options, continuation);
+      if ((continuation = store.continueStopRestore(input, Date.now())) !== "continue")
+        return this.#end(options, continuation);
       selected.assertCurrent();
-      const recorded = await store.recordStopRestoreProposal(input, output.bytes, this.#validator, Date.now(), validation());
-      return {kind: "prepared" as const, ...recorded};
+      const recorded = await store.recordStopRestoreProposal(
+        input,
+        output.bytes,
+        this.#validator,
+        Date.now(),
+        validation(),
+      );
+      return { kind: "prepared" as const, ...recorded };
     });
   }
 
   /** Keep the complete review charged until its response closes or expires. */
   async review(options: Parameters<typeof deliverStopRestore>[0]) {
-    const config = this.config, signal = options.signal;
-    const input = {...snapshotStopRestoreLookup(options.lookup), host: snapshotHostCoordinate(options.connection.host),
-      maxBytes: config.maxBytes, maxEvents: config.maxEvents, maxOutputBytes: config.maxBytes};
+    const config = this.config,
+      signal = options.signal;
+    const input = {
+      ...snapshotStopRestoreLookup(options.lookup),
+      host: snapshotHostCoordinate(options.connection.host),
+      maxBytes: config.maxBytes,
+      maxEvents: config.maxEvents,
+      maxOutputBytes: config.maxBytes,
+    };
     const deadlineMs = deadline(options.connection.deadlineMs);
-    const release = this.#reserve(signal), lifetime = new AbortController();
+    const release = this.#reserve(signal),
+      lifetime = new AbortController();
     const startedAt = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const close = (reason: unknown = new Error("Restore review closed.")) => {
@@ -136,16 +227,25 @@ export class LiveRestorePreparation {
       lifetime.abort(reason);
     };
     const abort = () => close(signal?.reason);
-    signal?.addEventListener("abort", abort, {once: true});
+    signal?.addEventListener("abort", abort, { once: true });
     timer = setTimeout(() => close(new Error("Restore review expired.")), deadlineMs);
     timer.unref();
     try {
       // Expiry cancels the validation run, so expired content is never returned.
-      const review = await options.store.readStopRestoreReview(input, this.#validator, lifetime.signal);
+      const review = await options.store.readStopRestoreReview(
+        input,
+        this.#validator,
+        lifetime.signal,
+      );
       if (signal?.aborted) throw signal.reason;
       lifetime.signal.throwIfAborted();
       if (performance.now() - startedAt >= deadlineMs) throw new Error("Restore review expired.");
-      return {review, close: () => close(), invalidated: lifetime.signal, maxOutputBytes: config.maxBytes} as const;
+      return {
+        review,
+        close: () => close(),
+        invalidated: lifetime.signal,
+        maxOutputBytes: config.maxBytes,
+      } as const;
     } catch (error) {
       close(error);
       throw error;
@@ -162,39 +262,91 @@ export class LiveRestorePreparation {
     return this.#complete(options, expectedDigest, false);
   }
 
-  async #complete(options: Parameters<typeof deliverStopRestore>[0], expectedDigest: string, requireReview: boolean) {
-    const config = this.config, signal = options.signal, store = options.store, deliveryKind = options.deliveryKind;
+  async #complete(
+    options: Parameters<typeof deliverStopRestore>[0],
+    expectedDigest: string,
+    requireReview: boolean,
+  ) {
+    const config = this.config,
+      signal = options.signal,
+      store = options.store,
+      deliveryKind = options.deliveryKind;
     const proposalDigest = parseLiveUpdateDigest(expectedDigest);
-    const connection = {...options.connection, host: snapshotHostCoordinate(options.connection.host),
-      nextRequestId: options.connection.nextRequestId.bind(options.connection)};
-    const input = {...snapshotStopRestoreLookup(options.lookup), host: connection.host,
-      maxBytes: config.maxBytes, maxEvents: config.maxEvents};
-    const check = () => {if (signal?.aborted) throw signal.reason;};
+    const connection = {
+      ...options.connection,
+      host: snapshotHostCoordinate(options.connection.host),
+      nextRequestId: options.connection.nextRequestId.bind(options.connection),
+    };
+    const input = {
+      ...snapshotStopRestoreLookup(options.lookup),
+      host: connection.host,
+      maxBytes: config.maxBytes,
+      maxEvents: config.maxEvents,
+    };
+    const check = () => {
+      if (signal?.aborted) throw signal.reason;
+    };
     return this.#reserved(signal, async () => {
       // Admission loses to a recorded Decline or a departed path. An admitted restore needs its workspace identity.
       const continuation = store.continueStopRestore(input, Date.now());
-      if (continuation !== "continue") throw new Error((await this.#end({...options, connection}, continuation)).reason);
+      if (continuation !== "continue")
+        throw new Error((await this.#end({ ...options, connection }, continuation)).reason);
       const retained = store.readStopRestoreLifecycle(input);
       const validation = validationSignal(signal, connection.deadlineMs);
-      let current = retained ?? await (requireReview
-        ? store.admitReviewedStopRestoreProposal({...input, maxOutputBytes: config.maxBytes}, proposalDigest, this.#validator, Date.now(), validation)
-        : store.admitStopRestoreProposal(input, proposalDigest, this.#validator, Date.now(), validation));
+      let current =
+        retained ??
+        (await (requireReview
+          ? store.admitReviewedStopRestoreProposal(
+              { ...input, maxOutputBytes: config.maxBytes },
+              proposalDigest,
+              this.#validator,
+              Date.now(),
+              validation,
+            )
+          : store.admitStopRestoreProposal(
+              input,
+              proposalDigest,
+              this.#validator,
+              Date.now(),
+              validation,
+            )));
       const verify = () => {
         check();
-        if (current.proposalDigest !== proposalDigest || current.preparation.fence.operation.origin.kind !== deliveryKind) {
+        if (
+          current.proposalDigest !== proposalDigest ||
+          current.preparation.fence.operation.origin.kind !== deliveryKind
+        ) {
           throw new Error("Restore continuation does not match the retained proposal.");
         }
       };
       const send = async (operation: "apply" | "settle" | "resume", settlementId?: string) => {
         verify();
-        const header = {...current.preparation, candidateDigest: current.candidateDigest,
-          nativeSourceManifestDigest: current.nativeSourceManifestDigest, admitted: current.admitted,
-          ...(settlementId === undefined ? {} : {settlementId})};
-        const bytes = encodeNativeRestoreInput(Buffer.from(JSON.stringify(header)), config.maxBytes);
-        const output = await connection.client.sendLiveRestore({id: connection.nextRequestId(), workspace: connection.workspace,
-          deadlineMs: connection.deadlineMs}, operation, bytes, config.maxBytes, signal);
+        const header = {
+          ...current.preparation,
+          candidateDigest: current.candidateDigest,
+          nativeSourceManifestDigest: current.nativeSourceManifestDigest,
+          admitted: current.admitted,
+          ...(settlementId === undefined ? {} : { settlementId }),
+        };
+        const bytes = encodeNativeRestoreInput(
+          Buffer.from(JSON.stringify(header)),
+          config.maxBytes,
+        );
+        const output = await connection.client.sendLiveRestore(
+          {
+            id: connection.nextRequestId(),
+            workspace: connection.workspace,
+            deadlineMs: connection.deadlineMs,
+          },
+          operation,
+          bytes,
+          config.maxBytes,
+          signal,
+        );
         check();
-        return JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(output.bytes)) as unknown;
+        return JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(output.bytes),
+        ) as unknown;
       };
       verify();
       if (current.phase === "relay-admitted") {
@@ -203,16 +355,30 @@ export class LiveRestorePreparation {
       if (current.phase === "native-applied") {
         current = store.acknowledgeStopRestoreSettlement(input, await send("settle"));
         if (current.phase === "native-applied") {
-          return {kind: "pending" as const, reason: "Restore materialization is pending.", proposalDigest};
+          return {
+            kind: "pending" as const,
+            reason: "Restore materialization is pending.",
+            proposalDigest,
+          };
         }
       }
       if (current.phase === "settled") {
-        if (!current.settlement?.materialized) throw new Error("Restore settlement is not materialized.");
-        current = store.acknowledgeStopRestoreResume(input, await send("resume", current.settlement.settlementId));
+        if (!current.settlement?.materialized)
+          throw new Error("Restore settlement is not materialized.");
+        current = store.acknowledgeStopRestoreResume(
+          input,
+          await send("resume", current.settlement.settlementId),
+        );
       }
       verify();
-      if (current.phase !== "resumed" || !current.resume) throw new Error("Restore continuation did not resume.");
-      return {kind: "resumed" as const, proposalDigest, receipt: current.resume, moved: store.stopRestoreFinishedAtMovedPath(input)};
+      if (current.phase !== "resumed" || !current.resume)
+        throw new Error("Restore continuation did not resume.");
+      return {
+        kind: "resumed" as const,
+        proposalDigest,
+        receipt: current.resume,
+        moved: store.stopRestoreFinishedAtMovedPath(input),
+      };
     });
   }
 }

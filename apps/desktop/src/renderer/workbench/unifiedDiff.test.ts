@@ -75,7 +75,10 @@ describe("buildUnifiedDiffLines", () => {
 function markedWords(before: string, after: string): [string, string[]][] {
   return unified(before, after)
     .filter((line) => line.kind === "added" || line.kind === "removed")
-    .map((line) => [line.kind, (line.words ?? []).map(([start, end]) => line.text.slice(start, end))]);
+    .map((line) => [
+      line.kind,
+      (line.words ?? []).map(([start, end]) => line.text.slice(start, end)),
+    ]);
 }
 
 describe("changed words", () => {
@@ -131,10 +134,7 @@ describe("changed words", () => {
 
   it("pairs a block's removed and added lines in order", () => {
     expect(
-      markedWords(
-        "keep\nalpha one\nbeta two\nkeep\n",
-        "keep\nalpha uno\nbeta dos\nkeep\n",
-      ),
+      markedWords("keep\nalpha one\nbeta two\nkeep\n", "keep\nalpha uno\nbeta dos\nkeep\n"),
     ).toEqual([
       ["removed", ["one"]],
       ["removed", ["two"]],
@@ -166,7 +166,10 @@ describe("word marks' size limit", () => {
     const lineChars = 1_000;
     const count = Math.round(chars / (2 * lineChars));
     const body = (word: string) =>
-      Array.from({ length: count }, (_, index) => `${String(index).padStart(6, "0")} ${word} ${"x".repeat(lineChars - 14)}`).join("\n") + "\n";
+      Array.from(
+        { length: count },
+        (_, index) => `${String(index).padStart(6, "0")} ${word} ${"x".repeat(lineChars - 14)}`,
+      ).join("\n") + "\n";
     return [body("aaaaaa"), body("bbbbbb")];
   }
 
@@ -198,8 +201,13 @@ describe("word marks' size limit", () => {
     // Each pair changes its first and last word, so it compares its whole
     // line: 99 tokens a side, 10,000 cells. The page has 1,000,000.
     const body = (start: string, end: string) =>
-      Array.from({ length: 150 }, (_, index) => `${start}${index} ${"word ".repeat(48)}${end}${index}`).join("\n") + "\n";
-    const lines = unified(body("a", "z"), body("b", "y"), 800).filter((line) => line.kind === "removed");
+      Array.from(
+        { length: 150 },
+        (_, index) => `${start}${index} ${"word ".repeat(48)}${end}${index}`,
+      ).join("\n") + "\n";
+    const lines = unified(body("a", "z"), body("b", "y"), 800).filter(
+      (line) => line.kind === "removed",
+    );
     expect(lines).toHaveLength(150);
     expect(lines[0].words).toHaveLength(2);
     // Past the budget, the marks would cover the whole line, so there are none.
@@ -208,7 +216,8 @@ describe("word marks' size limit", () => {
   });
 
   it("marks the whole middle of a long rewrite inside a kept start and end", () => {
-    const middle = (word: string) => Array.from({ length: 200 }, (_, index) => `${word}${index}`).join(" ");
+    const middle = (word: string) =>
+      Array.from({ length: 200 }, (_, index) => `${word}${index}`).join(" ");
     const before = `Start of the paragraph. ${middle("a")} ${"x ".repeat(600)}End.`;
     const after = `Start of the paragraph. ${middle("b")} ${"x ".repeat(600)}End.`;
     const words = changedWords(before, after);
@@ -234,7 +243,8 @@ describe("the diff's size", () => {
   it("counts lines, not words, however many words a line changed", () => {
     // Two lines changed, four words among them: the count is the lines.
     expect(
-      computeTextDiff("alpha one two\nbeta three four\n", "alpha uno dos\nbeta tres cuatro\n").counts,
+      computeTextDiff("alpha one two\nbeta three four\n", "alpha uno dos\nbeta tres cuatro\n")
+        .counts,
     ).toEqual({ added: 2, removed: 2 });
   });
 });

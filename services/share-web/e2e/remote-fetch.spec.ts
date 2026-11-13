@@ -1,9 +1,5 @@
 import { type Page, type Request } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const MARKER = "iso7remotefetch-31c8e4a7";
 const SENTINEL_BASELINE = `${MARKER}-unmodified`;
@@ -56,7 +52,11 @@ async function expectSentinelsUnchanged(page: Page): Promise<void> {
   expect(values).toEqual([SENTINEL_BASELINE, SENTINEL_BASELINE]);
 }
 
-test("blocks remote media and cross-origin connection egress", async ({ browser, probe, stack }) => {
+test("blocks remote media and cross-origin connection egress", async ({
+  browser,
+  probe,
+  stack,
+}) => {
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
@@ -87,20 +87,15 @@ test("blocks remote media and cross-origin connection egress", async ({ browser,
     const page = await context.newPage();
     const viewerResponse = await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
     if (!viewerResponse) throw new Error("viewer navigation returned no response");
-    expect(viewerResponse.headers()["content-security-policy"]).toContain(
-      "connect-src 'self'",
-    );
+    expect(viewerResponse.headers()["content-security-policy"]).toContain("connect-src 'self'");
 
     const article = page.locator("article.markdown");
     await expect(article).toContainText("Remote fetch browser conformance");
     await expect(page).toHaveURL(/\/s\/[A-Za-z0-9_-]{12}$/u);
     await expect(
-      article.locator(
-        'img[src^="http:" i], img[src^="https:" i], img[src^="data:" i]',
-      ),
+      article.locator('img[src^="http:" i], img[src^="https:" i], img[src^="data:" i]'),
     ).toHaveCount(0);
-    await expect(article.locator("img, link[rel~='stylesheet' i], script, style"))
-      .toHaveCount(0);
+    await expect(article.locator("img, link[rel~='stylesheet' i], script, style")).toHaveCount(0);
     await expect(
       article.locator(
         "base, button, embed, form, iframe, input, meta, object, select, svg, template, textarea",
@@ -140,9 +135,11 @@ test("blocks remote media and cross-origin connection egress", async ({ browser,
       errorName: "TypeError",
       rejected: true,
     });
-    await expect.poll(() =>
-      directFetchConsoleErrors.some((message) => message.includes("Content Security Policy"))
-    ).toBe(true);
+    await expect
+      .poll(() =>
+        directFetchConsoleErrors.some((message) => message.includes("Content Security Policy")),
+      )
+      .toBe(true);
     expect(probe.requests).toEqual([]);
 
     const viewerUrl = page.url();

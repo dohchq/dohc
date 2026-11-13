@@ -5,7 +5,10 @@ const shown = new Map<string, { copies: string; dismissed: boolean }>();
 export function useKeptFilesNotice(input: {
   workspaceId: string;
   paths: readonly (readonly [string, string])[] | undefined;
-  report: (notice: { paths: readonly (readonly [string, string])[]; toast: boolean }, openFolder: () => void) => void;
+  report: (
+    notice: { paths: readonly (readonly [string, string])[]; toast: boolean },
+    openFolder: () => void,
+  ) => void;
   openFolder: () => void;
 }): { noteDismissed: () => void } {
   const { workspaceId, paths, report, openFolder } = input;

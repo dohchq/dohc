@@ -21,8 +21,10 @@ export function bridgeWriteDeferred(
       typeof payload === "object" &&
       payload !== null &&
       !Array.isArray(payload) &&
-      typeof payload.workspaceId === "string" && payload.workspaceId.length > 0 &&
-      typeof payload.path === "string" && payload.path.length > 0
+      typeof payload.workspaceId === "string" &&
+      payload.workspaceId.length > 0 &&
+      typeof payload.path === "string" &&
+      payload.path.length > 0
     ) {
       note(payload.workspaceId, payload.path);
     }
@@ -73,11 +75,18 @@ export function scopeOf(payload: unknown): { workspaceId: string; paths: string[
   const rawPaths = Array.isArray(record.paths)
     ? record.paths.filter((path): path is string => typeof path === "string")
     : null;
-  const appliedCount = typeof record.projectedCount === "number" ? record.projectedCount :
-    typeof record.appliedCount === "number" ? record.appliedCount : Number.NaN;
+  const appliedCount =
+    typeof record.projectedCount === "number"
+      ? record.projectedCount
+      : typeof record.appliedCount === "number"
+        ? record.appliedCount
+        : Number.NaN;
   const notOwnedCount =
-    typeof record.projectedCount === "number" ? 0 :
-    typeof record.notOwnedCount === "number" ? record.notOwnedCount : Number.NaN;
+    typeof record.projectedCount === "number"
+      ? 0
+      : typeof record.notOwnedCount === "number"
+        ? record.notOwnedCount
+        : Number.NaN;
   const truncated =
     rawPaths === null ||
     !Number.isFinite(appliedCount) ||
@@ -124,8 +133,12 @@ export function bridgeCaptureEventsToRenderer(
   }
 
   const unsubscribe = daemon.onEvent((event) => {
-    if (event.name !== CAPTURE_MOMENT_RECORDED_EVENT && event.name !== COLLECTIONS_PROJECTED_EVENT &&
-      event.name !== CAPTURE_INITIAL_SETTLED_EVENT) return;
+    if (
+      event.name !== CAPTURE_MOMENT_RECORDED_EVENT &&
+      event.name !== COLLECTIONS_PROJECTED_EVENT &&
+      event.name !== CAPTURE_INITIAL_SETTLED_EVENT
+    )
+      return;
     const scope = scopeOf(event.payload);
     if (!scope) {
       pendingGlobal = true;

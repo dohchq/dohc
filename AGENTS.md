@@ -242,6 +242,7 @@ Run the smallest check that proves the change.
 Run affected-package typechecks and focused tests while editing and during review.
 Run `pnpm lint` after you change JavaScript or TypeScript. It runs oxlint with the rules in `.oxlintrc.json`, and the JavaScript gate runs it too.
 Fix a report in the code. If the code is correct, put `// oxlint-disable-next-line <rule> -- <reason>` above the line.
+Run `pnpm fmt` before you commit JavaScript or TypeScript. The JavaScript gate fails on a file that oxfmt would change.
 Test observable behavior that can break. Mock-call assertions and callback wiring alone do not prove it.
 Leave facts already guaranteed by types to the typechecker.
 Extend an existing case or table when it covers the behavior.

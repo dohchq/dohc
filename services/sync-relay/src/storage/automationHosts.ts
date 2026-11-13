@@ -80,10 +80,15 @@ export interface AutomationServerSchedules {
   fenceGeneration: number | null;
 }
 
-export function readAutomationServerSchedules(storage: StorageContext, workspaceId: string): AutomationServerSchedules | null {
-  const row = storage.db.prepare(
-    "SELECT incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation FROM sync_relay_automation_server_schedules WHERE workspace_id = ?",
-  ).get(workspaceId);
+export function readAutomationServerSchedules(
+  storage: StorageContext,
+  workspaceId: string,
+): AutomationServerSchedules | null {
+  const row = storage.db
+    .prepare(
+      "SELECT incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation FROM sync_relay_automation_server_schedules WHERE workspace_id = ?",
+    )
+    .get(workspaceId);
   if (!row) return null;
   const optional = (value: unknown) => (value === null ? null : Number(value));
   return {
@@ -102,9 +107,14 @@ export function readAutomationServerSchedules(storage: StorageContext, workspace
  * that copy was given becomes the fence, and the new copy has started and
  * taken nothing yet. The progress stays, since the server ran nothing after it.
  */
-export function beginAutomationServerCopy(storage: StorageContext, input: { workspaceId: string; incarnation: number }): void {
-  storage.tx(() => storage.db.prepare(
-    `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
+export function beginAutomationServerCopy(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number },
+): void {
+  storage.tx(() =>
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
      VALUES (?, ?, NULL, NULL, NULL, NULL, NULL)
      ON CONFLICT(workspace_id) DO UPDATE SET
        fence_generation = CASE WHEN incarnation = excluded.incarnation THEN fence_generation
@@ -114,30 +124,48 @@ export function beginAutomationServerCopy(storage: StorageContext, input: { work
        host_generation = CASE WHEN incarnation = excluded.incarnation THEN host_generation END,
        host_released_ms = CASE WHEN incarnation = excluded.incarnation THEN host_released_ms END,
        incarnation = excluded.incarnation`,
-  ).run(input.workspaceId, input.incarnation));
+      )
+      .run(input.workspaceId, input.incarnation),
+  );
 }
 
 /** The server started its schedules from this host record, in this copy of the workspace. */
 export function recordAutomationServerStart(
   storage: StorageContext,
-  input: { workspaceId: string; incarnation: number; generation: number; releasedThroughMs: number | null },
+  input: {
+    workspaceId: string;
+    incarnation: number;
+    generation: number;
+    releasedThroughMs: number | null;
+  },
 ): void {
-  storage.tx(() => storage.db.prepare(
-    `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
+  storage.tx(() =>
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
      VALUES (?, ?, ?, ?, NULL, NULL, NULL)
      ON CONFLICT(workspace_id) DO UPDATE SET
        incarnation = excluded.incarnation, host_generation = excluded.host_generation,
        host_released_ms = excluded.host_released_ms`,
-  ).run(input.workspaceId, input.incarnation, input.generation, input.releasedThroughMs));
+      )
+      .run(input.workspaceId, input.incarnation, input.generation, input.releasedThroughMs),
+  );
 }
 
 /** The server's schedules reached this mark. The progress never goes back. */
-export function recordAutomationServerProgress(storage: StorageContext, input: { workspaceId: string; throughMs: number }): void {
-  storage.tx(() => storage.db.prepare(
-    `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
+export function recordAutomationServerProgress(
+  storage: StorageContext,
+  input: { workspaceId: string; throughMs: number },
+): void {
+  storage.tx(() =>
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_automation_server_schedules (workspace_id, incarnation, host_generation, host_released_ms, through_ms, taken_generation, fence_generation)
      VALUES (?, 0, NULL, NULL, ?, NULL, NULL)
      ON CONFLICT(workspace_id) DO UPDATE SET through_ms = max(coalesce(through_ms, excluded.through_ms), excluded.through_ms)`,
-  ).run(input.workspaceId, input.throughMs));
+      )
+      .run(input.workspaceId, input.throughMs),
+  );
 }
 
 // Each server run whose changes the relay may not have yet, kept here
@@ -187,48 +215,89 @@ export interface LostAutomationServerRun {
 }
 
 /** Before a run's first change to the copy since the relay last had all of them. */
-export function recordAutomationServerRunChanging(storage: StorageContext, input: AutomationServerRun & {
-  automationName: string | null; collectionPath: string | null; startedAtMs: number; nowMs: number;
-}): void {
-  storage.tx(() => storage.db.prepare(
-    `INSERT INTO sync_relay_automation_server_unsent_runs (workspace_id, incarnation, automation_id, claim_id, automation_name,
+export function recordAutomationServerRunChanging(
+  storage: StorageContext,
+  input: AutomationServerRun & {
+    automationName: string | null;
+    collectionPath: string | null;
+    startedAtMs: number;
+    nowMs: number;
+  },
+): void {
+  storage.tx(() =>
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_automation_server_unsent_runs (workspace_id, incarnation, automation_id, claim_id, automation_name,
        collection_path, started_at_ms, unsent_since_ms, ended, touch, lost_at_ms, reported)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, NULL, 0)
      ON CONFLICT(workspace_id, incarnation, automation_id, claim_id) DO UPDATE SET
        automation_name = coalesce(excluded.automation_name, automation_name),
        collection_path = coalesce(excluded.collection_path, collection_path), ended = 0, touch = touch + 1`,
-  ).run(input.workspaceId, input.incarnation, input.automationId, input.claimId, input.automationName, input.collectionPath,
-    input.startedAtMs, input.nowMs));
+      )
+      .run(
+        input.workspaceId,
+        input.incarnation,
+        input.automationId,
+        input.claimId,
+        input.automationName,
+        input.collectionPath,
+        input.startedAtMs,
+        input.nowMs,
+      ),
+  );
 }
 
 /** The run ended, so it changes its copy no more. Answers whether the relay may lack its changes. */
-export function endAutomationServerRun(storage: StorageContext, input: AutomationServerRun): boolean {
-  return storage.tx(() => storage.db.prepare(
-    `UPDATE sync_relay_automation_server_unsent_runs SET ended = 1, touch = touch + 1
+export function endAutomationServerRun(
+  storage: StorageContext,
+  input: AutomationServerRun,
+): boolean {
+  return storage.tx(
+    () =>
+      storage.db
+        .prepare(
+          `UPDATE sync_relay_automation_server_unsent_runs SET ended = 1, touch = touch + 1
      WHERE workspace_id = ? AND incarnation = ? AND automation_id = ? AND claim_id = ? AND lost_at_ms IS NULL`,
-  ).run(input.workspaceId, input.incarnation, input.automationId, input.claimId).changes > 0);
+        )
+        .run(input.workspaceId, input.incarnation, input.automationId, input.claimId).changes > 0,
+  );
 }
 
 /** The ended runs of this copy whose changes the relay may lack, as a sync about to begin finds them. */
-export function endedAutomationServerRuns(storage: StorageContext, input: { workspaceId: string; incarnation: number }) {
-  return storage.db.prepare(
-    `SELECT automation_id, claim_id, touch FROM sync_relay_automation_server_unsent_runs
+export function endedAutomationServerRuns(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number },
+) {
+  return storage.db
+    .prepare(
+      `SELECT automation_id, claim_id, touch FROM sync_relay_automation_server_unsent_runs
      WHERE workspace_id = ? AND incarnation = ? AND ended = 1 AND lost_at_ms IS NULL`,
-  ).all(input.workspaceId, input.incarnation)
-    .map((row) => ({ automationId: String(row.automation_id), claimId: String(row.claim_id), touch: Number(row.touch) }));
+    )
+    .all(input.workspaceId, input.incarnation)
+    .map((row) => ({
+      automationId: String(row.automation_id),
+      claimId: String(row.claim_id),
+      touch: Number(row.touch),
+    }));
 }
 
 /** A sync that began after these runs ended succeeded: the relay has their changes. */
-export function confirmAutomationServerRunsSent(storage: StorageContext, input: {
-  workspaceId: string; incarnation: number; runs: ReadonlyArray<{ automationId: string; claimId: string; touch: number }>;
-}): void {
+export function confirmAutomationServerRunsSent(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    incarnation: number;
+    runs: ReadonlyArray<{ automationId: string; claimId: string; touch: number }>;
+  },
+): void {
   if (input.runs.length === 0) return;
   storage.tx(() => {
     const remove = storage.db.prepare(
       `DELETE FROM sync_relay_automation_server_unsent_runs
        WHERE workspace_id = ? AND incarnation = ? AND automation_id = ? AND claim_id = ? AND touch = ? AND lost_at_ms IS NULL`,
     );
-    for (const run of input.runs) remove.run(input.workspaceId, input.incarnation, run.automationId, run.claimId, run.touch);
+    for (const run of input.runs)
+      remove.run(input.workspaceId, input.incarnation, run.automationId, run.claimId, run.touch);
   });
 }
 
@@ -236,81 +305,133 @@ export function confirmAutomationServerRunsSent(storage: StorageContext, input: 
  * This copy replaced an earlier one, whose engine is gone: what that copy had
  * not sent is lost. Rows lost longer ago than run history keeps a run go.
  */
-export function markAutomationServerRunsLost(storage: StorageContext, input: { workspaceId: string; incarnation: number; nowMs: number }): void {
+export function markAutomationServerRunsLost(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number; nowMs: number },
+): void {
   const cutoff = input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS;
-  const stale = storage.db.prepare(
-    `SELECT 1 FROM sync_relay_automation_server_unsent_runs
+  const stale = storage.db
+    .prepare(
+      `SELECT 1 FROM sync_relay_automation_server_unsent_runs
      WHERE workspace_id = ? AND ((incarnation <> ? AND lost_at_ms IS NULL) OR lost_at_ms <= ?) LIMIT 1`,
-  ).get(input.workspaceId, input.incarnation, cutoff);
+    )
+    .get(input.workspaceId, input.incarnation, cutoff);
   if (!stale) return;
   storage.tx(() => {
-    storage.db.prepare(
-      "DELETE FROM sync_relay_automation_server_unsent_runs WHERE workspace_id = ? AND lost_at_ms <= ?",
-    ).run(input.workspaceId, cutoff);
-    storage.db.prepare(
-      `UPDATE sync_relay_automation_server_unsent_runs SET lost_at_ms = ?
+    storage.db
+      .prepare(
+        "DELETE FROM sync_relay_automation_server_unsent_runs WHERE workspace_id = ? AND lost_at_ms <= ?",
+      )
+      .run(input.workspaceId, cutoff);
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_automation_server_unsent_runs SET lost_at_ms = ?
        WHERE workspace_id = ? AND incarnation <> ? AND lost_at_ms IS NULL`,
-    ).run(input.nowMs, input.workspaceId, input.incarnation);
+      )
+      .run(input.nowMs, input.workspaceId, input.incarnation);
   });
 }
 
 /** Where a page of lost runs ends: the next page lists the runs after this one. */
-export type LostAutomationServerRunCursor = Pick<LostAutomationServerRun, "startedAtMs" | "claimId">;
+export type LostAutomationServerRunCursor = Pick<
+  LostAutomationServerRun,
+  "startedAtMs" | "claimId"
+>;
 
 /**
  * Runs whose changes a lost copy may not have sent, newest first: one
  * automation's, or one claim's. A claim lost in several copies is one run.
  */
-export function lostAutomationServerRuns(storage: StorageContext, input: {
-  workspaceId: string; nowMs: number; limit: number; automationId: string; claimId?: string; after?: LostAutomationServerRunCursor;
-}): LostAutomationServerRun[] {
+export function lostAutomationServerRuns(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    nowMs: number;
+    limit: number;
+    automationId: string;
+    claimId?: string;
+    after?: LostAutomationServerRunCursor;
+  },
+): LostAutomationServerRun[] {
   const after = input.after ?? null;
-  return storage.db.prepare(
-    `SELECT claim_id, min(started_at_ms) AS first_started_at_ms, min(unsent_since_ms) AS first_unsent_since_ms
+  return storage.db
+    .prepare(
+      `SELECT claim_id, min(started_at_ms) AS first_started_at_ms, min(unsent_since_ms) AS first_unsent_since_ms
      FROM sync_relay_automation_server_unsent_runs
      WHERE workspace_id = ? AND lost_at_ms > ? AND automation_id = ? AND (? IS NULL OR claim_id = ?)
      GROUP BY claim_id
      HAVING ? IS NULL OR (min(started_at_ms), claim_id) < (?, ?)
      ORDER BY min(started_at_ms) DESC, claim_id DESC LIMIT ?`,
-  ).all(input.workspaceId, input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS, input.automationId, input.claimId ?? null, input.claimId ?? null,
-    after === null ? null : 1, after?.startedAtMs ?? null, after?.claimId ?? null, input.limit)
+    )
+    .all(
+      input.workspaceId,
+      input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS,
+      input.automationId,
+      input.claimId ?? null,
+      input.claimId ?? null,
+      after === null ? null : 1,
+      after?.startedAtMs ?? null,
+      after?.claimId ?? null,
+      input.limit,
+    )
     .map((row) => ({
-      claimId: String(row.claim_id), startedAtMs: Number(row.first_started_at_ms),
+      claimId: String(row.claim_id),
+      startedAtMs: Number(row.first_started_at_ms),
       unsentSinceMs: Number(row.first_unsent_since_ms),
     }));
 }
 
 /** The lost runs no Notice told of yet, for each lost copy and automation: how many, and the newest. */
-export function unreportedLostAutomationServerRuns(storage: StorageContext, input: { workspaceId: string; nowMs: number }) {
+export function unreportedLostAutomationServerRuns(
+  storage: StorageContext,
+  input: { workspaceId: string; nowMs: number },
+) {
   // SQLite takes the bare columns from the row with the latest start.
-  return storage.db.prepare(
-    `SELECT incarnation, automation_id, count(*) AS runs, max(started_at_ms) AS started_at_ms, claim_id, automation_name, collection_path
+  return storage.db
+    .prepare(
+      `SELECT incarnation, automation_id, count(*) AS runs, max(started_at_ms) AS started_at_ms, claim_id, automation_name, collection_path
      FROM sync_relay_automation_server_unsent_runs
      WHERE workspace_id = ? AND lost_at_ms > ? AND reported = 0
      GROUP BY incarnation, automation_id ORDER BY incarnation, automation_id`,
-  ).all(input.workspaceId, input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS)
+    )
+    .all(input.workspaceId, input.nowMs - AUTOMATION_SERVER_LOST_RUN_KEEP_MS)
     .map((row) => ({
-      incarnation: Number(row.incarnation), automationId: String(row.automation_id), runs: Number(row.runs), newestClaimId: String(row.claim_id),
+      incarnation: Number(row.incarnation),
+      automationId: String(row.automation_id),
+      runs: Number(row.runs),
+      newestClaimId: String(row.claim_id),
       automationName: row.automation_name === null ? null : String(row.automation_name),
       collectionPath: row.collection_path === null ? null : String(row.collection_path),
     }));
 }
 
 /** A Notice told the owner of every lost run of this copy and automation. */
-export function reportAutomationServerRunsLost(storage: StorageContext, input: { workspaceId: string; incarnation: number; automationId: string }): void {
+export function reportAutomationServerRunsLost(
+  storage: StorageContext,
+  input: { workspaceId: string; incarnation: number; automationId: string },
+): void {
   storage.tx(() => {
-    storage.db.prepare(
-      `UPDATE sync_relay_automation_server_unsent_runs SET reported = 1
+    storage.db
+      .prepare(
+        `UPDATE sync_relay_automation_server_unsent_runs SET reported = 1
        WHERE workspace_id = ? AND incarnation = ? AND automation_id = ? AND lost_at_ms IS NOT NULL AND reported = 0`,
-    ).run(input.workspaceId, input.incarnation, input.automationId);
+      )
+      .run(input.workspaceId, input.incarnation, input.automationId);
   });
 }
 
 /** The server gave its current copy the release at this generation to take. It never goes back. */
-export function recordAutomationServerTaken(storage: StorageContext, input: { workspaceId: string; generation: number }): void {
-  storage.tx(() => storage.db.prepare(
-    "UPDATE sync_relay_automation_server_schedules SET taken_generation = max(coalesce(taken_generation, 0), ?) WHERE workspace_id = ?",
-  ).run(input.generation, input.workspaceId));
+export function recordAutomationServerTaken(
+  storage: StorageContext,
+  input: { workspaceId: string; generation: number },
+): void {
+  storage.tx(() =>
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_automation_server_schedules SET taken_generation = max(coalesce(taken_generation, 0), ?) WHERE workspace_id = ?",
+      )
+      .run(input.generation, input.workspaceId),
+  );
 }
 
 function serverProgress(storage: StorageContext, workspaceId: string): number | null {
@@ -320,26 +441,36 @@ function serverProgress(storage: StorageContext, workspaceId: string): number | 
 function keepGroupHandover(
   storage: StorageContext,
   workspaceId: string,
-  row: { generation: number; forInstallId: string; tookOver: boolean; groups: string; reach: string | null },
+  row: {
+    generation: number;
+    forInstallId: string;
+    tookOver: boolean;
+    groups: string;
+    reach: string | null;
+  },
 ): void {
-  storage.db.prepare(
-    `INSERT INTO sync_relay_automation_group_handovers
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_automation_group_handovers
        (workspace_id, generation, for_install_id, took_over, groups_json)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id) DO UPDATE SET
        generation = excluded.generation, for_install_id = excluded.for_install_id,
        took_over = excluded.took_over, groups_json = excluded.groups_json`,
-  ).run(workspaceId, row.generation, row.forInstallId, row.tookOver ? 1 : 0, row.groups);
-  storage.db.prepare(
-    `INSERT INTO sync_relay_automation_reach_handovers (workspace_id, reach_json) VALUES (?, ?)
+    )
+    .run(workspaceId, row.generation, row.forInstallId, row.tookOver ? 1 : 0, row.groups);
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_automation_reach_handovers (workspace_id, reach_json) VALUES (?, ?)
      ON CONFLICT(workspace_id) DO UPDATE SET reach_json = excluded.reach_json`,
-  ).run(workspaceId, row.reach);
+    )
+    .run(workspaceId, row.reach);
 }
 
 function heldReach(storage: StorageContext, workspaceId: string): string | null {
-  const row = storage.db.prepare(
-    "SELECT reach_json FROM sync_relay_automation_reach_handovers WHERE workspace_id = ?",
-  ).get(workspaceId);
+  const row = storage.db
+    .prepare("SELECT reach_json FROM sync_relay_automation_reach_handovers WHERE workspace_id = ?")
+    .get(workspaceId);
   return row?.reach_json === undefined || row.reach_json === null ? null : String(row.reach_json);
 }
 
@@ -398,10 +529,12 @@ function requireOwner(storage: StorageContext, scope: OwnerScope): void {
 }
 
 function readHost(storage: StorageContext, workspaceId: string): RelayAutomationHost | null {
-  const row = storage.db.prepare(
-    `SELECT install_id, generation, handover_from, released_through_ms
+  const row = storage.db
+    .prepare(
+      `SELECT install_id, generation, handover_from, released_through_ms
      FROM sync_relay_automation_hosts WHERE workspace_id = ?`,
-  ).get(workspaceId);
+    )
+    .get(workspaceId);
   if (!row) return null;
   return {
     installId: String(row.install_id),
@@ -411,19 +544,28 @@ function readHost(storage: StorageContext, workspaceId: string): RelayAutomation
   };
 }
 
-function readState(storage: StorageContext, input: AutomationHostReadInput): RelayAutomationHostState {
-  const computers: RelayAutomationComputer[] = storage.db.prepare(
-    `SELECT install_id, label, last_seen_ms FROM sync_relay_automation_computers
+function readState(
+  storage: StorageContext,
+  input: AutomationHostReadInput,
+): RelayAutomationHostState {
+  const computers: RelayAutomationComputer[] = storage.db
+    .prepare(
+      `SELECT install_id, label, last_seen_ms FROM sync_relay_automation_computers
      WHERE workspace_id = ? ORDER BY last_seen_ms DESC, install_id`,
-  ).all(input.workspaceId).map((row) => ({
-    installId: String(row.install_id),
-    kind: "computer",
-    label: String(row.label),
-    lastSeenMs: Number(row.last_seen_ms),
-  }));
+    )
+    .all(input.workspaceId)
+    .map((row) => ({
+      installId: String(row.install_id),
+      kind: "computer",
+      label: String(row.label),
+      lastSeenMs: Number(row.last_seen_ms),
+    }));
   if (input.server) {
     computers.unshift({
-      installId: AUTOMATION_SERVER_INSTALL_ID, kind: "server", label: input.server.label, lastSeenMs: input.nowMs,
+      installId: AUTOMATION_SERVER_INSTALL_ID,
+      kind: "server",
+      label: input.server.label,
+      lastSeenMs: input.nowMs,
     });
   }
   return { host: readHost(storage, input.workspaceId), computers };
@@ -431,30 +573,38 @@ function readState(storage: StorageContext, input: AutomationHostReadInput): Rel
 
 // The computer the relay placed as the host itself, or null.
 function placement(storage: StorageContext, workspaceId: string): string | null {
-  const row = storage.db.prepare(
-    "SELECT install_id FROM sync_relay_automation_host_placements WHERE workspace_id = ?",
-  ).get(workspaceId);
+  const row = storage.db
+    .prepare("SELECT install_id FROM sync_relay_automation_host_placements WHERE workspace_id = ?")
+    .get(workspaceId);
   return row ? String(row.install_id) : null;
 }
 
 function place(storage: StorageContext, workspaceId: string, installId: string | null): void {
   if (installId === null) {
-    storage.db.prepare("DELETE FROM sync_relay_automation_host_placements WHERE workspace_id = ?").run(workspaceId);
+    storage.db
+      .prepare("DELETE FROM sync_relay_automation_host_placements WHERE workspace_id = ?")
+      .run(workspaceId);
     return;
   }
-  storage.db.prepare(
-    `INSERT INTO sync_relay_automation_host_placements (workspace_id, install_id) VALUES (?, ?)
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_automation_host_placements (workspace_id, install_id) VALUES (?, ?)
      ON CONFLICT(workspace_id) DO UPDATE SET install_id = excluded.install_id`,
-  ).run(workspaceId, installId);
+    )
+    .run(workspaceId, installId);
 }
 
 // Whether the server can run this workspace's automations: it already does,
 // or it runs them for fewer workspaces than its limit.
 function serverHasRoom(storage: StorageContext, workspaceId: string): boolean {
-  const others = Number(storage.db.prepare(
-    `SELECT COUNT(*) AS n FROM sync_relay_automation_hosts
+  const others = Number(
+    storage.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM sync_relay_automation_hosts
      WHERE (install_id = ? OR handover_from = ?) AND workspace_id <> ?`,
-  ).get(AUTOMATION_SERVER_INSTALL_ID, AUTOMATION_SERVER_INSTALL_ID, workspaceId)?.n);
+      )
+      .get(AUTOMATION_SERVER_INSTALL_ID, AUTOMATION_SERVER_INSTALL_ID, workspaceId)?.n,
+  );
   return others < AUTOMATION_SERVER_MAX_WORKSPACES;
 }
 
@@ -472,12 +622,25 @@ function startWithoutHandover(
   installId: string,
   nowMs: number,
 ): void {
-  writeHost(storage, workspaceId, {
-    installId, handoverFrom: null,
-    releasedThroughMs: laterProgress(host.releasedThroughMs, Math.max(nowMs, serverProgress(storage, workspaceId) ?? nowMs)),
-  }, host);
+  writeHost(
+    storage,
+    workspaceId,
+    {
+      installId,
+      handoverFrom: null,
+      releasedThroughMs: laterProgress(
+        host.releasedThroughMs,
+        Math.max(nowMs, serverProgress(storage, workspaceId) ?? nowMs),
+      ),
+    },
+    host,
+  );
   keepGroupHandover(storage, workspaceId, {
-    generation: host.generation + 1, forInstallId: installId, tookOver: true, groups: "{}", reach: null,
+    generation: host.generation + 1,
+    forInstallId: installId,
+    tookOver: true,
+    groups: "{}",
+    reach: null,
   });
 }
 
@@ -487,7 +650,12 @@ function startWithoutHandover(
 // was handing over to, and starts after now. When a computer was handing over
 // to the server, that computer never stopped: the handover is called off,
 // as choosing that computer back does.
-function repairWithoutServer(storage: StorageContext, workspaceId: string, claimant: string | null, nowMs: number): void {
+function repairWithoutServer(
+  storage: StorageContext,
+  workspaceId: string,
+  claimant: string | null,
+  nowMs: number,
+): void {
   const host = readHost(storage, workspaceId);
   if (!host) return;
   const running = host.handoverFrom ?? host.installId;
@@ -499,9 +667,16 @@ function repairWithoutServer(storage: StorageContext, workspaceId: string, claim
       place(storage, workspaceId, claimant);
     }
   } else if (host.installId === AUTOMATION_SERVER_INSTALL_ID) {
-    writeHost(storage, workspaceId, {
-      installId: running, handoverFrom: null, releasedThroughMs: host.releasedThroughMs,
-    }, host);
+    writeHost(
+      storage,
+      workspaceId,
+      {
+        installId: running,
+        handoverFrom: null,
+        releasedThroughMs: host.releasedThroughMs,
+      },
+      host,
+    );
   }
 }
 
@@ -516,14 +691,22 @@ function writeHost(
   next: Omit<RelayAutomationHost, "generation">,
   previous: RelayAutomationHost | null,
 ): void {
-  storage.db.prepare(
-    `INSERT INTO sync_relay_automation_hosts
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_automation_hosts
        (workspace_id, install_id, generation, handover_from, released_through_ms)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(workspace_id) DO UPDATE SET
        install_id = excluded.install_id, generation = excluded.generation,
        handover_from = excluded.handover_from, released_through_ms = excluded.released_through_ms`,
-  ).run(workspaceId, next.installId, (previous?.generation ?? 0) + 1, next.handoverFrom, next.releasedThroughMs);
+    )
+    .run(
+      workspaceId,
+      next.installId,
+      (previous?.generation ?? 0) + 1,
+      next.handoverFrom,
+      next.releasedThroughMs,
+    );
 }
 
 // The latest progress any computer that handed over reported. A later
@@ -533,11 +716,17 @@ function laterProgress(previous: number | null, reported: number): number {
 }
 
 /** The workspace's host record, for the server that runs its automations in this process. */
-export function automationHostRecord(storage: StorageContext, workspaceId: string): RelayAutomationHost | null {
+export function automationHostRecord(
+  storage: StorageContext,
+  workspaceId: string,
+): RelayAutomationHost | null {
   return storage.readTx(() => readHost(storage, workspaceId));
 }
 
-export function readAutomationHost(storage: StorageContext, input: AutomationHostReadInput): RelayAutomationHostState {
+export function readAutomationHost(
+  storage: StorageContext,
+  input: AutomationHostReadInput,
+): RelayAutomationHostState {
   return storage.readTx(() => {
     requireOwner(storage, input);
     return readState(storage, input);
@@ -558,46 +747,75 @@ export function checkInAutomationComputer(
   return storage.tx(() => {
     requireOwner(storage, input);
     const { workspaceId, installId } = input;
-    if (installId === AUTOMATION_SERVER_INSTALL_ID) throw badRequest("installId is reserved for the server");
-    if (!input.server) repairWithoutServer(storage, workspaceId, input.claim ? installId : null, input.nowMs);
+    if (installId === AUTOMATION_SERVER_INSTALL_ID)
+      throw badRequest("installId is reserved for the server");
+    if (!input.server)
+      repairWithoutServer(storage, workspaceId, input.claim ? installId : null, input.nowMs);
     const host = readHost(storage, workspaceId);
-    const known = storage.db.prepare(
-      "SELECT 1 FROM sync_relay_automation_computers WHERE workspace_id = ? AND install_id = ?",
-    ).get(workspaceId, installId);
+    const known = storage.db
+      .prepare(
+        "SELECT 1 FROM sync_relay_automation_computers WHERE workspace_id = ? AND install_id = ?",
+      )
+      .get(workspaceId, installId);
     if (!known) {
-      const count = Number(storage.db.prepare(
-        "SELECT COUNT(*) AS n FROM sync_relay_automation_computers WHERE workspace_id = ?",
-      ).get(workspaceId)?.n);
+      const count = Number(
+        storage.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM sync_relay_automation_computers WHERE workspace_id = ?",
+          )
+          .get(workspaceId)?.n,
+      );
       if (count >= AUTOMATION_COMPUTERS_PER_WORKSPACE) {
-        storage.db.prepare(
-          `DELETE FROM sync_relay_automation_computers WHERE workspace_id = ? AND install_id = (
+        storage.db
+          .prepare(
+            `DELETE FROM sync_relay_automation_computers WHERE workspace_id = ? AND install_id = (
              SELECT install_id FROM sync_relay_automation_computers
              WHERE workspace_id = ? AND install_id IS NOT ? AND install_id IS NOT ?
              ORDER BY last_seen_ms, install_id LIMIT 1)`,
-        ).run(workspaceId, workspaceId, host?.installId ?? null, host?.handoverFrom ?? null);
+          )
+          .run(workspaceId, workspaceId, host?.installId ?? null, host?.handoverFrom ?? null);
       }
     }
-    storage.db.prepare(
-      `INSERT INTO sync_relay_automation_computers (workspace_id, install_id, label, last_seen_ms)
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_automation_computers (workspace_id, install_id, label, last_seen_ms)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(workspace_id, install_id) DO UPDATE SET
          label = excluded.label, last_seen_ms = excluded.last_seen_ms`,
-    ).run(workspaceId, installId, input.label, input.nowMs);
+      )
+      .run(workspaceId, installId, input.label, input.nowMs);
     if (input.claim && !host) {
       const toServer = input.server !== null && serverHasRoom(storage, workspaceId);
-      writeHost(storage, workspaceId, {
-        installId: toServer ? AUTOMATION_SERVER_INSTALL_ID : installId, handoverFrom: null, releasedThroughMs: null,
-      }, null);
+      writeHost(
+        storage,
+        workspaceId,
+        {
+          installId: toServer ? AUTOMATION_SERVER_INSTALL_ID : installId,
+          handoverFrom: null,
+          releasedThroughMs: null,
+        },
+        null,
+      );
       place(storage, workspaceId, toServer ? null : installId);
     } else if (
-      input.server && host?.installId === installId && host.handoverFrom === null &&
-      placement(storage, workspaceId) === installId && serverHasRoom(storage, workspaceId)
+      input.server &&
+      host?.installId === installId &&
+      host.handoverFrom === null &&
+      placement(storage, workspaceId) === installId &&
+      serverHasRoom(storage, workspaceId)
     ) {
       // The placement stays through the handover, so a handover called off
       // leaves the computer placed, not chosen.
-      writeHost(storage, workspaceId, {
-        installId: AUTOMATION_SERVER_INSTALL_ID, handoverFrom: installId, releasedThroughMs: host.releasedThroughMs,
-      }, host);
+      writeHost(
+        storage,
+        workspaceId,
+        {
+          installId: AUTOMATION_SERVER_INSTALL_ID,
+          handoverFrom: installId,
+          releasedThroughMs: host.releasedThroughMs,
+        },
+        host,
+      );
     }
     return readState(storage, input);
   });
@@ -625,24 +843,31 @@ export function chooseAutomationHost(
         throw badRequest(AUTOMATION_SERVER_FULL);
       }
     } else {
-      const known = storage.db.prepare(
-        "SELECT 1 FROM sync_relay_automation_computers WHERE workspace_id = ? AND install_id = ?",
-      ).get(workspaceId, installId);
+      const known = storage.db
+        .prepare(
+          "SELECT 1 FROM sync_relay_automation_computers WHERE workspace_id = ? AND install_id = ?",
+        )
+        .get(workspaceId, installId);
       if (!known) throw badRequest("installId is not one of this workspace's computers");
     }
     place(storage, workspaceId, null);
     // The computer that is still running: the one handing over, or else the host.
-    const running = host === null ? null : host.handoverFrom ?? host.installId;
+    const running = host === null ? null : (host.handoverFrom ?? host.installId);
     if (host !== null && running === AUTOMATION_SERVER_INSTALL_ID && !input.server) {
       startWithoutHandover(storage, workspaceId, host, installId, input.nowMs);
       return readState(storage, input);
     }
     if (host?.installId === installId) return readState(storage, input);
-    writeHost(storage, workspaceId, {
-      installId,
-      handoverFrom: running === installId ? null : running,
-      releasedThroughMs: host?.releasedThroughMs ?? null,
-    }, host);
+    writeHost(
+      storage,
+      workspaceId,
+      {
+        installId,
+        handoverFrom: running === installId ? null : running,
+        releasedThroughMs: host?.releasedThroughMs ?? null,
+      },
+      host,
+    );
     return readState(storage, input);
   });
 }
@@ -659,18 +884,25 @@ export function releaseAutomationHost(
     const host = readHost(storage, input.workspaceId);
     requireGeneration(host, input.generation);
     if (!host || host.handoverFrom !== input.installId) throw relayError("conflict");
-    writeHost(storage, input.workspaceId, {
-      installId: host.installId,
-      handoverFrom: null,
-      releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
-    }, host);
+    writeHost(
+      storage,
+      input.workspaceId,
+      {
+        installId: host.installId,
+        handoverFrom: null,
+        releasedThroughMs: laterProgress(host.releasedThroughMs, input.releasedThroughMs),
+      },
+      host,
+    );
     // A computer that has not watched since the relay's last record ran
     // nothing since, so its own handover is stale. The record goes on
     // instead: a handover that computer never took, or, after a take over
     // it never watched at, a mark, so the next computer starts from now.
-    const held = storage.db.prepare(
-      "SELECT generation, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
-    ).get(input.workspaceId);
+    const held = storage.db
+      .prepare(
+        "SELECT generation, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
+      )
+      .get(input.workspaceId);
     const stale = held !== undefined && input.groupsWatched < Number(held.generation);
     keepGroupHandover(storage, input.workspaceId, {
       generation: host.generation + 1,
@@ -695,19 +927,22 @@ export function readAutomationGroupHandover(
     requireOwner(storage, input);
     const host = readHost(storage, input.workspaceId);
     if (!host || host.generation !== input.generation) throw relayError("conflict");
-    const everShared = storage.db.prepare(
-      "SELECT 1 FROM sync_relay_shares WHERE workspace_id = ? LIMIT 1",
-    ).get(input.workspaceId) !== undefined;
-    const row = storage.db.prepare(
-      "SELECT generation, for_install_id, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
-    ).get(input.workspaceId);
+    const everShared =
+      storage.db
+        .prepare("SELECT 1 FROM sync_relay_shares WHERE workspace_id = ? LIMIT 1")
+        .get(input.workspaceId) !== undefined;
+    const row = storage.db
+      .prepare(
+        "SELECT generation, for_install_id, took_over, groups_json FROM sync_relay_automation_group_handovers WHERE workspace_id = ?",
+      )
+      .get(input.workspaceId);
     if (!row) return { generation: null, groups: null, reach: null, everShared };
     const mine = row.took_over === 0 && row.for_install_id === host.installId;
     const reach = mine ? heldReach(storage, input.workspaceId) : null;
     return {
       generation: Number(row.generation),
-      groups: mine ? JSON.parse(String(row.groups_json)) as Record<string, unknown> : null,
-      reach: reach === null ? null : JSON.parse(reach) as Record<string, unknown>,
+      groups: mine ? (JSON.parse(String(row.groups_json)) as Record<string, unknown>) : null,
+      reach: reach === null ? null : (JSON.parse(reach) as Record<string, unknown>),
       everShared,
     };
   });
@@ -735,11 +970,16 @@ export function takeOverAutomationHost(
     if (host.installId === AUTOMATION_SERVER_INSTALL_ID && !input.server) {
       throw badRequest(AUTOMATION_SERVER_OFF);
     }
-    writeHost(storage, input.workspaceId, {
-      installId: host.installId,
-      handoverFrom: null,
-      releasedThroughMs: host.releasedThroughMs,
-    }, host);
+    writeHost(
+      storage,
+      input.workspaceId,
+      {
+        installId: host.installId,
+        handoverFrom: null,
+        releasedThroughMs: host.releasedThroughMs,
+      },
+      host,
+    );
     keepGroupHandover(storage, input.workspaceId, {
       generation: host.generation + 1,
       forInstallId: host.installId,

@@ -1,9 +1,5 @@
 import { type Page, type Request } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const OBSERVER_CONTROL = "__dohcIso10StorageObserverControl_b7e15162";
 const CONTENT_WINDOW_MARKER = "__dohcIso10StorageContentMarker_b7e15162";
@@ -54,7 +50,7 @@ interface StorageSnapshot {
   sessionStorageEntries: Array<[string, string]>;
 }
 
-function attackProgram(vector: typeof ATTACK_VECTORS[number]): string {
+function attackProgram(vector: (typeof ATTACK_VECTORS)[number]): string {
   return [
     `window[${JSON.stringify(CONTENT_WINDOW_MARKER)}]=${JSON.stringify(vector.marker)}`,
     `localStorage.setItem(${JSON.stringify(vector.localStorageKey)},${JSON.stringify(vector.marker)})`,
@@ -162,10 +158,11 @@ function observerSnapshot(page: Page): Promise<ObserverSnapshot> {
 
 function apiRequestsUseSession(requests: readonly Request[], session: string): boolean {
   const viewRequests = requests.filter((request) =>
-    new URL(request.url()).pathname.startsWith("/api/view/")
+    new URL(request.url()).pathname.startsWith("/api/view/"),
   );
-  return viewRequests.length > 0 && viewRequests.every((request) =>
-    request.headers()["x-dohc-link-session"] === session
+  return (
+    viewRequests.length > 0 &&
+    viewRequests.every((request) => request.headers()["x-dohc-link-session"] === session)
   );
 }
 
@@ -181,10 +178,12 @@ test("keeps shared content from creating viewer-origin browser storage", async (
   const observerShare = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
-    files: [{
-      path: "docs/observer.md",
-      content: `# Viewer storage observer\n\n${ORDINARY_OBSERVER_TEXT}\n`,
-    }],
+    files: [
+      {
+        path: "docs/observer.md",
+        content: `# Viewer storage observer\n\n${ORDINARY_OBSERVER_TEXT}\n`,
+      },
+    ],
   });
 
   const context = await browser.newContext();
@@ -194,9 +193,7 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     const observerPage = await context.newPage();
     observerPage.on("request", (request) => observerRequests.push(request));
     await observerPage.goto(`${stack.shareWebUrl}/s/#${observerShare.secret}`);
-    await expect(observerPage.locator("article.markdown")).toContainText(
-      ORDINARY_OBSERVER_TEXT,
-    );
+    await expect(observerPage.locator("article.markdown")).toContainText(ORDINARY_OBSERVER_TEXT);
     const observerSession = sessionFromPage(observerPage);
     const observerUrl = observerPage.url();
 
@@ -226,8 +223,9 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     const hostileUrl = hostilePage.url();
     expect(hostileSession).not.toBe(observerSession);
     expect(hostileUrl).not.toBe(observerUrl);
-    expect(await hostilePage.evaluate((name) => Reflect.has(window, name), CONTENT_WINDOW_MARKER))
-      .toBe(false);
+    expect(
+      await hostilePage.evaluate((name) => Reflect.has(window, name), CONTENT_WINDOW_MARKER),
+    ).toBe(false);
 
     const hostileStorage = await storageSnapshot(hostilePage);
     expect(hostileStorage.localStorageEntries).toEqual([]);
@@ -249,29 +247,24 @@ test("keeps shared content from creating viewer-origin browser storage", async (
     expect(observerStorage.serviceWorkerRegistrations).toEqual([]);
 
     const shareCookies = await context.cookies();
-    const sessionCookies = shareCookies.filter((cookie) =>
-      cookie.name.startsWith("dohc_share_") &&
-      !cookie.name.startsWith("dohc_share_profile_")
+    const sessionCookies = shareCookies.filter(
+      (cookie) =>
+        cookie.name.startsWith("dohc_share_") && !cookie.name.startsWith("dohc_share_profile_"),
     );
     expect(sessionCookies.map((cookie) => cookie.name).sort()).toEqual(
       [`dohc_share_${hostileSession}`, `dohc_share_${observerSession}`].sort(),
     );
     expect(new Set(sessionCookies.map((cookie) => cookie.value)).size).toBe(2);
     const profileCookies = shareCookies.filter((cookie) =>
-      cookie.name.startsWith("dohc_share_profile_")
+      cookie.name.startsWith("dohc_share_profile_"),
     );
     expect(profileCookies.map((cookie) => cookie.name).sort()).toEqual(
-      [
-        `dohc_share_profile_${hostileSession}`,
-        `dohc_share_profile_${observerSession}`,
-      ].sort(),
+      [`dohc_share_profile_${hostileSession}`, `dohc_share_profile_${observerSession}`].sort(),
     );
     expect(new Set(profileCookies.map((cookie) => cookie.value)).size).toBe(2);
-    expect(
-      new Set(
-        [...sessionCookies, ...profileCookies].map((cookie) => cookie.value),
-      ).size,
-    ).toBe(4);
+    expect(new Set([...sessionCookies, ...profileCookies].map((cookie) => cookie.value)).size).toBe(
+      4,
+    );
     expect(apiRequestsUseSession(observerRequests, observerSession)).toBe(true);
     expect(apiRequestsUseSession(hostileRequests, hostileSession)).toBe(true);
 
@@ -279,17 +272,13 @@ test("keeps shared content from creating viewer-origin browser storage", async (
       .getByRole("navigation", { name: "Shared files" })
       .getByRole("button", { name: "observer.md", exact: true })
       .click();
-    await expect(observerPage.locator("article.markdown")).toContainText(
-      ORDINARY_OBSERVER_TEXT,
-    );
+    await expect(observerPage.locator("article.markdown")).toContainText(ORDINARY_OBSERVER_TEXT);
     expect(observerPage.url()).toBe(observerUrl);
     await hostilePage
       .getByRole("navigation", { name: "Shared files" })
       .getByRole("button", { name: "storage.md", exact: true })
       .click();
-    await expect(hostilePage.locator("article.markdown")).toContainText(
-      ORDINARY_HOSTILE_TEXT,
-    );
+    await expect(hostilePage.locator("article.markdown")).toContainText(ORDINARY_HOSTILE_TEXT);
     expect(hostilePage.url()).toBe(hostileUrl);
   } finally {
     await context.close();

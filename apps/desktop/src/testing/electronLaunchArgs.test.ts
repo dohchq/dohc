@@ -10,9 +10,7 @@ describe("electronLaunchArgs", () => {
       userDataDir: "C:/temp/dohc-desktop-e2e-ab12/electron-user-data",
       platform: "win32",
     });
-    expect(args).toContain(
-      "--user-data-dir=C:/temp/dohc-desktop-e2e-ab12/electron-user-data",
-    );
+    expect(args).toContain("--user-data-dir=C:/temp/dohc-desktop-e2e-ab12/electron-user-data");
     expect(args).toContain("--dohc-isolated-test");
   });
 
@@ -30,8 +28,7 @@ describe("electronLaunchArgs", () => {
       userDataDir: "/tmp/dohc-desktop-e2e-bbb/electron-user-data",
       platform: "linux",
     });
-    const dirOf = (args: string[]) =>
-      args.find((arg) => arg.startsWith("--user-data-dir="));
+    const dirOf = (args: string[]) => args.find((arg) => arg.startsWith("--user-data-dir="));
     expect(dirOf(first)).toBeDefined();
     expect(dirOf(first)).not.toBe(dirOf(second));
   });

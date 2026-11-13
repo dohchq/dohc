@@ -515,7 +515,11 @@ export const EMOJI_DATA: readonly EmojiEntry[] = [
   { emoji: "📃", shortcode: "page_with_curl", keywords: ["document"] },
   { emoji: "📊", shortcode: "bar_chart", keywords: ["graph", "data", "stats"] },
   { emoji: "📈", shortcode: "chart_with_upwards_trend", keywords: ["growth", "increase", "stats"] },
-  { emoji: "📉", shortcode: "chart_with_downwards_trend", keywords: ["decline", "decrease", "stats"] },
+  {
+    emoji: "📉",
+    shortcode: "chart_with_downwards_trend",
+    keywords: ["decline", "decrease", "stats"],
+  },
   { emoji: "🗒️", shortcode: "spiral_notepad", keywords: ["notes", "todo"] },
   { emoji: "🗓️", shortcode: "spiral_calendar", keywords: ["schedule", "date"] },
   { emoji: "📅", shortcode: "calendar", keywords: ["date", "schedule"] },

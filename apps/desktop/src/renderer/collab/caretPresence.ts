@@ -45,8 +45,7 @@ export function caretFallbackName(clientId: number): string {
 // "Editor N". Color is always the hash — never trusts an existing value, so
 // every client agrees on the same peer's color from the clientID alone.
 export function resolveCaretUser(awareness: Awareness): { name: string; color: string } {
-  const existing = (awareness.getLocalState() as { user?: { name?: string } } | null)
-    ?.user;
+  const existing = (awareness.getLocalState() as { user?: { name?: string } } | null)?.user;
   const name =
     typeof existing?.name === "string" && existing.name.trim()
       ? existing.name

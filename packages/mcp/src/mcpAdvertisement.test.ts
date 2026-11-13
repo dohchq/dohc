@@ -10,23 +10,35 @@ const exposure = (levels: readonly ("owner" | "view" | "comment" | "edit")[]) =>
   },
 });
 
-it.each(["edit", "owner"] as const)("advertises a %s-only tool only at that level", level => {
-  expect(deriveMcpToolLevels({ tool: ["action"] }, { action: exposure([level]) }))
-    .toEqual({ tool: [level] });
+it.each(["edit", "owner"] as const)("advertises a %s-only tool only at that level", (level) => {
+  expect(deriveMcpToolLevels({ tool: ["action"] }, { action: exposure([level]) })).toEqual({
+    tool: [level],
+  });
 });
 
 it("requires every id of a multiplexed tool to agree at every level", () => {
-  expect(deriveMcpToolLevels({ tool: ["first", "second"] }, {
-    first: exposure(["owner", "edit"]), second: exposure(["owner", "edit"]),
-  })).toEqual({ tool: ["owner", "edit"] });
-  expect(() => deriveMcpToolLevels({ tool: ["first", "second"] }, {
-    first: exposure(["owner"]), second: exposure(["owner", "edit"]),
-  })).toThrow(/tool.*edit/);
+  expect(
+    deriveMcpToolLevels(
+      { tool: ["first", "second"] },
+      {
+        first: exposure(["owner", "edit"]),
+        second: exposure(["owner", "edit"]),
+      },
+    ),
+  ).toEqual({ tool: ["owner", "edit"] });
+  expect(() =>
+    deriveMcpToolLevels(
+      { tool: ["first", "second"] },
+      {
+        first: exposure(["owner"]),
+        second: exposure(["owner", "edit"]),
+      },
+    ),
+  ).toThrow(/tool.*edit/);
 });
 
 it("does not advertise a tool whose ids agree on no levels", () => {
-  expect(deriveMcpToolLevels({ tool: ["action"] }, { action: exposure([]) }))
-    .toEqual({ tool: [] });
+  expect(deriveMcpToolLevels({ tool: ["action"] }, { action: exposure([]) })).toEqual({ tool: [] });
 });
 
 it("does not advertise a tool with an empty capability id list", () => {

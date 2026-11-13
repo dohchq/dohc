@@ -5,7 +5,14 @@ import { hasIgnoredSegment, validateUserWritePath } from "@dohc/workspace-core/p
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
-import { asObject, decodeBase64, encodeBase64, optionalString, requiredString, sha256 } from "./json";
+import {
+  asObject,
+  decodeBase64,
+  encodeBase64,
+  optionalString,
+  requiredString,
+  sha256,
+} from "./json";
 import {
   CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
@@ -40,9 +47,7 @@ const INTERNAL_REFUSALS = new Set<string>(["state-corrupt", "persist-failed"]);
 function refusalFrom(error: unknown): unknown {
   if (!(error instanceof Error)) return error;
   if ("wireError" in error) return error;
-  const code: ErrorCode = INTERNAL_REFUSALS.has(error.message)
-    ? "INTERNAL"
-    : "INVALID_PARAMS";
+  const code: ErrorCode = INTERNAL_REFUSALS.has(error.message) ? "INTERNAL" : "INVALID_PARAMS";
   const wireError: WireError = { code, message: error.message, retry: "no" };
   return Object.assign(error, { wireError });
 }
@@ -131,13 +136,7 @@ function mapConflictSnapshots(
   return served;
 }
 
-const ACCEPTED_ORIGINS = new Set<string>([
-  "api",
-  "local-file",
-  "restore",
-  "sync",
-  "unknown",
-]);
+const ACCEPTED_ORIGINS = new Set<string>(["api", "local-file", "restore", "sync", "unknown"]);
 
 interface SerdeParamShape {
   requiredStrings?: readonly string[];
@@ -156,11 +155,7 @@ const MUTATION_OPTIONAL_STRINGS = [
   "correlationId",
   "expectedSha256",
 ] as const;
-const WRITE_OPTIONAL_STRINGS = [
-  ...MUTATION_OPTIONAL_STRINGS,
-  "objectId",
-  "momentId",
-] as const;
+const WRITE_OPTIONAL_STRINGS = [...MUTATION_OPTIONAL_STRINGS, "objectId", "momentId"] as const;
 const REQUIRED_SECRET_METADATA = ["workspaceId", "origin"] as const;
 const OPTIONAL_SECRET_METADATA = ["summary", "correlationId"] as const;
 
@@ -182,7 +177,10 @@ const VERSIONED_PARAM_SHAPES = {
     optionalJson: ["author", "createOnly", "publish"],
   },
   [VERSIONED_METHOD.textRead]: { requiredStrings: ["versionId", "path"] },
-  [VERSIONED_METHOD.textCheckMove]: { requiredStrings: ["versionId", "path"], optionalJson: ["author", "change"] },
+  [VERSIONED_METHOD.textCheckMove]: {
+    requiredStrings: ["versionId", "path"],
+    optionalJson: ["author", "change"],
+  },
   [VERSIONED_METHOD.textReadBlob]: {
     requiredStrings: ["workspaceId", "sha256"],
   },
@@ -195,7 +193,12 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textDelete]: {
     requiredStrings: ["versionId", "path"],
-    optionalStrings: [...MUTATION_OPTIONAL_STRINGS, "expectedObjectId", "expectedSha256", "captureHoldId"],
+    optionalStrings: [
+      ...MUTATION_OPTIONAL_STRINGS,
+      "expectedObjectId",
+      "expectedSha256",
+      "captureHoldId",
+    ],
     optionalI64: ["nowMs"],
     optionalJson: ["author"],
     // The engine checks the disk; a loopback has none, so it only validates.
@@ -254,13 +257,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalUsize: ["byteBudget"],
   },
   [VERSIONED_METHOD.secretsWrite]: {
-    requiredStrings: [
-      ...REQUIRED_SECRET_METADATA,
-      "versionId",
-      "path",
-      "text",
-      "momentId",
-    ],
+    requiredStrings: [...REQUIRED_SECRET_METADATA, "versionId", "path", "text", "momentId"],
     optionalStrings: OPTIONAL_SECRET_METADATA,
   },
   [VERSIONED_METHOD.secretsList]: {
@@ -276,12 +273,7 @@ const VERSIONED_PARAM_SHAPES = {
     requiredStrings: ["workspaceId", "path", "text"],
   },
   [VERSIONED_METHOD.secretsDelete]: {
-    requiredStrings: [
-      ...REQUIRED_SECRET_METADATA,
-      "versionId",
-      "path",
-      "momentId",
-    ],
+    requiredStrings: [...REQUIRED_SECRET_METADATA, "versionId", "path", "momentId"],
     optionalStrings: OPTIONAL_SECRET_METADATA,
   },
   [VERSIONED_METHOD.secretsFork]: {
@@ -303,12 +295,7 @@ const VERSIONED_PARAM_SHAPES = {
     optionalStrings: OPTIONAL_SECRET_METADATA,
   },
   [VERSIONED_METHOD.secretsRestore]: {
-    requiredStrings: [
-      ...REQUIRED_SECRET_METADATA,
-      "path",
-      "beforeMomentId",
-      "momentId",
-    ],
+    requiredStrings: [...REQUIRED_SECRET_METADATA, "path", "beforeMomentId", "momentId"],
     optionalStrings: OPTIONAL_SECRET_METADATA,
   },
   [VERSIONED_METHOD.secretsMomentsList]: {
@@ -326,9 +313,12 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.publicationApplied]: { requiredStrings: ["requestId", "momentId"] },
-  [VERSIONED_METHOD.historyOperations]: {requiredStrings: ["operationId"]},
-  [VERSIONED_METHOD.historyUndo]: {requiredStrings: ["operationId"], optionalJson: ["author"]},
-  [VERSIONED_METHOD.historyRewriteLinks]: {requiredStrings: ["operationId"], optionalJson: ["author"]},
+  [VERSIONED_METHOD.historyOperations]: { requiredStrings: ["operationId"] },
+  [VERSIONED_METHOD.historyUndo]: { requiredStrings: ["operationId"], optionalJson: ["author"] },
+  [VERSIONED_METHOD.historyRewriteLinks]: {
+    requiredStrings: ["operationId"],
+    optionalJson: ["author"],
+  },
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
     optionalStrings: ["versionId", "objectId", "operationId"],
@@ -547,11 +537,7 @@ function serdeOptionalParamBytes(object: JsonObject, key: string): number[] | un
   if (
     !Array.isArray(value) ||
     value.some(
-      (byte) =>
-        typeof byte !== "number" ||
-        !Number.isInteger(byte) ||
-        byte < 0 ||
-        byte > 255,
+      (byte) => typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255,
     )
   ) {
     throw new Error("invalid parameters");
@@ -571,13 +557,8 @@ function versionedParamFields(shape: SerdeParamShape): ReadonlySet<string> {
   ]);
 }
 
-function validateVersionedParams(
-  method: string,
-  params: JsonObject,
-  request: Request,
-): void {
-  const shape: SerdeParamShape | undefined =
-    VERSIONED_PARAM_SHAPES[method as VersionedMethod];
+function validateVersionedParams(method: string, params: JsonObject, request: Request): void {
+  const shape: SerdeParamShape | undefined = VERSIONED_PARAM_SHAPES[method as VersionedMethod];
   if (shape === undefined) return;
   rejectUnknownFields(params, versionedParamFields(shape));
   requestIdempotencyKey(request);
@@ -620,7 +601,10 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
       }
       break;
     case VERSIONED_METHOD.publicationApplied:
-      if (serdeRequiredParamString(params, "requestId") === "" || serdeRequiredParamString(params, "momentId") === "") {
+      if (
+        serdeRequiredParamString(params, "requestId") === "" ||
+        serdeRequiredParamString(params, "momentId") === ""
+      ) {
         throw new Error("requestId and momentId must not be empty");
       }
       break;
@@ -707,10 +691,7 @@ function parseWorkspaceOnlyFields(params: JsonObject): void {
   serdeOptionalParamString(params, "workspaceId");
 }
 
-function parseTextRenameFields(
-  params: JsonObject,
-  request: Request,
-): ParsedTextRenameFields {
+function parseTextRenameFields(params: JsonObject, request: Request): ParsedTextRenameFields {
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -724,10 +705,7 @@ function parseTextRenameFields(
   };
 }
 
-function parseTextDeleteFields(
-  params: JsonObject,
-  request: Request,
-): ParsedTextDeleteFields {
+function parseTextDeleteFields(params: JsonObject, request: Request): ParsedTextDeleteFields {
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
   serdeOptionalParamString(params, "summary");
@@ -833,9 +811,7 @@ function normalizedEnginePath(path: string, kind: "addressable" | "storable"): s
   validateRustPathFloor(path);
   const classification = classifyEngineFilePath(path).kind;
   const accepted =
-    kind === "addressable"
-      ? classification !== "ignored"
-      : classification === "tracked";
+    kind === "addressable" ? classification !== "ignored" : classification === "tracked";
   const validation = validateUserWritePath(path);
   if (!accepted || !validation.ok) throw new Error("invalid-path");
   return validation.normalized;
@@ -883,22 +859,18 @@ interface LineHunk {
   replacement: string[];
 }
 
-type MarkdownMergeResult =
-  | { status: "merged"; text: string }
-  | { status: "conflict" };
+type MarkdownMergeResult = { status: "merged"; text: string } | { status: "conflict" };
 
 function diffHunks(base: string[], side: string[]): LineHunk[] {
   const rowCount = base.length;
   const columnCount = side.length;
-  const lcs = Array.from(
-    { length: rowCount + 1 },
-    () => Array<number>(columnCount + 1).fill(0),
-  );
+  const lcs = Array.from({ length: rowCount + 1 }, () => Array<number>(columnCount + 1).fill(0));
   for (let row = rowCount - 1; row >= 0; row -= 1) {
     for (let column = columnCount - 1; column >= 0; column -= 1) {
-      lcs[row]![column] = base[row] === side[column]
-        ? lcs[row + 1]![column + 1]! + 1
-        : Math.max(lcs[row + 1]![column]!, lcs[row]![column + 1]!);
+      lcs[row]![column] =
+        base[row] === side[column]
+          ? lcs[row + 1]![column + 1]! + 1
+          : Math.max(lcs[row + 1]![column]!, lcs[row]![column + 1]!);
     }
   }
 
@@ -950,7 +922,11 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
   const baseLines = base.split("\n");
   const localLines = local.split("\n");
   const remoteLines = remote.split("\n");
-  if ([baseLines.length, localLines.length, remoteLines.length].some((count) => count > MAX_MERGE_LINES)) {
+  if (
+    [baseLines.length, localLines.length, remoteLines.length].some(
+      (count) => count > MAX_MERGE_LINES,
+    )
+  ) {
     return { status: "conflict" };
   }
 
@@ -967,8 +943,7 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
         (localHunk.baseStart === localHunk.baseEnd) !==
           (remoteHunk.baseStart === remoteHunk.baseEnd);
       const overlapping =
-        localHunk.baseStart < remoteHunk.baseEnd &&
-        remoteHunk.baseStart < localHunk.baseEnd;
+        localHunk.baseStart < remoteHunk.baseEnd && remoteHunk.baseStart < localHunk.baseEnd;
       if (bothInsertAtSameOffset || sameStartWithInsertion || overlapping) {
         return { status: "conflict" };
       }
@@ -1007,9 +982,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = normalizedEnginePath(input.path, "storable");
     const state = this.workspace(input.workspace);
     const versionId = input.versionId ?? "main";
-    const version = versionId === "main"
-      ? this.ensureMain(state, input.workspace)
-      : this.version(state, versionId);
+    const version =
+      versionId === "main"
+        ? this.ensureMain(state, input.workspace)
+        : this.version(state, versionId);
     const objectId = input.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = input.momentId ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
@@ -1023,14 +999,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: input.origin ?? "local-file",
       momentLog: before ? [...before.momentLog] : [],
     };
-    const moment = this.makeMoment(
-      version,
-      path,
-      momentId,
-      "write",
-      file,
-      before,
-    );
+    const moment = this.makeMoment(version, path, momentId, "write", file, before);
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
     version.files.set(path, file);
@@ -1041,9 +1010,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = normalizedEnginePath(input.path, "storable");
     const state = this.workspace(input.workspace);
     const versionId = input.versionId ?? "main";
-    const version = versionId === "main"
-      ? this.ensureMain(state, input.workspace)
-      : this.version(state, versionId);
+    const version =
+      versionId === "main"
+        ? this.ensureMain(state, input.workspace)
+        : this.version(state, versionId);
     const objectId = input.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = input.momentId ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
@@ -1059,14 +1029,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: input.origin ?? "local-file",
       momentLog: before ? [...before.momentLog] : [],
     };
-    const moment = this.makeMoment(
-      version,
-      path,
-      momentId,
-      "write",
-      file,
-      before,
-    );
+    const moment = this.makeMoment(version, path, momentId, "write", file, before);
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
     version.files.set(path, file);
@@ -1078,9 +1041,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = normalizedSecretPath(input.path);
     const state = this.workspace(input.workspace);
     const versionId = input.versionId ?? "main";
-    const version = versionId === "main"
-      ? this.ensureMain(state, input.workspace)
-      : this.version(state, versionId);
+    const version =
+      versionId === "main"
+        ? this.ensureMain(state, input.workspace)
+        : this.version(state, versionId);
     const momentId = input.momentId ?? `secret-moment-${this.nextMomentId++}`;
     this.assertFreshSecretMoment(state, momentId);
     const before = version.secrets.get(path);
@@ -1148,7 +1112,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     switch (request.method) {
       case VERSIONED_METHOD.textWriteBlob: {
         const bytes = Buffer.from(serdeRequiredParamString(params, "bytesBase64"), "base64");
-        if (sha256([...bytes]) !== params.sha256 || bytes.byteLength > 10 * 1024 * 1024) throw new Error("invalid-input");
+        if (sha256([...bytes]) !== params.sha256 || bytes.byteLength > 10 * 1024 * 1024)
+          throw new Error("invalid-input");
         const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
         const decoded: JsonObject = { ...params, text };
         delete decoded.sha256;
@@ -1251,7 +1216,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
         const path = normalizedSecretPath(requiredString(params, "path", "secret text check"));
         const text = requiredString(params, "text", "secret text check");
         return {
-          recorded: [...state.secretMoments.values()].some((entry) => entry.wire.path === path && entry.after === text),
+          recorded: [...state.secretMoments.values()].some(
+            (entry) => entry.wire.path === path && entry.after === text,
+          ),
         };
       }
       case VERSIONED_METHOD.secretsDelete:
@@ -1301,9 +1268,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const addressablePath = normalizedEnginePath(parsed.path, "addressable");
     if (parsed.momentId !== undefined) validateTextMomentId(parsed.momentId);
     const path = normalizedEnginePath(addressablePath, "storable");
-    if (params.publish !== undefined && typeof params.publish !== "boolean") throw new Error("invalid-params");
-    if (params.publish === true && versionId !== (state.activeVersionId ?? "main")) throw new Error("invalid-version");
-    if (params.publish !== true && (params.createOnly === true || params.expectedSha256 !== undefined)) throw new Error("invalid-params");
+    if (params.publish !== undefined && typeof params.publish !== "boolean")
+      throw new Error("invalid-params");
+    if (params.publish === true && versionId !== (state.activeVersionId ?? "main"))
+      throw new Error("invalid-version");
+    if (
+      params.publish !== true &&
+      (params.createOnly === true || params.expectedSha256 !== undefined)
+    )
+      throw new Error("invalid-params");
     const knownVersion = state.versions.get(versionId);
     if (knownVersion === undefined && versionId !== "main") {
       this.version(state, versionId);
@@ -1311,24 +1284,38 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (params.createOnly !== undefined && typeof params.createOnly !== "boolean") {
       throw new Error("invalid-params");
     }
-    if (params.createOnly === true && knownVersion?.files.has(path) &&
-        !(parsed.requestId !== undefined && state.replays.has(parsed.requestId))) {
+    if (
+      params.createOnly === true &&
+      knownVersion?.files.has(path) &&
+      !(parsed.requestId !== undefined && state.replays.has(parsed.requestId))
+    ) {
       throw new Error("target-path-exists");
     }
     const requestId = parsed.requestId;
     const restoreBeforeMomentId = serdeOptionalParamString(params, "restoreBeforeMomentId");
-    const historySource = restoreBeforeMomentId === undefined ? undefined : state.moments.get(restoreBeforeMomentId);
-    if (restoreBeforeMomentId !== undefined && (!historySource || origin !== "restore" ||
-        historySource.wire.versionId !== versionId || historySource.wire.path !== path ||
-        historySource.wire.operation === "rename" || historySource.wire.syncRecordOnly ||
-        historySource.before?.contentKind !== "text" || historySource.before.text !== text)) {
+    const historySource =
+      restoreBeforeMomentId === undefined ? undefined : state.moments.get(restoreBeforeMomentId);
+    if (
+      restoreBeforeMomentId !== undefined &&
+      (!historySource ||
+        origin !== "restore" ||
+        historySource.wire.versionId !== versionId ||
+        historySource.wire.path !== path ||
+        historySource.wire.operation === "rename" ||
+        historySource.wire.syncRecordOnly ||
+        historySource.before?.contentKind !== "text" ||
+        historySource.before.text !== text)
+    ) {
       throw new Error("invalid-input");
     }
-    const objectId = historySource?.wire.objectId ?? parsed.objectId ??
+    const objectId =
+      historySource?.wire.objectId ??
+      parsed.objectId ??
       (requestId !== undefined
         ? this.generatedWriteId("object", requestId, parsed.path)
-        : knownVersion?.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
-    const momentId = parsed.momentId ??
+        : (knownVersion?.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`));
+    const momentId =
+      parsed.momentId ??
       (requestId !== undefined
         ? this.generatedWriteId("moment", requestId, parsed.path)
         : undefined);
@@ -1343,8 +1330,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       const replay = this.replay(state, requestId, params, replayFingerprint);
       if (replay) return replay;
     }
-    if (typeof params.expectedSha256 === "string" && knownVersion?.files.get(path) &&
-        sha256(Buffer.from(knownVersion.files.get(path)!.text ?? "")) !== params.expectedSha256) {
+    if (
+      typeof params.expectedSha256 === "string" &&
+      knownVersion?.files.get(path) &&
+      sha256(Buffer.from(knownVersion.files.get(path)!.text ?? "")) !== params.expectedSha256
+    ) {
       throw new Error("write-precondition-failed");
     }
     const existingMoment = momentId === undefined ? undefined : state.moments.get(momentId);
@@ -1362,8 +1352,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         // fields here threw on an explicit `summary: null` that the first write
         // had accepted, so a fixed-momentId retry of a request the daemon
         // exact-replays (store.rs) got a refusal instead of `deduped: true`.
-        (existingMoment.wire.metadataSummary ?? null) ===
-          (metadata.metadataSummary ?? null) &&
+        (existingMoment.wire.metadataSummary ?? null) === (metadata.metadataSummary ?? null) &&
         (existingMoment.wire.metadataCorrelationId ?? null) ===
           (metadata.metadataCorrelationId ?? null) &&
         (existingMoment.writeAuthorFingerprint ?? null) === authorFingerprint;
@@ -1374,7 +1363,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
           snapshot: this.textSnapshot(workspace, versionId, path, recorded),
           moment: this.capMoment(existingMoment.wire),
           deduped: true,
-          materialized: params.publish === true, materializeOutcome: params.publish === true ? "applied" : "skipped",
+          materialized: params.publish === true,
+          materializeOutcome: params.publish === true ? "applied" : "skipped",
         };
       }
     }
@@ -1395,8 +1385,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     if (momentId === undefined) this.assertFreshMoment(state, resolvedMomentId);
     const before = version.files.get(path);
-    if (historySource && ((before && before.objectId !== objectId) ||
-        [...version.files.entries()].some(([boundPath, file]) => boundPath !== path && file.objectId === objectId))) {
+    if (
+      historySource &&
+      ((before && before.objectId !== objectId) ||
+        [...version.files.entries()].some(
+          ([boundPath, file]) => boundPath !== path && file.objectId === objectId,
+        ))
+    ) {
       throw new Error("invalid-input");
     }
     // The daemon binds the input object id to new paths only — an existing
@@ -1436,17 +1431,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
       snapshot: this.textSnapshot(workspace, version.id, path, file),
       moment: this.capMoment(moment),
       deduped: false,
-      materialized: params.publish === true, materializeOutcome: params.publish === true ? "applied" : "skipped",
+      materialized: params.publish === true,
+      materializeOutcome: params.publish === true ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
   }
 
   private textRead(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const path = normalizedEnginePath(
-      requiredString(params, "path", "text read"),
-      "addressable",
-    );
+    const path = normalizedEnginePath(requiredString(params, "path", "text read"), "addressable");
     const version = this.version(state, requiredString(params, "versionId", "text read"));
     const file = version.files.get(path);
     if (!file) return null;
@@ -1555,11 +1548,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (versionId !== (state.activeVersionId ?? "main")) throw new Error("invalid-version");
     const version = this.mutationVersion(state, workspace, versionId);
     const requestId = parsed.requestId;
-    const objectId = parsed.objectId ??
+    const objectId =
+      parsed.objectId ??
       (requestId !== undefined
         ? this.generatedWriteId("object", requestId, parsed.path)
-        : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
-    const momentId = parsed.momentId ??
+        : (version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`));
+    const momentId =
+      parsed.momentId ??
       (requestId !== undefined
         ? this.generatedWriteId("moment", requestId, parsed.path)
         : `moment-${this.nextMomentId++}`);
@@ -1575,8 +1570,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (replay) return replay;
     const before = version.files.get(path);
     if (params.createOnly === true && before) throw new Error("target-path-exists");
-    if (typeof params.expectedSha256 === "string" && (!before ||
-        (before.contentKind === "binary" ? before.binarySha : sha256(Buffer.from(before.text ?? ""))) !== params.expectedSha256)) {
+    if (
+      typeof params.expectedSha256 === "string" &&
+      (!before ||
+        (before.contentKind === "binary"
+          ? before.binarySha
+          : sha256(Buffer.from(before.text ?? ""))) !== params.expectedSha256)
+    ) {
       throw new Error("write-precondition-failed");
     }
     const binarySha = sha256(bytes);
@@ -1624,16 +1624,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
       momentLog: before ? [...before.momentLog] : [],
     };
-    const moment = this.makeMoment(
-      version,
-      path,
-      momentId,
-      "write",
-      file,
-      before,
-      now,
-      metadata,
-    );
+    const moment = this.makeMoment(version, path, momentId, "write", file, before, now, metadata);
     const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
     file.momentLog.push(internal);
     version.files.set(path, file);
@@ -1679,10 +1670,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // binaryWrite re-derives all three; these calls exist for the refusal order.
     requiredOrigin(params);
     this.momentMetadataFields(params);
-    const bytes =
-      encoded === undefined
-        ? state.blobs.get(expectedSha)
-        : [...decodeBase64(encoded)];
+    const bytes = encoded === undefined ? state.blobs.get(expectedSha) : [...decodeBase64(encoded)];
     if (bytes === undefined) throw new Error("file-not-found");
     if (encoded !== undefined && bytes.length > MAX_CAPTURE_BINARY_FILE_BYTES) {
       throw new Error("content-exceeds-capture-cap");
@@ -1694,13 +1682,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...parsed,
       bytesBase64: encodeBase64(bytes),
     };
-    return this.binaryWrite(
-      state,
-      workspace,
-      writeParams,
-      binaryParsed,
-      true,
-    );
+    return this.binaryWrite(state, workspace, writeParams, binaryParsed, true);
   }
 
   private textRename(
@@ -1717,9 +1699,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const toPath = normalizedEnginePath(toAddressablePath, "storable");
     if (fromPath === toPath) throw new Error("invalid-path");
     const version = this.version(state, versionId);
-    const momentId = requestId !== undefined
-      ? this.generatedRequestId("moment", requestId, parsed.toPath)
-      : `moment-${this.nextMomentId++}`;
+    const momentId =
+      requestId !== undefined
+        ? this.generatedRequestId("moment", requestId, parsed.toPath)
+        : `moment-${this.nextMomentId++}`;
     const fingerprint = this.renameFingerprint(
       workspace,
       { ...params, fromPath, toPath },
@@ -1784,21 +1767,26 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const metadata = this.momentMetadataFields(params);
     const path = normalizedEnginePath(parsed.path, "addressable");
     const version = this.version(state, versionId);
-    const momentId = requestId !== undefined
-      ? this.generatedRequestId("moment", requestId, parsed.path)
-      : `moment-${this.nextMomentId++}`;
-    const fingerprint = this.deleteFingerprint(
-      workspace,
-      { ...params, path },
-      origin,
-      momentId,
-    );
+    const momentId =
+      requestId !== undefined
+        ? this.generatedRequestId("moment", requestId, parsed.path)
+        : `moment-${this.nextMomentId++}`;
+    const fingerprint = this.deleteFingerprint(workspace, { ...params, path }, origin, momentId);
     const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) return replay;
     const before = this.file(version, path);
-    if(params.expectedObjectId!==undefined && params.expectedObjectId!==null && before.objectId!==params.expectedObjectId)throw new Error("object-identity-mismatch");
-    if (params.expectedSha256 !== undefined && params.expectedSha256 !== null
-      && (before.binarySha ?? sha256(before.text ?? "")) !== params.expectedSha256) throw new Error("write-precondition-failed");
+    if (
+      params.expectedObjectId !== undefined &&
+      params.expectedObjectId !== null &&
+      before.objectId !== params.expectedObjectId
+    )
+      throw new Error("object-identity-mismatch");
+    if (
+      params.expectedSha256 !== undefined &&
+      params.expectedSha256 !== null &&
+      (before.binarySha ?? sha256(before.text ?? "")) !== params.expectedSha256
+    )
+      throw new Error("write-precondition-failed");
     this.assertFreshMoment(state, momentId);
     const now = nowMs ?? this.clock++;
     // The removed content, not an empty tombstone: a delete moment repeats it
@@ -1838,10 +1826,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
-    const path = normalizedEnginePath(
-      requiredString(params, "path", "rollback"),
-      "addressable",
-    );
+    const path = normalizedEnginePath(requiredString(params, "path", "rollback"), "addressable");
     const origin = requiredOrigin(params);
     const authorJson = this.writeAuthorFingerprint(params);
     const requestId = requestIdempotencyKey(request);
@@ -1865,11 +1850,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const version = this.version(state, requiredString(params, "versionId", "rollback"));
     const mutationId = requiredString(params, "mutationMomentId", "rollback");
     const mutation = state.moments.get(mutationId);
-    if (
-      !mutation ||
-      mutation.wire.versionId !== version.id ||
-      mutation.wire.path !== path
-    ) {
+    if (!mutation || mutation.wire.versionId !== version.id || mutation.wire.path !== path) {
       throw new Error("file-not-found");
     }
     const superseded = [...state.moments.values()].some(
@@ -1891,9 +1872,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       mutation.wire.afterContentKind === "binary" &&
       version.id === state.activeVersionId;
     version.files.delete(path);
-    const restorePath = mutation.wire.operation === "rename"
-      ? mutation.beforePath ?? path
-      : path;
+    const restorePath = mutation.wire.operation === "rename" ? (mutation.beforePath ?? path) : path;
     if (mutation.before) version.files.set(restorePath, copyFile(mutation.before));
     state.moments.delete(mutationId);
     // Daemon parity: the rolled-back mutation's request-ledger row is deleted
@@ -1921,22 +1900,44 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private filesResolve(state: WorkspaceState, params: JsonObject): JsonValue {
-    if (!Array.isArray(params.targets) || params.targets.length > 128 || utf8Length(JSON.stringify(params)) > 48 * 1024) throw new Error("files.resolve exceeds its target or byte cap");
+    if (
+      !Array.isArray(params.targets) ||
+      params.targets.length > 128 ||
+      utf8Length(JSON.stringify(params)) > 48 * 1024
+    )
+      throw new Error("files.resolve exceeds its target or byte cap");
     const versionId = optionalString(params, "versionId") ?? state.activeVersionId;
     if (versionId === undefined) throw new Error("workspace-not-found");
     const version = this.version(state, versionId);
-    const results = params.targets.map(target => {
-      if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).length !== 1) return { status: "invalid" };
+    const results = params.targets.map((target) => {
+      if (
+        !target ||
+        typeof target !== "object" ||
+        Array.isArray(target) ||
+        Object.keys(target).length !== 1
+      )
+        return { status: "invalid" };
       let entry: [string, LoopbackFile] | undefined;
       if ("path" in target && typeof target.path === "string") {
         let path: string;
-        try { path = normalizedEnginePath(target.path, "addressable"); } catch { return { status: "invalid" }; }
+        try {
+          path = normalizedEnginePath(target.path, "addressable");
+        } catch {
+          return { status: "invalid" };
+        }
         const file = version.files.get(path);
         if (file) entry = [path, file];
-      } else if ("objectId" in target && typeof target.objectId === "string" && target.objectId.length > 0 && utf8Length(target.objectId) <= 512) {
+      } else if (
+        "objectId" in target &&
+        typeof target.objectId === "string" &&
+        target.objectId.length > 0 &&
+        utf8Length(target.objectId) <= 512
+      ) {
         entry = [...version.files].find(([, file]) => file.objectId === target.objectId);
       } else return { status: "invalid" };
-      return entry ? { status: "found", objectId: entry[1].objectId, path: entry[0] } : { status: "absent" };
+      return entry
+        ? { status: "found", objectId: entry[1].objectId, path: entry[0] }
+        : { status: "absent" };
     });
     const result = { versionId, results };
     return result;
@@ -1956,13 +1957,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
         objectId: file.objectId,
         contentKind: file.contentKind,
         sha256:
-          file.contentKind === "binary"
-            ? file.binarySha ?? sha256([])
-            : sha256(file.text ?? ""),
+          file.contentKind === "binary" ? (file.binarySha ?? sha256([])) : sha256(file.text ?? ""),
         byteLength:
-          file.contentKind === "text"
-            ? utf8Length(file.text ?? "")
-            : file.bytes?.length ?? 0,
+          file.contentKind === "text" ? utf8Length(file.text ?? "") : (file.bytes?.length ?? 0),
         binarySha256: file.binarySha ?? null,
         updatedAtMs: file.updatedAtMs,
         latestMomentId: file.latestMomentId,
@@ -1971,15 +1968,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
         // is modelled by the ydoc loopback engine, not this one.
         hasYdocMarker: false,
       })),
-      nextAfterPath: files.length > page.length ? page.at(-1)?.[0] ?? null : null,
+      nextAfterPath: files.length > page.length ? (page.at(-1)?.[0] ?? null) : null,
     };
   }
 
   private binaryRead(state: WorkspaceState, params: JsonObject): JsonValue {
-    const path = normalizedEnginePath(
-      requiredString(params, "path", "binary read"),
-      "addressable",
-    );
+    const path = normalizedEnginePath(requiredString(params, "path", "binary read"), "addressable");
     const version = this.version(state, requiredString(params, "versionId", "binary read"));
     const file = version.files.get(path);
     if (!file) return null;
@@ -2014,8 +2008,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ) ||
       [...state.moments.values()].some(
         (moment) =>
-          moment.wire.afterBinarySha256 === digest ||
-          moment.wire.beforeBinarySha256 === digest,
+          moment.wire.afterBinarySha256 === digest || moment.wire.beforeBinarySha256 === digest,
       );
     if (!referenced) throw new Error("file-not-found");
     const bytes = state.blobs.get(digest);
@@ -2071,9 +2064,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
         left.name.localeCompare(right.name) ||
         left.id.localeCompare(right.id),
     );
-    const afterIndex = afterVersionId === undefined
-      ? -1
-      : versions.findIndex((version) => version.id === afterVersionId);
+    const afterIndex =
+      afterVersionId === undefined
+        ? -1
+        : versions.findIndex((version) => version.id === afterVersionId);
     const page = afterIndex >= 0 ? versions.slice(afterIndex + 1) : versions;
     return {
       versions: page.map((version) => ({
@@ -2116,24 +2110,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       path,
       targetVersionId: target.id,
       sourceVersionId: source.id,
-      base: base
-        ? this.comparisonState(workspace, source.id, path, base)
-        : null,
-      current: current
-        ? this.comparisonState(workspace, target.id, path, current)
-        : null,
-      incoming: incoming
-        ? this.comparisonState(workspace, source.id, path, incoming)
-        : null,
+      base: base ? this.comparisonState(workspace, source.id, path, base) : null,
+      current: current ? this.comparisonState(workspace, target.id, path, current) : null,
+      incoming: incoming ? this.comparisonState(workspace, source.id, path, incoming) : null,
       status,
     };
   }
 
-  private compare(
-    state: WorkspaceState,
-    workspace: string,
-    params: JsonObject,
-  ): JsonValue {
+  private compare(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
     const path = requiredString(params, "path", "compare");
     validateRustPathFloor(path);
     const source = this.version(state, requiredString(params, "sourceVersionId", "compare"));
@@ -2158,15 +2142,18 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // normalizing the lookup key. Run that check before generated ids and
     // request replay, then keep the caller's raw path below.
     normalizedEnginePath(path, "addressable");
-    const objectId = requestId !== undefined
-      ? this.generatedRequestId("object", requestId, path)
-      : `object-${this.nextObjectId++}`;
-    const momentId = requestId !== undefined
-      ? this.generatedRequestId("moment", requestId, path)
-      : `moment-${this.nextMomentId++}`;
-    const conflictId = requestId !== undefined
-      ? this.generatedRequestId("conflict", requestId, path)
-      : `conflict-${this.nextMomentId++}`;
+    const objectId =
+      requestId !== undefined
+        ? this.generatedRequestId("object", requestId, path)
+        : `object-${this.nextObjectId++}`;
+    const momentId =
+      requestId !== undefined
+        ? this.generatedRequestId("moment", requestId, path)
+        : `moment-${this.nextMomentId++}`;
+    const conflictId =
+      requestId !== undefined
+        ? this.generatedRequestId("conflict", requestId, path)
+        : `conflict-${this.nextMomentId++}`;
     const fingerprint = this.mergeFingerprint(
       workspace,
       params,
@@ -2197,8 +2184,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // sides must be text. The base does not gate it — a binary base can never
     // compare equal to a text current. The line merge below reads all three, and
     // its own kind check keeps a binary ancestor out.
-    const liveSidesBinary =
-      incoming?.contentKind === "binary" || current?.contentKind === "binary";
+    const liveSidesBinary = incoming?.contentKind === "binary" || current?.contentKind === "binary";
     if (this.filesEqual(incoming, current)) {
       const result: JsonObject = {
         status: "unchanged",
@@ -2230,8 +2216,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // current equals base by content ADDRESS (a binary side never compares
     // equal to a text one), so only the source moved. A removal keeps its
     // conflict — that seam is the text delete.
-    const binaryFastForward =
-      incoming?.contentKind === "binary" && this.filesEqual(current, base);
+    const binaryFastForward = incoming?.contentKind === "binary" && this.filesEqual(current, base);
     if (!binaryFastForward && (liveSidesBinary || !this.filesEqual(current, base))) {
       const cleanMerge =
         base?.contentKind === "text" &&
@@ -2307,16 +2292,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       latestMomentId: momentId,
       metadataOrigin: origin,
     };
-    const moment = this.makeMoment(
-      target,
-      path,
-      momentId,
-      "write",
-      copied,
-      before,
-      now,
-      metadata,
-    );
+    const moment = this.makeMoment(target, path, momentId, "write", copied, before, now, metadata);
     const internal: InternalMoment = {
       wire: moment,
       before: before && copyFile(before),
@@ -2353,22 +2329,29 @@ export class VersionedLoopbackEngine implements EngineTransport {
       const sourceFile = source.files.get(path);
       const targetFile = target.files.get(path);
       if (this.filesEqual(sourceFile, targetFile)) return [];
-      const status: VersionChangeStatus = !targetFile ? "added" : !sourceFile ? "deleted" : "modified";
+      const status: VersionChangeStatus = !targetFile
+        ? "added"
+        : !sourceFile
+          ? "deleted"
+          : "modified";
       const entry: JsonObject = { path, status };
-      if (sourceFile?.contentKind === "binary" || targetFile?.contentKind === "binary") entry.binary = true;
+      if (sourceFile?.contentKind === "binary" || targetFile?.contentKind === "binary")
+        entry.binary = true;
       return [entry];
     });
     let included = changes.length;
     const budget = Math.max(1, optionalNumber(params, "byteBudget") ?? Number.MAX_SAFE_INTEGER);
     // Daemon parity: the byte-budget cut has a progress guarantee — the first
     // row always ships under a tiny budget (only the hard frame cap refuses).
-    while (included > 1 && Buffer.byteLength(JSON.stringify(changes.slice(0, included))) > budget) included -= 1;
+    while (included > 1 && Buffer.byteLength(JSON.stringify(changes.slice(0, included))) > budget)
+      included -= 1;
     const entries = changes.slice(0, included);
-    const nextCursor = included < changes.length
-      ? (entries.at(-1)?.path as string | undefined) ?? null
-      : scannedPaths.length === COMPARE_PAGE_SIZE
-        ? scannedPaths.at(-1) ?? null
-        : null;
+    const nextCursor =
+      included < changes.length
+        ? ((entries.at(-1)?.path as string | undefined) ?? null)
+        : scannedPaths.length === COMPARE_PAGE_SIZE
+          ? (scannedPaths.at(-1) ?? null)
+          : null;
     return { entries, nextCursor };
   }
 
@@ -2442,14 +2425,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
           latestMomentId: moment.id,
         };
       }),
-      nextAfterPath: entries.length > page.length ? page.at(-1)?.[0] ?? null : null,
+      nextAfterPath: entries.length > page.length ? (page.at(-1)?.[0] ?? null) : null,
     };
   }
 
   private secretMaterialize(state: WorkspaceState, params: JsonObject): JsonValue {
-    const path = normalizedSecretPath(
-      requiredString(params, "path", "secret materialize"),
-    );
+    const path = normalizedSecretPath(requiredString(params, "path", "secret materialize"));
     const versionId = requiredString(params, "versionId", "secret materialize");
     const version = state.versions.get(versionId);
     if (!version) throw new Error("invalid-version");
@@ -2513,9 +2494,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return {
       entries: page.map((path) => ({
         path,
-        status: !target.secrets.has(path) ? "added" : !source.secrets.has(path) ? "deleted" : "modified",
+        status: !target.secrets.has(path)
+          ? "added"
+          : !source.secrets.has(path)
+            ? "deleted"
+            : "modified",
       })),
-      nextAfterPath: paths.length > page.length ? page.at(-1) ?? null : null,
+      nextAfterPath: paths.length > page.length ? (page.at(-1) ?? null) : null,
     };
   }
 
@@ -2598,7 +2583,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadata.correlationId,
     );
     state.secretMoments.set(momentId, { wire, before: prior, after: sourceMoment.before });
-    return { restored: sourceMoment.before === undefined ? "deleted" : "text", restoredMomentId: momentId, path };
+    return {
+      restored: sourceMoment.before === undefined ? "deleted" : "text",
+      restoredMomentId: momentId,
+      path,
+    };
   }
 
   private secretMomentsList(state: WorkspaceState, params: JsonObject): JsonValue {
@@ -2626,12 +2615,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return {
       moments: page,
       nextBeforeMomentOrder:
-        filtered.length > page.length ? page.at(-1)?.momentOrder ?? null : null,
+        filtered.length > page.length ? (page.at(-1)?.momentOrder ?? null) : null,
     };
   }
 
   private secretMomentsGet(state: WorkspaceState, params: JsonObject): JsonValue {
-    return state.secretMoments.get(requiredString(params, "momentId", "secret moment get"))?.wire ?? null;
+    return (
+      state.secretMoments.get(requiredString(params, "momentId", "secret moment get"))?.wire ?? null
+    );
   }
 
   private momentsList(state: WorkspaceState, params: JsonObject): MomentsListResult {
@@ -2658,7 +2649,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const page = filtered.slice(0, limit);
     return {
       moments: page.map((moment) => this.capMoment(moment)),
-      nextBeforeMomentOrder: filtered.length > page.length ? page.at(-1)?.momentOrder ?? null : null,
+      nextBeforeMomentOrder:
+        filtered.length > page.length ? (page.at(-1)?.momentOrder ?? null) : null,
       latestMomentOrder: all[0]?.momentOrder ?? -1,
     };
   }
@@ -2674,8 +2666,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const momentId = requiredString(params, "momentId", "publication applied");
     const recorded = state.replays.get(requiredString(params, "requestId", "publication applied"));
     const moment = recorded?.result.moment;
-    return recorded?.published === true && state.moments.has(momentId) &&
-      typeof moment === "object" && moment !== null && !Array.isArray(moment) && moment.momentId === momentId;
+    return (
+      recorded?.published === true &&
+      state.moments.has(momentId) &&
+      typeof moment === "object" &&
+      moment !== null &&
+      !Array.isArray(moment) &&
+      moment.momentId === momentId
+    );
   }
 
   private historyPage(state: WorkspaceState, params: JsonObject): JsonValue {
@@ -2685,43 +2683,155 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const operationId = optionalString(params, "operationId") ?? null;
     if (objectId === "") throw new Error("invalid-input");
     const limit = Math.max(1, Math.min(50, optionalNumber(params, "limit") ?? 50));
-    const text = [...state.moments.values()].map(m => m.wire).filter(m => m.versionId === versionId && (objectId === null || m.objectId === objectId) && (operationId === null || m.metadataCorrelationId === operationId));
-    const protectedRows = objectId === null && operationId === null ? [...state.secretMoments.values()].map(m => m.wire).filter(m => m.versionId === versionId) : [];
-    const versions = [...state.versions.values()].map(v => this.versionJson(v) as unknown as VersionRecord);
-    const startCursor: HistoryCursor = params.cursor as HistoryCursor | undefined ?? {
-      format: 1, engineUuid: this.engineUuid, workspaceId: versions[0]!.workspaceId,
-      versionId, objectId, operationId, textFence: Math.max(-1, ...text.map(m => m.momentOrder)),
-      protectedFence: Math.max(-1, ...protectedRows.map(m => m.momentOrder)), markerFence: objectId === null && operationId === null ? versions.length : -1,
-      text: null, protected: null, marker: null,
+    const text = [...state.moments.values()]
+      .map((m) => m.wire)
+      .filter(
+        (m) =>
+          m.versionId === versionId &&
+          (objectId === null || m.objectId === objectId) &&
+          (operationId === null || m.metadataCorrelationId === operationId),
+      );
+    const protectedRows =
+      objectId === null && operationId === null
+        ? [...state.secretMoments.values()]
+            .map((m) => m.wire)
+            .filter((m) => m.versionId === versionId)
+        : [];
+    const versions = [...state.versions.values()].map(
+      (v) => this.versionJson(v) as unknown as VersionRecord,
+    );
+    const startCursor: HistoryCursor = (params.cursor as HistoryCursor | undefined) ?? {
+      format: 1,
+      engineUuid: this.engineUuid,
+      workspaceId: versions[0]!.workspaceId,
+      versionId,
+      objectId,
+      operationId,
+      textFence: Math.max(-1, ...text.map((m) => m.momentOrder)),
+      protectedFence: Math.max(-1, ...protectedRows.map((m) => m.momentOrder)),
+      markerFence: objectId === null && operationId === null ? versions.length : -1,
+      text: null,
+      protected: null,
+      marker: null,
     };
-    const validPosition = (position: HistoryCursor["text"], fence: number) => position === null || (position.momentOrder >= 0 && position.momentOrder <= fence);
-    const objectStreamsEmpty = (objectId === null && operationId === null) || (startCursor.protectedFence === -1 && startCursor.markerFence === -1 && startCursor.protected === null && startCursor.marker === null);
-    if (startCursor.format !== 1 || startCursor.engineUuid !== this.engineUuid || startCursor.workspaceId !== versions[0]!.workspaceId ||
-      startCursor.versionId !== versionId || startCursor.objectId !== objectId || startCursor.operationId !== operationId || startCursor.textFence < -1 || startCursor.protectedFence < -1 || startCursor.markerFence < -1 ||
-      !validPosition(startCursor.text, startCursor.textFence) || !validPosition(startCursor.protected, startCursor.protectedFence) || !objectStreamsEmpty) throw new Error("invalid-input");
+    const validPosition = (position: HistoryCursor["text"], fence: number) =>
+      position === null || (position.momentOrder >= 0 && position.momentOrder <= fence);
+    const objectStreamsEmpty =
+      (objectId === null && operationId === null) ||
+      (startCursor.protectedFence === -1 &&
+        startCursor.markerFence === -1 &&
+        startCursor.protected === null &&
+        startCursor.marker === null);
+    if (
+      startCursor.format !== 1 ||
+      startCursor.engineUuid !== this.engineUuid ||
+      startCursor.workspaceId !== versions[0]!.workspaceId ||
+      startCursor.versionId !== versionId ||
+      startCursor.objectId !== objectId ||
+      startCursor.operationId !== operationId ||
+      startCursor.textFence < -1 ||
+      startCursor.protectedFence < -1 ||
+      startCursor.markerFence < -1 ||
+      !validPosition(startCursor.text, startCursor.textFence) ||
+      !validPosition(startCursor.protected, startCursor.protectedFence) ||
+      !objectStreamsEmpty
+    )
+      throw new Error("invalid-input");
     const cursor = structuredClone(startCursor);
-    const afterPosition = (m: {recordedAtMs: number; momentOrder: number}, p: HistoryCursor["text"]) => p === null || m.recordedAtMs < p.recordedAtMs || (m.recordedAtMs === p.recordedAtMs && m.momentOrder < p.momentOrder);
+    const afterPosition = (
+      m: { recordedAtMs: number; momentOrder: number },
+      p: HistoryCursor["text"],
+    ) =>
+      p === null ||
+      m.recordedAtMs < p.recordedAtMs ||
+      (m.recordedAtMs === p.recordedAtMs && m.momentOrder < p.momentOrder);
     const rows = [
-      ...text.filter(m => m.momentOrder <= cursor.textFence && afterPosition(m, cursor.text)).map(m => ({time:m.recordedAtMs, kind:0, order:m.momentOrder, id:m.momentId, value:m})),
-      ...protectedRows.filter(m => m.momentOrder <= cursor.protectedFence && afterPosition(m, cursor.protected)).map(m => ({time:m.recordedAtMs, kind:1, order:m.momentOrder, id:m.id, value:m})),
-      ...versions.slice(0, Math.max(0,cursor.markerFence)).filter(v => cursor.marker === null || v.createdAtMs < cursor.marker.createdAtMs || (v.createdAtMs === cursor.marker.createdAtMs && v.id < cursor.marker.versionId)).map(v => ({time:v.createdAtMs, kind:2, order:0, id:v.id, value:v})),
-    ].sort((a,b) => b.time-a.time || a.kind-b.kind || b.order-a.order || (a.id > b.id ? -1 : a.id < b.id ? 1 : 0));
-    const moments: JsonValue[] = [], protectedMoments: JsonValue[] = [], versionMarkers: JsonValue[] = [];
-    let used = 0, included = 0;
+      ...text
+        .filter((m) => m.momentOrder <= cursor.textFence && afterPosition(m, cursor.text))
+        .map((m) => ({
+          time: m.recordedAtMs,
+          kind: 0,
+          order: m.momentOrder,
+          id: m.momentId,
+          value: m,
+        })),
+      ...protectedRows
+        .filter((m) => m.momentOrder <= cursor.protectedFence && afterPosition(m, cursor.protected))
+        .map((m) => ({ time: m.recordedAtMs, kind: 1, order: m.momentOrder, id: m.id, value: m })),
+      ...versions
+        .slice(0, Math.max(0, cursor.markerFence))
+        .filter(
+          (v) =>
+            cursor.marker === null ||
+            v.createdAtMs < cursor.marker.createdAtMs ||
+            (v.createdAtMs === cursor.marker.createdAtMs && v.id < cursor.marker.versionId),
+        )
+        .map((v) => ({ time: v.createdAtMs, kind: 2, order: 0, id: v.id, value: v })),
+    ].sort(
+      (a, b) =>
+        b.time - a.time ||
+        a.kind - b.kind ||
+        b.order - a.order ||
+        (a.id > b.id ? -1 : a.id < b.id ? 1 : 0),
+    );
+    const moments: JsonValue[] = [],
+      protectedMoments: JsonValue[] = [],
+      versionMarkers: JsonValue[] = [];
+    let used = 0,
+      included = 0;
     for (const row of rows) {
       let value: JsonValue = row.value;
       if (row.kind === 0) {
         const m = row.value as MomentRecord;
-        value = {beforePath: m.beforePath ?? null, ...Object.fromEntries(["momentOrder","momentId","versionId","objectId","path","beforePath","recordedAtMs","operation","afterContentKind","afterByteLength","metadataOrigin","metadataSummary","metadataCorrelationId","authors","syncRecordOnly"].filter(k => k in m).map(k => [k,(m as unknown as JsonObject)[k]!]))} as JsonObject;
+        value = {
+          beforePath: m.beforePath ?? null,
+          ...Object.fromEntries(
+            [
+              "momentOrder",
+              "momentId",
+              "versionId",
+              "objectId",
+              "path",
+              "beforePath",
+              "recordedAtMs",
+              "operation",
+              "afterContentKind",
+              "afterByteLength",
+              "metadataOrigin",
+              "metadataSummary",
+              "metadataCorrelationId",
+              "authors",
+              "syncRecordOnly",
+            ]
+              .filter((k) => k in m)
+              .map((k) => [k, (m as unknown as JsonObject)[k]!]),
+          ),
+        } as JsonObject;
       }
       const bytes = utf8Length(JSON.stringify(value));
-      if (included >= limit || (included > 0 && used+bytes > 256*1024)) break;
-      used += bytes; included++;
-      if (row.kind === 0) { moments.push(value); cursor.text={recordedAtMs:row.time,momentOrder:row.order}; }
-      else if (row.kind === 1) { protectedMoments.push(value); cursor.protected={recordedAtMs:row.time,momentOrder:row.order}; }
-      else { versionMarkers.push(value); cursor.marker={createdAtMs:row.time,versionId:row.id}; }
+      if (included >= limit || (included > 0 && used + bytes > 256 * 1024)) break;
+      used += bytes;
+      included++;
+      if (row.kind === 0) {
+        moments.push(value);
+        cursor.text = { recordedAtMs: row.time, momentOrder: row.order };
+      } else if (row.kind === 1) {
+        protectedMoments.push(value);
+        cursor.protected = { recordedAtMs: row.time, momentOrder: row.order };
+      } else {
+        versionMarkers.push(value);
+        cursor.marker = { createdAtMs: row.time, versionId: row.id };
+      }
     }
-    return {activeVersion:this.versionJson(this.version(state,state.activeVersionId!)), moments,protectedMoments,versionMarkers,startCursor,nextCursor:included<rows.length?cursor:null,latestMomentOrder:startCursor.textFence};
+    return {
+      activeVersion: this.versionJson(this.version(state, state.activeVersionId!)),
+      moments,
+      protectedMoments,
+      versionMarkers,
+      startCursor,
+      nextCursor: included < rows.length ? cursor : null,
+      latestMomentOrder: startCursor.textFence,
+    };
   }
 
   private workspace(id: string): WorkspaceState {
@@ -2797,10 +2907,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return request.workspace;
   }
 
-  private validateWorkspaceParam(
-    params: JsonObject,
-    workspace: string,
-  ): void {
+  private validateWorkspaceParam(params: JsonObject, workspace: string): void {
     const candidate = serdeOptionalString(params, "workspaceId");
     if (candidate !== undefined && candidate !== workspace) throw new Error("invalid-workspace");
   }
@@ -2828,9 +2935,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (recorded.fingerprint !== fingerprint) {
       throw new Error("idempotency-key-reuse-mismatch");
     }
-    return markDeduped
-      ? { ...recorded.result, deduped: true }
-      : { ...recorded.result };
+    return markDeduped ? { ...recorded.result, deduped: true } : { ...recorded.result };
   }
 
   private recordReplay(
@@ -2846,9 +2951,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
         result,
         // The daemon records a write's publication outcome, and confirms a
         // checked delete once it reaches disk. This engine publishes as it records.
-        published: result.materializeOutcome === undefined
-          ? typeof params.expectedSha256 === "string"
-          : result.materializeOutcome === "applied",
+        published:
+          result.materializeOutcome === undefined
+            ? typeof params.expectedSha256 === "string"
+            : result.materializeOutcome === "applied",
       });
     }
   }
@@ -2935,8 +3041,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataSummary: params.summary ?? null,
       metadataCorrelationId: params.correlationId ?? null,
       authorJson: this.writeAuthorFingerprint(params),
-      ...(params.expectedObjectId!=null?{expectedObjectId:params.expectedObjectId}:{}),
-      ...(params.expectedSha256!=null?{expectedSha256:params.expectedSha256}:{}),
+      ...(params.expectedObjectId != null ? { expectedObjectId: params.expectedObjectId } : {}),
+      ...(params.expectedSha256 != null ? { expectedSha256: params.expectedSha256 } : {}),
     });
   }
 
@@ -2989,7 +3095,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return { id: objectId, workspaceId: workspace, createdAtMs };
   }
 
-  private textSnapshot(workspace: string, versionId: string, path: string, file: LoopbackFile): JsonObject {
+  private textSnapshot(
+    workspace: string,
+    versionId: string,
+    path: string,
+    file: LoopbackFile,
+  ): JsonObject {
     const digest = sha256(file.text ?? "");
     return {
       workspaceId: workspace,
@@ -3007,15 +3118,22 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
   }
 
-  private snapshotMetadata(workspace: string, versionId: string, path: string, file: LoopbackFile): JsonObject {
+  private snapshotMetadata(
+    workspace: string,
+    versionId: string,
+    path: string,
+    file: LoopbackFile,
+  ): JsonObject {
     return {
       workspaceId: workspace,
       versionId,
       objectId: file.objectId,
       path,
       contentKind: file.contentKind,
-      sha256: file.contentKind === "binary" ? file.binarySha ?? sha256([]) : sha256(file.text ?? ""),
-      byteLength: file.contentKind === "binary" ? file.bytes?.length ?? 0 : utf8Length(file.text ?? ""),
+      sha256:
+        file.contentKind === "binary" ? (file.binarySha ?? sha256([])) : sha256(file.text ?? ""),
+      byteLength:
+        file.contentKind === "binary" ? (file.bytes?.length ?? 0) : utf8Length(file.text ?? ""),
       updatedAtMs: file.updatedAtMs,
       latestMomentId: file.latestMomentId,
       metadataOrigin: file.metadataOrigin,
@@ -3030,12 +3148,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): JsonObject {
     const metadata = this.snapshotMetadata(workspace, versionId, path, file);
     const digest =
-      file.contentKind === "binary"
-        ? file.binarySha ?? sha256([])
-        : sha256(file.text ?? "");
+      file.contentKind === "binary" ? (file.binarySha ?? sha256([])) : sha256(file.text ?? "");
     return {
       ...metadata,
-      text: file.contentKind === "binary" ? "" : file.text ?? "",
+      text: file.contentKind === "binary" ? "" : (file.text ?? ""),
       blobSha256: digest,
     };
   }
@@ -3057,18 +3173,31 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
-    if (Object.values(value).some(field => typeof field === "string" && /\p{Cc}/u.test(field)) ||
-        ["agentId", "automationId", "humanId", "onBehalfOf", "agentRunId", "principalId", "grantId"]
-          .some(field => typeof value[field] === "string" && utf8Length(value[field]) > 512) ||
-        utf8Length(JSON.stringify([value])) > 128 * 1024) {
+    if (
+      Object.values(value).some((field) => typeof field === "string" && /\p{Cc}/u.test(field)) ||
+      [
+        "agentId",
+        "automationId",
+        "humanId",
+        "onBehalfOf",
+        "agentRunId",
+        "principalId",
+        "grantId",
+      ].some((field) => typeof value[field] === "string" && utf8Length(value[field]) > 512) ||
+      utf8Length(JSON.stringify([value])) > 128 * 1024
+    ) {
       throw new Error("invalid-metadata");
     }
     const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
     if (kind === "human") {
-      if (typeof value.humanId !== "string" || value.humanId.length === 0 || Object.keys(value).length !== 2) {
+      if (
+        typeof value.humanId !== "string" ||
+        value.humanId.length === 0 ||
+        Object.keys(value).length !== 2
+      ) {
         throw new Error("invalid-metadata");
       }
-      return {kind: "human", humanId: value.humanId};
+      return { kind: "human", humanId: value.humanId };
     }
     if (
       kind !== "agent" ||
@@ -3077,7 +3206,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       typeof onBehalfOf !== "string" ||
       onBehalfOf.length === 0 ||
       (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0)) ||
-      (depth !== undefined && (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 64))
+      (depth !== undefined &&
+        (typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 64))
     ) {
       throw new Error("invalid-metadata");
     }
@@ -3095,9 +3225,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const correlationId = metadataField(params, "correlationId");
     return {
       ...(summary !== undefined ? { metadataSummary: summary } : {}),
-      ...(correlationId !== undefined
-        ? { metadataCorrelationId: correlationId }
-        : {}),
+      ...(correlationId !== undefined ? { metadataCorrelationId: correlationId } : {}),
       // The daemon stamps the write's author on the moment it records and
       // returns it from moments.list/get (store.rs `author_json`); a write
       // without one gets null. Dropping it here made every moment look
@@ -3131,8 +3259,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     metadata: JsonObject = {},
     fromPath?: string,
   ): MomentRecord {
-    const afterText = after.contentKind === "text" ? after.text ?? "" : null;
-    const beforeText = before?.contentKind === "text" ? before.text ?? "" : null;
+    const afterText = after.contentKind === "text" ? (after.text ?? "") : null;
+    const beforeText = before?.contentKind === "text" ? (before.text ?? "") : null;
     return {
       ...metadata,
       momentOrder: this.clock++,
@@ -3161,12 +3289,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
       syncRecordOnly: false,
       afterText,
       afterByteLength:
-        after.contentKind === "text"
-          ? utf8Length(afterText ?? "")
-          : after.bytes?.length ?? null,
+        after.contentKind === "text" ? utf8Length(afterText ?? "") : (after.bytes?.length ?? null),
       afterInbandLimitBytes: null,
       beforeText,
-      beforeByteLength: before === undefined ? null : before.contentKind === "text" ? utf8Length(beforeText ?? "") : before.bytes?.length ?? null,
+      beforeByteLength:
+        before === undefined
+          ? null
+          : before.contentKind === "text"
+            ? utf8Length(beforeText ?? "")
+            : (before.bytes?.length ?? null),
       beforeInbandLimitBytes: null,
       // The path the preimage occupied. A write or delete replaced or removed
       // content at its own path (`payload_before_path` is
@@ -3174,7 +3305,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       // conflicts.rs:1222, and the delete's own path in store.rs:3540); a
       // rename carries the path it moved FROM (store.rs:381). No preimage, no
       // before side.
-      beforePath: before === undefined ? null : fromPath ?? path,
+      beforePath: before === undefined ? null : (fromPath ?? path),
     };
   }
 
@@ -3265,5 +3396,4 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ? left.text === right.text
       : left.binarySha === right.binarySha;
   }
-
 }

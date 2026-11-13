@@ -4,44 +4,74 @@ import { Activity, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import { describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { useWorkspaceQuery, type WorkspaceQuery } from "./useWorkspaceQuery";
-import { useWorkspaceSession, WorkspaceSessionProvider, type WorkspaceSession } from "./workspaceSession";
+import {
+  useWorkspaceSession,
+  WorkspaceSessionProvider,
+  type WorkspaceSession,
+} from "./workspaceSession";
 
-const wrapper = ({ children }: { children?: ReactNode }) => <WorkspaceSessionProvider workspaceId="w">{children}</WorkspaceSessionProvider>;
+const wrapper = ({ children }: { children?: ReactNode }) => (
+  <WorkspaceSessionProvider workspaceId="w">{children}</WorkspaceSessionProvider>
+);
 
 describe("useWorkspaceQuery", () => {
   it("reads when it starts, and a new key drops the old key's late answer and failure", async () => {
     const answers = { a: deferred<string>(), b: deferred<string>() };
     const signals: AbortSignal[] = [];
-    const hook = renderHook(({ key }) => useWorkspaceQuery(useWorkspaceSession(), {
-      key,
-      load: (signal) => { signals.push(signal); return answers[key].promise; },
-    }), { wrapper, initialProps: { key: "a" as "a" | "b" } });
+    const hook = renderHook(
+      ({ key }) =>
+        useWorkspaceQuery(useWorkspaceSession(), {
+          key,
+          load: (signal) => {
+            signals.push(signal);
+            return answers[key].promise;
+          },
+        }),
+      { wrapper, initialProps: { key: "a" as "a" | "b" } },
+    );
     expect(hook.result.current.pending).toBe(true);
     hook.rerender({ key: "b" });
     expect(signals[0]!.aborted).toBe(true);
-    await act(async () => { answers.b.resolve("b"); });
-    await act(async () => { answers.a.reject(Error("late")); });
+    await act(async () => {
+      answers.b.resolve("b");
+    });
+    await act(async () => {
+      answers.a.reject(Error("late"));
+    });
     expect(hook.result.current).toMatchObject({ value: "b", pending: false, error: null });
   });
 
   it("drops an answer from an earlier visit to the same workspace", async () => {
     const first = deferred<string>();
-    const read = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValueOnce("B").mockResolvedValue("second visit");
+    const read = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce("B")
+      .mockResolvedValue("second visit");
     const sessions = new Set<WorkspaceSession>();
-    let mounts = 0, files!: WorkspaceQuery<string>;
+    let mounts = 0,
+      files!: WorkspaceQuery<string>;
     function Files() {
-      useState(() => { mounts += 1; });
+      useState(() => {
+        mounts += 1;
+      });
       const session = useWorkspaceSession();
       sessions.add(session);
       files = useWorkspaceQuery(session, { key: "files", load: read });
       return null;
     }
-    const visit = (workspaceId: string) => <WorkspaceSessionProvider workspaceId={workspaceId}><Files /></WorkspaceSessionProvider>;
+    const visit = (workspaceId: string) => (
+      <WorkspaceSessionProvider workspaceId={workspaceId}>
+        <Files />
+      </WorkspaceSessionProvider>
+    );
     // A to B to A, without unmounting the reader.
     const view = render(visit("A"));
     view.rerender(visit("B"));
     view.rerender(visit("A"));
-    await act(async () => { first.resolve("first visit"); });
+    await act(async () => {
+      first.resolve("first visit");
+    });
     expect(files).toMatchObject({ value: "second visit", pending: false });
     expect(read).toHaveBeenCalledTimes(3);
     expect(mounts).toBe(1);
@@ -58,13 +88,24 @@ describe("useWorkspaceQuery", () => {
       files = useWorkspaceQuery(useWorkspaceSession(), { key: "files", manual, load });
       return null;
     }
-    const shown = (mode: "visible" | "hidden") => <WorkspaceSessionProvider workspaceId="w"><Activity mode={mode}><Files /></Activity></WorkspaceSessionProvider>;
+    const shown = (mode: "visible" | "hidden") => (
+      <WorkspaceSessionProvider workspaceId="w">
+        <Activity mode={mode}>
+          <Files />
+        </Activity>
+      </WorkspaceSessionProvider>
+    );
     const view = render(shown("visible"));
-    if (manual) act(() => { void files.retry(); });
+    if (manual)
+      act(() => {
+        void files.retry();
+      });
     expect(files.pending).toBe(true);
     view.rerender(shown("hidden"));
     view.rerender(shown("visible"));
-    await act(async () => { first.resolve("before hide"); });
+    await act(async () => {
+      first.resolve("before hide");
+    });
     return { files, load };
   }
   it("a manual query stops pending when shown again during a read", async () => {
@@ -79,16 +120,29 @@ describe("useWorkspaceQuery", () => {
   });
 
   it("keeps only the newest read, and retry waits for its own read", async () => {
-    const older = deferred<string>(), newer = deferred<string>();
+    const older = deferred<string>(),
+      newer = deferred<string>();
     const load = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
-    const hook = renderHook(() => useWorkspaceQuery(useWorkspaceSession(), { key: "k", manual: true, load }), { wrapper });
+    const hook = renderHook(
+      () => useWorkspaceQuery(useWorkspaceSession(), { key: "k", manual: true, load }),
+      { wrapper },
+    );
     expect(load).not.toHaveBeenCalled();
     let first!: Promise<void>;
-    act(() => { first = hook.result.current.retry(); });
-    act(() => { void hook.result.current.retry(); });
-    await act(async () => { older.resolve("older"); await first; });
+    act(() => {
+      first = hook.result.current.retry();
+    });
+    act(() => {
+      void hook.result.current.retry();
+    });
+    await act(async () => {
+      older.resolve("older");
+      await first;
+    });
     expect(hook.result.current).toMatchObject({ value: undefined, pending: true });
-    await act(async () => { newer.resolve("newer"); });
+    await act(async () => {
+      newer.resolve("newer");
+    });
     expect(hook.result.current).toMatchObject({ value: "newer", pending: false });
   });
 
@@ -111,8 +165,15 @@ describe("#894 (c15dce8c7): the first backlinks read landed over the focus read"
     const [focusNonce, setFocusNonce] = useState(0);
     useEffect(() => {
       let active = true;
-      read(path).then((answer) => { if (active) setLoaded(answer); }, () => undefined);
-      return () => { active = false; };
+      read(path).then(
+        (answer) => {
+          if (active) setLoaded(answer);
+        },
+        () => undefined,
+      );
+      return () => {
+        active = false;
+      };
     }, [path, read]);
     useEffect(() => {
       const onFocus = () => setFocusNonce((nonce) => nonce + 1);
@@ -122,8 +183,15 @@ describe("#894 (c15dce8c7): the first backlinks read landed over the focus read"
     useEffect(() => {
       if (focusNonce === 0) return;
       let active = true;
-      read(path).then((answer) => { if (active) setLoaded(answer); }, () => undefined);
-      return () => { active = false; };
+      read(path).then(
+        (answer) => {
+          if (active) setLoaded(answer);
+        },
+        () => undefined,
+      );
+      return () => {
+        active = false;
+      };
     }, [focusNonce, path, read]);
     return loaded;
   }
@@ -138,14 +206,21 @@ describe("#894 (c15dce8c7): the first backlinks read landed over the focus read"
     return query.value;
   }
   async function firstReadLandsLast(useBacklinks: typeof useBacklinksBefore) {
-    const first = deferred<string>(), focus = deferred<string>();
+    const first = deferred<string>(),
+      focus = deferred<string>();
     const read = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(focus.promise);
     const hook = renderHook(() => useBacklinks("note.md", read), { wrapper });
     try {
-      act(() => { window.dispatchEvent(new Event("focus")); });
+      act(() => {
+        window.dispatchEvent(new Event("focus"));
+      });
       expect(read).toHaveBeenCalledTimes(2);
-      await act(async () => { focus.resolve("after the edit"); });
-      await act(async () => { first.resolve("before the edit"); });
+      await act(async () => {
+        focus.resolve("after the edit");
+      });
+      await act(async () => {
+        first.resolve("before the edit");
+      });
       return hook.result.current;
     } finally {
       // Its focus listener must not reach the next case.
@@ -168,31 +243,50 @@ describe("#698 (ca868c25a): an unclaimed status write turned a run off", () => {
     const [active, setActive] = useState(false);
     const issued = useRef(0);
     const committed = useRef(0);
-    const refresh = useCallback(async (branch: "engine" | "opted-out") => {
-      if (branch === "opted-out") {
-        setActive(await read());
-        return;
-      }
-      const token = ++issued.current;
-      const answer = await read();
-      if (token <= committed.current) return;
-      committed.current = token;
-      setActive(answer);
-    }, [read]);
+    const refresh = useCallback(
+      async (branch: "engine" | "opted-out") => {
+        if (branch === "opted-out") {
+          setActive(await read());
+          return;
+        }
+        const token = ++issued.current;
+        const answer = await read();
+        if (token <= committed.current) return;
+        committed.current = token;
+        setActive(answer);
+      },
+      [read],
+    );
     return { active, refresh };
   }
   function useAgentLaneOnQuery(read: () => Promise<boolean>): AgentLane {
-    const query = useWorkspaceQuery(useWorkspaceSession(), { key: "agent-run", manual: true, load: () => read() });
+    const query = useWorkspaceQuery(useWorkspaceSession(), {
+      key: "agent-run",
+      manual: true,
+      load: () => read(),
+    });
     return { active: query.value ?? false, refresh: () => query.retry() };
   }
-  async function olderRefreshLandsAfterRunStarted(useAgentLane: (read: () => Promise<boolean>) => AgentLane) {
-    const before = deferred<boolean>(), after = deferred<boolean>();
+  async function olderRefreshLandsAfterRunStarted(
+    useAgentLane: (read: () => Promise<boolean>) => AgentLane,
+  ) {
+    const before = deferred<boolean>(),
+      after = deferred<boolean>();
     const read = vi.fn().mockReturnValueOnce(before.promise).mockReturnValueOnce(after.promise);
     const hook = renderHook(() => useAgentLane(read), { wrapper });
     let first!: Promise<void>, second!: Promise<void>;
-    act(() => { first = hook.result.current.refresh("opted-out"); second = hook.result.current.refresh("engine"); });
-    await act(async () => { after.resolve(true); await second; });
-    await act(async () => { before.resolve(false); await first; });
+    act(() => {
+      first = hook.result.current.refresh("opted-out");
+      second = hook.result.current.refresh("engine");
+    });
+    await act(async () => {
+      after.resolve(true);
+      await second;
+    });
+    await act(async () => {
+      before.resolve(false);
+      await first;
+    });
     return hook.result.current.active;
   }
   it("before: the opted-out answer lands last and wins", async () => {
@@ -208,21 +302,28 @@ describe("known gap", () => {
   // still write after its workspace was left, and no check sees it.
   it("a loader that captures its own setter still commits late", async () => {
     const answers = { A: deferred<string>(), B: deferred<string>() };
-    const hook = renderHook(({ workspaceId }) => {
-      const [leaked, setLeaked] = useState<string>();
-      const query = useWorkspaceQuery(useWorkspaceSession(), {
-        key: workspaceId,
-        load: async () => {
-          const answer = await answers[workspaceId].promise;
-          setLeaked(answer);
-          return answer;
-        },
-      });
-      return { value: query.value, leaked };
-    }, { wrapper, initialProps: { workspaceId: "A" as "A" | "B" } });
+    const hook = renderHook(
+      ({ workspaceId }) => {
+        const [leaked, setLeaked] = useState<string>();
+        const query = useWorkspaceQuery(useWorkspaceSession(), {
+          key: workspaceId,
+          load: async () => {
+            const answer = await answers[workspaceId].promise;
+            setLeaked(answer);
+            return answer;
+          },
+        });
+        return { value: query.value, leaked };
+      },
+      { wrapper, initialProps: { workspaceId: "A" as "A" | "B" } },
+    );
     hook.rerender({ workspaceId: "B" });
-    await act(async () => { answers.B.resolve("B's files"); });
-    await act(async () => { answers.A.resolve("A's files"); });
+    await act(async () => {
+      answers.B.resolve("B's files");
+    });
+    await act(async () => {
+      answers.A.resolve("A's files");
+    });
     expect(hook.result.current.value).toBe("B's files");
     expect(hook.result.current.leaked).toBe("A's files");
   });

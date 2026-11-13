@@ -2,7 +2,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { datasetColumnFields, type DatasetDescription } from "@dohc/security-contract/dataset";
 import { DatasetSchemaChange, type DatasetMigrationPreparation } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
-import { CollectionMigrationReviewDialog, type CollectionMigrationReviewDialogProps } from "./CollectionMigrationReviewDialog";
+import {
+  CollectionMigrationReviewDialog,
+  type CollectionMigrationReviewDialogProps,
+} from "./CollectionMigrationReviewDialog";
 import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { inputClass, selectClass, parseOptionsText } from "./collections/FieldForm";
@@ -32,128 +35,470 @@ export interface CollectionFieldsDialogProps {
   onRetry?(change: DatasetSchemaChange): void;
 }
 type FieldType = Extract<DatasetSchemaChange, { kind: "changeField" }>["type"];
-const types: Array<[FieldType, string]> = [["text", "Text"], ["number", "Number"], ["checkbox", "Checkbox"], ["date", "Date"],
-  ["select", "Select"], ["multi-select", "Multi-select"], ["url", "URL"], ["attachment", "File"]];
+const types: Array<[FieldType, string]> = [
+  ["text", "Text"],
+  ["number", "Number"],
+  ["checkbox", "Checkbox"],
+  ["date", "Date"],
+  ["select", "Select"],
+  ["multi-select", "Multi-select"],
+  ["url", "URL"],
+  ["attachment", "File"],
+];
 
 export function CollectionFieldsDialog(props: CollectionFieldsDialogProps) {
-  return <ScopedFields key={`${props.workspaceId}:${props.dataset.datasetId}:${props.tableId}:${props.dataset.revisionSha256}`} {...props} />;
+  return (
+    <ScopedFields
+      key={`${props.workspaceId}:${props.dataset.datasetId}:${props.tableId}:${props.dataset.revisionSha256}`}
+      {...props}
+    />
+  );
 }
 function ScopedFields(props: CollectionFieldsDialogProps) {
-  const table = props.dataset.tables.find(table => table.tableId === props.tableId);
+  const table = props.dataset.tables.find((table) => table.tableId === props.tableId);
   // Buttons get their own controls. Names stay unique across every field.
   const columns = table ? datasetColumnFields(table) : [];
-  const [kind, setKind] = useState<DatasetSchemaChange["kind"]>("addField"), [name, setName] = useState("");
-  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""), [type, setType] = useState<FieldType>(props.addType ?? "text");
-  const [required, setRequired] = useState(false), [unique, setUnique] = useState(false), [hasDefault, setHasDefault] = useState(false);
-  const [defaultText, setDefaultText] = useState(""), [options, setOptions] = useState("");
-  const [review, setReview] = useState<{ preparation: DatasetMigrationPreparation; change: DatasetSchemaChange } | null>(null);
+  const [kind, setKind] = useState<DatasetSchemaChange["kind"]>("addField"),
+    [name, setName] = useState("");
+  const [fieldId, setFieldId] = useState(columns[0]?.fieldId ?? ""),
+    [type, setType] = useState<FieldType>(props.addType ?? "text");
+  const [required, setRequired] = useState(false),
+    [unique, setUnique] = useState(false),
+    [hasDefault, setHasDefault] = useState(false);
+  const [defaultText, setDefaultText] = useState(""),
+    [options, setOptions] = useState("");
+  const [review, setReview] = useState<{
+    preparation: DatasetMigrationPreparation;
+    change: DatasetSchemaChange;
+  } | null>(null);
   // Each button and what it does, and each action no field is named for yet, which can become a button.
-  const buttonFields = table?.fields.filter(field => field.type === "button") ?? [];
-  const actions = props.onButtonAdded ? props.dataset.operations.filter(operation => operation.tableId === props.tableId && operation.kind === "action" &&
-    !operation.readOnly && !table?.fields.some(field => field.name === operation.label)) : [];
-  const [pending, setPending] = useState(false), [invalid, setInvalid] = useState<string | null>(null);
-  const lifetime = useRef<AbortController | null>(null), active = useRef(true), locked = useRef(false);
-  const selectedField = columns.find(field => field.fieldId === fieldId);
+  const buttonFields = table?.fields.filter((field) => field.type === "button") ?? [];
+  const actions = props.onButtonAdded
+    ? props.dataset.operations.filter(
+        (operation) =>
+          operation.tableId === props.tableId &&
+          operation.kind === "action" &&
+          !operation.readOnly &&
+          !table?.fields.some((field) => field.name === operation.label),
+      )
+    : [];
+  const [pending, setPending] = useState(false),
+    [invalid, setInvalid] = useState<string | null>(null);
+  const lifetime = useRef<AbortController | null>(null),
+    active = useRef(true),
+    locked = useRef(false);
+  const selectedField = columns.find((field) => field.fieldId === fieldId);
   function selectField(id: string) {
-    const field = columns.find(field => field.fieldId === id);
-    setFieldId(id); setName(field?.name ?? ""); setType(field?.type ?? "text"); setRequired(field?.required ?? false);
+    const field = columns.find((field) => field.fieldId === id);
+    setFieldId(id);
+    setName(field?.name ?? "");
+    setType(field?.type ?? "text");
+    setRequired(field?.required ?? false);
   }
-  useLayoutEffect(() => { active.current = true; return () => { active.current = false; lifetime.current?.abort(); }; }, []);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+      lifetime.current?.abort();
+    };
+  }, []);
   function changeFromDraft(): DatasetSchemaChange {
-    if (kind === "changeField") return DatasetSchemaChange.parse({kind, tableId: props.tableId, fieldId, type, required});
+    if (kind === "changeField")
+      return DatasetSchemaChange.parse({ kind, tableId: props.tableId, fieldId, type, required });
     const label = name.trim();
     if (!label) throw new Error("Enter a name.");
     if (kind === "renameCollection") return DatasetSchemaChange.parse({ kind, name: label });
-    if (kind === "renameTable") return DatasetSchemaChange.parse({ kind, tableId: props.tableId, name: label });
-    if (table?.fields.some(field => field.name.toLocaleLowerCase() === label.toLocaleLowerCase() && (kind === "addField" || field.fieldId !== fieldId))) throw new Error("A field already uses this name. Choose another name.");
-    if (kind === "renameField") return DatasetSchemaChange.parse({ kind, tableId: props.tableId, fieldId, name: label });
+    if (kind === "renameTable")
+      return DatasetSchemaChange.parse({ kind, tableId: props.tableId, name: label });
+    if (
+      table?.fields.some(
+        (field) =>
+          field.name.toLocaleLowerCase() === label.toLocaleLowerCase() &&
+          (kind === "addField" || field.fieldId !== fieldId),
+      )
+    )
+      throw new Error("A field already uses this name. Choose another name.");
+    if (kind === "renameField")
+      return DatasetSchemaChange.parse({ kind, tableId: props.tableId, fieldId, name: label });
     if (type === "relation") throw new Error("Choose a field type.");
-    const field: Extract<DatasetSchemaChange, { kind: "addField" }>["field"] = { name: label, type, required, unique };
-    if (type === "select" || type === "multi-select") { field.options = parseOptionsText(options); if (!field.options.length) throw new Error("Enter at least one option."); }
+    const field: Extract<DatasetSchemaChange, { kind: "addField" }>["field"] = {
+      name: label,
+      type,
+      required,
+      unique,
+    };
+    if (type === "select" || type === "multi-select") {
+      field.options = parseOptionsText(options);
+      if (!field.options.length) throw new Error("Enter at least one option.");
+    }
     if (hasDefault) {
-      if (type === "number") { if (!defaultText.trim() || !Number.isFinite(Number(defaultText))) throw new Error("Enter a number for the default."); field.default = Number(defaultText); }
-      else if (type === "checkbox") field.default = defaultText === "true";
+      if (type === "number") {
+        if (!defaultText.trim() || !Number.isFinite(Number(defaultText)))
+          throw new Error("Enter a number for the default.");
+        field.default = Number(defaultText);
+      } else if (type === "checkbox") field.default = defaultText === "true";
       else if (type === "multi-select") field.default = parseOptionsText(defaultText);
       else field.default = defaultText;
     }
-    if (required && !hasDefault) throw new Error("A new required field needs a default for existing records.");
-    if (unique && hasDefault) throw new Error("A new unique field cannot give every record the same default.");
+    if (required && !hasDefault)
+      throw new Error("A new required field needs a default for existing records.");
+    if (unique && hasDefault)
+      throw new Error("A new unique field cannot give every record the same default.");
     return DatasetSchemaChange.parse({ kind, tableId: props.tableId, field });
   }
   function prepare(button?: string) {
     if (locked.current || !active.current) return;
     let change: DatasetSchemaChange;
-    try { change = button ? DatasetSchemaChange.parse({ kind: "addButton", tableId: props.tableId, name: button }) : changeFromDraft(); setInvalid(null); }
-    catch (error) { setInvalid(error instanceof Error ? error.message : "Check the field values."); return; }
+    try {
+      change = button
+        ? DatasetSchemaChange.parse({ kind: "addButton", tableId: props.tableId, name: button })
+        : changeFromDraft();
+      setInvalid(null);
+    } catch (error) {
+      setInvalid(error instanceof Error ? error.message : "Check the field values.");
+      return;
+    }
     void prepareChange(change);
   }
   async function prepareChange(change: DatasetSchemaChange) {
     if (locked.current || !active.current) return;
-    locked.current = true; setPending(true); const abort = new AbortController(); lifetime.current = abort;
+    locked.current = true;
+    setPending(true);
+    const abort = new AbortController();
+    lifetime.current = abort;
     try {
       const preparation = await props.onPrepare(change, abort.signal);
       if (active.current && !abort.signal.aborted) {
-        if (preparation.expected.workspaceId !== props.workspaceId || preparation.revision.datasetId !== props.dataset.datasetId
-          || preparation.previousRevision.revisionSha256 !== props.dataset.revisionSha256) throw new Error("This review belongs to another Collection revision. Refresh the Collection.");
+        if (
+          preparation.expected.workspaceId !== props.workspaceId ||
+          preparation.revision.datasetId !== props.dataset.datasetId ||
+          preparation.previousRevision.revisionSha256 !== props.dataset.revisionSha256
+        )
+          throw new Error(
+            "This review belongs to another Collection revision. Refresh the Collection.",
+          );
         setReview({ preparation, change });
       }
     } catch (error) {
       const { onRetry } = props;
-      if (active.current && !abort.signal.aborted) props.onError("dohc could not prepare this field change.", error,
-        onRetry ? () => onRetry(change) : () => { if (active.current) void prepareChange(change); });
+      if (active.current && !abort.signal.aborted)
+        props.onError(
+          "dohc could not prepare this field change.",
+          error,
+          onRetry
+            ? () => onRetry(change)
+            : () => {
+                if (active.current) void prepareChange(change);
+              },
+        );
+    } finally {
+      if (active.current) {
+        locked.current = false;
+        setPending(false);
+      }
     }
-    finally { if (active.current) { locked.current = false; setPending(false); } }
   }
   const { retry } = props;
-  useEffect(() => { if (retry) void prepareChange(retry.change); }, [retry]);
-  if (review) return <CollectionMigrationReviewDialog workspaceId={props.workspaceId} datasetId={props.dataset.datasetId} initialPreparation={review.preparation} generatedChange
-    onPrepare={(_input, signal) => props.onPrepare(review.change, signal)} onApprove={async (input, signal) => {
-      await props.onApprove(input, signal);
-      // The button exists now. What it does is chosen in the builder, where it can be saved.
-      if (review.change.kind === "addButton") props.onButtonAdded?.(review.change.name);
-    }} onDiscard={props.onDiscard} onLoadPreview={props.onLoadPreview} onClose={props.onClose} onError={props.onError} />;
-  return <Overlay onClose={pending ? undefined : props.onClose}><form role="dialog" aria-modal="true" aria-labelledby="collection-fields-title"
-    onSubmit={event => { event.preventDefault(); prepare(); }} className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5">
-    <h2 id="collection-fields-title" className="m-0 text-base font-semibold text-ink">Fields and names</h2>
-    <label className="text-[12px] text-muted">Change<select aria-label="Change" disabled={pending} className={`${selectClass} mt-1 w-full`} value={kind} onChange={event => {
-      const next = event.target.value as DatasetSchemaChange["kind"]; setKind(next); setInvalid(null);
-      if (next === "changeField") { selectField(fieldId); return; }
-      if (next === "addField") { setType("text"); setRequired(false); }
-      setName(next === "renameTable" ? table?.name ?? "" : next === "renameCollection" ? props.dataset.name : next === "renameField" ? columns.find(field => field.fieldId === fieldId)?.name ?? "" : "");
-    }}><option value="addField">Add field</option><option value="renameField">Rename field</option><option value="changeField">Change field type or requirement</option><option value="renameTable">Rename table</option><option value="renameCollection">Rename Collection</option></select></label>
-    {(kind === "renameField" || kind === "changeField") && <label className="text-[12px] text-muted">Field<select aria-label="Field" disabled={pending} className={`${selectClass} mt-1 w-full`} value={fieldId} onChange={event => selectField(event.target.value)}>{columns.map(field => <option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select></label>}
-    {kind !== "changeField" && <label className="text-[12px] text-muted">Name<input aria-label="Name" autoFocus className={`${inputClass} mt-1`} disabled={pending} value={name} onChange={event => setName(event.target.value)} /></label>}
-    {kind === "changeField" && <>
-      <label className="text-[12px] text-muted">Type<select aria-label="Type" className={`${selectClass} mt-1 w-full`} disabled={pending} value={type} onChange={event => setType(event.target.value as FieldType)}>
-        {selectedField?.type === "relation" && <option value="relation">Relation</option>}
-        {types.filter(([value]) => value === selectedField?.type || ["text", "number"].includes(selectedField?.type ?? "") && ["text", "number"].includes(value)).map(([value,label]) => <option key={value} value={value}>{label}</option>)}
-      </select></label>
-      <label className="flex items-center gap-1 text-[12px] text-muted"><input type="checkbox" checked={required} disabled={pending} onChange={event => setRequired(event.target.checked)} />Required</label>
-      <p className="m-0 text-[12px] text-muted">Review existing values before applying this change. Fix conflicting records first. Other conversions need a source change.</p>
-    </>}
-    {kind === "addField" && <>
-      <label className="text-[12px] text-muted">Type<select aria-label="Type" className={`${selectClass} mt-1 w-full`} disabled={pending} value={type} onChange={event => { setType(event.target.value as FieldType); setRequired(false); setUnique(false); setHasDefault(false); setDefaultText(""); }}>{types.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-      {(type === "select" || type === "multi-select") && <label className="text-[12px] text-muted">Options<input aria-label="Options" className={`${inputClass} mt-1`} disabled={pending} value={options} placeholder="Todo, Doing, Done" onChange={event => setOptions(event.target.value)} /></label>}
-      <div className="flex flex-wrap gap-3 text-[12px] text-muted"><label className="flex items-center gap-1"><input type="checkbox" checked={required} disabled={pending || type === "attachment"} onChange={event => setRequired(event.target.checked)} />Required</label>
-        <label className="flex items-center gap-1"><input type="checkbox" checked={unique} disabled={pending || type === "attachment" || type === "multi-select"} onChange={event => setUnique(event.target.checked)} />Unique</label>
-        <label className="flex items-center gap-1"><input type="checkbox" checked={hasDefault} disabled={pending || type === "attachment"} onChange={event => setHasDefault(event.target.checked)} />Default value</label></div>
-      {hasDefault && <label className="text-[12px] text-muted">Default{type === "checkbox" ? <select aria-label="Default" className={`${selectClass} mt-1 w-full`} disabled={pending} value={defaultText || "false"} onChange={event => setDefaultText(event.target.value)}><option value="false">Unchecked</option><option value="true">Checked</option></select> : <input aria-label="Default" className={`${inputClass} mt-1`} type={type === "number" ? "number" : type === "date" ? "date" : "text"} disabled={pending} value={defaultText} onChange={event => setDefaultText(event.target.value)} />}</label>}
-      <p className="m-0 text-[12px] text-muted">New fields do not expand shared access. Custom rules stay unchanged; edit their source to use a new field.</p>
-    </>}
-    {buttonFields.length > 0 || actions.length > 0 ? <section aria-label="Buttons" className="flex flex-col gap-1 border-t border-line pt-3">
-      <SectionLabel>Buttons</SectionLabel>
-      {buttonFields.map(field => <div key={field.fieldId} className="flex h-8 items-center gap-2 rounded-md px-2">
-        <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{field.name}</span>
-        {props.onChooseButton && props.buttonStates?.get(field.name)?.kind === "no-automation" ? <SecondaryButton type="button" aria-label={`Choose what it does: ${field.name}`} disabled={pending}
-          onClick={() => props.onChooseButton?.(field.name)}>Choose what it does</SecondaryButton> : null}
-      </div>)}
-      {actions.map(operation => <div key={operation.operationId} className="flex h-8 items-center gap-2 rounded-md px-2">
-        <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{operation.label}</span>
-        <SecondaryButton type="button" aria-label={`Add as button: ${operation.label}`} disabled={pending}
-          onClick={() => prepare(operation.label)}>Add as button</SecondaryButton>
-      </div>)}
-    </section> : null}
-    {invalid && <p role="alert" className="m-0 text-[12px] text-danger">{invalid}</p>}
-    <div className="flex flex-wrap items-center justify-end gap-2"><SecondaryButton type="button" disabled={pending} onClick={props.onReviewSource}>Review source change</SecondaryButton><SecondaryButton type="button" disabled={pending} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton type="submit" disabled={pending}>{pending ? "Preparing…" : "Review change"}</PrimaryButton></div>
-  </form></Overlay>;
+  useEffect(() => {
+    if (retry) void prepareChange(retry.change);
+  }, [retry]);
+  if (review)
+    return (
+      <CollectionMigrationReviewDialog
+        workspaceId={props.workspaceId}
+        datasetId={props.dataset.datasetId}
+        initialPreparation={review.preparation}
+        generatedChange
+        onPrepare={(_input, signal) => props.onPrepare(review.change, signal)}
+        onApprove={async (input, signal) => {
+          await props.onApprove(input, signal);
+          // The button exists now. What it does is chosen in the builder, where it can be saved.
+          if (review.change.kind === "addButton") props.onButtonAdded?.(review.change.name);
+        }}
+        onDiscard={props.onDiscard}
+        onLoadPreview={props.onLoadPreview}
+        onClose={props.onClose}
+        onError={props.onError}
+      />
+    );
+  return (
+    <Overlay onClose={pending ? undefined : props.onClose}>
+      <form
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="collection-fields-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          prepare();
+        }}
+        className="dohc-elevated dohc-pop-in flex max-h-[88vh] w-[min(480px,calc(100vw-32px))] flex-col gap-3 overflow-y-auto rounded-xl border border-line bg-panel p-5"
+      >
+        <h2 id="collection-fields-title" className="m-0 text-base font-semibold text-ink">
+          Fields and names
+        </h2>
+        <label className="text-[12px] text-muted">
+          Change
+          <select
+            aria-label="Change"
+            disabled={pending}
+            className={`${selectClass} mt-1 w-full`}
+            value={kind}
+            onChange={(event) => {
+              const next = event.target.value as DatasetSchemaChange["kind"];
+              setKind(next);
+              setInvalid(null);
+              if (next === "changeField") {
+                selectField(fieldId);
+                return;
+              }
+              if (next === "addField") {
+                setType("text");
+                setRequired(false);
+              }
+              setName(
+                next === "renameTable"
+                  ? (table?.name ?? "")
+                  : next === "renameCollection"
+                    ? props.dataset.name
+                    : next === "renameField"
+                      ? (columns.find((field) => field.fieldId === fieldId)?.name ?? "")
+                      : "",
+              );
+            }}
+          >
+            <option value="addField">Add field</option>
+            <option value="renameField">Rename field</option>
+            <option value="changeField">Change field type or requirement</option>
+            <option value="renameTable">Rename table</option>
+            <option value="renameCollection">Rename Collection</option>
+          </select>
+        </label>
+        {(kind === "renameField" || kind === "changeField") && (
+          <label className="text-[12px] text-muted">
+            Field
+            <select
+              aria-label="Field"
+              disabled={pending}
+              className={`${selectClass} mt-1 w-full`}
+              value={fieldId}
+              onChange={(event) => selectField(event.target.value)}
+            >
+              {columns.map((field) => (
+                <option key={field.fieldId} value={field.fieldId}>
+                  {field.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {kind !== "changeField" && (
+          <label className="text-[12px] text-muted">
+            Name
+            <input
+              aria-label="Name"
+              autoFocus
+              className={`${inputClass} mt-1`}
+              disabled={pending}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+        )}
+        {kind === "changeField" && (
+          <>
+            <label className="text-[12px] text-muted">
+              Type
+              <select
+                aria-label="Type"
+                className={`${selectClass} mt-1 w-full`}
+                disabled={pending}
+                value={type}
+                onChange={(event) => setType(event.target.value as FieldType)}
+              >
+                {selectedField?.type === "relation" && <option value="relation">Relation</option>}
+                {types
+                  .filter(
+                    ([value]) =>
+                      value === selectedField?.type ||
+                      (["text", "number"].includes(selectedField?.type ?? "") &&
+                        ["text", "number"].includes(value)),
+                  )
+                  .map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-[12px] text-muted">
+              <input
+                type="checkbox"
+                checked={required}
+                disabled={pending}
+                onChange={(event) => setRequired(event.target.checked)}
+              />
+              Required
+            </label>
+            <p className="m-0 text-[12px] text-muted">
+              Review existing values before applying this change. Fix conflicting records first.
+              Other conversions need a source change.
+            </p>
+          </>
+        )}
+        {kind === "addField" && (
+          <>
+            <label className="text-[12px] text-muted">
+              Type
+              <select
+                aria-label="Type"
+                className={`${selectClass} mt-1 w-full`}
+                disabled={pending}
+                value={type}
+                onChange={(event) => {
+                  setType(event.target.value as FieldType);
+                  setRequired(false);
+                  setUnique(false);
+                  setHasDefault(false);
+                  setDefaultText("");
+                }}
+              >
+                {types.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {(type === "select" || type === "multi-select") && (
+              <label className="text-[12px] text-muted">
+                Options
+                <input
+                  aria-label="Options"
+                  className={`${inputClass} mt-1`}
+                  disabled={pending}
+                  value={options}
+                  placeholder="Todo, Doing, Done"
+                  onChange={(event) => setOptions(event.target.value)}
+                />
+              </label>
+            )}
+            <div className="flex flex-wrap gap-3 text-[12px] text-muted">
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={required}
+                  disabled={pending || type === "attachment"}
+                  onChange={(event) => setRequired(event.target.checked)}
+                />
+                Required
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={unique}
+                  disabled={pending || type === "attachment" || type === "multi-select"}
+                  onChange={(event) => setUnique(event.target.checked)}
+                />
+                Unique
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={hasDefault}
+                  disabled={pending || type === "attachment"}
+                  onChange={(event) => setHasDefault(event.target.checked)}
+                />
+                Default value
+              </label>
+            </div>
+            {hasDefault && (
+              <label className="text-[12px] text-muted">
+                Default
+                {type === "checkbox" ? (
+                  <select
+                    aria-label="Default"
+                    className={`${selectClass} mt-1 w-full`}
+                    disabled={pending}
+                    value={defaultText || "false"}
+                    onChange={(event) => setDefaultText(event.target.value)}
+                  >
+                    <option value="false">Unchecked</option>
+                    <option value="true">Checked</option>
+                  </select>
+                ) : (
+                  <input
+                    aria-label="Default"
+                    className={`${inputClass} mt-1`}
+                    type={type === "number" ? "number" : type === "date" ? "date" : "text"}
+                    disabled={pending}
+                    value={defaultText}
+                    onChange={(event) => setDefaultText(event.target.value)}
+                  />
+                )}
+              </label>
+            )}
+            <p className="m-0 text-[12px] text-muted">
+              New fields do not expand shared access. Custom rules stay unchanged; edit their source
+              to use a new field.
+            </p>
+          </>
+        )}
+        {buttonFields.length > 0 || actions.length > 0 ? (
+          <section aria-label="Buttons" className="flex flex-col gap-1 border-t border-line pt-3">
+            <SectionLabel>Buttons</SectionLabel>
+            {buttonFields.map((field) => (
+              <div key={field.fieldId} className="flex h-8 items-center gap-2 rounded-md px-2">
+                <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{field.name}</span>
+                {props.onChooseButton &&
+                props.buttonStates?.get(field.name)?.kind === "no-automation" ? (
+                  <SecondaryButton
+                    type="button"
+                    aria-label={`Choose what it does: ${field.name}`}
+                    disabled={pending}
+                    onClick={() => props.onChooseButton?.(field.name)}
+                  >
+                    Choose what it does
+                  </SecondaryButton>
+                ) : null}
+              </div>
+            ))}
+            {actions.map((operation) => (
+              <div
+                key={operation.operationId}
+                className="flex h-8 items-center gap-2 rounded-md px-2"
+              >
+                <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
+                  {operation.label}
+                </span>
+                <SecondaryButton
+                  type="button"
+                  aria-label={`Add as button: ${operation.label}`}
+                  disabled={pending}
+                  onClick={() => prepare(operation.label)}
+                >
+                  Add as button
+                </SecondaryButton>
+              </div>
+            ))}
+          </section>
+        ) : null}
+        {invalid && (
+          <p role="alert" className="m-0 text-[12px] text-danger">
+            {invalid}
+          </p>
+        )}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <SecondaryButton type="button" disabled={pending} onClick={props.onReviewSource}>
+            Review source change
+          </SecondaryButton>
+          <SecondaryButton type="button" disabled={pending} onClick={props.onClose}>
+            Cancel
+          </SecondaryButton>
+          <PrimaryButton type="submit" disabled={pending}>
+            {pending ? "Preparing…" : "Review change"}
+          </PrimaryButton>
+        </div>
+      </form>
+    </Overlay>
+  );
 }

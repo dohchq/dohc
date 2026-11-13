@@ -8,7 +8,13 @@ afterEach(cleanup);
 
 const noop = () => {};
 
-function strip(options: { dirty?: boolean; recovery?: string[]; onClose?: (groupId: string, path: string) => void } = {}) {
+function strip(
+  options: {
+    dirty?: boolean;
+    recovery?: string[];
+    onClose?: (groupId: string, path: string) => void;
+  } = {},
+) {
   return (
     <EditorTabs
       groupId="left"
@@ -28,7 +34,8 @@ function strip(options: { dirty?: boolean; recovery?: string[]; onClose?: (group
 }
 
 const tabOf = (path: string) => screen.getByTestId(editorTabTestId(path));
-const closeOf = (path: string) => within(tabOf(path)).getByRole("button", { name: `Close ${path}` });
+const closeOf = (path: string) =>
+  within(tabOf(path)).getByRole("button", { name: `Close ${path}` });
 const classes = (el: Element) => el.className.split(/\s+/);
 
 describe("EditorTabs unsaved dot", () => {
@@ -36,7 +43,8 @@ describe("EditorTabs unsaved dot", () => {
   // tab lays out the same boxes as a saved one, with no box before its glyph,
   // and its dot sits inside the close's 16px slot, which a saved tab has too.
   it("keeps an unsaved tab as wide as a saved one", () => {
-    const boxes = (tab: HTMLElement) => [...tab.children].map((child) => `${child.tagName} ${child.className}`);
+    const boxes = (tab: HTMLElement) =>
+      [...tab.children].map((child) => `${child.tagName} ${child.className}`);
     const { rerender } = render(strip());
     const saved = boxes(tabOf("plan.md"));
     rerender(strip({ dirty: true }));
@@ -97,7 +105,9 @@ describe("EditorTabs unsaved dot", () => {
     const tab = tabOf("plan.md");
     // An image, so every browser reads its label into the tab's name. ARIA
     // names no span that has no role.
-    expect(within(tab).getByRole("img", { name: "Unsaved changes" })).toBe(within(tab).getByTestId("tab-dirty"));
+    expect(within(tab).getByRole("img", { name: "Unsaved changes" })).toBe(
+      within(tab).getByTestId("tab-dirty"),
+    );
     expect(screen.getByRole("tab", { name: /Unsaved changes/ })).toBe(tab);
     fireEvent.click(closeOf("plan.md"));
     expect(onClose).toHaveBeenLastCalledWith("left", "plan.md");

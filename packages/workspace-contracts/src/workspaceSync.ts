@@ -1,9 +1,12 @@
 import { z } from "zod";
 import { ChangeAuthor, ChangeAuthorStatus, changeAuthorStatus } from "./changeAuthor";
 
-export const WorkspaceSyncPause = z.object({
-  atMs: z.number().int().nonnegative(), author: ChangeAuthor,
-}).strict();
+export const WorkspaceSyncPause = z
+  .object({
+    atMs: z.number().int().nonnegative(),
+    author: ChangeAuthor,
+  })
+  .strict();
 export type WorkspaceSyncPause = z.infer<typeof WorkspaceSyncPause>;
 
 export const WorkspaceSyncPauseStatus = WorkspaceSyncPause.extend({ author: ChangeAuthorStatus });

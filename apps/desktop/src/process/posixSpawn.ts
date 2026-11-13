@@ -47,9 +47,7 @@ function neverRejects(promise: Promise<unknown>): Promise<void> {
   });
 }
 
-function resolveSettled(
-  settled: Promise<unknown> | (() => Promise<unknown>),
-): Promise<void> {
+function resolveSettled(settled: Promise<unknown> | (() => Promise<unknown>)): Promise<void> {
   try {
     const result = typeof settled === "function" ? settled() : settled;
     return neverRejects(Promise.resolve(result));
@@ -75,9 +73,7 @@ export interface ProcessIdentity {
 export function parseProcessTable(output: string): ProcessTableEntry[] {
   const entries: ProcessTableEntry[] = [];
   for (const line of output.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S(?:.*\S)?)\s*$/.exec(
-      line,
-    );
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S(?:.*\S)?)\s*$/.exec(line);
     if (!match?.[1] || !match[2] || !match[3]) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
@@ -184,7 +180,10 @@ export async function processDescendants(
     return processTreePids(table, rootPid).filter((pid) => pid !== rootPid);
   } catch (error) {
     // A slow or failed read counts as finding nothing, so leave a trace.
-    console.warn("[desktop] could not read the process table, so this capture found nothing", error);
+    console.warn(
+      "[desktop] could not read the process table, so this capture found nothing",
+      error,
+    );
     return [];
   }
 }
@@ -217,36 +216,32 @@ function readProcessTableWithTimeout(
   readTimeoutMs: number,
 ): Promise<string> {
   if (readTimeoutMs <= 0) {
-    return Promise.reject(
-      new Error(`Process table read exceeded ${readTimeoutMs} ms.`),
-    );
+    return Promise.reject(new Error(`Process table read exceeded ${readTimeoutMs} ms.`));
   }
   return new Promise((resolveOutput, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      reject(
-        new Error(
-          `Process table read exceeded ${readTimeoutMs} ms.`,
-        ),
-      );
+      reject(new Error(`Process table read exceeded ${readTimeoutMs} ms.`));
     }, readTimeoutMs);
     timer.unref?.();
-    Promise.resolve().then(readProcessTable).then(
-      (output) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolveOutput(output);
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
+    Promise.resolve()
+      .then(readProcessTable)
+      .then(
+        (output) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolveOutput(output);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
   });
 }
 
@@ -262,18 +257,15 @@ async function signalProcessTreePosix(
   options: KillProcessTreePosixOptions,
 ): Promise<ProcessTreeSignalResult> {
   const readTimeoutMs = options.readTimeoutMs ?? PROCESS_TABLE_READ_TIMEOUT_MS;
-  const readProcessTable = options.readProcessTable ??
-    (() => readProcessTableWithPs(readTimeoutMs));
-  const sendSignal = options.sendSignal ??
-    ((pid, pidSignal) => process.kill(pid, pidSignal));
+  const readProcessTable =
+    options.readProcessTable ?? (() => readProcessTableWithPs(readTimeoutMs));
+  const sendSignal = options.sendSignal ?? ((pid, pidSignal) => process.kill(pid, pidSignal));
   const isForceRound = options.alsoSignalIdentities !== undefined;
   const capturedIdentities = new Map(
     options.alsoSignalIdentities?.map((identity) => [identity.pid, identity]),
   );
   // capturedIdentities is empty on the non-force path, so the filter was a no-op.
-  const initialPids = isForceRound
-    ? []
-    : [...new Set([rootPid, ...(options.alsoSignal ?? [])])];
+  const initialPids = isForceRound ? [] : [...new Set([rootPid, ...(options.alsoSignal ?? [])])];
 
   let pids = initialPids;
   let identities: ProcessIdentity[] = [];
@@ -294,9 +286,7 @@ async function signalProcessTreePosix(
       }
       return entriesByPid.get(pid)?.startedAt === captured.startedAt;
     };
-    const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(
-      identityMatches,
-    );
+    const roots = [rootPid, ...(options.alsoSignal ?? [])].filter(identityMatches);
     pids = collectTreePidsForRoots(childrenByParent, roots);
     identities = pids.flatMap((pid) => {
       const entry = entriesByPid.get(pid);
@@ -419,18 +409,11 @@ export async function stopProcessTreePosix(
       ...options,
       alsoSignal: captured,
       alsoSignalIdentities: capturedIdentities,
-      readTimeoutMs: phaseBudget(
-        PROCESS_TABLE_READ_TIMEOUT_MS,
-        FINAL_WAIT_RESERVE_MS,
-      ),
+      readTimeoutMs: phaseBudget(PROCESS_TABLE_READ_TIMEOUT_MS, FINAL_WAIT_RESERVE_MS),
     });
     forceResultPids = result.pids;
     unverifiable ||= result.tableReadFailed;
-    await waitForProcessExit(
-      forceResultPids,
-      phaseBudget(Number.POSITIVE_INFINITY, 0),
-      isAlive,
-    );
+    await waitForProcessExit(forceResultPids, phaseBudget(Number.POSITIVE_INFINITY, 0), isAlive);
   } catch {
     unverifiable = true;
   }
@@ -440,9 +423,7 @@ export async function stopProcessTreePosix(
   // process handle cannot target an unrelated process through pid reuse.
   // A root omitted from the first table has no identity; if it is still alive,
   // only the caller's owned process handle can stop it without pid-reuse risk.
-  const rootIdentityCaptured = capturedIdentities.some(
-    (identity) => identity.pid === pid,
-  );
+  const rootIdentityCaptured = capturedIdentities.some((identity) => identity.pid === pid);
   const omittedLiveRoot = !rootIdentityCaptured && isAlive(pid);
   if (unverifiable || forceResultPids.some(isAlive) || omittedLiveRoot) {
     onTreeKillFailure?.();

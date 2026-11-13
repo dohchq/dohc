@@ -86,12 +86,7 @@ function scriptLoopbackDefault(
   return loopback;
 }
 
-const KNOWN_PACKAGE_MANAGER_COMMANDS: ReadonlySet<string> = new Set([
-  "npm",
-  "pnpm",
-  "yarn",
-  "bun",
-]);
+const KNOWN_PACKAGE_MANAGER_COMMANDS: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn", "bun"]);
 
 // npm's own documented boolean options for `run`/`run-script`, deliberately
 // excluding any option that takes a value (e.g. --script-shell) — a
@@ -133,16 +128,17 @@ function packageManagerScriptRun(
     if (first !== "run" && first !== "run-script") return null;
     const run = npmRunScriptResult(rest);
     return run
-      ? { manager: "npm", script: run.script, options: run.options, forwardedArgs: run.forwardedArgs }
+      ? {
+          manager: "npm",
+          script: run.script,
+          options: run.options,
+          forwardedArgs: run.forwardedArgs,
+        }
       : null;
   }
   const [first, second, ...rest] = parsed.args;
   if (rest.length > 0) return null;
-  if (
-    parsed.command === "pnpm" ||
-    parsed.command === "yarn" ||
-    parsed.command === "bun"
-  ) {
+  if (parsed.command === "pnpm" || parsed.command === "yarn" || parsed.command === "bun") {
     if (first === "run" && second) {
       return { manager: parsed.command, script: second, options: [], forwardedArgs: [] };
     }
@@ -165,19 +161,12 @@ function validatedPackageManagerRun(
   }
   const scriptBody = site.scripts[run.script];
   if (!scriptBody) {
-    throw new Error(
-      `App has no ${run.script} script to run via ${run.manager}: ${site.root}`,
-    );
+    throw new Error(`App has no ${run.script} script to run via ${run.manager}: ${site.root}`);
   }
-  const validated = packageManagerValidatedScriptCommand(
-    run.manager,
-    run.script,
-    scriptBody,
-    {
-      pre: site.scripts[`pre${run.script}`],
-      post: site.scripts[`post${run.script}`],
-    },
-  );
+  const validated = packageManagerValidatedScriptCommand(run.manager, run.script, scriptBody, {
+    pre: site.scripts[`pre${run.script}`],
+    post: site.scripts[`post${run.script}`],
+  });
   const loopback =
     previewScript === "build" ? null : scriptLoopbackDefault(scriptBody, run.forwardedArgs);
   const forwardedArgs =

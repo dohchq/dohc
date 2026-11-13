@@ -3,7 +3,11 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CollectionCustomizeDialog, documentCollectionFiles, type CollectionFile } from "./CollectionCustomizeDialog";
+import {
+  CollectionCustomizeDialog,
+  documentCollectionFiles,
+  type CollectionFile,
+} from "./CollectionCustomizeDialog";
 
 afterEach(cleanup);
 
@@ -13,11 +17,24 @@ function Harness(props: { files: readonly CollectionFile[]; onOpenFile?: (path: 
   const [open, setOpen] = useState(false);
   return (
     <>
-      <details onClick={(event) => { if (event.target instanceof HTMLButtonElement) event.currentTarget.open = false; }}>
+      <details
+        onClick={(event) => {
+          if (event.target instanceof HTMLButtonElement) event.currentTarget.open = false;
+        }}
+      >
         <summary>Manage Collection</summary>
-        <button type="button" onClick={() => setOpen(true)}>Customize…</button>
+        <button type="button" onClick={() => setOpen(true)}>
+          Customize…
+        </button>
       </details>
-      {open ? <CollectionCustomizeDialog name="Trips" files={props.files} onOpenFile={props.onOpenFile ?? vi.fn()} onClose={() => setOpen(false)} /> : null}
+      {open ? (
+        <CollectionCustomizeDialog
+          name="Trips"
+          files={props.files}
+          onOpenFile={props.onOpenFile ?? vi.fn()}
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
     </>
   );
 }
@@ -43,12 +60,10 @@ describe("CollectionCustomizeDialog", () => {
     expect(document.activeElement).toBe(screen.getByText("Manage Collection"));
   });
 
-
   it("copies a file's path", async () => {
     const { user } = await openDialog(documentCollectionFiles("trips", true));
     await user.click(screen.getByRole("button", { name: "Copy collection.yaml path" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Path copied" })).toBeTruthy());
     expect(await navigator.clipboard.readText()).toBe("trips/collection.yaml");
   });
-
 });

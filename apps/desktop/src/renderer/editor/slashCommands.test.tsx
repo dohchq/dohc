@@ -68,9 +68,7 @@ function Harness({
   onEditor: (editor: Editor) => void;
   onState: (state: SlashCommandState) => void;
 }) {
-  const [slashState, setSlashState] = useState<SlashCommandState>(
-    CLOSED_SLASH_COMMAND_STATE,
-  );
+  const [slashState, setSlashState] = useState<SlashCommandState>(CLOSED_SLASH_COMMAND_STATE);
   const slashStateRef = useRef<SlashCommandState>(slashState);
   const runCommandRef = useRef<(id: SlashCommandId) => void>(() => {});
   const editorRef = useRef<Editor | null>(null);
@@ -237,7 +235,6 @@ describe("Escape on the slash menu", () => {
     expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "head" });
     editor.destroy();
   });
-
 });
 
 // A collaborator's edits arrive through Y.js, which replaces the whole
@@ -366,18 +363,27 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
     Element.prototype.scrollIntoView = scrollIntoView;
     try {
       const props = { onSelect: () => {}, onHover: () => {} };
-      const { rerender } = render(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, ...props }));
+      const { rerender } = render(
+        createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, ...props }),
+      );
       const list = screen.getByRole("listbox", { name: "slash commands" });
       const options = screen.getAllByRole("option");
       const last = options.at(-1)!;
       expect(options[0]!.hasAttribute("data-active")).toBe(true);
       expect(inListView(list, last)).toBe(false);
 
-      rerender(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE, selected: options.length - 1 }, ...props }));
+      rerender(
+        createElement(SlashCommandMenu, {
+          state: { ...OPEN_STATE_BASE, selected: options.length - 1 },
+          ...props,
+        }),
+      );
       expect(last.hasAttribute("data-active")).toBe(true);
       expect(options[0]!.hasAttribute("data-active")).toBe(false);
       expect(inListView(list, last)).toBe(true);
-      rerender(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE, selected: 0 }, ...props }));
+      rerender(
+        createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE, selected: 0 }, ...props }),
+      );
       expect(inListView(list, options[0]!)).toBe(true);
       expect(scrollIntoView).not.toHaveBeenCalled();
     } finally {
@@ -387,7 +393,13 @@ describe("SlashCommandMenu on the Menu part's recipe", () => {
 
   it("takes the active option only from a pointer that moves", () => {
     const onHover = vi.fn();
-    render(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, onSelect: () => {}, onHover }));
+    render(
+      createElement(SlashCommandMenu, {
+        state: { ...OPEN_STATE_BASE },
+        onSelect: () => {},
+        onHover,
+      }),
+    );
     const second = screen.getAllByRole("option")[1]!;
     fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
     expect(onHover).not.toHaveBeenCalled();

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, TriangleAlert } from "lucide-react";
 import { preferredBuildOutput } from "@dohc/workspace-core";
-import { previewRunsAppCode, type SitePackageInfo, type SitePreviewMode } from "../../ipc/bridgeContract";
+import {
+  previewRunsAppCode,
+  type SitePackageInfo,
+  type SitePreviewMode,
+} from "../../ipc/bridgeContract";
 import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
@@ -25,8 +29,10 @@ import { SettingRow, SettingsSection, SwitchControl } from "./SettingRow";
 const DEFAULT_DESCRIPTIONS: Record<WorkspacePreviewMode, string> = {
   auto: "Dev when an app has a dev script. Otherwise Build for a package, or Static.",
   dev: "Runs each app's dev script on this computer. An app that cannot start this way uses Auto.",
-  build: "Shows each app's build output. Runs its build script first when it has one. An app that cannot start this way uses Auto.",
-  static: "Shows each app's files without running commands. An app that cannot start this way uses Auto.",
+  build:
+    "Shows each app's build output. Runs its build script first when it has one. An app that cannot start this way uses Auto.",
+  static:
+    "Shows each app's files without running commands. An app that cannot start this way uses Auto.",
 };
 
 const SOURCE_WORDS: Record<StartingModeSource, string> = {
@@ -42,7 +48,13 @@ type ListState =
   | { status: "ready"; workspaceId: string; apps: SitePackageInfo[] }
   | { status: "failed"; workspaceId: string };
 
-type ReportError = (message: string, cause?: unknown, retry?: () => Promise<void>, details?: undefined, identity?: string) => void;
+type ReportError = (
+  message: string,
+  cause?: unknown,
+  retry?: () => Promise<void>,
+  details?: undefined,
+  identity?: string,
+) => void;
 
 export function AppsSettings(props: {
   workspaceId: string;
@@ -80,7 +92,13 @@ export function AppsSettings(props: {
       },
       onError: (error) => {
         setList({ status: "failed", workspaceId });
-        report.current.onError?.(ipcErrorMessage(error, "dohc could not list this workspace's apps."), error, async () => retry(), undefined, identity);
+        report.current.onError?.(
+          ipcErrorMessage(error, "dohc could not list this workspace's apps."),
+          error,
+          async () => retry(),
+          undefined,
+          identity,
+        );
       },
     },
     [workspaceId, attempt],
@@ -88,9 +106,12 @@ export function AppsSettings(props: {
   useEffect(() => () => report.current.onClearError?.(identity), [identity]);
 
   // An answer for another workspace never shows.
-  const current = list.status !== "loading" && list.workspaceId !== workspaceId ? { status: "loading" as const } : list;
+  const current =
+    list.status !== "loading" && list.workspaceId !== workspaceId
+      ? { status: "loading" as const }
+      : list;
   const apps = current.status === "ready" ? current.apps : [];
-  const page = opened === null ? null : apps.find((app) => app.root === opened) ?? null;
+  const page = opened === null ? null : (apps.find((app) => app.root === opened) ?? null);
 
   // Opening a page focuses its back button; going back focuses the app's row.
   const card = useRef<HTMLDivElement>(null);
@@ -101,7 +122,12 @@ export function AppsSettings(props: {
     if (target === null) return;
     focusAfter.current = null;
     if (target === "page") back.current?.focus();
-    else card.current?.querySelector<HTMLElement>(`[data-testid="settings-app-row"][data-app-root="${CSS.escape(target.row)}"]`)?.focus();
+    else
+      card.current
+        ?.querySelector<HTMLElement>(
+          `[data-testid="settings-app-row"][data-app-root="${CSS.escape(target.row)}"]`,
+        )
+        ?.focus();
   });
   // A page whose app left the workspace goes back to the list.
   useEffect(() => {
@@ -133,7 +159,9 @@ export function AppsSettings(props: {
           else rememberMode(workspaceId, page.root, mode);
           setPicks((count) => count + 1);
         }}
-        {...(props.onSetPinned ? { onSetPinned: (pinned: boolean) => props.onSetPinned?.(page.root, pinned) } : {})}
+        {...(props.onSetPinned
+          ? { onSetPinned: (pinned: boolean) => props.onSetPinned?.(page.root, pinned) }
+          : {})}
         {...(props.onOpenApp ? { onOpen: () => props.onOpenApp?.(page.root) } : {})}
       />
     );
@@ -170,9 +198,15 @@ export function AppsSettings(props: {
             testId="settings-row-apps-trust"
           >
             <span data-testid="apps-trust-state" className="text-[12px] text-muted">
-              {props.trust.trusted === null ? "Checking" : props.trust.trusted ? "Trusted" : "Restricted Mode"}
+              {props.trust.trusted === null
+                ? "Checking"
+                : props.trust.trusted
+                  ? "Trusted"
+                  : "Restricted Mode"}
             </span>
-            <SecondaryButton size="compact" onClick={props.trust.onOpen}>Change</SecondaryButton>
+            <SecondaryButton size="compact" onClick={props.trust.onOpen}>
+              Change
+            </SecondaryButton>
           </SettingRow>
         ) : null}
       </SettingsSection>
@@ -183,9 +217,14 @@ export function AppsSettings(props: {
           {current.status === "loading" ? (
             <SkeletonRows layout="panel" label="Loading apps..." />
           ) : current.status === "failed" ? (
-            <RetryRow testId="settings-apps-failed" onRetry={retry}>dohc could not list this workspace's apps.</RetryRow>
+            <RetryRow testId="settings-apps-failed" onRetry={retry}>
+              dohc could not list this workspace's apps.
+            </RetryRow>
           ) : apps.length === 0 ? (
-            <p data-testid="settings-apps-empty" className="m-0 rounded-lg border border-dashed border-line px-4 py-6 text-center text-[13px] text-muted">
+            <p
+              data-testid="settings-apps-empty"
+              className="m-0 rounded-lg border border-dashed border-line px-4 py-6 text-center text-[13px] text-muted"
+            >
               No apps in this workspace yet.
             </p>
           ) : (
@@ -207,15 +246,24 @@ export function AppsSettings(props: {
                   >
                     <span className="min-w-0 flex-1">
                       <span className="flex min-w-0 items-center gap-1.5">
-                        <span className="min-w-0 truncate text-[13px] font-medium text-ink">{app.title}</span>
+                        <span className="min-w-0 truncate text-[13px] font-medium text-ink">
+                          {app.title}
+                        </span>
                         <AppMarks app={app} />
                       </span>
-                      <span className="block truncate font-mono text-[11px] text-subtle">{app.root}</span>
+                      <span className="block truncate font-mono text-[11px] text-subtle">
+                        {app.root}
+                      </span>
                     </span>
-                    <span data-testid="settings-app-mode" className="flex shrink-0 items-center gap-2 text-[12px] text-muted">
+                    <span
+                      data-testid="settings-app-mode"
+                      className="flex shrink-0 items-center gap-2 text-[12px] text-muted"
+                    >
                       {start ? (
                         <>
-                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-ink">{modeLabel(start.mode)}</span>
+                          <span className="rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-ink">
+                            {modeLabel(start.mode)}
+                          </span>
                           <span>{SOURCE_WORDS[start.source]}</span>
                         </>
                       ) : (
@@ -234,12 +282,15 @@ export function AppsSettings(props: {
   );
 }
 
-function fallbackWords(fallback: { mode: SitePreviewMode; source: StartingModeSource } | null): string {
+function fallbackWords(
+  fallback: { mode: SitePreviewMode; source: StartingModeSource } | null,
+): string {
   if (!fallback) return "This app has nothing to preview yet.";
   const mode = modeLabel(fallback.mode);
   if (fallback.source === "app") return `Default starts ${mode}, as its dohc.json sets.`;
   if (fallback.source === "workspace") return `Default starts ${mode}, the workspace default.`;
-  if (fallback.source === "shared") return `Default starts ${mode}, the only mode a shared app has.`;
+  if (fallback.source === "shared")
+    return `Default starts ${mode}, the only mode a shared app has.`;
   return `Default starts ${mode}, which dohc picks for this app.`;
 }
 
@@ -259,14 +310,25 @@ function AppPage(props: {
   const { app } = props;
   const starts = props.picked ?? props.fallback?.mode ?? null;
   const held = props.restricted && starts !== null && previewRunsAppCode(app, starts);
-  const devScript = app.configuredScripts.dev ?? app.scripts.dev ?? app.configuredScripts.start ?? app.scripts.start;
+  const devScript =
+    app.configuredScripts.dev ??
+    app.scripts.dev ??
+    app.configuredScripts.start ??
+    app.scripts.start;
   const buildScript = app.configuredScripts.build ?? app.scripts.build;
   const output = preferredBuildOutput(app);
   const details: Array<[string, string]> = [
     ["Folder", app.root],
     ...(app.entryPath ? [["Opens", app.entryPath] as [string, string]] : []),
     ...(app.configPath ? [["Settings file", app.configPath] as [string, string]] : []),
-    ...(app.packagePath ? [["Package", app.packageManager ? `${app.packagePath} (${app.packageManager})` : app.packagePath] as [string, string]] : []),
+    ...(app.packagePath
+      ? [
+          [
+            "Package",
+            app.packageManager ? `${app.packagePath} (${app.packageManager})` : app.packagePath,
+          ] as [string, string],
+        ]
+      : []),
     ...(devScript ? [["Dev script", devScript] as [string, string]] : []),
     ...(buildScript ? [["Build script", buildScript] as [string, string]] : []),
     ...(output ? [["Build output", output] as [string, string]] : []),
@@ -280,7 +342,8 @@ function AppPage(props: {
         onClick={props.onBack}
         className="-ml-1 mb-4 inline-flex items-center gap-1 rounded px-1 text-[13px] text-muted hover:text-ink"
       >
-        <ChevronLeft size={14} aria-hidden />Apps
+        <ChevronLeft size={14} aria-hidden />
+        Apps
       </button>
       <div className="mb-6 flex items-center gap-3">
         <div className="min-w-0 flex-1">
@@ -291,24 +354,35 @@ function AppPage(props: {
           <p className="m-0 mt-0.5 truncate font-mono text-[12px] text-muted">{app.root}</p>
         </div>
         {props.onOpen ? (
-          <SecondaryButton data-testid="settings-app-open" onClick={props.onOpen} className="shrink-0">Open app</SecondaryButton>
+          <SecondaryButton
+            data-testid="settings-app-open"
+            onClick={props.onOpen}
+            className="shrink-0"
+          >
+            Open app
+          </SecondaryButton>
         ) : null}
       </div>
 
       <SettingsSection title="Preview">
         <SettingRow
           title="Start with"
-          description={<>
-            {props.picked
-              ? "Picked on this computer. Applies the next time this preview starts."
-              : fallbackWords(props.fallback)}
-            {held ? (
-              <span data-testid="settings-app-restricted" className="mt-1 flex items-center gap-1.5 text-warning">
-                <TriangleAlert size={12} aria-hidden className="shrink-0" />
-                Restricted Mode holds {modeLabel(starts)} until you trust this workspace.
-              </span>
-            ) : null}
-          </>}
+          description={
+            <>
+              {props.picked
+                ? "Picked on this computer. Applies the next time this preview starts."
+                : fallbackWords(props.fallback)}
+              {held ? (
+                <span
+                  data-testid="settings-app-restricted"
+                  className="mt-1 flex items-center gap-1.5 text-warning"
+                >
+                  <TriangleAlert size={12} aria-hidden className="shrink-0" />
+                  Restricted Mode holds {modeLabel(starts)} until you trust this workspace.
+                </span>
+              ) : null}
+            </>
+          }
           testId="settings-app-start-with"
         >
           {props.modes.length > 0 ? (
@@ -338,9 +412,14 @@ function AppPage(props: {
       <SettingsSection title="Details">
         <dl data-testid="settings-app-details" className="m-0">
           {details.map(([label, value]) => (
-            <div key={label} className="flex items-baseline gap-4 border-b border-line py-2.5 last:border-b-0">
+            <div
+              key={label}
+              className="flex items-baseline gap-4 border-b border-line py-2.5 last:border-b-0"
+            >
               <dt className="w-28 shrink-0 text-[13px] text-muted">{label}</dt>
-              <dd className="m-0 min-w-0 select-text break-all font-mono text-[12px] text-ink">{value}</dd>
+              <dd className="m-0 min-w-0 select-text break-all font-mono text-[12px] text-ink">
+                {value}
+              </dd>
             </div>
           ))}
         </dl>
@@ -350,11 +429,20 @@ function AppPage(props: {
         <SettingsSection title="Problems">
           <ul data-testid="settings-app-problems" className="m-0 list-none p-0">
             {app.diagnostics.map((diagnostic, index) => (
-              <li key={`${diagnostic.code}-${index}`} className="flex items-start gap-2 border-b border-line py-2.5 text-[12px] last:border-b-0">
-                <TriangleAlert size={12} aria-hidden className={`mt-0.5 shrink-0 ${diagnostic.severity === "error" ? "text-danger" : "text-warning"}`} />
+              <li
+                key={`${diagnostic.code}-${index}`}
+                className="flex items-start gap-2 border-b border-line py-2.5 text-[12px] last:border-b-0"
+              >
+                <TriangleAlert
+                  size={12}
+                  aria-hidden
+                  className={`mt-0.5 shrink-0 ${diagnostic.severity === "error" ? "text-danger" : "text-warning"}`}
+                />
                 <span className="min-w-0 text-ink">
                   {diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}
-                  {diagnostic.path ? <span className="ml-1.5 font-mono text-subtle">{diagnostic.path}</span> : null}
+                  {diagnostic.path ? (
+                    <span className="ml-1.5 font-mono text-subtle">{diagnostic.path}</span>
+                  ) : null}
                 </span>
               </li>
             ))}

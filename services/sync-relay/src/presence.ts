@@ -281,7 +281,9 @@ export class PresenceHub {
     const groups = new Set(workspaceIds);
     for (const [key, scope] of this.scopes) {
       let changed = false;
-      for (const [entryKey, entry] of scope.entries) if (entry.userId === userId || groups.has(scope.group)) changed = this.deleteEntry(scope, entryKey) || changed;
+      for (const [entryKey, entry] of scope.entries)
+        if (entry.userId === userId || groups.has(scope.group))
+          changed = this.deleteEntry(scope, entryKey) || changed;
       if (changed) this.bump(key, scope);
       this.gc(key, scope);
     }

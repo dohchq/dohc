@@ -1,35 +1,58 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
-import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
-import {dirname,join} from 'node:path';
-import {tmpdir} from 'node:os';
-import {createPrepareFixture} from './prepare-fixture.mjs';
-import {orderedDeliveryArtifact} from './ordered-delivery-fixture.mjs';
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { createPrepareFixture } from "./prepare-fixture.mjs";
+import { orderedDeliveryArtifact } from "./ordered-delivery-fixture.mjs";
 test("ordered delivery preparation selects the exact native test executable", () => {
   const root = join(tmpdir(), "ordered-delivery-artifact");
-  const valid = {reason:"compiler-artifact", target:{name:"dohc-workspace-engine",kind:["bin"]}, profile:{test:true},
-    manifest_path:join(root,"crates/dohc-workspace-engine/Cargo.toml"), executable:join(root,"target/debug/deps/test-executable")};
-  assert.equal(orderedDeliveryArtifact([{...valid,profile:{test:false}},valid],root),valid.executable);
-  for (const mutation of [{profile:{test:false}},{target:{name:"other",kind:["bin"]}},
-    {manifest_path:join(root,"other/Cargo.toml")},{executable:join(root,"target-other/debug/test-executable")}]) {
-    assert.throws(()=>orderedDeliveryArtifact([{...valid,...mutation}],root),/did not report/);
+  const valid = {
+    reason: "compiler-artifact",
+    target: { name: "dohc-workspace-engine", kind: ["bin"] },
+    profile: { test: true },
+    manifest_path: join(root, "crates/dohc-workspace-engine/Cargo.toml"),
+    executable: join(root, "target/debug/deps/test-executable"),
+  };
+  assert.equal(
+    orderedDeliveryArtifact([{ ...valid, profile: { test: false } }, valid], root),
+    valid.executable,
+  );
+  for (const mutation of [
+    { profile: { test: false } },
+    { target: { name: "other", kind: ["bin"] } },
+    { manifest_path: join(root, "other/Cargo.toml") },
+    { executable: join(root, "target-other/debug/test-executable") },
+  ]) {
+    assert.throws(
+      () => orderedDeliveryArtifact([{ ...valid, ...mutation }], root),
+      /did not report/,
+    );
   }
 });
 
 test("ordered delivery fixture rejects stale source and artifacts and closes preparation on cancellation", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-ordered-fixture-"));
   const put = (path, contents) => {
-    mkdirSync(dirname(join(root, path)), {recursive:true});
+    mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), contents);
   };
   try {
     createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
-    put("scripts/verification/ordered-delivery-fixture.mjs", readFileSync(new URL("./ordered-delivery-fixture.mjs", import.meta.url)));
+    put(
+      "scripts/verification/ordered-delivery-fixture.mjs",
+      readFileSync(new URL("./ordered-delivery-fixture.mjs", import.meta.url)),
+    );
     put("vendor/fixture/lib.rs", "original vendor input");
     put("crates/dohc-workspace-engine/src/proof_test.rs", "original harness input");
-    put("scripts/verification/process.mjs", readFileSync(join(root,"scripts/verification/process.mjs"),"utf8")
-      .replace("export async function run(","async function originalRun(") + `
+    put(
+      "scripts/verification/process.mjs",
+      readFileSync(join(root, "scripts/verification/process.mjs"), "utf8").replace(
+        "export async function run(",
+        "async function originalRun(",
+      ) +
+        `
       export async function run(command,args,options) {
         assert.equal(command,'cargo');
         assert.deepEqual(args,['test','--locked','--target-dir',join(repoRoot,'target'),'-p','dohc-workspace-engine',
@@ -41,7 +64,8 @@ test("ordered delivery fixture rejects stale source and artifacts and closes pre
         return {stdout:JSON.stringify({reason:'compiler-artifact',target:{name:'dohc-workspace-engine',kind:['bin']},
           profile:{test:true},manifest_path:join(repoRoot,'crates/dohc-workspace-engine/Cargo.toml'),executable})};
       }
-    `);
+    `,
+    );
     const script = `
       import assert from 'node:assert/strict';
       import cp from 'node:child_process';
@@ -81,8 +105,14 @@ test("ordered delivery fixture rejects stale source and artifacts and closes pre
       }
       process.exitCode=0;
     `;
-    const result=spawnSync(process.execPath,["--input-type=module","-e",script],{cwd:root,encoding:"utf8",timeout:30_000});
-    assert.equal(result.error,undefined,result.stderr);
-    assert.equal(result.status,0,result.stderr);
-  } finally { rmSync(root,{recursive:true,force:true}); }
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(result.error, undefined, result.stderr);
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

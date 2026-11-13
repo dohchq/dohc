@@ -9,53 +9,185 @@ import type { StorageContext } from "./storage/context";
 import type { AppBackendAuth } from "./appBackendAuthority";
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const digest = (domain: string, value: unknown) => sha(JSON.stringify([domain, value]));
-export const limits = {maxFiles: 20, maxMetadataBytes: 65536, maxBundleBytes: 65536};
-export const owner: AppBackendAuth = {kind: "named", workspaceId: "w", userId: "owner"};
+export const limits = { maxFiles: 20, maxMetadataBytes: 65536, maxBundleBytes: 65536 };
+export const owner: AppBackendAuth = { kind: "named", workspaceId: "w", userId: "owner" };
 const cleanups: (() => void)[] = [];
-afterEach(() => {for (const cleanup of cleanups.splice(0).reverse()) cleanup();});
+afterEach(() => {
+  for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+});
 
-type PushedFile = {path: string; text: string};
+type PushedFile = { path: string; text: string };
 /** Pushes one change to a main file from the owner's desktop: a write, a move when the paths differ, or a delete with no after. */
-export function pushFile(storage: StorageContext, objectId: string, before: PushedFile | null, after: PushedFile | null): void {
-  for (const file of [before, after]) if (file) storage.putBlob({workspaceId: "w", sha256: sha(file.text), content: Buffer.from(file.text), createdAtMs: 1});
-  const last = storage.db.prepare("SELECT MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id='w' AND origin_id='desktop'").get();
+export function pushFile(
+  storage: StorageContext,
+  objectId: string,
+  before: PushedFile | null,
+  after: PushedFile | null,
+): void {
+  for (const file of [before, after])
+    if (file)
+      storage.putBlob({
+        workspaceId: "w",
+        sha256: sha(file.text),
+        content: Buffer.from(file.text),
+        createdAtMs: 1,
+      });
+  const last = storage.db
+    .prepare(
+      "SELECT MAX(origin_seq) AS seq FROM sync_relay_log WHERE workspace_id='w' AND origin_id='desktop'",
+    )
+    .get();
   const originSeq = Number(last?.seq ?? -1) + 1;
-  storage.appendLogBatch({workspaceId: "w", originId: "desktop", ops: [{originSeq, opKind: "moment.append", recordedAtMs: 1, payloadJson: JSON.stringify({
-    momentId: `moment-${originSeq}`, versionId: "main", objectId, path: (after ?? before)!.path, recordedAtMs: 1,
-    operation: !after ? "delete" : before && before.path !== after.path ? "rename" : "write",
-    beforePresent: before ? "present" : "null", payloadBeforeBlobSha256: before && sha(before.text), payloadBeforePath: before?.path ?? null,
-    payloadAfterBlobSha256: after && sha(after.text), payloadAfterPath: after?.path ?? null,
-    ...(after ? {payloadAfterContentKind: "text", payloadAfterByteLength: Buffer.byteLength(after.text)} : {}), metadata: {origin: "api"}})}]});
+  storage.appendLogBatch({
+    workspaceId: "w",
+    originId: "desktop",
+    ops: [
+      {
+        originSeq,
+        opKind: "moment.append",
+        recordedAtMs: 1,
+        payloadJson: JSON.stringify({
+          momentId: `moment-${originSeq}`,
+          versionId: "main",
+          objectId,
+          path: (after ?? before)!.path,
+          recordedAtMs: 1,
+          operation: !after ? "delete" : before && before.path !== after.path ? "rename" : "write",
+          beforePresent: before ? "present" : "null",
+          payloadBeforeBlobSha256: before && sha(before.text),
+          payloadBeforePath: before?.path ?? null,
+          payloadAfterBlobSha256: after && sha(after.text),
+          payloadAfterPath: after?.path ?? null,
+          ...(after
+            ? {
+                payloadAfterContentKind: "text",
+                payloadAfterByteLength: Buffer.byteLength(after.text),
+              }
+            : {}),
+          metadata: { origin: "api" },
+        }),
+      },
+    ],
+  });
 }
 
 /** A published browser app and share; no legacy backend is created. */
 export function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "dataset-relay-test-"));
-  cleanups.push(() => rmSync(directory, {recursive: true, force: true}));
+  cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, "relay.sqlite");
   let storage = openSyncRelayStorage(path) as StorageContext;
   cleanups.push(() => storage.close());
-  storage.claimWorkspace({workspaceId: "w", ownerUserId: "owner", createdAtMs: 1});
-  storage.createShare({share: {shareId: "s", workspaceId: "w", granterUserId: "owner", selectorJson: JSON.stringify({paths: ["app"], versionId: null}), createdAtMs: 1},
-    grant: {grantId: "g", shareId: "s", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "view", generation: 1, status: "active", createdAtMs: 1, revokedAtMs: null, parentGrantId: null}});
-  storage.tx(() => storage.db.prepare("UPDATE sync_relay_share_grants SET principal_kind='link',principal_user_id=NULL WHERE grant_id='g'").run());
+  storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
+  storage.createShare({
+    share: {
+      shareId: "s",
+      workspaceId: "w",
+      granterUserId: "owner",
+      selectorJson: JSON.stringify({ paths: ["app"], versionId: null }),
+      createdAtMs: 1,
+    },
+    grant: {
+      grantId: "g",
+      shareId: "s",
+      principalKind: "user",
+      principalUserId: "reader",
+      principalEmail: null,
+      access: "view",
+      generation: 1,
+      status: "active",
+      createdAtMs: 1,
+      revokedAtMs: null,
+      parentGrantId: null,
+    },
+  });
+  storage.tx(() =>
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_share_grants SET principal_kind='link',principal_user_id=NULL WHERE grant_id='g'",
+      )
+      .run(),
+  );
   const bytes = Buffer.from("document.body.textContent='app'");
-  const candidate = parseAppPublicationCandidate({versionId: "main", appRoot: "app", entryPath: "app/index.ts", packageMap: {},
-    sourceRevision: "1".repeat(64), sourceDigest: "2".repeat(64), dependencyLockDigest: "3".repeat(64), bundleDigest: "4".repeat(64), buildDigest: "5".repeat(64),
-    compilerIdentity: {recipe: "closed-esbuild", version: "0.28.1", binarySha256: "6".repeat(64)},
-    inputs: [{path: "app/index.ts", sha256: "7".repeat(64), byteLength: 10}], dependencies: ["app/index.ts"],
-    files: [{path: "bundle.js", sha256: sha(bytes), byteLength: bytes.byteLength, contentType: "text/javascript; charset=utf-8"}], capabilities: []}, limits);
-  candidate.sourceDigest = digest("dohc-app-source-v2", {entry: candidate.entryPath, files: candidate.inputs, packages: []});
+  const candidate = parseAppPublicationCandidate(
+    {
+      versionId: "main",
+      appRoot: "app",
+      entryPath: "app/index.ts",
+      packageMap: {},
+      sourceRevision: "1".repeat(64),
+      sourceDigest: "2".repeat(64),
+      dependencyLockDigest: "3".repeat(64),
+      bundleDigest: "4".repeat(64),
+      buildDigest: "5".repeat(64),
+      compilerIdentity: {
+        recipe: "closed-esbuild",
+        version: "0.28.1",
+        binarySha256: "6".repeat(64),
+      },
+      inputs: [{ path: "app/index.ts", sha256: "7".repeat(64), byteLength: 10 }],
+      dependencies: ["app/index.ts"],
+      files: [
+        {
+          path: "bundle.js",
+          sha256: sha(bytes),
+          byteLength: bytes.byteLength,
+          contentType: "text/javascript; charset=utf-8",
+        },
+      ],
+      capabilities: [],
+    },
+    limits,
+  );
+  candidate.sourceDigest = digest("dohc-app-source-v2", {
+    entry: candidate.entryPath,
+    files: candidate.inputs,
+    packages: [],
+  });
   candidate.dependencyLockDigest = digest("dohc-app-dependencies-v1", candidate.inputs);
   candidate.bundleDigest = digest("dohc-app-bundle-v1", candidate.files);
-  candidate.buildDigest = digest("dohc-app-build-v1", {sourceDigest: candidate.sourceDigest, dependencyLockDigest: candidate.dependencyLockDigest, compiler: candidate.compilerIdentity, bundleDigest: candidate.bundleDigest});
-  const publication = storage.publishAppPublication({workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 1, candidate, limits, nowMs: 5,
-    blobs: [{sha256: sha(bytes), bytes}]});
-  return {get storage() {return storage;}, publicationId: publication.publicationId,
-    restart() {storage.close(); storage = openSyncRelayStorage(path) as StorageContext;},
+  candidate.buildDigest = digest("dohc-app-build-v1", {
+    sourceDigest: candidate.sourceDigest,
+    dependencyLockDigest: candidate.dependencyLockDigest,
+    compiler: candidate.compilerIdentity,
+    bundleDigest: candidate.bundleDigest,
+  });
+  const publication = storage.publishAppPublication({
+    workspaceId: "w",
+    ownerUserId: "owner",
+    shareId: "s",
+    grantId: "g",
+    generation: 1,
+    candidate,
+    limits,
+    nowMs: 5,
+    blobs: [{ sha256: sha(bytes), bytes }],
+  });
+  return {
+    get storage() {
+      return storage;
+    },
+    publicationId: publication.publicationId,
+    restart() {
+      storage.close();
+      storage = openSyncRelayStorage(path) as StorageContext;
+    },
     link(id: string, expiresAtMs = 1000): AppBackendAuth {
-      storage.mintLinkSession({session: {sessionId: `session-${id}`, capabilityHash: `capability-${id}`, grantId: "g", generation: 1, mintedAtMs: 2, expiresAtMs}});
-      return {kind: "link", capabilityHash: `capability-${id}`, profileTokenHash: `profile-${id}`};
+      storage.mintLinkSession({
+        session: {
+          sessionId: `session-${id}`,
+          capabilityHash: `capability-${id}`,
+          grantId: "g",
+          generation: 1,
+          mintedAtMs: 2,
+          expiresAtMs,
+        },
+      });
+      return {
+        kind: "link",
+        capabilityHash: `capability-${id}`,
+        profileTokenHash: `profile-${id}`,
+      };
     },
   };
 }

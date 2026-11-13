@@ -9,9 +9,7 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 
 function shortenedEngineId(id: string, enginePrefix: string, cliPrefix: string): string {
-  return id.startsWith(enginePrefix)
-    ? `${cliPrefix}${id.slice(enginePrefix.length)}`
-    : id;
+  return id.startsWith(enginePrefix) ? `${cliPrefix}${id.slice(enginePrefix.length)}` : id;
 }
 
 function cliChannelId(id: string): string {
@@ -43,7 +41,9 @@ export const FILES_GROUP: CliGroup = {
   kind: "group",
 };
 
-export function groupForCli(channel: Pick<ChatChannelSummary, "id" | "kind" | "name" | "slug" | "purpose">): CliGroup {
+export function groupForCli(
+  channel: Pick<ChatChannelSummary, "id" | "kind" | "name" | "slug" | "purpose">,
+): CliGroup {
   return {
     id: cliChannelId(channel.id),
     name: channel.kind === "agent" ? channel.slug : channel.name,
@@ -66,23 +66,23 @@ export function rawChatThread(thread: ChatThread) {
     title: thread.title,
     createdAtMs: thread.createdAtMs,
     updatedAtMs: thread.updatedAtMs,
-    ...(thread.linkedFile?.pathHint
-      ? { linkedPathHint: thread.linkedFile.pathHint }
-      : {}),
+    ...(thread.linkedFile?.pathHint ? { linkedPathHint: thread.linkedFile.pathHint } : {}),
   };
 }
 
 // A message's active reactions, each by its author. A message with none has no field.
 function rawReactions(reactions: readonly ChatReaction[]) {
-  return reactions.length === 0 ? {} : {
-    reactions: reactions.map((reaction) => ({
-      emoji: reaction.emoji,
-      authorId: reaction.author.authorId,
-      authorKind: reaction.author.kind,
-      authorDisplayName: reaction.author.displayName,
-      atMs: reaction.atMs,
-    })),
-  };
+  return reactions.length === 0
+    ? {}
+    : {
+        reactions: reactions.map((reaction) => ({
+          emoji: reaction.emoji,
+          authorId: reaction.author.authorId,
+          authorKind: reaction.author.kind,
+          authorDisplayName: reaction.author.displayName,
+          atMs: reaction.atMs,
+        })),
+      };
 }
 
 export function rawChatMessage(
@@ -95,7 +95,9 @@ export function rawChatMessage(
     threadId: message.threadId,
     authorKind: message.author.kind,
     authorDisplayName: message.author.displayName,
-    ...(message.authorOwnerDisplayName ? { authorOwnerDisplayName: message.authorOwnerDisplayName } : {}),
+    ...(message.authorOwnerDisplayName
+      ? { authorOwnerDisplayName: message.authorOwnerDisplayName }
+      : {}),
     body: message.body,
     createdAtMs: message.createdAtMs,
     ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
@@ -104,12 +106,16 @@ export function rawChatMessage(
       ...(pathHint ? { pathHint } : {}),
     })),
     needsDecision: decision !== undefined,
-    ...(decision ? {
-      decisionState: decision.state,
-      ...(decision.options ? { options: [...decision.options] } : {}),
-      ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
-      ...(decision.resolvedByMessageId ? { resolvedByMessageId: decision.resolvedByMessageId } : {}),
-    } : {}),
+    ...(decision
+      ? {
+          decisionState: decision.state,
+          ...(decision.options ? { options: [...decision.options] } : {}),
+          ...(decision.chosenOption ? { chosenOption: decision.chosenOption } : {}),
+          ...(decision.resolvedByMessageId
+            ? { resolvedByMessageId: decision.resolvedByMessageId }
+            : {}),
+        }
+      : {}),
     ...rawReactions(reactions),
     ...agentRequestsFor(message),
     ...reportedFor(message),
@@ -117,20 +123,23 @@ export function rawChatMessage(
   };
 }
 
-export function cliShowMessage(message: ChatMessage, decision: ChatStreamItem["decision"]): CliShowMessage {
+export function cliShowMessage(
+  message: ChatMessage,
+  decision: ChatStreamItem["decision"],
+): CliShowMessage {
   return {
     id: cliMessageId(message.id),
     author: authorForCli(message),
     body: message.body,
     createdAtMs: message.createdAtMs,
-    ...(message.parentMessageId
-      ? { parentMessageId: cliMessageId(message.parentMessageId) }
+    ...(message.parentMessageId ? { parentMessageId: cliMessageId(message.parentMessageId) } : {}),
+    ...(decision
+      ? {
+          decisionState: decision.state,
+          ...(decision.options ? { decisionOptions: [...decision.options] } : {}),
+          ...(decision.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
+        }
       : {}),
-    ...(decision ? {
-      decisionState: decision.state,
-      ...(decision.options ? { decisionOptions: [...decision.options] } : {}),
-      ...(decision.chosenOption ? { decisionChosenOption: decision.chosenOption } : {}),
-    } : {}),
     attachments: message.attachments.map((attachment) => ({
       ...(attachment.objectId ? { objectId: attachment.objectId } : {}),
       ...(attachment.pathHint ? { pathHint: attachment.pathHint } : {}),

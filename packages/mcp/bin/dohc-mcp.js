@@ -9,9 +9,13 @@ const requireFromHere = createRequire(import.meta.url);
 const tsxLoader = requireFromHere.resolve("tsx");
 const server = resolve(here, "../src/server.ts");
 
-const child = spawn(process.execPath, ["--import", pathToFileURL(tsxLoader).href, server, ...process.argv.slice(2)], {
-  stdio: "inherit",
-});
+const child = spawn(
+  process.execPath,
+  ["--import", pathToFileURL(tsxLoader).href, server, ...process.argv.slice(2)],
+  {
+    stdio: "inherit",
+  },
+);
 
 child.on("exit", (code, signal) => {
   if (signal) {

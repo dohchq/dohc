@@ -78,7 +78,10 @@ it("shows the empty body's hint while the title has the caret, and keeps it when
   const user = userEvent.setup();
   renderPage();
   const body = screen.getByLabelText("Page body") as HTMLTextAreaElement;
-  const hint = () => [body.placeholder, [...body.classList].filter((name) => name.includes("placeholder:"))];
+  const hint = () => [
+    body.placeholder,
+    [...body.classList].filter((name) => name.includes("placeholder:")),
+  ];
   expect(screen.getByLabelText("Page title")).toBe(document.activeElement);
   expect(hint()).toEqual(["Type '/' for commands", ["placeholder:text-subtle"]]);
   await user.keyboard("{Enter}");
@@ -96,7 +99,10 @@ it("hands the title, the body and its caret to the editor at once, and steps asi
   const live = pageEditor();
   page.editorReady(live);
   expect(live.setIdentity).toHaveBeenCalledWith({ title: "Lisbon", icon: "" });
-  expect(live.editor.insertTypedText).toHaveBeenCalledWith("Day one\nTram 28 ", "Day one\nTram 28 ".length);
+  expect(live.editor.insertTypedText).toHaveBeenCalledWith(
+    "Day one\nTram 28 ",
+    "Day one\nTram 28 ".length,
+  );
   expect(live.editor.focus).toHaveBeenCalledWith(undefined);
   expect(screen.queryByTestId("new-page")).toBeNull();
   expect(screen.getByTestId("file-view").parentElement!.hasAttribute("inert")).toBe(false);

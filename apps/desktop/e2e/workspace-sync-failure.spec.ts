@@ -78,7 +78,10 @@ test("a sync the server cannot take names the server, offers Try again, and clea
 
     await relay.stop();
     relay = null;
-    await writeFile(join(temp.rootPath, "notes/plan.md"), "local draft\n\nwritten while the server is down\n");
+    await writeFile(
+      join(temp.rootPath, "notes/plan.md"),
+      "local draft\n\nwritten while the server is down\n",
+    );
 
     // One failed pass: the title bar and a toast name the server, and
     // Notices keeps the row after the toast closes.
@@ -89,15 +92,15 @@ test("a sync the server cannot take names the server, offers Try again, and clea
     await expect(toast).toHaveCount(0);
     const notices = page.getByTestId("notice-center");
     await page.getByTestId("notice-center-toggle").click();
-    await expect(notices).toContainText(
-      "dohc could not reach the server.",
-    );
+    await expect(notices).toContainText("dohc could not reach the server.");
 
     // Try again from the row, while the server is still down: the dismissed
     // toast returns, so the pass ran, and it interrupts with Try again and copy.
     // Live editing files its own Try again row for the same outage, so the
     // click goes to the one row that names this failure.
-    const syncRow = notices.locator("[data-notice-row]", { hasText: "dohc could not reach the server." });
+    const syncRow = notices.locator("[data-notice-row]", {
+      hasText: "dohc could not reach the server.",
+    });
     await expect(syncRow).toHaveCount(1);
     await syncRow.getByRole("button", { name: "Try again" }).click();
     await expect(toast).toContainText("dohc could not reach the server.", { timeout: 60_000 });

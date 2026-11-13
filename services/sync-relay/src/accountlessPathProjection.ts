@@ -101,7 +101,9 @@ export function createAccountlessPathProjection(
     resolvePath: (path) => {
       let realPath = path;
       if (roots.length > 0) {
-        const root = roots.find((entry) => path === entry.visiblePath || path.startsWith(`${entry.visiblePath}/`));
+        const root = roots.find(
+          (entry) => path === entry.visiblePath || path.startsWith(`${entry.visiblePath}/`),
+        );
         if (!root) return null;
         realPath = `${root.realPath}${path.slice(root.visiblePath.length)}`;
       }

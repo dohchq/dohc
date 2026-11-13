@@ -6,12 +6,12 @@ export type EngineView = {
 };
 
 export type EngineWorkerRequest =
-  | { type: 'init'; canvas: OffscreenCanvas; pixelRatio: number; studioUrl: string }
-  | { type: 'view'; view: EngineView }
-  | { type: 'theme'; dark: boolean }
-  | { type: 'visible'; visible: boolean };
+  | { type: "init"; canvas: OffscreenCanvas; pixelRatio: number; studioUrl: string }
+  | { type: "view"; view: EngineView }
+  | { type: "theme"; dark: boolean }
+  | { type: "visible"; visible: boolean };
 
 export type EngineWorkerResponse =
-  | { type: 'ready' }
-  | { type: 'rendered' }
-  | { type: 'error'; message: string; stack?: string };
+  | { type: "ready" }
+  | { type: "rendered" }
+  | { type: "error"; message: string; stack?: string };

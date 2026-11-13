@@ -49,9 +49,7 @@ describe("live linked chat store real daemon", () => {
           body: "Second message",
         });
 
-        await expect(
-          store.listChannels({ workspaceId: workspace.workspaceId }),
-        ).resolves.toEqual([
+        await expect(store.listChannels({ workspaceId: workspace.workspaceId })).resolves.toEqual([
           expect.objectContaining({ id: channel.id, name: "Real daemon" }),
         ]);
         await expect(

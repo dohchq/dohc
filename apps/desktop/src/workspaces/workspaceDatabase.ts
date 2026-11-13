@@ -10,14 +10,7 @@ import {
 } from "@dohc/workspace-core";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  link,
-  lstat,
-  mkdir,
-  realpath,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { link, lstat, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { isInside } from "../security/pathContainment";
 import {
@@ -73,11 +66,7 @@ export async function readDatabaseSnapshot(
   relativePath: string,
   options: DatabaseWorkerCallOptions = {},
 ): Promise<DatabaseSnapshotView> {
-  const { realTarget, normalized } = await resolveWorkspaceFile(
-    rootPath,
-    relativePath,
-    "read",
-  );
+  const { realTarget, normalized } = await resolveWorkspaceFile(rootPath, relativePath, "read");
   return (options.worker ?? workspaceDatabaseWorker).readPath({
     absolutePath: realTarget,
     path: normalized,
@@ -254,12 +243,15 @@ export async function importToDatabase(
 ): Promise<{ path: string; tableName: string; rowCount: number; sha256: string; size: number }> {
   const mediaType = mediaTypeForPath(source.path) ?? "text/plain";
 
-  const result = await (options.worker ?? workspaceDatabaseWorker).importData({
-    name: basename(source.path),
-    mediaType,
-    body: source.body,
-    tableName,
-  }, options.signal);
+  const result = await (options.worker ?? workspaceDatabaseWorker).importData(
+    {
+      name: basename(source.path),
+      mediaType,
+      body: source.body,
+      tableName,
+    },
+    options.signal,
+  );
   if (options.signal?.aborted) throw new Error("Database import was cancelled.");
 
   const path = await writeWorkspaceBytes(
@@ -267,8 +259,13 @@ export async function importToDatabase(
     databaseRelativePath,
     Buffer.from(result.bytes.buffer, result.bytes.byteOffset, result.bytes.byteLength),
   );
-  return { path, tableName: result.tableName, rowCount: result.rowCount,
-    sha256: createHash("sha256").update(result.bytes).digest("hex"), size: result.bytes.byteLength };
+  return {
+    path,
+    tableName: result.tableName,
+    rowCount: result.rowCount,
+    sha256: createHash("sha256").update(result.bytes).digest("hex"),
+    size: result.bytes.byteLength,
+  };
 }
 
 // This computer numbers each visible database's operations with its own
@@ -278,32 +275,37 @@ export async function importToDatabase(
 // A counter dohc can't trust could make it give a number out again, so the
 // edit refuses and leaves it in place. Once the person removes its folder, the
 // next edit starts after the log.
-async function operationCounterPath(workspace: LocalStateWorkspace, databasePath: string): Promise<string> {
+async function operationCounterPath(
+  workspace: LocalStateWorkspace,
+  databasePath: string,
+): Promise<string> {
   const name = `databases/${databaseFolderName(databasePath)}`;
   // Throws, in words that say how to fix it, for a `.dohc` or `.dohc/local` dohc can't trust.
   await readOwnedLocalState(workspace.rootPath, async () => undefined);
   // Refuses until the engine's open has prepared `.dohc/local`. The desktop
   // waits for an open under way before it takes the workspace lease.
   const counterFolder = await localStateFolder(workspace, name, {
-    path: `.dohc/local/${name}`, lead: "dohc could not use this database's folder in .dohc/local.",
+    path: `.dohc/local/${name}`,
+    lead: "dohc could not use this database's folder in .dohc/local.",
   });
   if (!(await ownedSqliteFiles(counterFolder, OPERATION_COUNTER))) {
-    throw new Error(`dohc can't trust a file in .dohc/local/${name}. Remove that folder, then try again.`);
+    throw new Error(
+      `dohc can't trust a file in .dohc/local/${name}. Remove that folder, then try again.`,
+    );
   }
   return join(counterFolder, OPERATION_COUNTER);
 }
 
-export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: WorkspaceDatabaseWorkerOwner) {
-  function workerDatabaseReader(
-    signal?: AbortSignal,
-  ): OwnedWorkspaceDatabaseReader {
+export function createWorkspaceDatabaseAccess(
+  workspaceDatabaseWorker: WorkspaceDatabaseWorkerOwner,
+) {
+  function workerDatabaseReader(signal?: AbortSignal): OwnedWorkspaceDatabaseReader {
     return {
       readPrepared: (path, source) =>
         source.withVerifiedPath((absolutePath) =>
           workspaceDatabaseWorker.readPath({ absolutePath, path, signal }),
         ),
-      readBytes: (path, bytes) =>
-        workspaceDatabaseWorker.readBytes({ bytes, path, signal }),
+      readBytes: (path, bytes) => workspaceDatabaseWorker.readBytes({ bytes, path, signal }),
       readPagePrepared: (path, source, table, offset) =>
         source.withVerifiedPath((absolutePath) =>
           workspaceDatabaseWorker.readPagePath({
@@ -342,29 +344,33 @@ export function createWorkspaceDatabaseAccess(workspaceDatabaseWorker: Workspace
     const source = await prepareWorkspaceFileRead(rootPath, resolved.resolvedPath);
     const storage = await prepareDatabaseStorage(rootPath, resolved.normalized);
     const logPath = databaseOpLogPath(resolved.normalized);
-    return source.withVerifiedPath((absolutePath) =>
-      workspaceDatabaseWorker.editPath({
-        absolutePath,
-        path: resolved.normalized,
-        ...storage,
-        statePath,
-        edit: input.edit,
-        operation: {
-          operationId: input.operationId ?? randomUUID(),
-          databasePath: resolved.normalized,
-          table: input.edit.table,
-          op: input.edit.op,
-          rowId: String(input.edit.rowId),
-          payload: input.edit.payload ?? {},
-          appliedAt: input.nowMs,
-          author: input.author,
-        },
-        signal: input.signal,
-      }),
-    ).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== UNCOUNTABLE_LOG_VERSION) throw error;
-      throw new Error(`A line in ${logPath} has a version dohc can't count past. Remove that line, then try again.`);
-    });
+    return source
+      .withVerifiedPath((absolutePath) =>
+        workspaceDatabaseWorker.editPath({
+          absolutePath,
+          path: resolved.normalized,
+          ...storage,
+          statePath,
+          edit: input.edit,
+          operation: {
+            operationId: input.operationId ?? randomUUID(),
+            databasePath: resolved.normalized,
+            table: input.edit.table,
+            op: input.edit.op,
+            rowId: String(input.edit.rowId),
+            payload: input.edit.payload ?? {},
+            appliedAt: input.nowMs,
+            author: input.author,
+          },
+          signal: input.signal,
+        }),
+      )
+      .catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== UNCOUNTABLE_LOG_VERSION) throw error;
+        throw new Error(
+          `A line in ${logPath} has a version dohc can't count past. Remove that line, then try again.`,
+        );
+      });
   }
 
   return { workerDatabaseReader, editWorkspaceDatabaseInWorker };

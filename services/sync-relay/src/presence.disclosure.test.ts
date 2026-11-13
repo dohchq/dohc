@@ -626,15 +626,19 @@ it.each([1, 2])("recomputes at most once after %i concurrent read revisions", as
   });
   const originalOwnerCheck = f.storage.workspaceIsOwnedBy.bind(f.storage);
   let performed = 0;
-  const ownerCheck = vi.spyOn(f.storage, "workspaceIsOwnedBy").mockImplementation((workspaceId, userId) => {
-    const result = originalOwnerCheck(workspaceId, userId);
-    if (preparing && userId === "bob" && performed < writes) {
-      performed++;
-      db.prepare("UPDATE sync_relay_share_grants SET access = ? WHERE grant_id = ?")
-        .run(performed === 1 ? "view" : "edit", grant.grantId);
-    }
-    return result;
-  });
+  const ownerCheck = vi
+    .spyOn(f.storage, "workspaceIsOwnedBy")
+    .mockImplementation((workspaceId, userId) => {
+      const result = originalOwnerCheck(workspaceId, userId);
+      if (preparing && userId === "bob" && performed < writes) {
+        performed++;
+        db.prepare("UPDATE sync_relay_share_grants SET access = ? WHERE grant_id = ?").run(
+          performed === 1 ? "view" : "edit",
+          grant.grantId,
+        );
+      }
+      return result;
+    });
   try {
     const h = testHandler(f.storage, {
       presence: f.presence,

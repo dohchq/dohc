@@ -1,5 +1,5 @@
 import * as Y from "yjs";
-import type {OrderedLiveUpdateCutPolicy} from "./orderedLiveUpdateCut.js";
+import type { OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
 
 /** Calibrated for the validation worker's 512 MB heap. */
 export const WORKER_LIVE_VALIDATION_POLICY: OrderedLiveUpdateCutPolicy = Object.freeze({
@@ -24,13 +24,21 @@ export const LIVE_NOTE_ELEMENT_WEIGHT = 6;
 
 /** Whether `doc` fits the capacity above. The journal visits each struct three times, so `policy` also caps its structs. */
 export function withinLiveNoteCapacity(doc: Y.Doc, policy: OrderedLiveUpdateCutPolicy): boolean {
-  let structs = 0, elements = 0;
+  let structs = 0,
+    elements = 0;
   for (const list of doc.store.clients.values()) {
     structs += list.length;
     for (const struct of list) {
-      if (struct instanceof Y.Item && struct.content instanceof Y.ContentType
-        && struct.content.type instanceof Y.XmlElement) elements++;
+      if (
+        struct instanceof Y.Item &&
+        struct.content instanceof Y.ContentType &&
+        struct.content.type instanceof Y.XmlElement
+      )
+        elements++;
     }
   }
-  return structs <= policy.maxStructVisits / 3 && structs + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY;
+  return (
+    structs <= policy.maxStructVisits / 3 &&
+    structs + LIVE_NOTE_ELEMENT_WEIGHT * elements <= LIVE_NOTE_CAPACITY
+  );
 }

@@ -13,10 +13,7 @@ import type {
 import { prepareShareProjectionRead } from "./shareMounts";
 import { createTestScratch } from "./testTemp";
 import { WORKSPACE_ASSET_MAX_BYTES } from "./workspaceAssets";
-import {
-  readDatabaseSnapshot,
-  readDatabaseSnapshotFromBytes,
-} from "./workspaceDatabase";
+import { readDatabaseSnapshot, readDatabaseSnapshotFromBytes } from "./workspaceDatabase";
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
@@ -45,10 +42,7 @@ describe("owned workspace asset reads", () => {
     const rootPath = await createTestScratch("dohc-owned-file-local-");
     await mkdir(join(rootPath, "imports"), { recursive: true });
     await writeFile(join(rootPath, "imports", "data.csv"), "id,value\n1,local\n");
-    await symlink(
-      join(rootPath, "imports", "data.csv"),
-      join(rootPath, "imports", "notes.json"),
-    );
+    await symlink(join(rootPath, "imports", "data.csv"), join(rootPath, "imports", "notes.json"));
     const read = vi.fn(async () => {
       throw new Error("A local source must not read a share owner.");
     });
@@ -141,12 +135,7 @@ describe("owned workspace asset reads", () => {
   it("keeps a prepared local read local when its alias is retargeted into the projection", async () => {
     const rootPath = await createTestScratch("dohc-owned-file-retarget-");
     const localPath = join(rootPath, "imports", "data.csv");
-    const cachePath = join(
-      rootPath,
-      "shared-with-me",
-      "alice",
-      "data.csv",
-    );
+    const cachePath = join(rootPath, "shared-with-me", "alice", "data.csv");
     const aliasPath = join(rootPath, "source.csv");
     await mkdir(join(rootPath, "imports"), { recursive: true });
     await mkdir(join(rootPath, "shared-with-me", "alice"), {
@@ -156,12 +145,7 @@ describe("owned workspace asset reads", () => {
     await writeFile(cachePath, "id,value\n1,recipient cache\n");
     await symlink(localPath, aliasPath);
 
-    const prepared = await prepareShareProjectionRead(
-      rootPath,
-      "source.csv",
-      [],
-      true,
-    );
+    const prepared = await prepareShareProjectionRead(rootPath, "source.csv", [], true);
     expect(prepared.kind).toBe("local");
 
     await rm(aliasPath);
@@ -172,9 +156,9 @@ describe("owned workspace asset reads", () => {
       path: "imports/data.csv",
       bytes: Buffer.from("id,value\n1,local owner\n"),
     });
-    await expect(
-      prepareShareProjectionRead(rootPath, "source.csv", [], true),
-    ).rejects.toThrow(/no share owns it/i);
+    await expect(prepareShareProjectionRead(rootPath, "source.csv", [], true)).rejects.toThrow(
+      /no share owns it/i,
+    );
   });
 
   it("refuses a prepared local read when its canonical target becomes a projection symlink", async () => {
@@ -187,12 +171,7 @@ describe("owned workspace asset reads", () => {
     });
     await writeFile(localPath, "id,value\n1,local owner\n");
     await writeFile(cachePath, "id,value\n1,recipient cache\n");
-    const prepared = await prepareShareProjectionRead(
-      rootPath,
-      "imports/data.csv",
-      [],
-      true,
-    );
+    const prepared = await prepareShareProjectionRead(rootPath, "imports/data.csv", [], true);
     if (prepared.kind !== "local") throw new Error("Expected a local read.");
 
     await rm(localPath);
@@ -208,12 +187,7 @@ describe("owned workspace asset reads", () => {
     const outsidePath = join(outside, "secret.csv");
     await writeFile(localPath, "id,value\n1,local owner\n");
     await writeFile(outsidePath, "id,value\n1,outside secret\n");
-    const prepared = await prepareShareProjectionRead(
-      rootPath,
-      "data.csv",
-      [],
-      true,
-    );
+    const prepared = await prepareShareProjectionRead(rootPath, "data.csv", [], true);
     if (prepared.kind !== "local") throw new Error("Expected a local read.");
 
     await rm(localPath);
@@ -226,12 +200,7 @@ describe("owned workspace asset reads", () => {
     const rootPath = await createTestScratch("dohc-owned-file-growth-");
     const localPath = join(rootPath, "growing.bin");
     await writeFile(localPath, "small");
-    const prepared = await prepareShareProjectionRead(
-      rootPath,
-      "growing.bin",
-      [],
-      false,
-    );
+    const prepared = await prepareShareProjectionRead(rootPath, "growing.bin", [], false);
     if (prepared.kind !== "local") throw new Error("Expected a local read.");
 
     await truncate(localPath, WORKSPACE_ASSET_MAX_BYTES + 1);
@@ -257,15 +226,10 @@ describe("owned workspace database reads", () => {
     seedDatabase(recipientOnlyPath, "recipient only");
     await symlink(projectionPath, join(root, "shared-alias.sqlite"), "file");
     const projection = new DatabaseSync(projectionPath);
-    projection.exec(
-      "PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'projection wal';",
-    );
+    projection.exec("PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'projection wal';");
     await expect(readFile(`${projectionPath}-wal`)).resolves.not.toHaveLength(0);
     await expect(
-      readDatabaseSnapshot(
-        root,
-        "shared-with-me/healthy/canonical.sqlite",
-      ),
+      readDatabaseSnapshot(root, "shared-with-me/healthy/canonical.sqlite"),
     ).resolves.toMatchObject({
       tables: [
         {
@@ -276,10 +240,7 @@ describe("owned workspace database reads", () => {
     });
 
     const readOwner = vi.fn(
-      async (
-        _target: ShareViewFilesTarget,
-        request: ShareViewFileReadRequest,
-      ) => {
+      async (_target: ShareViewFilesTarget, request: ShareViewFileReadRequest) => {
         if (request.kind !== "asset" || request.path !== "canonical.sqlite") {
           throw new Error(`Shared file not found: ${request.path}`);
         }
@@ -335,18 +296,14 @@ describe("owned workspace database reads", () => {
     seedDatabase(databasePath, "main file");
     await symlink(databasePath, join(root, "source.sqlite"));
     const database = new DatabaseSync(databasePath);
-    database.exec(
-      "PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'local wal';",
-    );
+    database.exec("PRAGMA journal_mode = WAL; UPDATE sentinel SET marker = 'local wal';");
     const reader = createOwnedWorkspaceFileReader({
       workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
       files: { read: vi.fn() },
     });
 
     try {
-      await expect(
-        reader.readDatabase("source.sqlite"),
-      ).resolves.toMatchObject({
+      await expect(reader.readDatabase("source.sqlite")).resolves.toMatchObject({
         path: "source.sqlite",
         tables: [
           {
@@ -373,9 +330,7 @@ describe("owned workspace database reads", () => {
       files: { read: vi.fn() },
     });
 
-    await expect(
-      reader.readDatabase("large.sqlite"),
-    ).resolves.toMatchObject({
+    await expect(reader.readDatabase("large.sqlite")).resolves.toMatchObject({
       path: "large.sqlite",
       tables: [{ name: "payload" }],
     });
@@ -383,9 +338,7 @@ describe("owned workspace database reads", () => {
 
   it("removes its private database snapshot when SQLite rejects owner bytes", async () => {
     const prefix = "dohc-database-snapshot-";
-    const before = new Set(
-      (await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)),
-    );
+    const before = new Set((await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)));
 
     await expect(
       readDatabaseSnapshotFromBytes(
@@ -394,9 +347,7 @@ describe("owned workspace database reads", () => {
       ),
     ).rejects.toThrow();
 
-    const after = new Set(
-      (await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)),
-    );
+    const after = new Set((await readdir(tmpdir())).filter((entry) => entry.startsWith(prefix)));
     expect(after).toEqual(before);
   });
 });

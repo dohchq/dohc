@@ -3,11 +3,19 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { useCallback, useEffect, useMemo, useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
+import type {
+  EngineMomentDetailRecord,
+  HistoryPolicyUnreadableResult,
+} from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { EngineMomentDiffPage } from "./EngineMomentDiffPage";
 import * as unifiedDiff from "./unifiedDiff";
-import { HistoryHiddenState, HistoryUntrackedState, historyHiddenWords, restoreRulesUnreadableWords } from "./HistoryPolicyStates";
+import {
+  HistoryHiddenState,
+  HistoryUntrackedState,
+  historyHiddenWords,
+  restoreRulesUnreadableWords,
+} from "./HistoryPolicyStates";
 import { momentDiffTabPath } from "./workbenchState";
 
 const noop = () => {};
@@ -49,9 +57,18 @@ describe("History hidden by its rules", () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const onRetry = vi.fn();
-    render(<HistoryHiddenState testId="history-policy-hidden" result={hidden} onOpenFile={noop} onRetry={onRetry} />);
+    render(
+      <HistoryHiddenState
+        testId="history-policy-hidden"
+        result={hidden}
+        onOpenFile={noop}
+        onRetry={onRetry}
+      />,
+    );
     const state = screen.getByTestId("history-policy-hidden");
-    expect(state.textContent).toContain("dohc can't read .dohc/visibility.toml, so History is hidden.");
+    expect(state.textContent).toContain(
+      "dohc can't read .dohc/visibility.toml, so History is hidden.",
+    );
     expect(state.textContent).not.toContain("TOML parse error");
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetry).toHaveBeenCalledOnce();
@@ -63,28 +80,48 @@ describe("History hidden by its rules", () => {
 });
 
 describe("the file each rules panel opens", () => {
-  const buttons = () => screen.getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent);
+  const buttons = () =>
+    screen
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label") ?? button.textContent);
 
   it.each([
     [[".dohc/visibility.toml"], ".dohc/visibility.toml", "Open visibility.toml"],
     [[".dohc/files.toml"], ".dohc/files.toml", "Open files.toml"],
     [[".dohc/files.toml", ".dohc/visibility.toml"], ".dohc/files.toml", "Open files.toml"],
-  ] as const)("hidden by %j: opens %s first, then reads again on Try again", async (unreadable, file, label) => {
-    const user = userEvent.setup();
-    const onOpenFile = vi.fn();
-    const onRetry = vi.fn();
-    render(<HistoryHiddenState testId="history-policy-hidden" result={{ ...hidden, unreadable: [...unreadable] }} onOpenFile={onOpenFile} onRetry={onRetry} />);
-    expect(buttons()).toEqual([label, "Try again", "Copy details"]);
-    await user.click(screen.getByRole("button", { name: label }));
-    expect(onOpenFile).toHaveBeenCalledExactlyOnceWith(file);
-    expect(onRetry).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect(onRetry).toHaveBeenCalledOnce();
-    expect(onOpenFile).toHaveBeenCalledOnce();
-  });
+  ] as const)(
+    "hidden by %j: opens %s first, then reads again on Try again",
+    async (unreadable, file, label) => {
+      const user = userEvent.setup();
+      const onOpenFile = vi.fn();
+      const onRetry = vi.fn();
+      render(
+        <HistoryHiddenState
+          testId="history-policy-hidden"
+          result={{ ...hidden, unreadable: [...unreadable] }}
+          onOpenFile={onOpenFile}
+          onRetry={onRetry}
+        />,
+      );
+      expect(buttons()).toEqual([label, "Try again", "Copy details"]);
+      await user.click(screen.getByRole("button", { name: label }));
+      expect(onOpenFile).toHaveBeenCalledExactlyOnceWith(file);
+      expect(onRetry).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "Try again" }));
+      expect(onRetry).toHaveBeenCalledOnce();
+      expect(onOpenFile).toHaveBeenCalledOnce();
+    },
+  );
 
   it("offers no file to open when dohc can't read the .dohc folder itself", () => {
-    render(<HistoryHiddenState testId="history-policy-hidden" result={{ ...hidden, unreadable: [".dohc"] }} onOpenFile={noop} onRetry={noop} />);
+    render(
+      <HistoryHiddenState
+        testId="history-policy-hidden"
+        result={{ ...hidden, unreadable: [".dohc"] }}
+        onOpenFile={noop}
+        onRetry={noop}
+      />,
+    );
     expect(buttons()).toEqual(["Try again", "Copy details"]);
   });
 
@@ -92,7 +129,13 @@ describe("the file each rules panel opens", () => {
     const user = userEvent.setup();
     const onOpenFile = vi.fn();
     const onRetry = vi.fn();
-    render(<HistoryUntrackedState testId="engine-diff-untracked" onOpenFile={onOpenFile} onRetry={onRetry} />);
+    render(
+      <HistoryUntrackedState
+        testId="engine-diff-untracked"
+        onOpenFile={onOpenFile}
+        onRetry={onRetry}
+      />,
+    );
     expect(buttons()).toEqual(["Open files.toml", "Try again"]);
     await user.click(screen.getByRole("button", { name: "Open files.toml" }));
     expect(onOpenFile).toHaveBeenCalledExactlyOnceWith(".dohc/files.toml");
@@ -153,7 +196,8 @@ function renderPage(readEngineMoment: Mock, restoreEngineMomentFile: Mock = vi.f
 
 describe("a History diff the rules hide", () => {
   it("shows the hidden state and reads again on Try again", async () => {
-    const read = vi.fn()
+    const read = vi
+      .fn()
       .mockResolvedValueOnce({ ...hidden, moment: null })
       .mockResolvedValue({ moment: moment() });
     const page = renderPage(read);
@@ -167,7 +211,8 @@ describe("a History diff the rules hide", () => {
   });
 
   it("says the change is hidden because History no longer tracks its file, and drops the path from the tab", async () => {
-    const read = vi.fn()
+    const read = vi
+      .fn()
       .mockResolvedValueOnce({ status: "untracked", moment: null })
       .mockResolvedValue({ moment: moment() });
     const page = renderPage(read);
@@ -187,22 +232,28 @@ describe("a History diff the rules hide", () => {
   it.each([
     ["hidden", { ...hidden, moment: null }, "engine-diff-hidden"],
     ["untracked", { status: "untracked", moment: null }, "engine-diff-untracked"],
-  ] as const)("hides an open diff once a newer History answer finds it %s", async (_case, answer, testId) => {
-    const read = vi.fn().mockResolvedValueOnce({ moment: moment() }).mockResolvedValueOnce(answer);
-    const page = renderPage(read);
-    await screen.findByTestId("engine-diff-lines");
-    fireEvent.click(screen.getByTestId("engine-diff-more"));
-    expect(screen.getByRole("menu")).toBeTruthy();
+  ] as const)(
+    "hides an open diff once a newer History answer finds it %s",
+    async (_case, answer, testId) => {
+      const read = vi
+        .fn()
+        .mockResolvedValueOnce({ moment: moment() })
+        .mockResolvedValueOnce(answer);
+      const page = renderPage(read);
+      await screen.findByTestId("engine-diff-lines");
+      fireEvent.click(screen.getByTestId("engine-diff-more"));
+      expect(screen.getByRole("menu")).toBeTruthy();
 
-    page.update({ historyAnswer: { answer: 2 } });
-    expect(await screen.findByTestId(testId)).toBeTruthy();
-    expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
-    expect(screen.queryByTestId("engine-diff-restore-file")).toBeNull();
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(screen.queryByText("notes/plan.md")).toBeNull();
-    expect(page.onPathResolved).toHaveBeenLastCalledWith("m-1", null);
-  });
+      page.update({ historyAnswer: { answer: 2 } });
+      expect(await screen.findByTestId(testId)).toBeTruthy();
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
+      expect(screen.queryByTestId("engine-diff-restore-file")).toBeNull();
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(screen.queryByText("notes/plan.md")).toBeNull();
+      expect(page.onPathResolved).toHaveBeenLastCalledWith("m-1", null);
+    },
+  );
 
   it("keeps the diff it built when a newer History answer still shows the change", async () => {
     const read = vi.fn().mockResolvedValue({ moment: moment() });
@@ -216,7 +267,8 @@ describe("a History diff the rules hide", () => {
 
   it("lets only the newest read set the page", async () => {
     const older = deferred<{ moment: EngineMomentDetailRecord }>();
-    const read = vi.fn()
+    const read = vi
+      .fn()
       .mockResolvedValueOnce({ moment: moment() })
       .mockReturnValueOnce(older.promise)
       .mockResolvedValueOnce({ status: "untracked", moment: null });
@@ -237,18 +289,27 @@ describe("a History diff the rules hide", () => {
     const refused = new Error(
       `Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${PARSER}`,
     );
-    const restore = vi.fn()
+    const restore = vi
+      .fn()
       .mockRejectedValueOnce(refused)
       .mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" });
     const read = vi.fn().mockResolvedValue({ moment: moment() });
     const page = renderPage(read, restore);
     await screen.findByTestId("engine-diff-lines");
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+    });
     expect(page.onError).toHaveBeenCalledWith(
-      "dohc could not restore notes/plan.md.", refused, expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md",
+      "dohc could not restore notes/plan.md.",
+      refused,
+      expect.any(Function),
+      "history-restore:notes/plan.md",
+      "notes/plan.md",
     );
     expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
-    expect(screen.getByTestId("engine-moment-diff-page").textContent).not.toContain("TOML parse error");
+    expect(screen.getByTestId("engine-moment-diff-page").textContent).not.toContain(
+      "TOML parse error",
+    );
 
     // Try again asks the shell to open this change again; it restores nothing itself.
     (page.onError.mock.calls[0]![2] as () => void)();
@@ -272,7 +333,8 @@ describe("a History diff the rules hide", () => {
   });
 
   it("settles a restore request on a fresh read, which can find the change hidden", async () => {
-    const read = vi.fn()
+    const read = vi
+      .fn()
       .mockResolvedValueOnce({ moment: moment() })
       .mockResolvedValue({ status: "untracked", moment: null });
     const restore = vi.fn();
@@ -289,7 +351,8 @@ describe("a History diff the rules hide", () => {
   });
 
   it("drops a restore request whose fresh read fails, instead of restoring on an old answer", async () => {
-    const read = vi.fn()
+    const read = vi
+      .fn()
       .mockResolvedValueOnce({ moment: moment() })
       .mockRejectedValue(new Error("dohc is busy."));
     const restore = vi.fn();
@@ -307,7 +370,8 @@ describe("a History diff the rules hide", () => {
   // rejects the earlier read in the same commit, after the page's effects.
   it("leaves the request to the fresh read when an earlier read fails after Try again", async () => {
     const earlier = deferred<{ moment: EngineMomentDetailRecord }>();
-    const read = vi.fn()
+    const read = vi
+      .fn()
       .mockResolvedValueOnce({ moment: moment() })
       .mockReturnValueOnce(earlier.promise)
       .mockResolvedValue({ moment: moment() });
@@ -377,11 +441,14 @@ describe("a History diff the rules hide", () => {
     const other = { ...moment(), id: "m-0", path: "notes/other.md" };
     const target = deferred<{ moment: EngineMomentDetailRecord }>();
     const read = vi.fn(({ momentId }: { momentId: string }) =>
-      momentId === "m-0" ? Promise.resolve({ moment: other }) : target.promise);
+      momentId === "m-0" ? Promise.resolve({ moment: other }) : target.promise,
+    );
     const restore = vi.fn().mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" });
     const page = renderPage(read, restore);
     page.update({ tabPath: momentDiffTabPath("m-0") });
-    await waitFor(() => expect(screen.getByTestId("engine-diff-title-open-file").textContent).toBe("notes/other.md"));
+    await waitFor(() =>
+      expect(screen.getByTestId("engine-diff-title-open-file").textContent).toBe("notes/other.md"),
+    );
 
     // The tab switches to the change the shell asked about, and the page
     // still holds the other change's answer.
@@ -399,32 +466,55 @@ describe("a History diff the rules hide", () => {
   });
 
   it("runs a retried Undo again directly", async () => {
-    const restore = vi.fn()
+    const restore = vi
+      .fn()
       .mockResolvedValueOnce({ restored: "text", restoredMomentId: "restore-1" })
       .mockRejectedValueOnce(new Error("dohc is busy."))
       .mockResolvedValue({ restored: "text", restoredMomentId: "undo-1" });
     const page = renderPage(vi.fn().mockResolvedValue({ moment: moment() }), restore);
     await screen.findByTestId("engine-diff-lines");
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-undo-restore")); });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-undo-restore"));
+    });
     expect(page.onError).toHaveBeenCalledWith(
-      "dohc could not undo the restore of notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md",
+      "dohc could not undo the restore of notes/plan.md.",
+      expect.any(Error),
+      expect.any(Function),
+      "history-restore:notes/plan.md",
+      "notes/plan.md",
     );
-    await act(async () => { (page.onError.mock.calls[0]![2] as () => void)(); });
+    await act(async () => {
+      (page.onError.mock.calls[0]![2] as () => void)();
+    });
     expect(restore).toHaveBeenCalledTimes(3);
     expect(restore).toHaveBeenLastCalledWith({ workspaceId: "ws-1", momentId: "restore-1" });
     expect(page.onReopenRestore).not.toHaveBeenCalled();
-    expect(screen.getByTestId("engine-diff-restore-status").textContent).toBe("Undid the restore. This was recorded in history.");
+    expect(screen.getByTestId("engine-diff-restore-status").textContent).toBe(
+      "Undid the restore. This was recorded in history.",
+    );
   });
 });
-
 
 it("refreshes a diff's account name without waiting on the server", async () => {
   let notify!: (event: { workspaceId: string }) => void;
   let named = false;
-  const read = vi.fn(async () => ({ moment: { ...moment(), namedAuthor: { userId: "ben", label: named ? "ben@test.example (via share link)" : "Someone you shared with" } } }));
+  const read = vi.fn(async () => ({
+    moment: {
+      ...moment(),
+      namedAuthor: {
+        userId: "ben",
+        label: named ? "ben@test.example (via share link)" : "Someone you shared with",
+      },
+    },
+  }));
   const page = renderPage(read);
-  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  window.dohcDesktop!.onHistoryNamesChanged = (listener) => {
+    notify = listener;
+    return () => {};
+  };
   // Subscribe on the new workspace, under the same read token used by the diff.
   page.update({ workspaceId: "ws-names" });
   await screen.findByText(/Someone you shared with/);
@@ -438,9 +528,14 @@ it("keeps the prepared diff across name events and unrelated History answers", a
   const lines = vi.spyOn(unifiedDiff, "buildUnifiedDiffLines");
   let notify!: (event: { workspaceId: string }) => void;
   let label = "Someone you shared with";
-  const read = vi.fn(async () => ({ moment: { ...moment(), namedAuthor: { userId: "ben", label } } }));
+  const read = vi.fn(async () => ({
+    moment: { ...moment(), namedAuthor: { userId: "ben", label } },
+  }));
   const page = renderPage(read);
-  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  window.dohcDesktop!.onHistoryNamesChanged = (listener) => {
+    notify = listener;
+    return () => {};
+  };
   page.update({ workspaceId: "ws-names" });
   await screen.findByText(/Someone you shared with/);
   expect(compute).toHaveBeenCalledOnce();
@@ -452,7 +547,9 @@ it("keeps the prepared diff across name events and unrelated History answers", a
   expect.soft(compute).toHaveBeenCalledOnce();
   expect.soft(lines).toHaveBeenCalledOnce();
 
-  await act(async () => { page.update({ historyAnswer: { answer: "unrelated" } }); });
+  await act(async () => {
+    page.update({ historyAnswer: { answer: "unrelated" } });
+  });
   expect(read).toHaveBeenCalledTimes(4);
   expect(compute).toHaveBeenCalledOnce();
   expect(lines).toHaveBeenCalledOnce();
@@ -462,9 +559,14 @@ it("refreshes every author's name on a change several people wrote, keeping its 
   const compute = vi.spyOn(unifiedDiff, "computeTextDiff");
   let notify!: (event: { workspaceId: string }) => void;
   let authorLabels = ["ann@test.example", "Someone you shared with"];
-  const read = vi.fn(async (): Promise<{ moment: EngineMomentDetailRecord }> => ({ moment: { ...moment(), authorLabels } }));
+  const read = vi.fn(async (): Promise<{ moment: EngineMomentDetailRecord }> => ({
+    moment: { ...moment(), authorLabels },
+  }));
   const page = renderPage(read);
-  window.dohcDesktop!.onHistoryNamesChanged = listener => { notify = listener; return () => {}; };
+  window.dohcDesktop!.onHistoryNamesChanged = (listener) => {
+    notify = listener;
+    return () => {};
+  };
   page.update({ workspaceId: "ws-names" });
   expect((await screen.findAllByText(/Someone you shared with/)).length).toBeGreaterThan(0);
   const diffLines = screen.getByTestId("engine-diff-lines");

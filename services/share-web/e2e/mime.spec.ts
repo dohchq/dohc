@@ -1,9 +1,5 @@
 import { type Page, type Response } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 const MIME_ATTACK_SENTINEL = "__dohcIso4MimeAttackSentinel_3de752bf";
 const SENTINEL_BASELINE = "iso4mime-unmodified-3de752bf";
@@ -20,23 +16,26 @@ const SIGNATURE_ONLY_PNG = Buffer.concat([
 function activeHtml(probeUrl: string): Uint8Array {
   const scriptProbe = `${probeUrl}/iso4mime-script?sentinel=3de752bf`;
   const imageProbe = `${probeUrl}/iso4mime-image?sentinel=3de752bf`;
-  return new TextEncoder().encode([
-    "<!doctype html>",
-    '<html lang="en">',
-    "<head><meta charset=\"utf-8\"><title>MIME attack fixture</title></head>",
-    "<body>",
-    `<script>window[${JSON.stringify(MIME_ATTACK_SENTINEL)}] = "executed"; fetch(${JSON.stringify(scriptProbe)});</script>`,
-    `<img id="iso4mime-active-image" src=${JSON.stringify(imageProbe)} onload="window[${JSON.stringify(MIME_ATTACK_SENTINEL)}] = 'event-executed'">`,
-    `<p id="iso4mime-dom-marker">${HTML_DOM_MARKER}</p>`,
-    "</body>",
-    "</html>",
-  ].join("\n"));
+  return new TextEncoder().encode(
+    [
+      "<!doctype html>",
+      '<html lang="en">',
+      '<head><meta charset="utf-8"><title>MIME attack fixture</title></head>',
+      "<body>",
+      `<script>window[${JSON.stringify(MIME_ATTACK_SENTINEL)}] = "executed"; fetch(${JSON.stringify(scriptProbe)});</script>`,
+      `<img id="iso4mime-active-image" src=${JSON.stringify(imageProbe)} onload="window[${JSON.stringify(MIME_ATTACK_SENTINEL)}] = 'event-executed'">`,
+      `<p id="iso4mime-dom-marker">${HTML_DOM_MARKER}</p>`,
+      "</body>",
+      "</html>",
+    ].join("\n"),
+  );
 }
 
 function blobResponse(page: Page, sha256: string): Promise<Response> {
-  return page.waitForResponse((response) =>
-    response.request().method() === "GET" &&
-    new URL(response.url()).pathname === `/api/view/blob/${sha256}`
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === `/api/view/blob/${sha256}`,
   );
 }
 

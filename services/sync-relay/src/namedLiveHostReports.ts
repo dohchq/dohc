@@ -13,11 +13,26 @@ export function createLiveHostReports(options: {
       const check = options.storage.captureStanding();
       const current = options.storage.resolveLiveObjectHostBinding(scope, objectId);
       if (current.kind !== "current") return null;
-      const native = await options.captureNative(current.binding, signal ?? options.storage.unavailable);
+      const native = await options.captureNative(
+        current.binding,
+        signal ?? options.storage.unavailable,
+      );
       check();
       const next = options.storage.resolveLiveObjectHostBinding(scope, objectId);
-      if (native.invalidated.aborted || !isDeepStrictEqual(current, next) || !isDeepStrictEqual(current.host, native.coordinate)) return null;
-      for (const field of ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "restoreFenceGeneration"] as const) {
+      if (
+        native.invalidated.aborted ||
+        !isDeepStrictEqual(current, next) ||
+        !isDeepStrictEqual(current.host, native.coordinate)
+      )
+        return null;
+      for (const field of [
+        "workspaceId",
+        "mainVersionId",
+        "objectId",
+        "lineageClaimId",
+        "currentPath",
+        "restoreFenceGeneration",
+      ] as const) {
         if (current.binding[field] !== native.binding[field]) return null;
       }
       return { binding: current.binding, connection: native.coordinate };

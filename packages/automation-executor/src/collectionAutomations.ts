@@ -13,10 +13,21 @@ import {
   type AutomationScheduleTrigger,
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
-import { COLLECTION_SCHEMA_FILENAME, collectionVersionError, type CollectionListResult } from "@dohc/workspace-contracts/collection";
-import { isNormalizedRelativePath, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import {
+  COLLECTION_SCHEMA_FILENAME,
+  collectionVersionError,
+  type CollectionListResult,
+} from "@dohc/workspace-contracts/collection";
+import {
+  isNormalizedRelativePath,
+  parseCollectionSchema,
+} from "@dohc/workspace-contracts/collection-values";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import { AUTOMATION_HOST_REACH_MAX_BYTES, AUTOMATION_SERVER_OFF, type AutomationControlsTarget } from "@dohc/workspace-contracts/relay";
+import {
+  AUTOMATION_HOST_REACH_MAX_BYTES,
+  AUTOMATION_SERVER_OFF,
+  type AutomationControlsTarget,
+} from "@dohc/workspace-contracts/relay";
 import { automationControlsTarget, AUTOMATION_SWITCHED_OFF_BODY } from "./automationFailedNotice";
 import type {
   DatasetAutomationClaim,
@@ -26,7 +37,11 @@ import type {
   DatasetPressInput,
   DatasetRememberedPress,
 } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import type { DatasetDefinition, DatasetDescription, DatasetOperationKind } from "@dohc/security-contract/dataset";
+import type {
+  DatasetDefinition,
+  DatasetDescription,
+  DatasetOperationKind,
+} from "@dohc/security-contract/dataset";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   isInvalidInputRefusal,
@@ -42,7 +57,14 @@ import {
   type SharedFileUpdate,
   type SharedFileUpdateState,
 } from "@dohc/workspace-engine-client";
-import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
+import {
+  changedSincePressed,
+  datasetButtonAccess,
+  namesButton,
+  noAccessReason,
+  resolveButton,
+  type AutomationButtonState,
+} from "./automationButtons";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   codeFilesOf,
@@ -70,7 +92,19 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredCircuitBreaker, StoredRun, StoredSubscription, UndoKeptField, UndoWrite } from "./automationRunStore";
+import type {
+  AutomationRunStore,
+  ClaimStanding,
+  DatasetUndoCall,
+  ExpiringClaim,
+  ReportedFailure,
+  RunWrite,
+  StoredCircuitBreaker,
+  StoredRun,
+  StoredSubscription,
+  UndoKeptField,
+  UndoWrite,
+} from "./automationRunStore";
 import { sharedFileUpdateKey, sharedReversalsOf, recordedReversalsOf } from "./automationRunStore";
 import {
   runCollectionAutomation,
@@ -88,8 +122,21 @@ import {
   rebaseRun,
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
-import { automationInventory, canPressInventory, irreversibleActionsOf, type AutomationInventory } from "./automationInventory";
-import { describeButtonPresser, SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED, type DatasetOperationCeiling } from "./buttonPresser";
+import {
+  automationInventory,
+  canPressInventory,
+  irreversibleActionsOf,
+  type AutomationInventory,
+} from "./automationInventory";
+import {
+  describeButtonPresser,
+  SHARED_BUTTON_DENIED,
+  SHARED_BUTTON_FIELD_CHANGED,
+  SHARED_BUTTON_HELD,
+  SHARED_BUTTON_MOVED,
+  SHARED_BUTTON_UNCHECKED,
+  type DatasetOperationCeiling,
+} from "./buttonPresser";
 import type { RelayButtonAuthority, RelayButtonInspection } from "@dohc/workspace-contracts/relay";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
@@ -106,7 +153,13 @@ import {
   pinDatasetOperations,
   type DatasetRecordId,
 } from "./datasetAutomationPlan";
-import { datasetPresser, datasetRecordExists, runDatasetAutomation, type DatasetRunClaim, type DatasetRunHost } from "./datasetAutomationRun";
+import {
+  datasetPresser,
+  datasetRecordExists,
+  runDatasetAutomation,
+  type DatasetRunClaim,
+  type DatasetRunHost,
+} from "./datasetAutomationRun";
 import {
   datasetUndoDeletesRecorded,
   datasetUndoLostRun,
@@ -176,11 +229,14 @@ export const AUTOMATIONS_FILE_NAME = "automations.yaml";
 const DATASET_FILE_NAME = "dataset.json";
 const WATCHED_FILES = new Set([AUTOMATIONS_FILE_NAME, "collection.yaml", DATASET_FILE_NAME]);
 const MOVED_SINCE_PRESSED = "This Collection moved after the button was pressed. Press it again.";
-const DATASET_NOT_APPROVED = "This Collection's rules are not approved yet, so its automations cannot run.";
+const DATASET_NOT_APPROVED =
+  "This Collection's rules are not approved yet, so its automations cannot run.";
 // A dataset's records are kept on one computer, and its schedules and Group messages run only there.
-const DATASET_TRIGGERS_ELSEWHERE = "Schedules and Group messages run on another computer, but this Collection's records are kept on this one. Choose this computer under Schedules run on in Settings.";
+const DATASET_TRIGGERS_ELSEWHERE =
+  "Schedules and Group messages run on another computer, but this Collection's records are kept on this one. Choose this computer under Schedules run on in Settings.";
 // A Collection on the server: the server runs its schedules and Group messages only where Schedules run on names it.
-export const SERVER_TRIGGERS_ELSEWHERE = "Your server runs this only when you choose it under Schedules run on in Settings.";
+export const SERVER_TRIGGERS_ELSEWHERE =
+  "Your server runs this only when you choose it under Schedules run on in Settings.";
 
 const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
 // A workspace that synced before, or that has no record of whether it did,
@@ -206,8 +262,12 @@ const MAX_SETTLE_ERROR_CHARS = 1000;
 /** The engine RPC subset the executor drives. VersionedLiveAdapter satisfies it. */
 type AutomationPressResult = Awaited<ReturnType<VersionedLiveAdapter["pressAutomation"]>>;
 
-type AutomationClaimScheduleResult = Awaited<ReturnType<VersionedLiveAdapter["claimAutomationSchedule"]>>;
-type AutomationScheduleMark = Awaited<ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>>["marks"][number];
+type AutomationClaimScheduleResult = Awaited<
+  ReturnType<VersionedLiveAdapter["claimAutomationSchedule"]>
+>;
+type AutomationScheduleMark = Awaited<
+  ReturnType<VersionedLiveAdapter["listAutomationScheduleMarks"]>
+>["marks"][number];
 
 export interface CollectionAutomationEngine extends CollectionAutomationReads {
   sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]>;
@@ -226,19 +286,38 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   readonly workspaceId: string;
   /** The workspace's versions and their files, to list every automation a take over cannot vouch for. */
   listVersions(input: { workspaceId: string }): Promise<ReadonlyArray<{ id: string }>>;
-  listTextFileMetadata(input: { workspaceId: string; versionId: string }): Promise<ReadonlyArray<{ path: string; objectId: string }>>;
-  readTextFile(input: { workspaceId: string; versionId: string; path: string }): Promise<{ text: string | null; contentKind: string; objectId: string } | null>;
+  listTextFileMetadata(input: {
+    workspaceId: string;
+    versionId: string;
+  }): Promise<ReadonlyArray<{ path: string; objectId: string }>>;
+  readTextFile(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  }): Promise<{ text: string | null; contentKind: string; objectId: string } | null>;
   makeAutomationWritesDurable(input?: { claimId?: string }): Promise<void>;
-  settleAutomationClaim(input: { claimId: string; state: "done" | "failed"; error?: string }): Promise<unknown>;
+  settleAutomationClaim(input: {
+    claimId: string;
+    state: "done" | "failed";
+    error?: string;
+  }): Promise<unknown>;
   retryAutomationClaim(input: { claimId: string }): Promise<AutomationClaimSummary>;
   /** One page of an automation's run history, newest first, and the `before` of the next page, or null after the oldest. */
-  listAutomationClaims(input: { automationId: string; before?: string; limit?: number }): Promise<{ claims: AutomationClaimSummary[]; next: string | null }>;
+  listAutomationClaims(input: {
+    automationId: string;
+    before?: string;
+    limit?: number;
+  }): Promise<{ claims: AutomationClaimSummary[]; next: string | null }>;
   /** One claim in run history, by its id or by its automation and trigger key, or null. */
-  getAutomationClaim(input: { claimId: string } | { automationId: string; key: string }): Promise<{ claim: AutomationClaimSummary | null }>;
+  getAutomationClaim(
+    input: { claimId: string } | { automationId: string; key: string },
+  ): Promise<{ claim: AutomationClaimSummary | null }>;
   /** Expires one batch of done claims past 30 days, except those `keep` names. */
   pruneAutomationHistory(input: { keep: string[] }): Promise<{ pruned: number; more: boolean }>;
   /** Each automation's newest failed claim, the one its failure notice offers to try again. */
-  listAutomationFailures(): Promise<{ failures: Array<Omit<AutomationFailure, "datasetInstance" | "neverStarted">> }>;
+  listAutomationFailures(): Promise<{
+    failures: Array<Omit<AutomationFailure, "datasetInstance" | "neverStarted">>;
+  }>;
   /** When Group messages last started nothing here for a reason a person can act on, by this computer's clock. */
   readAutomationGroupSkips(): Promise<{ aheadAtMs: number | null; lateAtMs: number | null }>;
   /** Hands a running claim this computer holds back to pending, without counting an attempt. */
@@ -253,7 +332,13 @@ export interface CollectionAutomationEngine extends CollectionAutomationReads {
   listAutomationScheduleMarks(): Promise<{ marks: AutomationScheduleMark[] }>;
   /** Claims Run now from a skipped-run notice; a repeat answers the same claim. */
   runAutomationNow(input: { automationId: string; noticeId: string }): Promise<unknown>;
-  pressAutomation(input: { pressId: string; automationId: string; recordId: string; pressedBy: string; by: AutomationPressActor }): Promise<AutomationPressResult>;
+  pressAutomation(input: {
+    pressId: string;
+    automationId: string;
+    recordId: string;
+    pressedBy: string;
+    by: AutomationPressActor;
+  }): Promise<AutomationPressResult>;
 }
 
 /** An enabled schedule this executor can run. */
@@ -271,7 +356,6 @@ export interface ScheduledAutomation {
   enabledSince: number | null;
 }
 
-
 /** Whether the Collection an automation id names is one whose automations a take over could not list. */
 function inUnprovenFolder(folders: ReadonlySet<string>, automationId: string): boolean {
   if (folders.size === 0) return false;
@@ -282,7 +366,10 @@ function inUnprovenFolder(folders: ReadonlySet<string>, automationId: string): b
 /** The dataset host's automation surface, as the executor drives it. LocalDatasetHost's `automations` satisfies it. */
 export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   /** Each approved, unarchived dataset's rules. */
-  datasets(): { definitions: DatasetDefinition[]; failures: Array<{ datasetId: string; error: unknown }> };
+  datasets(): {
+    definitions: DatasetDefinition[];
+    failures: Array<{ datasetId: string; error: unknown }>;
+  };
   subscribe(datasetId: string, subscription: DatasetAutomationSubscription): void;
   unsubscribe(datasetId: string, automationId: string): void;
   subscriptions(): Array<DatasetAutomationSubscription & { datasetId: string }>;
@@ -292,7 +379,10 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   release(started: DatasetAutomationClaim): void;
   retry(claimId: string): unknown;
   /** One page of an automation's run history, newest first, and the `before` of the next page, or null after the oldest. */
-  claims(automationId: string, page?: { before?: string; limit?: number }): { claims: DatasetAutomationClaim[]; next: string | null };
+  claims(
+    automationId: string,
+    page?: { before?: string; limit?: number },
+  ): { claims: DatasetAutomationClaim[]; next: string | null };
   /** Expires one batch of done claims past 30 days, except those `keep` names. */
   pruneHistory(keep: readonly string[]): { pruned: number; more: boolean };
   /** One of an automation's claims however old, or null. */
@@ -301,7 +391,10 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
   /** Throws why the host cannot take a press of this button, as `press` would. */
   assertPressable(datasetId: string, button: Pick<DatasetPressInput, "tableId" | "fieldId">): void;
   /** Records a press by `pressedBy`, made by `by`, and answers the claim that runs it. */
-  press(datasetId: string, input: Omit<DatasetPressInput, "presser"> & { pressedBy: string; by: AutomationPressActor }): DatasetPressed;
+  press(
+    datasetId: string,
+    input: Omit<DatasetPressInput, "presser"> & { pressedBy: string; by: AutomationPressActor },
+  ): DatasetPressed;
   /** A press the ledger remembers, with its claim, or null. */
   pressed(pressId: string): DatasetRememberedPress | null;
 }
@@ -341,14 +434,23 @@ export interface CollectionAutomationsOptions {
   /** Undo's record writes, which are the edits of the person who asked for it. */
   withUndoWrites: CollectionAutomationRunDependencies["withRecordWrites"];
   /** A workspace text file, or null when it does not exist. */
-  readText(relativePath: string): Promise<
-    { text: string; truncated: false; contentHash: string } | { text: string; truncated: true; contentHash: null } | null
+  readText(
+    relativePath: string,
+  ): Promise<
+    | { text: string; truncated: false; contentHash: string }
+    | { text: string; truncated: true; contentHash: null }
+    | null
   >;
   /**
    * Replaces a text file whose content still hashes to `expectedContentHash`,
    * as the automation `automationId`, so History does not name a person.
    */
-  writeText(relativePath: string, text: string, expectedContentHash: string, automationId: string): Promise<{ status: "written" | "conflict" }>;
+  writeText(
+    relativePath: string,
+    text: string,
+    expectedContentHash: string,
+    automationId: string,
+  ): Promise<{ status: "written" | "conflict" }>;
   pathExists(relativePath: string): Promise<boolean>;
   /**
    * Resolves once the engine has recorded every file change the watcher
@@ -466,7 +568,10 @@ export interface CollectionAutomationsOptions {
    * This workspace's dataset host, while it is open; resolves null when it is
    * not. With `open`, opens it first: only for what a person asked for.
    */
-  withDatasetHost<T>(work: (host: DatasetAutomationHost) => T | Promise<T>, open: boolean): Promise<T | null>;
+  withDatasetHost<T>(
+    work: (host: DatasetAutomationHost) => T | Promise<T>,
+    open: boolean,
+  ): Promise<T | null>;
   nowMs?: () => number;
   /** Starts a run's deadline, which calls `abort`; returns its cancel. Five minutes unless a test sets it. */
   deadline?: (abort: () => void) => () => void;
@@ -492,7 +597,12 @@ function unindexedReason(server: OnServer | Unfinished | null): string {
  * A dataset Collection's approved rules, whether dohc generated its
  * operations, and its data grants, as the reach check reads them.
  */
-type IndexedDataset = { approved: import("@dohc/security-contract/dataset").DatasetRevision | null; definition: DatasetDefinition; generated: boolean | null; grants: ReachDatasetGrants };
+type IndexedDataset = {
+  approved: import("@dohc/security-contract/dataset").DatasetRevision | null;
+  definition: DatasetDefinition;
+  generated: boolean | null;
+  grants: ReachDatasetGrants;
+};
 
 /** One step's reach as the ⚡ panel shows it. */
 export type CollectionAutomationStepReach =
@@ -502,9 +612,14 @@ export type CollectionAutomationStepReach =
   // for a current editor to confirm it with `seq`. `target` is the
   // destination the step reaches.
   | {
-    verdict: "held"; step: string; stoppedFor: string | null; seq: number; target: string; action: CollectionAutomationHold["action"];
-    fileUnread: CollectionAutomationHold["fileUnread"];
-  };
+      verdict: "held";
+      step: string;
+      stoppedFor: string | null;
+      seq: number;
+      target: string;
+      action: CollectionAutomationHold["action"];
+      fileUnread: CollectionAutomationHold["fileUnread"];
+    };
 
 /** One automation as the ⚡ panel reads it. */
 export type CollectionAutomationSummary =
@@ -520,7 +635,9 @@ export type CollectionAutomationSummary =
        */
       cannotRun: string | null;
       /** Each step's reach in step order, or why dohc cannot check who can edit yet. */
-      reach: { kind: "checked"; steps: CollectionAutomationStepReach[] } | { kind: "waiting"; reason: string };
+      reach:
+        | { kind: "checked"; steps: CollectionAutomationStepReach[] }
+        | { kind: "waiting"; reason: string };
       /** Its newest run on this computer, or null when it has not run here. */
       lastRun: { state: AutomationClaimSummary["state"]; atMs: number } | null;
     }
@@ -578,7 +695,11 @@ export type CollectionAutomationTarget = {
       /** Why no action step can run there, or null. */
       actionsStopped: string | null;
       /** Each approved operation a step can use, with why the reach check stops it there, or null. */
-      operations: Array<{ name: string; kind: "read" | "create" | "edit" | "delete" | "action"; stopped: string | null }>;
+      operations: Array<{
+        name: string;
+        kind: "read" | "create" | "edit" | "delete" | "action";
+        stopped: string | null;
+      }>;
     }
 );
 
@@ -616,7 +737,8 @@ export type CollectionAutomationPeople =
   | { status: "waiting"; reason: string };
 
 /** Why a direct message cannot go to this computer's own person. */
-export const DIRECT_MESSAGE_TO_YOU = "A direct message goes to another person. To reach yourself, use Notify.";
+export const DIRECT_MESSAGE_TO_YOU =
+  "A direct message goes to another person. To reach yourself, use Notify.";
 
 /**
  * A step whose reach changed, for its notice: one that waits for a current
@@ -703,7 +825,12 @@ export interface CollectionAutomationRun {
   sharedSettlementNotAccepted?: boolean;
   undoSettlementPending?: boolean;
   undoSettlementNotAccepted?: boolean;
-  reversals?: Array<{ recordId: string; field: string; path: string; state?: SharedFileUpdateState }>;
+  reversals?: Array<{
+    recordId: string;
+    field: string;
+    path: string;
+    state?: SharedFileUpdateState;
+  }>;
   claimId: string;
   state: AutomationClaimSummary["state"];
   error: string | null;
@@ -847,17 +974,36 @@ type DatasetUndoChecked =
   | Extract<CollectionAutomationUndo, { status: "confirm" | "refused" }>;
 
 function documentUndoKept(runs: readonly StoredRun[]) {
-  const datasetRecords = new Set(runs.flatMap((run) => [
-    ...run.applied.flatMap(({ writes }) => writes.flatMap((write) => write.kind === "dataset-edit"
-      ? [JSON.stringify([write.rules.datasetId, write.tableId, write.recordId])] : [])),
-    ...run.steps.flatMap(({ effects }) => effects.flatMap((effect) => effect.kind === "dataset-edit"
-      ? [JSON.stringify([effect.rules.datasetId, effect.tableId, effect.target.recordId])] : [])),
-  ]));
-  return [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !datasetRecords.has(kept.recordId))
-    .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
+  const datasetRecords = new Set(
+    runs.flatMap((run) => [
+      ...run.applied.flatMap(({ writes }) =>
+        writes.flatMap((write) =>
+          write.kind === "dataset-edit"
+            ? [JSON.stringify([write.rules.datasetId, write.tableId, write.recordId])]
+            : [],
+        ),
+      ),
+      ...run.steps.flatMap(({ effects }) =>
+        effects.flatMap((effect) =>
+          effect.kind === "dataset-edit"
+            ? [JSON.stringify([effect.rules.datasetId, effect.tableId, effect.target.recordId])]
+            : [],
+        ),
+      ),
+    ]),
+  );
+  return [
+    ...new Map(
+      runs
+        .flatMap((run) => run.undoKept)
+        .filter((kept) => !datasetRecords.has(kept.recordId))
+        .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept]),
+    ).values(),
+  ];
 }
 
-const DATASET_UNDO_KEPT = "dohc kept the fields someone changed after this run. Restore them from each record's History.";
+const DATASET_UNDO_KEPT =
+  "dohc kept the fields someone changed after this run. Restore them from each record's History.";
 const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a moment.";
 
 /**
@@ -866,14 +1012,30 @@ const BUSY_CLAIM_REFUSAL = "dohc is already changing this run. Try again in a mo
  * from `created`, once.
  */
 function stepWritesOf(runs: readonly StoredRun[]): Array<{ ordinal: number; write: RunWrite }> {
-  const writes = runs.flatMap((run) => run.applied.flatMap((effect, index) => effect.writes.map((write) => ({ ordinal: effect.ordinal,
-    write: writeConfirmed(run, index, write) ? write : { ...write, unconfirmed: true as const } }))));
-  const listed = new Set(writes.flatMap(({ write }) => (write.kind === "created" ? [write.recordId] : [])));
+  const writes = runs.flatMap((run) =>
+    run.applied.flatMap((effect, index) =>
+      effect.writes.map((write) => ({
+        ordinal: effect.ordinal,
+        write: writeConfirmed(run, index, write) ? write : { ...write, unconfirmed: true as const },
+      })),
+    ),
+  );
+  const listed = new Set(
+    writes.flatMap(({ write }) => (write.kind === "created" ? [write.recordId] : [])),
+  );
   for (const run of runs) {
     for (const created of run.created) {
       if (listed.has(created.recordId)) continue;
       listed.add(created.recordId);
-      writes.push({ ordinal: created.ordinal, write: { kind: "created", recordId: created.recordId, path: created.path, unconfirmed: true } });
+      writes.push({
+        ordinal: created.ordinal,
+        write: {
+          kind: "created",
+          recordId: created.recordId,
+          path: created.path,
+          unconfirmed: true,
+        },
+      });
     }
   }
   return writes;
@@ -882,11 +1044,16 @@ function stepWritesOf(runs: readonly StoredRun[]): Array<{ ordinal: number; writ
 /** What each step of runs did, in step order, numbered from 1. */
 function stepsOf(runs: readonly StoredRun[]): CollectionAutomationRunDetail["steps"] {
   const steps = new Map<number, RunWrite[]>();
-  for (const { ordinal, write } of stepWritesOf(runs)) steps.set(ordinal, [...(steps.get(ordinal) ?? []), write]);
-  return [...steps].sort(([left], [right]) => left - right).map(([ordinal, writes]) => ({ step: ordinal + 1, writes }));
+  for (const { ordinal, write } of stepWritesOf(runs))
+    steps.set(ordinal, [...(steps.get(ordinal) ?? []), write]);
+  return [...steps]
+    .sort(([left], [right]) => left - right)
+    .map(([ordinal, writes]) => ({ step: ordinal + 1, writes }));
 }
 
-function timingOf(runs: readonly StoredRun[]): Pick<CollectionAutomationRunDetail, "findMs" | "planMs" | "writeMs" | "writeCount"> {
+function timingOf(
+  runs: readonly StoredRun[],
+): Pick<CollectionAutomationRunDetail, "findMs" | "planMs" | "writeMs" | "writeCount"> {
   const steps = runs.flatMap((run) => run.steps);
   if (steps.length === 0) return {};
   const effects = runs.flatMap((run) => run.applied);
@@ -902,8 +1069,10 @@ function timingOf(runs: readonly StoredRun[]): Pick<CollectionAutomationRunDetai
   const planMs = total(steps.map((step) => step.planMs));
   // With no effects, zero is known only for runs whose steps were measured.
   const measured = findMs !== undefined && planMs !== undefined;
-  const writeMs = effects.length > 0 || measured ? total(effects.map((effect) => effect.writeMs)) : undefined;
-  const writeCount = effects.length > 0 || measured ? total(effects.map((effect) => effect.writeCount)) : undefined;
+  const writeMs =
+    effects.length > 0 || measured ? total(effects.map((effect) => effect.writeMs)) : undefined;
+  const writeCount =
+    effects.length > 0 || measured ? total(effects.map((effect) => effect.writeCount)) : undefined;
   return {
     ...(findMs === undefined ? {} : { findMs }),
     ...(planMs === undefined ? {} : { planMs }),
@@ -944,7 +1113,9 @@ function stoppedAtStep(run: StoredRun | undefined): number | null {
   if (run.outcome?.state === "failed") {
     const failed = run.outcome.step;
     const through = run.steps.findIndex((step) => step.ordinal === failed);
-    const planned = run.steps.slice(0, through + 1).reduce((count, step) => count + step.effects.length, 0);
+    const planned = run.steps
+      .slice(0, through + 1)
+      .reduce((count, step) => count + step.effects.length, 0);
     if (through < 0 || planned > run.applied.length) return failed + 1;
   }
   const ordinals = run.steps.flatMap((step) => step.effects.map(() => step.ordinal));
@@ -965,8 +1136,12 @@ function startDeadline(abort: () => void): () => void {
 
 /** Whether any step wakes its person's agent. */
 function wakesAgent(automation: Automation): boolean {
-  const walk = (steps: Automation["do"]): boolean => steps.some((step) =>
-    step.kind === "wake-agent" || (step.kind === "if" && (walk(step.do) || walk(step.otherwise))));
+  const walk = (steps: Automation["do"]): boolean =>
+    steps.some(
+      (step) =>
+        step.kind === "wake-agent" ||
+        (step.kind === "if" && (walk(step.do) || walk(step.otherwise))),
+    );
   return walk(automation.do);
 }
 
@@ -985,7 +1160,10 @@ function relayedPressId(pressId: string, hash: string, collectionPath: string): 
  * What a relayed press's claim is bound to: the definition its presser saw,
  * and the folder the relay allowed it in. Null for any other claim.
  */
-function boundPress(claim: { trigger: AutomationClaim["trigger"]; change: { kind: AutomationClaim["change"]["kind"] } }): { hostPressId: string; definition: string; place: string } | null {
+function boundPress(claim: {
+  trigger: AutomationClaim["trigger"];
+  change: { kind: AutomationClaim["change"]["kind"] };
+}): { hostPressId: string; definition: string; place: string } | null {
   if (claim.change.kind !== "button" || !("key" in claim.trigger)) return null;
   const match = /^press:([^.]+)\.([0-9a-f]{16})\.([0-9a-f]{16})$/u.exec(claim.trigger.key);
   return match ? { hostPressId: match[1]!, definition: match[2]!, place: match[3]! } : null;
@@ -996,30 +1174,49 @@ function collectionNamed(path: string): ReachCollection {
 }
 
 /** Why dohc cannot check who can edit `collection`, from a roster it does not know. */
-function rosterProblem(roster: Extract<ReachRoster, { kind: "unknown" }>, collection: ReachCollection): string {
-  const [waiting] = checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] });
-  return waiting !== undefined && !waiting.allowed ? waiting.reason : `dohc could not check who can edit ${collection.name}.`;
+function rosterProblem(
+  roster: Extract<ReachRoster, { kind: "unknown" }>,
+  collection: ReachCollection,
+): string {
+  const [waiting] = checkAutomationReach(roster, {
+    id: "",
+    collection,
+    codeFiles: [],
+    steps: [{ kind: "change-records", collection }],
+  });
+  return waiting !== undefined && !waiting.allowed
+    ? waiting.reason
+    : `dohc could not check who can edit ${collection.name}.`;
 }
 
 type OwnedAutomation = { automationId: string; collectionPath: string; automation: Automation };
 
 type SettleInput = { state: "done" } | { state: "failed"; error: string };
 /** A claim this computer holds, from the ledger that made it. */
-type HeldClaim = { source: "engine"; claim: AutomationClaim } | { source: "dataset"; claim: DatasetAutomationClaim };
+type HeldClaim =
+  | { source: "engine"; claim: AutomationClaim }
+  | { source: "dataset"; claim: DatasetAutomationClaim };
 
 /**
  * How a held claim runs: through the dataset its Collection keeps, or as a
  * document Collection's engine claim. An engine claim in a dataset
  * Collection is a due time or a Group message, and runs through the dataset.
  */
-function runnerOf(held: HeldClaim, datasetId: string | undefined): { kind: "dataset"; held: DatasetRunClaim } | { kind: "document"; claim: AutomationClaim } {
+function runnerOf(
+  held: HeldClaim,
+  datasetId: string | undefined,
+): { kind: "dataset"; held: DatasetRunClaim } | { kind: "document"; claim: AutomationClaim } {
   if (held.source === "dataset") return { kind: "dataset", held };
-  return datasetId === undefined ? { kind: "document", claim: held.claim } : { kind: "dataset", held: { ...held, datasetId } };
+  return datasetId === undefined
+    ? { kind: "document", claim: held.claim }
+    : { kind: "dataset", held: { ...held, datasetId } };
 }
 
 /** Whether a held claim runs a button's press, whose window hears how it runs. */
 function isPress(held: HeldClaim): boolean {
-  return held.source === "engine" ? held.claim.change.kind === "button" : held.claim.fact?.kind === "button";
+  return held.source === "engine"
+    ? held.claim.change.kind === "button"
+    : held.claim.fact?.kind === "button";
 }
 
 /** A dataset record's primary key from the JSON a window sends, or null when it is not one. */
@@ -1030,19 +1227,26 @@ function datasetRecordIdOf(text: string): DatasetRecordId | null {
   } catch {
     return null;
   }
-  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value)) ? value : null;
+  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value))
+    ? value
+    : null;
 }
 /**
  * Whether a claim failed before it started, as both ledgers insert it: failed
  * and never served. Of those, a chain stop records its own reason.
  */
-function stopOf(claim: Pick<AutomationClaimSummary, "state" | "attempts"> & { error?: string | null }): Pick<CollectionAutomationRun, "neverStarted" | "chainStopped"> {
+function stopOf(
+  claim: Pick<AutomationClaimSummary, "state" | "attempts"> & { error?: string | null },
+): Pick<CollectionAutomationRun, "neverStarted" | "chainStopped"> {
   const neverStarted = claim.state === "failed" && claim.attempts === 0;
   return { neverStarted, chainStopped: neverStarted && claim.error === AUTOMATION_CHAIN_STOPPED };
 }
 
 /** One automation's run history and the failure its notice offers, whichever ledger holds its claims. */
-type HistoryClaim = Pick<AutomationClaimSummary, "claimId" | "state" | "createdAtMs" | "updatedAtMs" | "attempts"> & {
+type HistoryClaim = Pick<
+  AutomationClaimSummary,
+  "claimId" | "state" | "createdAtMs" | "updatedAtMs" | "attempts"
+> & {
   error?: string | null;
   trigger: CollectionAutomationTrigger;
 };
@@ -1064,8 +1268,14 @@ type LedgerClaim = {
 };
 
 /** Which of two claims is newer: by when each was made, then by id. */
-function newerFirst(left: Pick<HistoryClaim, "createdAtMs" | "claimId">, right: Pick<HistoryClaim, "createdAtMs" | "claimId">): number {
-  return right.createdAtMs - left.createdAtMs || (left.claimId < right.claimId ? 1 : left.claimId > right.claimId ? -1 : 0);
+function newerFirst(
+  left: Pick<HistoryClaim, "createdAtMs" | "claimId">,
+  right: Pick<HistoryClaim, "createdAtMs" | "claimId">,
+): number {
+  return (
+    right.createdAtMs - left.createdAtMs ||
+    (left.claimId < right.claimId ? 1 : left.claimId > right.claimId ? -1 : 0)
+  );
 }
 
 /** Claims from both ledgers, merged newest first, in the order both page them. */
@@ -1076,7 +1286,13 @@ function newestFirst(claims: HistoryClaim[]): HistoryClaim[] {
 function engineHistoryClaim(claim: AutomationClaimSummary): HistoryClaim {
   return {
     ...claim,
-    trigger: { kind: claim.change.kind, recordId: claim.recordId, by: claim.change.actorKind, sharedAuthor: claim.change.sharedAuthor, depth: claim.depth },
+    trigger: {
+      kind: claim.change.kind,
+      recordId: claim.recordId,
+      by: claim.change.actorKind,
+      sharedAuthor: claim.change.sharedAuthor,
+      depth: claim.depth,
+    },
   };
 }
 
@@ -1102,7 +1318,12 @@ type WaitReason = PressWaitReason | "dataset";
  */
 type ClaimAction =
   | { kind: "release"; waitsFor?: WaitReason }
-  | { kind: "settle"; input: SettleInput; outcome: Exclude<PressSettled["outcome"], "ended">; settled: () => Promise<void> };
+  | {
+      kind: "settle";
+      input: SettleInput;
+      outcome: Exclude<PressSettled["outcome"], "ended">;
+      settled: () => Promise<void>;
+    };
 // One page of run history shows this many runs.
 const RUN_PAGE = 20;
 // The most claims one page of either ledger holds.
@@ -1110,24 +1331,43 @@ const CLAIM_PAGE_LIMIT = 100;
 
 export class CollectionAutomations {
   async makeWritesDurable(claimId?: string): Promise<void> {
-    const result = await this.withLiveEngine(async engine => {
-      await engine.makeAutomationWritesDurable(claimId === undefined ? {} : {claimId});
+    const result = await this.withLiveEngine(async (engine) => {
+      await engine.makeAutomationWritesDurable(claimId === undefined ? {} : { claimId });
       return true;
     });
     if (result === null) throw new AutomationRunWait("The workspace engine is unavailable.");
   }
-  pendingRestores() { return this.options.store.pendingRestores(); }
-  savePendingRestore(entry: import("./automationRunStore").PendingRestoreUpdate, whilePending?: string) { return this.options.store.savePendingRestore(entry, whilePending); }
-  recordRestoreIntents(id: string, momentIds: readonly string[]) { return this.options.store.recordRestoreIntents(id, momentIds); }
-  async recordRestoreReceipts(id: string, receipts: readonly {path: string; restoredMomentId: string; removed?: boolean}[], originalMomentIds: readonly string[] = []) {
+  pendingRestores() {
+    return this.options.store.pendingRestores();
+  }
+  savePendingRestore(
+    entry: import("./automationRunStore").PendingRestoreUpdate,
+    whilePending?: string,
+  ) {
+    return this.options.store.savePendingRestore(entry, whilePending);
+  }
+  recordRestoreIntents(id: string, momentIds: readonly string[]) {
+    return this.options.store.recordRestoreIntents(id, momentIds);
+  }
+  async recordRestoreReceipts(
+    id: string,
+    receipts: readonly { path: string; restoredMomentId: string; removed?: boolean }[],
+    originalMomentIds: readonly string[] = [],
+  ) {
     await this.makeWritesDurable();
     await this.options.store.recordRestoreReceipts(id, receipts, originalMomentIds);
   }
-  async undoRestoreReceipts(id: string, momentIds: readonly string[], originalMomentIds: readonly string[] = []) {
+  async undoRestoreReceipts(
+    id: string,
+    momentIds: readonly string[],
+    originalMomentIds: readonly string[] = [],
+  ) {
     await this.makeWritesDurable();
     await this.options.store.undoRestoreReceipts(id, momentIds, originalMomentIds);
   }
-  removePendingRestore(id: string) { return this.options.store.removePendingRestore(id); }
+  removePendingRestore(id: string) {
+    return this.options.store.removePendingRestore(id);
+  }
   /**
    * Every document Collection the engine lists, and those a watcher batch
    * added, with its Collection id: the object id of its collection.yaml.
@@ -1145,9 +1385,15 @@ export class CollectionAutomations {
   /** Dataset Collections, with their approved rules. Only when dohc can run dataset automations. */
   private readonly datasets = new Map<string, IndexedDataset>();
   private targetRevision = 0;
-  private readonly inventories = new WeakMap<Automation, {
-    revision: number; chat: ChatDirectory | null; source: string; result: AutomationInventory | Error;
-  }>();
+  private readonly inventories = new WeakMap<
+    Automation,
+    {
+      revision: number;
+      chat: ChatDirectory | null;
+      source: string;
+      result: AutomationInventory | Error;
+    }
+  >();
   /** The engine subscriptions this computer holds, by engine automation id. */
   private subscribed = new Map<string, StoredSubscription>();
   /** Each step's last reach verdict. */
@@ -1305,8 +1551,18 @@ export class CollectionAutomations {
     const current = () => generation === this.generation;
     this.opened ??= this.enqueue(async () => {
       const subscriptions = await this.options.store.readSubscriptions();
-      const { verdicts, hostRecord, unproven, unprovenAll, unprovenFolders, unprovenPaths, pending, taken, unreadable, missing } =
-        await this.options.store.readReachVerdicts();
+      const {
+        verdicts,
+        hostRecord,
+        unproven,
+        unprovenAll,
+        unprovenFolders,
+        unprovenPaths,
+        pending,
+        taken,
+        unreadable,
+        missing,
+      } = await this.options.store.readReachVerdicts();
       const timeouts = await this.options.store.readTimeouts();
       if (!current()) return;
       this.handoverUnreadAt = null;
@@ -1324,13 +1580,21 @@ export class CollectionAutomations {
       this.reachPending = pending;
       this.savedPending = pending;
       for (const verdict of verdicts) {
-        this.verdicts.set(reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.id), verdict);
+        this.verdicts.set(
+          reachVerdictKey(
+            verdict.automationId,
+            verdict.definitionHash,
+            verdict.step,
+            verdict.recipient?.id,
+          ),
+          verdict,
+        );
         this.verdictSeq = Math.max(this.verdictSeq, verdict.seq);
       }
       await this.loadIndex();
       if (!current()) return;
       await this.noteSwitches();
-      if (missing && await this.options.holdUnprovenWithoutHistory?.()) {
+      if (missing && (await this.options.holdUnprovenWithoutHistory?.())) {
         await this.updateVerdicts(() => this.holdUnproven(), true);
       }
       this.noteEnabledSchedules(true);
@@ -1369,8 +1633,9 @@ export class CollectionAutomations {
 
   /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
-    void this.rereadFoldersOf(events.map((event) => event.path))
-      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
+    void this.rereadFoldersOf(events.map((event) => event.path)).catch((error: unknown) =>
+      this.options.onError("reload Collection automations", error),
+    );
   }
 
   /**
@@ -1379,8 +1644,9 @@ export class CollectionAutomations {
    * Collection's automations or schema (ADR 0013) is read from here.
    */
   handlePulledPaths(paths: readonly string[]): void {
-    void this.rereadFoldersOf(paths)
-      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
+    void this.rereadFoldersOf(paths).catch((error: unknown) =>
+      this.options.onError("reload Collection automations", error),
+    );
   }
 
   /** A lost observation cursor requires every definition to be read again. */
@@ -1394,11 +1660,13 @@ export class CollectionAutomations {
       await this.reconcile(false);
       this.publishHolds();
       this.wakeDatasetWaits();
-    }).then(() => {
-      this.options.onAutomationsChanged();
-      this.rosterChanged();
-      this.options.onSchedulesChanged?.();
-    }).catch((error: unknown) => this.options.onError("reload Collection automations", error));
+    })
+      .then(() => {
+        this.options.onAutomationsChanged();
+        this.rosterChanged();
+        this.options.onSchedulesChanged?.();
+      })
+      .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
   private async rereadFoldersOf(paths: readonly (string | undefined)[]): Promise<void> {
@@ -1410,53 +1678,58 @@ export class CollectionAutomations {
     }
     if (folders.size === 0 || this.opened === null) return;
     this.targetRevision += 1;
-    return this.readingIndex(() => this.enqueue(async () => {
-      let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
-      let listed: Promise<Map<string, string>> | undefined;
-      for (const folder of folders) {
-        this.schemaFields.delete(folder);
-        const collectionId = await this.options.pathExists(`${folder}/collection.yaml`)
-          ? (await (listed ??= this.listedCollections())).get(folder)
-          : undefined;
-        if (collectionId !== undefined) {
-          this.datasets.delete(folder);
-          this.collections.set(folder, collectionId);
-          await this.readFile(folder);
-          continue;
-        }
-        this.collections.delete(folder);
-        // A new automations.yaml beside a dataset is a reason to open its host.
-        const open = await this.options.pathExists(`${folder}/${DATASET_FILE_NAME}`) &&
-          await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`);
-        const knownDatasets = await (datasets ??= this.datasetFolders(open));
-        if (knownDatasets === null) continue;
-        const dataset = knownDatasets.get(folder);
-        if (dataset === undefined) {
-          this.datasets.delete(folder);
-          this.files.delete(folder);
-          if (this.unprovenPaths.has(folder)) await this.proveFolder(folder, undefined);
-        } else {
-          this.datasets.set(folder, dataset);
-          await this.readFile(folder);
-        }
-      }
-      await this.readNamedSchemas();
-      this.targetRevision += 1;
-      await this.noteSwitches();
-      this.noteEnabledSchedules(false);
-      await this.reconcile(false);
-      // An edited or removed automation's held steps leave the notices.
-      this.publishHolds();
-      // A descriptor fixed or removed: its waiting due times and messages look again.
-      this.wakeDatasetWaits();
-    }))
-      // A new or changed step gets its verdict now, while the people who
-      // could have written it can still edit the Collection.
-      .then(() => {
-        this.options.onAutomationsChanged();
-        this.rosterChanged();
-        this.options.onSchedulesChanged?.();
-      });
+    return (
+      this.readingIndex(() =>
+        this.enqueue(async () => {
+          let datasets: Promise<Map<string, IndexedDataset> | null> | undefined;
+          let listed: Promise<Map<string, string>> | undefined;
+          for (const folder of folders) {
+            this.schemaFields.delete(folder);
+            const collectionId = (await this.options.pathExists(`${folder}/collection.yaml`))
+              ? (await (listed ??= this.listedCollections())).get(folder)
+              : undefined;
+            if (collectionId !== undefined) {
+              this.datasets.delete(folder);
+              this.collections.set(folder, collectionId);
+              await this.readFile(folder);
+              continue;
+            }
+            this.collections.delete(folder);
+            // A new automations.yaml beside a dataset is a reason to open its host.
+            const open =
+              (await this.options.pathExists(`${folder}/${DATASET_FILE_NAME}`)) &&
+              (await this.options.pathExists(`${folder}/${AUTOMATIONS_FILE_NAME}`));
+            const knownDatasets = await (datasets ??= this.datasetFolders(open));
+            if (knownDatasets === null) continue;
+            const dataset = knownDatasets.get(folder);
+            if (dataset === undefined) {
+              this.datasets.delete(folder);
+              this.files.delete(folder);
+              if (this.unprovenPaths.has(folder)) await this.proveFolder(folder, undefined);
+            } else {
+              this.datasets.set(folder, dataset);
+              await this.readFile(folder);
+            }
+          }
+          await this.readNamedSchemas();
+          this.targetRevision += 1;
+          await this.noteSwitches();
+          this.noteEnabledSchedules(false);
+          await this.reconcile(false);
+          // An edited or removed automation's held steps leave the notices.
+          this.publishHolds();
+          // A descriptor fixed or removed: its waiting due times and messages look again.
+          this.wakeDatasetWaits();
+        }),
+      )
+        // A new or changed step gets its verdict now, while the people who
+        // could have written it can still edit the Collection.
+        .then(() => {
+          this.options.onAutomationsChanged();
+          this.rosterChanged();
+          this.options.onSchedulesChanged?.();
+        })
+    );
   }
 
   /**
@@ -1510,7 +1783,9 @@ export class CollectionAutomations {
    * indexed, and settles once the store opened without it.
    */
   private wakeDatasetWaits(): void {
-    const woken = [...this.datasetWaits].filter(([, datasetId]) => !this.waitsForDataset(datasetId));
+    const woken = [...this.datasetWaits].filter(
+      ([, datasetId]) => !this.waitsForDataset(datasetId),
+    );
     for (const [claimId] of woken) {
       this.datasetWaits.delete(claimId);
       this.waitingFor.delete(claimId);
@@ -1523,7 +1798,10 @@ export class CollectionAutomations {
    * to open, or the approved dataset's folder does not name it now.
    */
   private waitsForDataset(datasetId: string): boolean {
-    return this.collectionPathOf(datasetId) === null && (this.datasetStoreFailed || this.unplacedDatasets.has(datasetId));
+    return (
+      this.collectionPathOf(datasetId) === null &&
+      (this.datasetStoreFailed || this.unplacedDatasets.has(datasetId))
+    );
   }
 
   /** The wake-up: a claim event landed, a retry queued a claim, or a reconcile registered work. */
@@ -1548,8 +1826,9 @@ export class CollectionAutomations {
    */
   rosterChanged(): void {
     if (this.state !== "open") return;
-    void this.options.cachedRoster()
-      .then((roster) => roster.kind === "unknown" ? undefined : this.recordVerdicts(roster))
+    void this.options
+      .cachedRoster()
+      .then((roster) => (roster.kind === "unknown" ? undefined : this.recordVerdicts(roster)))
       .catch((error: unknown) => this.options.onError("check who can edit automations", error))
       .finally(() => this.clearWaits("roster", "held"));
   }
@@ -1566,8 +1845,9 @@ export class CollectionAutomations {
    */
   hostChanged(): void {
     if (this.opened === null) return;
-    void this.enqueue(() => this.reconcile(false))
-      .catch((error: unknown) => this.options.onError("update Group subscriptions for the automation host", error));
+    void this.enqueue(() => this.reconcile(false)).catch((error: unknown) =>
+      this.options.onError("update Group subscriptions for the automation host", error),
+    );
   }
 
   /** A sync pull reached the relay: a failed reach or Group handover read is asked for again. */
@@ -1594,16 +1874,22 @@ export class CollectionAutomations {
           if (!this.unprovenAll || this.markEpoch !== epoch) return;
           const { named, unread } = this.addListedDefinitions(found);
           // A path whose file names its Collection in every version is identified again.
-          const unidentified = new Set(found.flatMap((file) => file.collectionId === null ? [file.folder] : []));
-          for (const file of found) if (!unidentified.has(file.folder)) this.unprovenPaths.delete(file.folder);
+          const unidentified = new Set(
+            found.flatMap((file) => (file.collectionId === null ? [file.folder] : [])),
+          );
+          for (const file of found)
+            if (!unidentified.has(file.folder)) this.unprovenPaths.delete(file.folder);
           for (const key of this.unproven) {
             const [automationId] = JSON.parse(key) as [string, string];
-            if (!named.has(automationId) && !inUnprovenFolder(unread, automationId)) this.unproven.delete(key);
+            if (!named.has(automationId) && !inUnprovenFolder(unread, automationId))
+              this.unproven.delete(key);
           }
           this.unprovenFolders = unread;
           this.unprovenAll = false;
         }, true);
-      }).catch((error: unknown) => this.options.onError("hold the automations this computer could not vouch for", error));
+      }).catch((error: unknown) =>
+        this.options.onError("hold the automations this computer could not vouch for", error),
+      );
     }
   }
 
@@ -1617,10 +1903,16 @@ export class CollectionAutomations {
     await this.verdictChain;
     if (this.verdictsUnreadable || this.reachPending !== null) return null;
     const handover: ReachHandover = {
-      version: 2, verdicts: [...this.verdicts.values()], unproven: [...this.unproven], unprovenAll: this.unprovenAll,
-      unprovenFolders: [...this.unprovenFolders], unprovenPaths: [...this.unprovenPaths],
+      version: 2,
+      verdicts: [...this.verdicts.values()],
+      unproven: [...this.unproven],
+      unprovenAll: this.unprovenAll,
+      unprovenFolders: [...this.unprovenFolders],
+      unprovenPaths: [...this.unprovenPaths],
     };
-    return Buffer.byteLength(JSON.stringify(handover)) <= AUTOMATION_HOST_REACH_MAX_BYTES ? handover : null;
+    return Buffer.byteLength(JSON.stringify(handover)) <= AUTOMATION_HOST_REACH_MAX_BYTES
+      ? handover
+      : null;
   }
 
   /**
@@ -1633,7 +1925,9 @@ export class CollectionAutomations {
    * again. A message claimed here before still runs here, as a claimed
    * schedule does.
    */
-  async releaseGroupSubscriptions(stillHandingOver: () => boolean): Promise<AutomationReleaseGroupsResult | null> {
+  async releaseGroupSubscriptions(
+    stillHandingOver: () => boolean,
+  ): Promise<AutomationReleaseGroupsResult | null> {
     await this.opened;
     if (this.state !== "open") return null;
     let released = null as AutomationReleaseGroupsResult | null;
@@ -1716,8 +2010,14 @@ export class CollectionAutomations {
 
   /** Whether an enabled automation starts on a schedule or a Group message, which only the host runs. */
   hasHostTriggers(): boolean {
-    return this.state === "open" && this.everyAutomation().some(({ automation }) =>
-      automation.enabled && (automation.when.kind === "schedule" || automation.when.kind === "group-message"));
+    return (
+      this.state === "open" &&
+      this.everyAutomation().some(
+        ({ automation }) =>
+          automation.enabled &&
+          (automation.when.kind === "schedule" || automation.when.kind === "group-message"),
+      )
+    );
   }
 
   /** The enabled schedules this executor can run, or null until it has opened. */
@@ -1745,7 +2045,9 @@ export class CollectionAutomations {
    */
   async runNow(automationId: string, noticeId: string): Promise<boolean> {
     await this.markHostClaims();
-    const ran = await this.withLiveEngine((engine) => engine.runAutomationNow({ automationId, noticeId }));
+    const ran = await this.withLiveEngine((engine) =>
+      engine.runAutomationNow({ automationId, noticeId }),
+    );
     if (ran === null) return false;
     this.notifyClaimed();
     return true;
@@ -1758,7 +2060,8 @@ export class CollectionAutomations {
    */
   async runNowRefusal(automationId: string): Promise<string | null> {
     await this.ready();
-    if (parseCollectionAutomationId(automationId) === null || this.locate(automationId) !== null) return null;
+    if (parseCollectionAutomationId(automationId) === null || this.locate(automationId) !== null)
+      return null;
     // A dataset whose host has not opened yet may still be kept here.
     await this.enqueue(() => this.indexDatasets(true));
     if (this.locate(automationId) !== null) return null;
@@ -1778,19 +2081,25 @@ export class CollectionAutomations {
   /** The folder of the indexed Collection with this Collection id, or null. */
   private collectionPathOf(collectionId: string): string | null {
     for (const [path, id] of this.collections) if (id === collectionId) return path;
-    for (const [path, dataset] of this.datasets) if (dataset.definition.datasetId === collectionId) return path;
+    for (const [path, dataset] of this.datasets)
+      if (dataset.definition.datasetId === collectionId) return path;
     return null;
   }
 
   /** An indexed Collection's id: its collection.yaml's object id, or its dataset id. */
   private collectionIdOf(collectionPath: string): string | null {
-    return this.collections.get(collectionPath) ?? this.datasets.get(collectionPath)?.definition.datasetId ?? null;
+    return (
+      this.collections.get(collectionPath) ??
+      this.datasets.get(collectionPath)?.definition.datasetId ??
+      null
+    );
   }
 
   /** The engine id of the automation `id` in an indexed Collection. */
   private automationIdIn(collectionPath: string, id: string): string {
     const collectionId = this.collectionIdOf(collectionPath);
-    if (collectionId === null) throw new Error(`dohc has not indexed the Collection ${collectionPath}.`);
+    if (collectionId === null)
+      throw new Error(`dohc has not indexed the Collection ${collectionPath}.`);
     return collectionAutomationId(collectionId, id);
   }
 
@@ -1830,30 +2139,66 @@ export class CollectionAutomations {
     const unapproved = await this.maybeDataset(collectionPath);
     const server = unapproved ? await this.onServer({ folder: collectionPath }) : null;
     if (server !== null && !("unfinished" in server)) return await this.serverAutomationsIn(server);
-    const indexed = unapproved ? await this.parsedFile(collectionPath) : this.files.get(collectionPath);
-    const collectionId = unapproved ? await this.describedDatasetId(collectionPath) : this.collectionIdOf(collectionPath);
+    const indexed = unapproved
+      ? await this.parsedFile(collectionPath)
+      : this.files.get(collectionPath);
+    const collectionId = unapproved
+      ? await this.describedDatasetId(collectionPath)
+      : this.collectionIdOf(collectionPath);
     const roster = await this.options.cachedRoster();
-    const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
+    const you =
+      roster.kind === "owner" && roster.localPersonId !== undefined
+        ? { you: roster.localPersonId }
+        : {};
     if (!indexed || collectionId === null) return { status: "missing", ...you };
-    if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
-    const { unsupported, reasonOf } = await this.reasonsIn(collectionPath, unapproved ? unindexedReason(server) : null);
+    if (indexed.file.status === "unreadable")
+      return { status: "unreadable", diagnostic: indexed.file.diagnostic };
+    const { unsupported, reasonOf } = await this.reasonsIn(
+      collectionPath,
+      unapproved ? unindexedReason(server) : null,
+    );
     const collection = collectionNamed(collectionPath);
-    const runnable = indexed.file.entries.flatMap((entry) => entry.status === "valid" && unsupported(entry.automation) === null
-      ? [{ automationId: collectionAutomationId(collectionId, entry.automation.id), collectionPath, automation: entry.automation }]
-      : []);
+    const runnable = indexed.file.entries.flatMap((entry) =>
+      entry.status === "valid" && unsupported(entry.automation) === null
+        ? [
+            {
+              automationId: collectionAutomationId(collectionId, entry.automation.id),
+              collectionPath,
+              automation: entry.automation,
+            },
+          ]
+        : [],
+    );
     // Without a roster, the reason is the same for every step: dohc cannot
     // check who can edit the Collection yet.
-    const [waiting] = roster.kind === "unknown"
-      ? checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] })
-      : [];
+    const [waiting] =
+      roster.kind === "unknown"
+        ? checkAutomationReach(roster, {
+            id: "",
+            collection,
+            codeFiles: [],
+            steps: [{ kind: "change-records", collection }],
+          })
+        : [];
     if (roster.kind !== "unknown") await this.recordVerdicts(roster, runnable);
     // One engine read per automation, together; the newest claim comes first.
-    const lastRuns = new Map(await Promise.all(indexed.file.entries.flatMap((entry) => entry.status === "valid"
-      ? [collectionAutomationId(collectionId, entry.automation.id)]
-      : []).map(async (automationId) => {
-      const [newest] = (await this.claimPage(automationId, { limit: 1 }))?.claims ?? [];
-      return [automationId, newest ? { state: newest.state, atMs: newest.updatedAtMs } : null] as const;
-    })));
+    const lastRuns = new Map(
+      await Promise.all(
+        indexed.file.entries
+          .flatMap((entry) =>
+            entry.status === "valid"
+              ? [collectionAutomationId(collectionId, entry.automation.id)]
+              : [],
+          )
+          .map(async (automationId) => {
+            const [newest] = (await this.claimPage(automationId, { limit: 1 }))?.claims ?? [];
+            return [
+              automationId,
+              newest ? { state: newest.state, atMs: newest.updatedAtMs } : null,
+            ] as const;
+          }),
+      ),
+    );
     const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
       if (entry.status === "invalid") {
         return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
@@ -1863,34 +2208,67 @@ export class CollectionAutomations {
       const hash = definitionHash(automation);
       const cannotRun = reasonOf(automation);
       const summary = {
-        valid: true as const, automationId, automation, definitionHash: hash, cannotRun,
+        valid: true as const,
+        automationId,
+        automation,
+        definitionHash: hash,
+        cannotRun,
         lastRun: lastRuns.get(automationId) ?? null,
       };
-      if (this.verdictsUnreadable) return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
+      if (this.verdictsUnreadable)
+        return { ...summary, reach: { kind: "waiting", reason: UNREADABLE_REACH } };
       if (roster.kind === "unknown") {
-        return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
+        return {
+          ...summary,
+          reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" },
+        };
       }
       const reachSteps = this.reachSteps(collectionPath, automation);
       const steps = checkAutomationReach(roster, {
-        id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps: reachSteps,
+        id: automation.id,
+        collection,
+        codeFiles: codeFilesOf(automation, collectionPath),
+        steps: reachSteps,
       }).map((reach, step): CollectionAutomationStepReach => {
         if (!reach.allowed) return { verdict: "stopped", reason: reach.reason };
-        const stored = this.verdicts.get(reachVerdictKey(automationId, hash, reachStepId(reachSteps[step]!, step)));
+        const stored = this.verdicts.get(
+          reachVerdictKey(automationId, hash, reachStepId(reachSteps[step]!, step)),
+        );
         const reached = reachSteps[step] ? reachDestination(reachSteps[step]) : null;
         return stored?.verdict === "held" && reached
           ? {
-              verdict: "held", step: stored.step, stoppedFor: stored.stoppedFor, seq: stored.seq,
-              fileUnread: this.fileUnread(stored), ...reached,
+              verdict: "held",
+              step: stored.step,
+              stoppedFor: stored.stoppedFor,
+              seq: stored.seq,
+              fileUnread: this.fileUnread(stored),
+              ...reached,
             }
           : { verdict: "allowed" };
       });
       return { ...summary, reach: { kind: "checked", steps } };
     });
-    const dataset = unapproved || roster.kind === "unknown" ? undefined : this.datasets.get(collectionPath);
-    const codeFiles = indexed.file.entries.flatMap((entry) => entry.status === "valid" ? codeFilesOf(entry.automation, collectionPath) : []);
-    const addsStay = dataset === undefined ? [] : dataset.definition.tables
-      .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants, codeFiles).length === 0)
-      .map((table) => table.name);
+    const dataset =
+      unapproved || roster.kind === "unknown" ? undefined : this.datasets.get(collectionPath);
+    const codeFiles = indexed.file.entries.flatMap((entry) =>
+      entry.status === "valid" ? codeFilesOf(entry.automation, collectionPath) : [],
+    );
+    const addsStay =
+      dataset === undefined
+        ? []
+        : dataset.definition.tables
+            .filter(
+              (table) =>
+                datasetUndoDeletes(
+                  roster,
+                  collection,
+                  dataset.definition,
+                  table.tableId,
+                  dataset.grants,
+                  codeFiles,
+                ).length === 0,
+            )
+            .map((table) => table.name);
     return { status: "read", contentHash: indexed.contentHash, automations, addsStay, ...you };
   }
 
@@ -1936,10 +2314,19 @@ export class CollectionAutomations {
     const dataset = await this.datasetFailures();
     const failures: AutomationFailure[] = [
       // The engine inserts a claim failed only for a chain stop.
-      ...engine.failures.map((failure) => ({ ...failure, neverStarted: failure.chainStopped, datasetInstance: null })),
+      ...engine.failures.map((failure) => ({
+        ...failure,
+        neverStarted: failure.chainStopped,
+        datasetInstance: null,
+      })),
       ...(dataset ?? []),
     ];
-    const reported = new Map((await this.options.store.readReportedFailures()).map((entry) => [automationFailureKey(entry), entry]));
+    const reported = new Map(
+      (await this.options.store.readReportedFailures()).map((entry) => [
+        automationFailureKey(entry),
+        entry,
+      ]),
+    );
     for (const [key, breaker] of [...this.pendingCircuitBreakers]) {
       await this.options.store.recordCircuitBreaker(breaker);
       if (this.pendingCircuitBreakers.get(key) === breaker) this.pendingCircuitBreakers.delete(key);
@@ -1959,11 +2346,22 @@ export class CollectionAutomations {
       const last = reported.get(key);
       // The same run at the same count was sent. Another run, as the older
       // failed run a retry of the newest leaves, is news.
-      if (last !== undefined && last.claimId === failure.claimId && failure.generation <= last.generation) continue;
+      if (
+        last !== undefined &&
+        last.claimId === failure.claimId &&
+        failure.generation <= last.generation
+      )
+        continue;
       try {
         const context = await this.failureContextOf(failure);
-        const breaker = breakers.find((entry) => automationFailureKey(entry) === key && entry.claimId === failure.claimId && entry.run === context.run);
-        if (breaker !== undefined) failure.switchedOff = { reason: breaker.reason, collectionPath: breaker.collectionPath };
+        const breaker = breakers.find(
+          (entry) =>
+            automationFailureKey(entry) === key &&
+            entry.claimId === failure.claimId &&
+            entry.run === context.run,
+        );
+        if (breaker !== undefined)
+          failure.switchedOff = { reason: breaker.reason, collectionPath: breaker.collectionPath };
         const definition = this.definitionFor(failure.automationId);
         await this.options.reportFailure({
           failure,
@@ -1979,31 +2377,56 @@ export class CollectionAutomations {
         continue;
       }
       const { automationId, datasetInstance, claimId, generation } = failure;
-      if (!(await commit(key, { automationId, datasetInstance, claimId, generation, open: true }))) return;
+      if (!(await commit(key, { automationId, datasetInstance, claimId, generation, open: true })))
+        return;
     }
-    const newest = new Map(failures.map((failure) => [automationFailureKey(failure), failure.claimId]));
+    const newest = new Map(
+      failures.map((failure) => [automationFailureKey(failure), failure.claimId]),
+    );
     for (const [key, entry] of reported) {
       if (this.state === "disposed") return;
-      if (!entry.open || newest.get(key) === entry.claimId || (entry.datasetInstance !== null && dataset === null)) continue;
+      if (
+        !entry.open ||
+        newest.get(key) === entry.claimId ||
+        (entry.datasetInstance !== null && dataset === null)
+      )
+        continue;
       await this.options.withdrawFailure(entry);
       if (!(await commit(key, { ...entry, open: false }))) return;
     }
   }
 
-  private async failureContextOf(failure: AutomationFailure): Promise<{ startedBy: string | null; run: number | null }> {
+  private async failureContextOf(
+    failure: AutomationFailure,
+  ): Promise<{ startedBy: string | null; run: number | null }> {
     const unknown = { startedBy: null, run: null };
     if (failure.datasetInstance !== null) {
-      const claim = await this.withLiveHost((ledger) => ledger.claim(failure.automationId, failure.claimId));
+      const claim = await this.withLiveHost((ledger) =>
+        ledger.claim(failure.automationId, failure.claimId),
+      );
       if (!claim) return unknown;
-      return { run: claim.run, startedBy: claim.actor.kind === "named" || claim.actor.kind === "owner" ? claim.actor.userId ?? null : null };
+      return {
+        run: claim.run,
+        startedBy:
+          claim.actor.kind === "named" || claim.actor.kind === "owner"
+            ? (claim.actor.userId ?? null)
+            : null,
+      };
     }
-    const found = await this.withLiveEngine((engine) => engine.getAutomationClaim({ claimId: failure.claimId }));
+    const found = await this.withLiveEngine((engine) =>
+      engine.getAutomationClaim({ claimId: failure.claimId }),
+    );
     const claim = found?.claim;
     if (claim?.automationId !== failure.automationId) return unknown;
     const change = claim.change;
-    const startedBy = change.kind === "message" || change.kind === "button" ? change.onBehalfOf
-      : change.sharedAuthor?.kind === "named" ? change.sharedAuthor.userId
-        : change.sharedAuthor === null && change.actorKind === "human" ? change.onBehalfOf : null;
+    const startedBy =
+      change.kind === "message" || change.kind === "button"
+        ? change.onBehalfOf
+        : change.sharedAuthor?.kind === "named"
+          ? change.sharedAuthor.userId
+          : change.sharedAuthor === null && change.actorKind === "human"
+            ? change.onBehalfOf
+            : null;
     return { run: claim.run, startedBy };
   }
 
@@ -2027,14 +2450,27 @@ export class CollectionAutomations {
    * in the builder. A switch, a rename, a copy, or an edit elsewhere leaves
    * what each existing step does alone.
    */
-  async pinOperations(collectionPath: string, automations: readonly Automation[], saved: readonly Automation[]): Promise<Automation[]> {
+  async pinOperations(
+    collectionPath: string,
+    automations: readonly Automation[],
+    saved: readonly Automation[],
+  ): Promise<Automation[]> {
     await this.ready();
     await this.openDataset(collectionPath);
     // A Collection on the server pins against the server's rules.
     const server = await this.onServer({ folder: collectionPath });
-    const held = new Set(saved.flatMap((automation) => stepsInOrder(automation).map(({ step }) => JSON.stringify(step))));
-    const datasetAt = server === null || "unfinished" in server ? undefined : await this.serverDatasetsFor(server, automations);
-    return automations.map((automation) => this.pinned(collectionPath, automation, held, datasetAt));
+    const held = new Set(
+      saved.flatMap((automation) =>
+        stepsInOrder(automation).map(({ step }) => JSON.stringify(step)),
+      ),
+    );
+    const datasetAt =
+      server === null || "unfinished" in server
+        ? undefined
+        : await this.serverDatasetsFor(server, automations);
+    return automations.map((automation) =>
+      this.pinned(collectionPath, automation, held, datasetAt),
+    );
   }
 
   /**
@@ -2043,15 +2479,25 @@ export class CollectionAutomations {
    * reaches, each against that dataset's approved rules. A step in `held`
    * stays as the file holds it.
    */
-  private pinned(collectionPath: string, automation: Automation, held: ReadonlySet<string>, datasetAt: DatasetAt = (path) => this.datasets.get(path)): Automation {
+  private pinned(
+    collectionPath: string,
+    automation: Automation,
+    held: ReadonlySet<string>,
+    datasetAt: DatasetAt = (path) => this.datasets.get(path),
+  ): Automation {
     const kept = (step: object) => held.has(JSON.stringify(step));
     let pinned = automation;
     const own = datasetAt(collectionPath);
-    if (own !== undefined && own.generated !== null) pinned = pinDatasetOperations(pinned, { ...own, generated: own.generated === true }, kept);
+    if (own !== undefined && own.generated !== null)
+      pinned = pinDatasetOperations(pinned, { ...own, generated: own.generated === true }, kept);
     for (const path of new Set(recordStepDestinations(automation, collectionPath).values())) {
       const dataset = path === collectionPath ? undefined : datasetAt(path);
       if (dataset === undefined || dataset.generated === null) continue;
-      pinned = pinDatasetOperations(pinned, { ...dataset, generated: dataset.generated === true, sourceCollection: collectionPath }, kept);
+      pinned = pinDatasetOperations(
+        pinned,
+        { ...dataset, generated: dataset.generated === true, sourceCollection: collectionPath },
+        kept,
+      );
     }
     return pinned;
   }
@@ -2069,10 +2515,18 @@ export class CollectionAutomations {
     const dataset = this.datasets.get(collectionPath);
     if (dataset === undefined && !this.collections.has(collectionPath)) return null;
     const indexed = this.files.get(collectionPath);
-    const held = new Set(indexed?.file.status === "read"
-      ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
-      : []);
-    return (await this.reasonsIn(collectionPath, null)).reasonOf(this.pinned(collectionPath, automation, held));
+    const held = new Set(
+      indexed?.file.status === "read"
+        ? indexed.file.entries.flatMap((entry) =>
+            entry.status === "valid"
+              ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step))
+              : [],
+          )
+        : [],
+    );
+    return (await this.reasonsIn(collectionPath, null)).reasonOf(
+      this.pinned(collectionPath, automation, held),
+    );
   }
 
   /**
@@ -2080,14 +2534,21 @@ export class CollectionAutomations {
    * run reads it, at its JSON Pointer. A Find in a Collection dohc has not
    * indexed has none to give.
    */
-  async draftFindProblems(collectionPath: string, automation: Automation): Promise<Array<{ path: string; problem: string }>> {
+  async draftFindProblems(
+    collectionPath: string,
+    automation: Automation,
+  ): Promise<Array<{ path: string; problem: string }>> {
     await this.ready();
     return findProblems(automation, (collection) => this.keptIn(collection ?? collectionPath));
   }
 
   /** How an indexed Collection keeps its records, or null when dohc cannot tell, as for one whose schema it cannot read. */
   private keptIn(path: string): "dataset" | "document" | null {
-    return this.datasets.has(path) ? "dataset" : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string" ? "document" : null;
+    return this.datasets.has(path)
+      ? "dataset"
+      : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string"
+        ? "document"
+        : null;
   }
 
   /**
@@ -2096,9 +2557,16 @@ export class CollectionAutomations {
    */
   async missingCodeFiles(collectionPath: string, automation: Automation): Promise<string[]> {
     // Only a path the file contract takes, so a lookup stays inside the Collection's folder by name.
-    const files = [...new Set(stepsInOrder(automation).flatMap(({ step }) =>
-      (step.kind === "run-file" && isNormalizedRelativePath(step.file) ? [step.file] : [])))];
-    const found = await Promise.all(files.map((file) => this.options.pathExists(`${collectionPath}/${file}`)));
+    const files = [
+      ...new Set(
+        stepsInOrder(automation).flatMap(({ step }) =>
+          step.kind === "run-file" && isNormalizedRelativePath(step.file) ? [step.file] : [],
+        ),
+      ),
+    ];
+    const found = await Promise.all(
+      files.map((file) => this.options.pathExists(`${collectionPath}/${file}`)),
+    );
     return files.filter((_, index) => !found[index]);
   }
 
@@ -2114,18 +2582,32 @@ export class CollectionAutomations {
       unindexed ?? this.cannotRun(collectionPath, automation);
     const hostCanRun = (await this.options.hostCanRun?.()) ?? true;
     // Only the computer that keeps a dataset can run its schedules and Group messages.
-    const keptHereOnly = hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
-    const reasonOf = (automation: Automation): string | null => unsupported(automation) ?? this.groupProblem(automation) ?? (hostCanRun
-      ? (keptHereOnly && (automation.when.kind === "schedule" || automation.when.kind === "group-message") ? DATASET_TRIGGERS_ELSEWHERE : null)
-      : automation.when.kind === "schedule" ? SCHEDULES_NEED_SYNC
-      : automation.when.kind === "group-message" ? GROUP_MESSAGES_NEED_SYNC
-      : null);
+    const keptHereOnly =
+      hostCanRun && this.datasets.has(collectionPath) && (await this.options.groupHost()) === null;
+    const reasonOf = (automation: Automation): string | null =>
+      unsupported(automation) ??
+      this.groupProblem(automation) ??
+      (hostCanRun
+        ? keptHereOnly &&
+          (automation.when.kind === "schedule" || automation.when.kind === "group-message")
+          ? DATASET_TRIGGERS_ELSEWHERE
+          : null
+        : automation.when.kind === "schedule"
+          ? SCHEDULES_NEED_SYNC
+          : automation.when.kind === "group-message"
+            ? GROUP_MESSAGES_NEED_SYNC
+            : null);
     return { unsupported, reasonOf };
   }
 
   /** Every step that waits for a current editor, and whether dohc could read what was allowed. */
   holdState(): CollectionAutomationHolds {
-    return { holds: this.holds(), stops: this.stops(), unreadable: this.verdictsUnreadable, unprovenPaths: this.heldUnprovenPaths() };
+    return {
+      holds: this.holds(),
+      stops: this.stops(),
+      unreadable: this.verdictsUnreadable,
+      unprovenPaths: this.heldUnprovenPaths(),
+    };
   }
 
   /** The unidentified paths where a Collection is indexed, so its automations wait. A stray file holds nothing. */
@@ -2148,13 +2630,24 @@ export class CollectionAutomations {
         const collection = collectionNamed(collectionPath);
         const hash = definitionHash(automation);
         const steps = this.reachSteps(collectionPath, automation);
-        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
+        checkAutomationReach(roster, {
+          id: automation.id,
+          collection,
+          codeFiles: codeFilesOf(automation, collectionPath),
+          steps,
+        }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
           // A former link's evidence is part of what Allow answers now.
-          const accounted = reach.allowed ? (reach.formerStops ?? []).map((stop) => stop.evidence).sort() : [];
+          const accounted = reach.allowed
+            ? (reach.formerStops ?? []).map((stop) => stop.evidence).sort()
+            : [];
           this.verdicts.set(reachVerdictKey(automationId, hash, step), {
-            automationId, definitionHash: hash, step,
-            ...(reach.allowed ? { verdict: "held", stoppedFor: null } : { verdict: "stopped", stoppedFor: reach.person ?? null }),
+            automationId,
+            definitionHash: hash,
+            step,
+            ...(reach.allowed
+              ? { verdict: "held", stoppedFor: null }
+              : { verdict: "stopped", stoppedFor: reach.person ?? null }),
             ...(accounted.length === 0 ? {} : { accountedLinks: accounted }),
             seq: ++this.verdictSeq,
           });
@@ -2179,24 +2672,46 @@ export class CollectionAutomations {
    */
   async groupsFor(collectionPath: string): Promise<CollectionAutomationGroup[]> {
     await this.ready();
-    const listed = [...((await this.options.groupList?.()) ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+    const listed = [...((await this.options.groupList?.()) ?? [])].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
     if (listed.length === 0) return [];
     const roster = await this.options.cachedRoster();
-    const chat = roster.kind === "unknown"
-      ? null
-      : await this.options.chat.directory(roster, { groups: new Set(listed.map(({ slug }) => slug)), people: new Set() });
+    const chat =
+      roster.kind === "unknown"
+        ? null
+        : await this.options.chat.directory(roster, {
+            groups: new Set(listed.map(({ slug }) => slug)),
+            people: new Set(),
+          });
     const collection = collectionNamed(collectionPath);
     return listed.map(({ name, slug }) => {
       // The name, where it names this Group as a run reads it; otherwise the slug, which always does.
       const bySlug = chat?.group(slug);
       const byName = chat?.group(name);
-      const ref = bySlug && byName && !("problem" in bySlug) && !("problem" in byName) && byName.channelId === bySlug.channelId ? name : slug;
+      const ref =
+        bySlug &&
+        byName &&
+        !("problem" in bySlug) &&
+        !("problem" in byName) &&
+        byName.channelId === bySlug.channelId
+          ? name
+          : slug;
       const found = chat?.group(ref);
       // A Group the directory cannot resolve can neither start nor take a message.
-      if (found && "problem" in found) return { name, slug, ref, readStopped: found.problem, postStopped: found.problem };
-      const group = found ? { channelWireId: found.wireId, name: found.name } : { channelWireId: null, name };
+      if (found && "problem" in found)
+        return { name, slug, ref, readStopped: found.problem, postStopped: found.problem };
+      const group = found
+        ? { channelWireId: found.wireId, name: found.name }
+        : { channelWireId: null, name };
       const [read, post] = checkAutomationReach(roster, {
-        id: "", collection, codeFiles: [], steps: [{ kind: "read-group", group }, { kind: "post", group }],
+        id: "",
+        collection,
+        codeFiles: [],
+        steps: [
+          { kind: "read-group", group },
+          { kind: "post", group },
+        ],
       });
       return {
         name,
@@ -2221,7 +2736,12 @@ export class CollectionAutomations {
     const collection = collectionNamed(collectionPath);
     if (roster.kind === "unknown") {
       // Every step waits for the same reason without a roster.
-      const [waiting] = checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "notify", person: { userId: "", name: "" } }] });
+      const [waiting] = checkAutomationReach(roster, {
+        id: "",
+        collection,
+        codeFiles: [],
+        steps: [{ kind: "notify", person: { userId: "", name: "" } }],
+      });
       return { status: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" };
     }
     // A shared view lists nobody: its automations run on the owner's computer.
@@ -2229,30 +2749,50 @@ export class CollectionAutomations {
     // The owner by this computer's own id in a workspace proved never shared, as steps name them there; else by their account.
     const you = roster.localPersonId ?? roster.ownerUserId;
     const others = roster.grants.flatMap((grant) =>
-      grant.recipientUserId !== null && grant.recipientUserId !== roster.ownerUserId && grant.recipientUserId !== you ? [grant.recipientUserId] : []);
+      grant.recipientUserId !== null &&
+      grant.recipientUserId !== roster.ownerUserId &&
+      grant.recipientUserId !== you
+        ? [grant.recipientUserId]
+        : [],
+    );
     const ids = [...new Set([...(you === null ? [] : [you]), ...others])];
     if (ids.length === 0) return { status: "listed", people: [] };
     // The directory reads a direct message only for the people it is asked about.
-    const chat = await this.options.chat.directory(roster, { groups: new Set(), people: new Set(ids) });
+    const chat = await this.options.chat.directory(roster, {
+      groups: new Set(),
+      people: new Set(ids),
+    });
     // A run waits for the engine then too.
-    if (chat === null) return { status: "waiting", reason: "dohc could not read this workspace's chats." };
+    if (chat === null)
+      return { status: "waiting", reason: "dohc could not read this workspace's chats." };
     const people = ids.map((userId) => {
       const name = chat.person(userId);
       const dm = userId === you ? { problem: DIRECT_MESSAGE_TO_YOU } : chat.directMessage(userId);
       const recipient = chat.noticeRecipient(userId);
       const [sent, noticed] = checkAutomationReach(roster, {
-        id: "", collection, codeFiles: [], steps: [directMessageReach(chat, userId), { kind: "notify", person: { userId, name } }],
+        id: "",
+        collection,
+        codeFiles: [],
+        steps: [directMessageReach(chat, userId), { kind: "notify", person: { userId, name } }],
       });
       return {
         userId,
         name,
         you: userId === you,
         dmStopped: "problem" in dm ? dm.problem : sent && !sent.allowed ? sent.reason : null,
-        noticeStopped: "problem" in recipient ? recipient.problem : noticed && !noticed.allowed ? noticed.reason : null,
+        noticeStopped:
+          "problem" in recipient
+            ? recipient.problem
+            : noticed && !noticed.allowed
+              ? noticed.reason
+              : null,
       };
     });
     // You first, then everyone else by name.
-    return { status: "listed", people: people.sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)) };
+    return {
+      status: "listed",
+      people: people.sort((a, b) => Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)),
+    };
   }
 
   /**
@@ -2267,21 +2807,41 @@ export class CollectionAutomations {
     await this.ready();
     const roster = await this.options.cachedRoster();
     const collection = collectionNamed(collectionPath);
-    const reasonOf = (verdict: ReturnType<typeof checkAutomationReach>[number] | undefined) => (verdict && !verdict.allowed ? verdict.reason : null);
+    const reasonOf = (verdict: ReturnType<typeof checkAutomationReach>[number] | undefined) =>
+      verdict && !verdict.allowed ? verdict.reason : null;
     const documents = [...this.collections.keys()].map((path): CollectionAutomationTarget => {
       const target = collectionNamed(path);
       const [change, find] = checkAutomationReach(roster, {
-        id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection: target }, { kind: "find-records", collection: target }],
+        id: "",
+        collection,
+        codeFiles: [],
+        steps: [
+          { kind: "change-records", collection: target },
+          { kind: "find-records", collection: target },
+        ],
       });
-      return { kind: "document", path, name: target.name, stopped: reasonOf(change), findStopped: reasonOf(find) };
+      return {
+        kind: "document",
+        path,
+        name: target.name,
+        stopped: reasonOf(change),
+        findStopped: reasonOf(find),
+      };
     });
     const resolver = this.targetResolver();
     const datasets: CollectionAutomationTarget[] = [];
     const indexed = this.files.get(collectionPath);
-    const named = indexed?.file.status === "read"
-      ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [...recordStepDestinations(entry.automation, collectionPath).values()] : []))
-      : [];
-    const unlisted = named.filter((path) => !this.collections.has(path) && !this.datasets.has(path));
+    const named =
+      indexed?.file.status === "read"
+        ? indexed.file.entries.flatMap((entry) =>
+            entry.status === "valid"
+              ? [...recordStepDestinations(entry.automation, collectionPath).values()]
+              : [],
+          )
+        : [];
+    const unlisted = named.filter(
+      (path) => !this.collections.has(path) && !this.datasets.has(path),
+    );
     for (const path of new Set([...this.datasets.keys(), ...unlisted])) {
       if (this.collections.has(path)) continue;
       const name = collectionNamed(path).name;
@@ -2295,32 +2855,73 @@ export class CollectionAutomations {
       if (resolved.kind !== "dataset") {
         // A folder with no Collection at all stays out; the builder says it cannot find it.
         if (resolved.kind === "problem" && resolved.code === "missing") continue;
-        const problem = resolved.kind === "problem" ? resolved.problem : `dohc cannot find the Collection ${path}.`;
-        datasets.push({ kind: "dataset", path, name, datasetId: null, stopped: problem, findStopped: problem, editStopped: problem, actionsStopped: problem, operations: [] });
+        const problem =
+          resolved.kind === "problem"
+            ? resolved.problem
+            : `dohc cannot find the Collection ${path}.`;
+        datasets.push({
+          kind: "dataset",
+          path,
+          name,
+          datasetId: null,
+          stopped: problem,
+          findStopped: problem,
+          editStopped: problem,
+          actionsStopped: problem,
+          operations: [],
+        });
         continue;
       }
       const { approved, grants } = resolved;
       const operations = approved.definition.operations;
       const verdicts = checkAutomationReach(roster, {
-        id: "", collection, codeFiles: [], steps: operations.map((operation): ReachStep => ({
-          kind: "dataset-operation", collection: resolved.collection, datasetId: approved.datasetId, operations, grants,
-          operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
+        id: "",
+        collection,
+        codeFiles: [],
+        steps: operations.map((operation): ReachStep => ({
+          kind: "dataset-operation",
+          collection: resolved.collection,
+          datasetId: approved.datasetId,
+          operations,
+          grants,
+          operation: {
+            operationId: operation.operationId,
+            name: operation.name,
+            label: operation.label,
+            access: operation.access,
+          },
         })),
       });
-      const listed = operations.map((operation, index) => ({ name: operation.name, kind: operation.kind, stopped: reasonOf(verdicts[index]) }));
+      const listed = operations.map((operation, index) => ({
+        name: operation.name,
+        kind: operation.kind,
+        stopped: reasonOf(verdicts[index]),
+      }));
       // Why no operation of `kind` can run for a step: none is approved, or the reach check stops each one.
       const blocked = (kind: DatasetOperationKind, missing: string) => {
         const of = listed.filter((operation) => operation.kind === kind);
-        return of.length === 0 ? `${name} has no approved ${missing}.` : of.every((operation) => operation.stopped !== null) ? of[0]!.stopped : null;
+        return of.length === 0
+          ? `${name} has no approved ${missing}.`
+          : of.every((operation) => operation.stopped !== null)
+            ? of[0]!.stopped
+            : null;
       };
       const records = resolved.generated ? null : GENERATED_ONLY(name);
       datasets.push({
-        kind: "dataset", path, name, datasetId: approved.datasetId,
-        stopped: records ?? blocked("create", "way to add records"), findStopped: records ?? blocked("read", "read"),
-        editStopped: records ?? blocked("edit", "edit"), actionsStopped: blocked("action", "actions"), operations: listed,
+        kind: "dataset",
+        path,
+        name,
+        datasetId: approved.datasetId,
+        stopped: records ?? blocked("create", "way to add records"),
+        findStopped: records ?? blocked("read", "read"),
+        editStopped: records ?? blocked("edit", "edit"),
+        actionsStopped: blocked("action", "actions"),
+        operations: listed,
       });
     }
-    return [...documents, ...datasets].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return [...documents, ...datasets].sort((a, b) =>
+      a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+    );
   }
 
   /** Where an automation's Collection is now, once the index has read it, or null when this computer has none. */
@@ -2344,7 +2945,7 @@ export class CollectionAutomations {
     await this.indexAutomation(automationId);
     const id = this.locate(automationId);
     if (id === null) return null;
-    const indexed = this.files.get(id.collectionPath) ?? await this.parsedFile(id.collectionPath);
+    const indexed = this.files.get(id.collectionPath) ?? (await this.parsedFile(id.collectionPath));
     if (indexed?.file.status !== "read") return null;
     for (const entry of indexed.file.entries) {
       if (entry.status === "valid" && entry.automation.id === id.id) return entry.automation.name;
@@ -2363,8 +2964,10 @@ export class CollectionAutomations {
    * dismissed, one per step.
    */
   stops(): CollectionAutomationStop[] {
-    return this.stepsWhere((verdict, automation) =>
-      automation.enabled && verdict.verdict === "stopped" && verdict.narrowed === true);
+    return this.stepsWhere(
+      (verdict, automation) =>
+        automation.enabled && verdict.verdict === "stopped" && verdict.narrowed === true,
+    );
   }
 
   /**
@@ -2372,12 +2975,20 @@ export class CollectionAutomations {
    * verdict they saw by `seq`, so a step that stopped again since keeps its
    * notice.
    */
-  async dismissStops(seen: ReadonlyArray<{ automationId: string; definitionHash: string; step: string; seq: number }>): Promise<void> {
+  async dismissStops(
+    seen: ReadonlyArray<{
+      automationId: string;
+      definitionHash: string;
+      step: string;
+      seq: number;
+    }>,
+  ): Promise<void> {
     await this.updateVerdicts(() => {
       for (const { automationId, definitionHash: hash, step, seq } of seen) {
         const key = reachVerdictKey(automationId, hash, step);
         const stored = this.verdicts.get(key);
-        if (stored?.verdict !== "stopped" || stored.narrowed !== true || stored.seq !== seq) continue;
+        if (stored?.verdict !== "stopped" || stored.narrowed !== true || stored.seq !== seq)
+          continue;
         const { narrowed: _dismissed, ...kept } = stored;
         this.verdicts.set(key, { ...kept, seq: ++this.verdictSeq });
       }
@@ -2394,13 +3005,21 @@ export class CollectionAutomations {
     const writable = this.writableCollections();
     const automations: OwnedAutomation[] = [];
     for (const owned of this.everyAutomation()) {
-      if (owned.automation.enabled && (await this.canRun(owned.automationId, owned.collectionPath, owned.automation, writable))) {
+      if (
+        owned.automation.enabled &&
+        (await this.canRun(owned.automationId, owned.collectionPath, owned.automation, writable))
+      ) {
         automations.push(owned);
       }
     }
     const reach = automations.map(({ automationId, collectionPath, automation }) => {
       const collection = collectionNamed(collectionPath);
-      return { id: automationId, collection, codeFiles: codeFilesOf(automation, collectionPath), steps: this.reachSteps(collectionPath, automation) };
+      return {
+        id: automationId,
+        collection,
+        codeFiles: codeFilesOf(automation, collectionPath),
+        steps: this.reachSteps(collectionPath, automation),
+      };
     });
     const stopped = shareImpactOf(await this.options.roster(), share, reach);
     return stopped.flatMap(({ automationId, step }): CollectionAutomationShareStop[] => {
@@ -2409,17 +3028,21 @@ export class CollectionAutomations {
       const reached = reach[index]?.steps[step];
       const target = reached ? reachDestination(reached) : null;
       if (!owner || !target) return [];
-      return [{
-        automationId,
-        automationName: owner.automation.name,
-        collectionPath: owner.collectionPath,
-        ...target,
-      }];
+      return [
+        {
+          automationId,
+          automationName: owner.automation.name,
+          collectionPath: owner.collectionPath,
+          ...target,
+        },
+      ];
     });
   }
 
   /** The steps whose stored verdict matches, with what their notice names. */
-  private stepsWhere(matches: (verdict: StoredReachVerdict, automation: Automation) => boolean): CollectionAutomationHold[] {
+  private stepsWhere(
+    matches: (verdict: StoredReachVerdict, automation: Automation) => boolean,
+  ): CollectionAutomationHold[] {
     const steps: CollectionAutomationHold[] = [];
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const hash = definitionHash(automation);
@@ -2431,17 +3054,41 @@ export class CollectionAutomations {
         const held = reachDestination(reach);
         if (held === null) return;
         steps.push({
-          automationId, automationName: automation.name, definitionHash: hash, step, seq: stored.seq,
+          automationId,
+          automationName: automation.name,
+          definitionHash: hash,
+          step,
+          seq: stored.seq,
           ...(reach.kind === "dataset-operation" ? { operationName: reach.operation.label } : {}),
-          collection: collection.name, collectionPath, ...held, stoppedFor: stored.stoppedFor, fileUnread: this.fileUnread(stored),
+          collection: collection.name,
+          collectionPath,
+          ...held,
+          stoppedFor: stored.stoppedFor,
+          fileUnread: this.fileUnread(stored),
         });
       });
       for (const stored of this.verdicts.values()) {
-        if (stored.automationId !== automationId || stored.definitionHash !== hash || !stored.recipient || stored.verdict !== "held" || !matches(stored, automation)) continue;
+        if (
+          stored.automationId !== automationId ||
+          stored.definitionHash !== hash ||
+          !stored.recipient ||
+          stored.verdict !== "held" ||
+          !matches(stored, automation)
+        )
+          continue;
         steps.push({
-          automationId, automationName: automation.name, definitionHash: hash, step: stored.step, seq: stored.seq,
-          collection: collection.name, collectionPath, target: stored.recipient.name, action: stored.recipient.action,
-          recipient: stored.recipient.id, stoppedFor: stored.stoppedFor, fileUnread: this.fileUnread(stored),
+          automationId,
+          automationName: automation.name,
+          definitionHash: hash,
+          step: stored.step,
+          seq: stored.seq,
+          collection: collection.name,
+          collectionPath,
+          target: stored.recipient.name,
+          action: stored.recipient.action,
+          recipient: stored.recipient.id,
+          stoppedFor: stored.stoppedFor,
+          fileUnread: this.fileUnread(stored),
         });
       }
     }
@@ -2461,7 +3108,10 @@ export class CollectionAutomations {
     const writable = this.writableCollections();
     if (!(await writable(collectionPath))) return [];
     return await this.marksOf(writable, ({ collectionPath: home, automation }) =>
-      fieldWritesOf(automation).flatMap((write) => ((write.collection ?? home) === collectionPath ? [write.field] : [])));
+      fieldWritesOf(automation).flatMap((write) =>
+        (write.collection ?? home) === collectionPath ? [write.field] : [],
+      ),
+    );
   }
 
   /**
@@ -2476,7 +3126,12 @@ export class CollectionAutomations {
     const dataset = home === null ? undefined : this.datasets.get(home);
     if (home === null || dataset === undefined || dataset.generated === null) return [];
     return await this.marksOf(this.writableCollections(), ({ collectionPath, automation }) =>
-      datasetFieldWritesOf(automation, { ...dataset, generated: dataset.generated === true, sourceCollection: collectionPath }).flatMap((write) => (write.table === table ? [write.field] : [])));
+      datasetFieldWritesOf(automation, {
+        ...dataset,
+        generated: dataset.generated === true,
+        sourceCollection: collectionPath,
+      }).flatMap((write) => (write.table === table ? [write.field] : [])),
+    );
   }
 
   /** Each field `fieldsOf` names for a switched-on automation that can run, with those automations' names in file order. */
@@ -2489,7 +3144,11 @@ export class CollectionAutomations {
       const { automationId, collectionPath, automation } = owned;
       if (!automation.enabled) continue;
       const fields = fieldsOf(owned);
-      if (fields.length === 0 || !(await this.canRun(automationId, collectionPath, automation, writable))) continue;
+      if (
+        fields.length === 0 ||
+        !(await this.canRun(automationId, collectionPath, automation, writable))
+      )
+        continue;
       for (const field of fields) {
         const names = marks.get(field) ?? new Map<string, string>();
         names.set(automationId, automation.name);
@@ -2508,7 +3167,10 @@ export class CollectionAutomations {
     const indexed = parsed ? this.files.get(parsed.collectionPath) : undefined;
     if (!parsed || indexed?.file.status !== "read") return null;
     for (const entry of indexed.file.entries) {
-      const [id, name] = entry.status === "valid" ? [entry.automation.id, entry.automation.name] : [entry.id, entry.name];
+      const [id, name] =
+        entry.status === "valid"
+          ? [entry.automation.id, entry.automation.name]
+          : [entry.id, entry.name];
       if (id === parsed.id && name !== null) return name;
     }
     return null;
@@ -2528,10 +3190,20 @@ export class CollectionAutomations {
     await this.ready();
     const confirmed = await this.updateVerdicts(() => {
       if (this.verdictsUnreadable) return false;
-      const key = reachVerdictKey(input.automationId, input.definitionHash, input.step, input.recipient);
+      const key = reachVerdictKey(
+        input.automationId,
+        input.definitionHash,
+        input.step,
+        input.recipient,
+      );
       const stored = this.verdicts.get(key);
       if (stored?.verdict !== "held" || stored.seq !== input.seq) return false;
-      this.verdicts.set(key, { ...stored, verdict: "allowed", stoppedFor: null, seq: ++this.verdictSeq });
+      this.verdicts.set(key, {
+        ...stored,
+        verdict: "allowed",
+        stoppedFor: null,
+        seq: ++this.verdictSeq,
+      });
       return true;
     });
     if (!confirmed) return "changed";
@@ -2552,8 +3224,11 @@ export class CollectionAutomations {
   }
 
   private async maybeDataset(collectionPath: string): Promise<boolean> {
-    return !this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
-      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`);
+    return (
+      !this.collections.has(collectionPath) &&
+      !this.datasets.has(collectionPath) &&
+      (await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`))
+    );
   }
 
   private async indexAutomation(automationId: string): Promise<void> {
@@ -2576,7 +3251,10 @@ export class CollectionAutomations {
    * One page of an automation's runs on this computer, newest first, and
    * the `before` of the next page, or null after the oldest.
    */
-  async runs(automationId: string, before?: string): Promise<{ runs: CollectionAutomationRun[]; next: string | null }> {
+  async runs(
+    automationId: string,
+    before?: string,
+  ): Promise<{ runs: CollectionAutomationRun[]; next: string | null }> {
     await this.indexAutomation(automationId);
     const page = await this.claimPage(automationId, { before, limit: RUN_PAGE });
     if (page === null) throw new Error("The workspace engine is not running.");
@@ -2584,7 +3262,8 @@ export class CollectionAutomations {
     const runs: CollectionAutomationRun[] = [];
     const entries: Array<{ stored: StoredRun[]; row: CollectionAutomationRun }> = [];
     // Only the runs shown are read.
-    for (const claim of page.claims) runs.push(await this.runRow(automationId, claim, hash, entries));
+    for (const claim of page.claims)
+      runs.push(await this.runRow(automationId, claim, hash, entries));
     await this.readSharedSettlement(entries);
     return { runs, next: page.next };
   }
@@ -2598,7 +3277,9 @@ export class CollectionAutomations {
     await this.indexAutomation(automationId);
     const found = await this.findClaim(automationId, claimId, false);
     if (found === null) throw new Error("The workspace engine is not running.");
-    return found === "missing" ? null : await this.runRow(automationId, found.history, this.currentHash(automationId));
+    return found === "missing"
+      ? null
+      : await this.runRow(automationId, found.history, this.currentHash(automationId));
   }
 
   /** Whether this computer keeps the run, so record history can open it. */
@@ -2609,66 +3290,109 @@ export class CollectionAutomations {
     return found !== "missing";
   }
 
-  private async runRow(automationId: string, claim: HistoryClaim, hash: string | null, batch?: Array<{ stored: StoredRun[]; row: CollectionAutomationRun }>): Promise<CollectionAutomationRun> {
+  private async runRow(
+    automationId: string,
+    claim: HistoryClaim,
+    hash: string | null,
+    batch?: Array<{ stored: StoredRun[]; row: CollectionAutomationRun }>,
+  ): Promise<CollectionAutomationRun> {
     const { stored, run } = await this.runOf(automationId, claim, hash);
-    const row: CollectionAutomationRun = { ...run, writes: stepWritesOf(stored).map(({ write }) => write) };
+    const row: CollectionAutomationRun = {
+      ...run,
+      writes: stepWritesOf(stored).map(({ write }) => write),
+    };
     if (batch) batch.push({ stored, row });
     else await this.readSharedSettlement([{ stored, row }]);
     return row;
   }
 
-  private async readSharedSettlement(entries: Array<{ stored: StoredRun[]; row: CollectionAutomationRun }>): Promise<void> {
+  private async readSharedSettlement(
+    entries: Array<{ stored: StoredRun[]; row: CollectionAutomationRun }>,
+  ): Promise<void> {
     const key = sharedFileUpdateKey;
     const known = new Map<string, SharedFileUpdateState>();
     const wanted = new Map<string, SharedFileUpdate>();
-    for (const { stored } of entries) for (const run of stored) {
-      for (const status of run.sharedSettlements ?? []) known.set(key(status.draft), status.state);
-      for (const draft of [...run.applied.flatMap(step => step.writes.flatMap(write =>
-        write.kind === "field" && write.sharedFileUpdate ? [write.sharedFileUpdate] : [])),
-        ...(run.undoWrites ?? []).map(write => write.draft)]) wanted.set(key(draft), draft);
-    }
+    for (const { stored } of entries)
+      for (const run of stored) {
+        for (const status of run.sharedSettlements ?? [])
+          known.set(key(status.draft), status.state);
+        for (const draft of [
+          ...run.applied.flatMap((step) =>
+            step.writes.flatMap((write) =>
+              write.kind === "field" && write.sharedFileUpdate ? [write.sharedFileUpdate] : [],
+            ),
+          ),
+          ...(run.undoWrites ?? []).map((write) => write.draft),
+        ])
+          wanted.set(key(draft), draft);
+      }
     for (const id of known.keys()) wanted.delete(id);
     if (wanted.size > 0) {
       // Delivery can hold the upload slot. An unavailable status is unknown, never a failed History load.
       try {
-        const states = await this.options.withEngine(engine => engine.sharedFileUpdateStates([...wanted.values()]));
+        const states = await this.options.withEngine((engine) =>
+          engine.sharedFileUpdateStates([...wanted.values()]),
+        );
         if (states !== null && states.length === wanted.size) {
           [...wanted.keys()].forEach((id, index) => known.set(id, states[index]!));
         }
-      } catch { /* Refresh on the next History load. */ }
+      } catch {
+        /* Refresh on the next History load. */
+      }
     }
     for (const { stored, row } of entries) {
       for (const run of stored) {
-        const terminal = new Map((run.sharedSettlements ?? []).map(status => [key(status.draft), status]));
-        const drafts = [...run.applied.flatMap(step => step.writes.flatMap(write =>
-          write.kind === "field" && write.sharedFileUpdate ? [write.sharedFileUpdate] : [])),
-          ...(run.undoWrites ?? []).map(write => write.draft)];
+        const terminal = new Map(
+          (run.sharedSettlements ?? []).map((status) => [key(status.draft), status]),
+        );
+        const drafts = [
+          ...run.applied.flatMap((step) =>
+            step.writes.flatMap((write) =>
+              write.kind === "field" && write.sharedFileUpdate ? [write.sharedFileUpdate] : [],
+            ),
+          ),
+          ...(run.undoWrites ?? []).map((write) => write.draft),
+        ];
         for (const draft of drafts) {
           const state = known.get(key(draft));
-          if (state === "settled" || state === "not-accepted" || state === "absent") terminal.set(key(draft), { draft, state });
+          if (state === "settled" || state === "not-accepted" || state === "absent")
+            terminal.set(key(draft), { draft, state });
         }
         if (terminal.size > (run.sharedSettlements?.length ?? 0)) {
           const sharedSettlements = [...terminal.values()];
           // A failed metadata save also leaves History usable; the next load can retry it.
-          try { await this.options.store.updateState(run, { sharedSettlements }); run.sharedSettlements = sharedSettlements; }
-          catch { /* Do not hide the run when its status cannot be saved. */ }
+          try {
+            await this.options.store.updateState(run, { sharedSettlements });
+            run.sharedSettlements = sharedSettlements;
+          } catch {
+            /* Do not hide the run when its status cannot be saved. */
+          }
         }
       }
-      for (const write of row.writes) if (write.kind === "field" && write.sharedFileUpdate) {
-        write.sharedFileUpdateState = known.get(key(write.sharedFileUpdate));
-        if (write.sharedFileUpdateState === "pending") row.sharedSettlementPending = true;
-        if (write.sharedFileUpdateState === "not-accepted") row.sharedSettlementNotAccepted = true;
-      }
+      for (const write of row.writes)
+        if (write.kind === "field" && write.sharedFileUpdate) {
+          write.sharedFileUpdateState = known.get(key(write.sharedFileUpdate));
+          if (write.sharedFileUpdateState === "pending") row.sharedSettlementPending = true;
+          if (write.sharedFileUpdateState === "not-accepted")
+            row.sharedSettlementNotAccepted = true;
+        }
       const reversals = recordedReversalsOf(stored);
-      if (reversals.length) row.reversals = reversals.map(write => ({ recordId: write.recordId, field: write.field,
-        path: write.draft.binding.currentPath, state: known.get(key(write.draft)) }));
+      if (reversals.length)
+        row.reversals = reversals.map((write) => ({
+          recordId: write.recordId,
+          field: write.field,
+          path: write.draft.binding.currentPath,
+          state: known.get(key(write.draft)),
+        }));
       for (const write of reversals) {
         const state = known.get(key(write.draft));
         if (state === "pending") row.undoSettlementPending = true;
         if (state === "not-accepted") row.undoSettlementNotAccepted = true;
       }
-      row.undone = stored.length > 0 && stored.every(run => run.undo === "done" && run.undoKept.length === 0) &&
-        reversals.every(write => known.get(key(write.draft)) !== "not-accepted");
+      row.undone =
+        stored.length > 0 &&
+        stored.every((run) => run.undo === "done" && run.undoKept.length === 0) &&
+        reversals.every((write) => known.get(key(write.draft)) !== "not-accepted");
     }
   }
 
@@ -2680,20 +3404,45 @@ export class CollectionAutomations {
     if (found === "missing") return null;
     const claim = found.history;
     const automation = this.definitionFor(automationId);
-    const { stored, run } = await this.runOf(automationId, claim, automation ? definitionHash(automation) : null);
-    const row: CollectionAutomationRun = { ...run, writes: stepWritesOf(stored).map(({ write }) => write) };
+    const { stored, run } = await this.runOf(
+      automationId,
+      claim,
+      automation ? definitionHash(automation) : null,
+    );
+    const row: CollectionAutomationRun = {
+      ...run,
+      writes: stepWritesOf(stored).map(({ write }) => write),
+    };
     await this.readSharedSettlement([{ stored, row }]);
-    Object.assign(run, { sharedSettlementPending: row.sharedSettlementPending, sharedSettlementNotAccepted: row.sharedSettlementNotAccepted,
-      undoSettlementPending: row.undoSettlementPending, undoSettlementNotAccepted: row.undoSettlementNotAccepted, reversals: row.reversals, undone: row.undone, undoUnfinished: row.undoUnfinished });
-    if (run.state !== "failed" || run.neverStarted) return { ...run, ...timingOf(stored), steps: stepsOf(stored), failedStep: null, startsOver: false };
+    Object.assign(run, {
+      sharedSettlementPending: row.sharedSettlementPending,
+      sharedSettlementNotAccepted: row.sharedSettlementNotAccepted,
+      undoSettlementPending: row.undoSettlementPending,
+      undoSettlementNotAccepted: row.undoSettlementNotAccepted,
+      reversals: row.reversals,
+      undone: row.undone,
+      undoUnfinished: row.undoUnfinished,
+    });
+    if (run.state !== "failed" || run.neverStarted)
+      return {
+        ...run,
+        ...timingOf(stored),
+        steps: stepsOf(stored),
+        failedStep: null,
+        startsOver: false,
+      };
     // The run Try again continues, and whether it starts over, by retry's own rule.
-    const tryAgain = automation ? tryAgainOf(await runsForClaim(this.options.store, { automationId, claimId }, automation)) : null;
+    const tryAgain = automation
+      ? tryAgainOf(await runsForClaim(this.options.store, { automationId, claimId }, automation))
+      : null;
     const readable = tryAgain !== null && !("refused" in tryAgain) ? tryAgain : null;
     return {
       ...run,
       ...timingOf(stored),
       steps: stepsOf(stored),
-      failedStep: stoppedAtStep(readable?.current ?? stored.filter((entry) => !entry.superseded).at(-1)),
+      failedStep: stoppedAtStep(
+        readable?.current ?? stored.filter((entry) => !entry.superseded).at(-1),
+      ),
       startsOver: readable?.startsOver ?? false,
     };
   }
@@ -2712,8 +3461,9 @@ export class CollectionAutomations {
   ): Promise<{ stored: StoredRun[]; run: Omit<CollectionAutomationRun, "writes"> }> {
     // A run a person started over under a newer definition still changed
     // records, so its writes stay in the list.
-    const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs
-      .sort((left, right) => left.startedAtMs - right.startedAtMs);
+    const stored = (await this.options.store.runsOf(automationId, claim.claimId)).runs.sort(
+      (left, right) => left.startedAtMs - right.startedAtMs,
+    );
     const live = stored.filter((run) => !run.superseded);
     return {
       stored,
@@ -2726,8 +3476,10 @@ export class CollectionAutomations {
         trigger: claim.trigger,
         definitionChanged: hash !== null && live.some((run) => run.definitionHash !== hash),
         ...stopOf(claim),
-        undone: stored.length > 0 && stored.every((run) => run.undo === "done" && run.undoKept.length === 0),
-        undoUnfinished: stored.some(run => run.undo === "started"),
+        undone:
+          stored.length > 0 &&
+          stored.every((run) => run.undo === "done" && run.undoKept.length === 0),
+        undoUnfinished: stored.some((run) => run.undo === "started"),
       },
     };
   }
@@ -2738,7 +3490,8 @@ export class CollectionAutomations {
     const parsed = this.locate(automationId);
     const automation = this.definitionFor(automationId);
     return parsed !== null && automation !== null && !automation.enabled
-      ? automationControlsTarget(automationId, parsed.collectionPath) : null;
+      ? automationControlsTarget(automationId, parsed.collectionPath)
+      : null;
   }
 
   /**
@@ -2759,10 +3512,16 @@ export class CollectionAutomations {
     const parsed = this.locate(input.automationId);
     const automation = this.definitionFor(input.automationId);
     if (parsed === null || automation === null) {
-      return { status: "refused", reason: "This automation is no longer in its Collection's automations.yaml." };
+      return {
+        status: "refused",
+        reason: "This automation is no longer in its Collection's automations.yaml.",
+      };
     }
     if (!automation.enabled) {
-      return { status: "switched-off", target: automationControlsTarget(input.automationId, parsed.collectionPath) };
+      return {
+        status: "switched-off",
+        target: automationControlsTarget(input.automationId, parsed.collectionPath),
+      };
     }
     const cannotRun = this.cannotRun(parsed.collectionPath, automation);
     if (cannotRun !== null) return { status: "refused", reason: cannotRun };
@@ -2776,22 +3535,40 @@ export class CollectionAutomations {
       if (known === null) throw new Error("The workspace engine is not running.");
       // Without its run history, dohc cannot tell what the run already did.
       if (known === "missing") {
-        return { status: "refused", reason: "Run history no longer shows this run, so dohc will not run it again." };
+        return {
+          status: "refused",
+          reason: "Run history no longer shows this run, so dohc will not run it again.",
+        };
       }
       // A run that failed before it started has nothing to run again, whoever asks.
-      if (known.neverStarted) return { status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL };
+      if (known.neverStarted)
+        return { status: "refused", reason: AUTOMATION_NEVER_STARTED_REFUSAL };
       press = known.pressedBy !== undefined;
       if (press && !(await this.options.mayRetryPress(known.pressedBy ?? null))) {
-        return { status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again." };
+        return {
+          status: "refused",
+          reason:
+            "Only the person who pressed this button, or the workspace's owner, can run it again.",
+        };
       }
       if (known.hostPressId !== undefined) {
         try {
           const authority = await this.pressAuthority(known.hostPressId);
-          if (authority.definitionHash !== definitionHash(automation) || authority.collectionPath !== parsed.collectionPath) throw new Error(SHARED_BUTTON_DENIED);
+          if (
+            authority.definitionHash !== definitionHash(automation) ||
+            authority.collectionPath !== parsed.collectionPath
+          )
+            throw new Error(SHARED_BUTTON_DENIED);
           const inspected = await this.inspectAuthority(authority);
           if (inspected.kind !== "ready") return { status: "refused", reason: inspected.reason };
         } catch (error) {
-          return { status: "refused", reason: error instanceof AutomationRunWait ? SHARED_BUTTON_UNCHECKED : "This shared press cannot be retried. Press the button again." };
+          return {
+            status: "refused",
+            reason:
+              error instanceof AutomationRunWait
+                ? SHARED_BUTTON_UNCHECKED
+                : "This shared press cannot be retried. Press the button again.",
+          };
         }
       }
       const runs = tryAgainOf(await runsForClaim(this.options.store, input, automation));
@@ -2800,25 +3577,41 @@ export class CollectionAutomations {
       if (startsOver && !input.startOver) {
         // Either version may have sent messages that a new run sends again.
         const earlier = runs.current ?? runs.changedSince;
-        const repeatsMessages = sendsMessages(automation) ||
-          (earlier?.applied.some((effect) => effect.writes.some((write) => (write.kind === "message" || write.kind === "notice"))) ?? false);
+        const repeatsMessages =
+          sendsMessages(automation) ||
+          (earlier?.applied.some((effect) =>
+            effect.writes.some((write) => write.kind === "message" || write.kind === "notice"),
+          ) ??
+            false);
         return { status: "definition-changed", repeatsMessages };
       }
       this.waitingFor.delete(input.claimId);
-      const retried = known.ledger === "dataset"
-        ? await this.withLiveHost((ledger) => ledger.retry(input.claimId))
-        : await this.withLiveEngine((engine) => engine.retryAutomationClaim({ claimId: input.claimId }));
+      const retried =
+        known.ledger === "dataset"
+          ? await this.withLiveHost((ledger) => ledger.retry(input.claimId))
+          : await this.withLiveEngine((engine) =>
+              engine.retryAutomationClaim({ claimId: input.claimId }),
+            );
       if (retried === null) throw new Error("The workspace engine is not running.");
       for (const [key, entry] of this.pendingCircuitBreakers) {
-        if (entry.automationId === input.automationId && entry.claimId === input.claimId) this.pendingCircuitBreakers.delete(key);
+        if (entry.automationId === input.automationId && entry.claimId === input.claimId)
+          this.pendingCircuitBreakers.delete(key);
       }
-      try { await this.options.store.clearCircuitBreaker(input); }
-      catch (error) { this.options.onError("clear the retried automation's switch-off outcome", error); }
+      try {
+        await this.options.store.clearCircuitBreaker(input);
+      } catch (error) {
+        this.options.onError("clear the retried automation's switch-off outcome", error);
+      }
       if (startsOver) {
         const hash = definitionHash(automation);
-        for (const run of (await this.options.store.runsOf(input.automationId, input.claimId)).runs) {
+        for (const run of (await this.options.store.runsOf(input.automationId, input.claimId))
+          .runs) {
           if (run.superseded || run.definitionHash === hash) continue;
-          await this.options.store.save({ ...run, superseded: true, finishedAtMs: run.finishedAtMs ?? this.nowMs() });
+          await this.options.store.save({
+            ...run,
+            superseded: true,
+            finishedAtMs: run.finishedAtMs ?? this.nowMs(),
+          });
         }
       }
     } finally {
@@ -2838,12 +3631,20 @@ export class CollectionAutomations {
    * the relay. A roster dohc cannot read yet does not stop a press: the
    * run checks reach again before it writes, and waits for the roster.
    */
-  async buttons(collectionPath: string, fields: readonly string[], describe?: (datasetId: string) => Promise<DatasetDescription>): Promise<CollectionAutomationButton[]> {
+  async buttons(
+    collectionPath: string,
+    fields: readonly string[],
+    describe?: (datasetId: string) => Promise<DatasetDescription>,
+  ): Promise<CollectionAutomationButton[]> {
     await this.ready();
     const roster = await this.options.cachedRoster();
     const buttons: CollectionAutomationButton[] = [];
     const descriptions = describe === undefined ? undefined : this.buttonDescriptions(describe);
-    for (const field of fields) buttons.push({ field, state: await this.buttonState(collectionPath, field, roster, descriptions) });
+    for (const field of fields)
+      buttons.push({
+        field,
+        state: await this.buttonState(collectionPath, field, roster, descriptions),
+      });
     return buttons;
   }
 
@@ -2856,7 +3657,15 @@ export class CollectionAutomations {
    * the drain wakes, so the pressing window hears how the run settles.
    */
   async press(
-    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor; confirmed: readonly string[] },
+    input: {
+      collectionPath: string;
+      field: string;
+      recordId: string;
+      pressId: string;
+      pressedBy: string;
+      by: AutomationPressActor;
+      confirmed: readonly string[];
+    },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
     /** Checks a new press the way the caller must, such as that the field is still a button. */
     checkNew: () => Promise<void> = async () => undefined,
@@ -2866,13 +3675,18 @@ export class CollectionAutomations {
     const collectionId = this.collectionIdOf(input.collectionPath);
     const checkMoved = () => {
       const current = collectionId === null ? null : this.collectionPathOf(collectionId);
-      if (current !== null && current !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
+      if (current !== null && current !== input.collectionPath)
+        throw new Error(MOVED_SINCE_PRESSED);
     };
-    const remembered = this.presses.get(input.pressId) ?? await this.pressInEngine(input);
+    const remembered = this.presses.get(input.pressId) ?? (await this.pressInEngine(input));
     let automationId: string;
     if (remembered) {
-      if (parseCollectionAutomationId(remembered.automationId)?.collectionId !== collectionId || remembered.field !== input.field ||
-        remembered.recordId !== input.recordId || remembered.pressedBy !== input.pressedBy) {
+      if (
+        parseCollectionAutomationId(remembered.automationId)?.collectionId !== collectionId ||
+        remembered.field !== input.field ||
+        remembered.recordId !== input.recordId ||
+        remembered.pressedBy !== input.pressedBy
+      ) {
         throw new Error("This press id already names another press.");
       }
       automationId = remembered.automationId;
@@ -2880,34 +3694,64 @@ export class CollectionAutomations {
       let state: AutomationButtonState;
       try {
         await checkNew();
-        state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
-      } catch (error) { checkMoved(); throw error; }
+        state = await this.buttonState(
+          input.collectionPath,
+          input.field,
+          await this.options.cachedRoster(),
+          describe,
+        );
+      } catch (error) {
+        checkMoved();
+        throw error;
+      }
       // Admission must still name this Collection before the engine receives a press.
       checkMoved();
       if (state.kind !== "ready") throw new Error(describe ? SHARED_BUTTON_DENIED : state.reason);
-      if ((state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
+      if ((state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name)))
+        throw new Error(changedSincePressed(input.field));
       automationId = state.automationId;
     }
     const pressed = await this.withLiveEngine(async (engine) => {
       if (!remembered) {
         try {
-          await engine.getCollectionRecord({ collectionPath: input.collectionPath, recordId: input.recordId, historyLimit: 1 });
+          await engine.getCollectionRecord({
+            collectionPath: input.collectionPath,
+            recordId: input.recordId,
+            historyLimit: 1,
+          });
         } catch (error) {
           if (error instanceof Error && error.message === RECORD_NOT_FOUND) {
-            throw new Error(`This record is no longer in ${collectionNamed(input.collectionPath).name}.`);
+            throw new Error(
+              `This record is no longer in ${collectionNamed(input.collectionPath).name}.`,
+            );
           }
           throw error;
         }
       }
       checkMoved();
-      return engine.pressAutomation({ pressId: input.pressId, automationId, recordId: input.recordId, pressedBy: input.pressedBy, by: input.by });
-    }).catch(error => { checkMoved(); throw error; });
+      return engine.pressAutomation({
+        pressId: input.pressId,
+        automationId,
+        recordId: input.recordId,
+        pressedBy: input.pressedBy,
+        by: input.by,
+      });
+    }).catch((error) => {
+      checkMoved();
+      throw error;
+    });
     if (pressed === null) throw new Error("The workspace engine is not running.");
     if (pressed.busy) return { busy: true };
     const { claim } = pressed;
     this.presses.delete(input.pressId);
-    this.presses.set(input.pressId, { field: input.field, recordId: input.recordId, pressedBy: input.pressedBy, automationId });
-    if (this.presses.size > REMEMBERED_PRESSES) this.presses.delete(this.presses.keys().next().value!);
+    this.presses.set(input.pressId, {
+      field: input.field,
+      recordId: input.recordId,
+      pressedBy: input.pressedBy,
+      automationId,
+    });
+    if (this.presses.size > REMEMBERED_PRESSES)
+      this.presses.delete(this.presses.keys().next().value!);
     return await this.answerPress(claim, watch);
   }
 
@@ -2917,14 +3761,22 @@ export class CollectionAutomations {
    * event can be dropped.
    */
   private async answerPress(
-    claim: Pick<AutomationClaimSummary, "automationId" | "claimId" | "state"> & { error?: string | null },
+    claim: Pick<AutomationClaimSummary, "automationId" | "claimId" | "state"> & {
+      error?: string | null;
+    },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationPress> {
     if (claim.state === "failed") {
-      const error = claim.error === AUTOMATION_CHAIN_STOPPED ? CHAIN_STOPPED_PRESS : claim.error ?? null;
+      const error =
+        claim.error === AUTOMATION_CHAIN_STOPPED ? CHAIN_STOPPED_PRESS : (claim.error ?? null);
       return { busy: false, claimId: claim.claimId, settled: { outcome: "failed", error } };
     }
-    if (claim.state === "done") return { busy: false, claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
+    if (claim.state === "done")
+      return {
+        busy: false,
+        claimId: claim.claimId,
+        settled: { outcome: await this.doneOutcome(claim), error: null },
+      };
     // A press never waits for a dataset to open: its ledger claimed it there.
     const waiting = this.waitingFor.get(claim.claimId) ?? null;
     watch(claim.claimId, waiting === "dataset" ? null : waiting);
@@ -2948,7 +3800,11 @@ export class CollectionAutomations {
     if (indexed !== undefined) return indexed.definition.datasetId;
     // A dataset whose move hasn't finished is still a dataset, so a press of its button gives the button's reason.
     const server = await this.onServer({ folder: collectionPath });
-    return server === null ? null : "unfinished" in server ? server.datasetId : server.dataset.definition.datasetId;
+    return server === null
+      ? null
+      : "unfinished" in server
+        ? server.datasetId
+        : server.dataset.definition.datasetId;
   }
 
   /** Whether the dataset ledger remembers a press by this id, so sending it again answers its claim. */
@@ -2972,11 +3828,14 @@ export class CollectionAutomations {
     const description = await descriptions(datasetId);
     const states: AutomationButtonState[] = [];
     for (const button of buttons) {
-      states.push(server !== null && !("unfinished" in server)
-        ? await this.serverButton(server, button, description, roster, descriptions)
-        : collectionPath === null
-        ? { kind: "disabled", reason: unindexedReason(server) }
-        : (await this.datasetButton(collectionPath, button, description, roster, descriptions)).state);
+      states.push(
+        server !== null && !("unfinished" in server)
+          ? await this.serverButton(server, button, description, roster, descriptions)
+          : collectionPath === null
+            ? { kind: "disabled", reason: unindexedReason(server) }
+            : (await this.datasetButton(collectionPath, button, description, roster, descriptions))
+                .state,
+      );
     }
     return states;
   }
@@ -2991,44 +3850,84 @@ export class CollectionAutomations {
    * since, a renamed button included; only a new press is checked.
    */
   async pressDataset(
-    input: { datasetId: string; table: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor;
+    input: {
+      datasetId: string;
+      table: string;
+      field: string;
+      recordId: string;
+      pressId: string;
+      pressedBy: string;
+      by: AutomationPressActor;
       /** The names of the actions the person was told can't be undone and chose to run. */
-      confirmed: readonly string[] },
+      confirmed: readonly string[];
+    },
     describe: (datasetId: string) => Promise<DatasetDescription>,
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<CollectionAutomationPress> {
     await this.ready();
     const collectionPath = await this.datasetFolder(input.datasetId);
-    if (collectionPath === null) throw new Error(unindexedReason(await this.onServer({ datasetId: input.datasetId })));
+    if (collectionPath === null)
+      throw new Error(unindexedReason(await this.onServer({ datasetId: input.datasetId })));
     const recordId = datasetRecordIdOf(input.recordId);
     if (recordId === null) throw new Error(`This record is not in ${input.table}.`);
     const request = createHash("sha256")
-      .update(JSON.stringify(["dohc-dataset-press-v1", input.datasetId, input.table, input.field, recordId, input.pressedBy])).digest("hex");
-    const known = await this.withLiveHost((ledger) => ({ press: ledger.pressed(input.pressId) }), true);
+      .update(
+        JSON.stringify([
+          "dohc-dataset-press-v1",
+          input.datasetId,
+          input.table,
+          input.field,
+          recordId,
+          input.pressedBy,
+        ]),
+      )
+      .digest("hex");
+    const known = await this.withLiveHost(
+      (ledger) => ({ press: ledger.pressed(input.pressId) }),
+      true,
+    );
     if (known === null) throw new Error("The workspace's dataset host is not open.");
     if (known.press !== null) {
       const { claim } = known.press;
-      if (known.press.request !== request || datasetPresser(claim) !== input.pressedBy) throw new Error("This press id already names another press.");
+      if (known.press.request !== request || datasetPresser(claim) !== input.pressedBy)
+        throw new Error("This press id already names another press.");
       return await this.answerPress(claim, watch);
     }
     const descriptions = this.buttonDescriptions(describe);
     const description = await descriptions(input.datasetId);
-    const button = await this.datasetButton(collectionPath, input, description, await this.options.cachedRoster(), descriptions);
+    const button = await this.datasetButton(
+      collectionPath,
+      input,
+      description,
+      await this.options.cachedRoster(),
+      descriptions,
+    );
     if (!("checked" in button)) throw new Error(button.state.reason);
     // The automation changed since the button asked: it would run an action nobody agreed to.
-    if ((button.state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
+    if ((button.state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name)))
+      throw new Error(changedSincePressed(input.field));
     const { datasetId, tableId, fieldId, automation } = button.checked;
     const pressed = await this.withLiveHost(async (ledger) => {
       // A dataset that moved to a server says so before anything reads it.
       ledger.assertPressable(datasetId, { tableId, fieldId });
       // Operations someone wrote are not read for dohc's own checks; the run
       // passes the record's id, and the operation it invokes finds the record.
-      if (ledger.generated(datasetId) && !(await datasetRecordExists(ledger, datasetId, automation, recordId))) {
+      if (
+        ledger.generated(datasetId) &&
+        !(await datasetRecordExists(ledger, datasetId, automation, recordId))
+      ) {
         throw new Error(`This record is no longer in ${input.table}.`);
       }
       return ledger.press(datasetId, {
-        pressId: input.pressId, request, automationId: button.state.automationId, definitionHash: definitionDigest(automation),
-        tableId, fieldId, recordId, pressedBy: input.pressedBy, by: input.by,
+        pressId: input.pressId,
+        request,
+        automationId: button.state.automationId,
+        definitionHash: definitionDigest(automation),
+        tableId,
+        fieldId,
+        recordId,
+        pressedBy: input.pressedBy,
+        by: input.by,
       });
     }, true);
     if (pressed === null) throw new Error("The workspace's dataset host is not open.");
@@ -3050,7 +3949,10 @@ export class CollectionAutomations {
     const descriptions = new Map<string, Promise<DatasetDescription>>();
     return (datasetId: string) => {
       let pending = descriptions.get(datasetId);
-      if (pending === undefined) { pending = describe(datasetId); descriptions.set(datasetId, pending); }
+      if (pending === undefined) {
+        pending = describe(datasetId);
+        descriptions.set(datasetId, pending);
+      }
       return pending;
     };
   }
@@ -3063,7 +3965,10 @@ export class CollectionAutomations {
     describe: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<
     | { state: Exclude<AutomationButtonState, { kind: "ready" }> }
-    | { state: Extract<AutomationButtonState, { kind: "ready" }>; checked: { automation: Automation; datasetId: string; tableId: string; fieldId: string } }
+    | {
+        state: Extract<AutomationButtonState, { kind: "ready" }>;
+        checked: { automation: Automation; datasetId: string; tableId: string; fieldId: string };
+      }
   > {
     const disabled = (reason: string) => ({ state: { kind: "disabled" as const, reason } });
     const dataset = this.datasets.get(collectionPath);
@@ -3071,30 +3976,54 @@ export class CollectionAutomations {
     const { definition } = dataset;
     const table = datasetTableNamed(definition, button.table);
     // A description of another dataset grants nothing here.
-    if (table === undefined || description.datasetId !== definition.datasetId || !datasetButtonAccess(description, table.name, [])) {
+    if (
+      table === undefined ||
+      description.datasetId !== definition.datasetId ||
+      !datasetButtonAccess(description, table.name, [])
+    ) {
       return disabled(noAccessReason(table?.name ?? button.table ?? definition.name));
     }
-    const field = table.fields.find((candidate) => candidate.type === "button" && candidate.name === button.field);
+    const field = table.fields.find(
+      (candidate) => candidate.type === "button" && candidate.name === button.field,
+    );
     if (field === undefined) return disabled(`${button.field} is not a button in ${table.name}.`);
     // A dataset that moved to a server lists its buttons with the reason a press would get.
     const unpressable = await this.withLiveHost((host) => {
       try {
-        host.assertPressable(definition.datasetId, { tableId: table.tableId, fieldId: field.fieldId });
+        host.assertPressable(definition.datasetId, {
+          tableId: table.tableId,
+          fieldId: field.fieldId,
+        });
         return null;
       } catch (error) {
         return error instanceof Error ? error.message : String(error);
       }
     });
     if (unpressable) return disabled(unpressable);
-    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, button.field,
-      (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
+    const resolved = resolveButton(
+      this.files.get(collectionPath)?.file ?? null,
+      button.field,
+      (named) => named === table.name || (named === null && definition.tables.length === 1),
+      definition.name,
+    );
     if (resolved.kind === "state") return { state: resolved.state };
     const { automation } = resolved;
-    const state = await this.checkedButtonState(collectionPath, automation, roster, table.name, describe);
+    const state = await this.checkedButtonState(
+      collectionPath,
+      automation,
+      roster,
+      table.name,
+      describe,
+    );
     if (state.kind !== "ready") return { state };
     return {
       state,
-      checked: { automation, datasetId: definition.datasetId, tableId: table.tableId, fieldId: field.fieldId },
+      checked: {
+        automation,
+        datasetId: definition.datasetId,
+        tableId: table.tableId,
+        fieldId: field.fieldId,
+      },
     };
   }
 
@@ -3102,12 +4031,18 @@ export class CollectionAutomations {
    * The folder of the dataset Collection with this id, which holds its
    * automations.yaml, for the ⚡ panel. Or why dohc cannot run its automations.
    */
-  async datasetCollection(datasetId: string): Promise<{ status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }> {
+  async datasetCollection(
+    datasetId: string,
+  ): Promise<
+    { status: "found"; collectionPath: string } | { status: "cannot-run"; reason: string }
+  > {
     await this.ready();
     const folder = await this.datasetFolder(datasetId);
     if (folder !== null) return { status: "found", collectionPath: folder };
     const server = await this.onServer({ datasetId });
-    return server === null || "unfinished" in server ? { status: "cannot-run", reason: unindexedReason(server) } : { status: "found", collectionPath: server.collectionPath };
+    return server === null || "unfinished" in server
+      ? { status: "cannot-run", reason: unindexedReason(server) }
+      : { status: "found", collectionPath: server.collectionPath };
   }
 
   /**
@@ -3116,18 +4051,37 @@ export class CollectionAutomations {
    * it, as an indexed dataset's must. A Collection this computer indexed is
    * not on the server. Nothing here subscribes, claims or runs it.
    */
-  private async onServer(place: { datasetId: string } | { folder: string }): Promise<OnServer | Unfinished | null> {
+  private async onServer(
+    place: { datasetId: string } | { folder: string },
+  ): Promise<OnServer | Unfinished | null> {
     if (this.options.serverDataset === undefined) return null;
-    const datasetId = "datasetId" in place ? place.datasetId : await this.describedDatasetId(place.folder);
+    const datasetId =
+      "datasetId" in place ? place.datasetId : await this.describedDatasetId(place.folder);
     if (datasetId === null || this.collectionPathOf(datasetId) !== null) return null;
     const server = await this.options.serverDataset(datasetId);
     if (server === null) return null;
     if ("unfinished" in server) return { datasetId, unfinished: server.unfinished };
     const { definition } = server.approved;
     const folder = datasetBaseFolder(definition);
-    if (definition.datasetId !== datasetId || folder === "." || ("folder" in place && place.folder !== folder) ||
-      this.collections.has(folder) || this.datasets.has(folder) || (await this.describedDatasetId(folder)) !== datasetId) return null;
-    return { collectionPath: folder, dataset: { approved: server.approved, definition, generated: server.generated, grants: server.grants }, runs: server.runs };
+    if (
+      definition.datasetId !== datasetId ||
+      folder === "." ||
+      ("folder" in place && place.folder !== folder) ||
+      this.collections.has(folder) ||
+      this.datasets.has(folder) ||
+      (await this.describedDatasetId(folder)) !== datasetId
+    )
+      return null;
+    return {
+      collectionPath: folder,
+      dataset: {
+        approved: server.approved,
+        definition,
+        generated: server.generated,
+        grants: server.grants,
+      },
+      runs: server.runs,
+    };
   }
 
   /**
@@ -3136,22 +4090,37 @@ export class CollectionAutomations {
    * reach, read from the server now, then the index's. Only the panel and
    * button checks read it; no run does.
    */
-  private async serverDatasetsFor(server: OnServer, automations: readonly Automation[]): Promise<DatasetAt> {
+  private async serverDatasetsFor(
+    server: OnServer,
+    automations: readonly Automation[],
+  ): Promise<DatasetAt> {
     const found = new Map<string, IndexedDataset>([[server.collectionPath, server.dataset]]);
-    const reached = new Set(automations.flatMap((automation) => [...recordStepDestinations(automation, server.collectionPath).values()]));
-    const others = [...reached].filter((folder) => !found.has(folder) && !this.collections.has(folder) && !this.datasets.has(folder));
+    const reached = new Set(
+      automations.flatMap((automation) => [
+        ...recordStepDestinations(automation, server.collectionPath).values(),
+      ]),
+    );
+    const others = [...reached].filter(
+      (folder) => !found.has(folder) && !this.collections.has(folder) && !this.datasets.has(folder),
+    );
     for (const other of await Promise.all(others.map((folder) => this.onServer({ folder })))) {
-      if (other !== null && !("unfinished" in other)) found.set(other.collectionPath, other.dataset);
+      if (other !== null && !("unfinished" in other))
+        found.set(other.collectionPath, other.dataset);
     }
     return (path) => found.get(path) ?? this.datasets.get(path);
   }
 
   /** Why the server does not run `automation` in its Collection, as far as this computer can tell, or null. */
-  private serverCannotRun(server: OnServer, automation: Automation, datasetAt: DatasetAt): string | null {
+  private serverCannotRun(
+    server: OnServer,
+    automation: Automation,
+    datasetAt: DatasetAt,
+  ): string | null {
     if (server.runs === "off") return AUTOMATION_SERVER_OFF;
     const cannot = this.cannotRun(server.collectionPath, automation, datasetAt);
     if (cannot !== null) return cannot;
-    const hostTrigger = automation.when.kind === "schedule" || automation.when.kind === "group-message";
+    const hostTrigger =
+      automation.when.kind === "schedule" || automation.when.kind === "group-message";
     return server.runs === "no-schedules" && hostTrigger ? SERVER_TRIGGERS_ELSEWHERE : null;
   }
 
@@ -3164,35 +4133,87 @@ export class CollectionAutomations {
     const { collectionPath, dataset } = server;
     const indexed = await this.parsedFile(collectionPath);
     const roster = await this.options.cachedRoster();
-    const you = roster.kind === "owner" && roster.localPersonId !== undefined ? { you: roster.localPersonId } : {};
+    const you =
+      roster.kind === "owner" && roster.localPersonId !== undefined
+        ? { you: roster.localPersonId }
+        : {};
     if (!indexed) return { status: "missing", ...you };
-    if (indexed.file.status === "unreadable") return { status: "unreadable", diagnostic: indexed.file.diagnostic };
+    if (indexed.file.status === "unreadable")
+      return { status: "unreadable", diagnostic: indexed.file.diagnostic };
     const collection = collectionNamed(collectionPath);
-    const datasetAt = await this.serverDatasetsFor(server, indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : [])));
-    const [waiting] = roster.kind === "unknown"
-      ? checkAutomationReach(roster, { id: "", collection, codeFiles: [], steps: [{ kind: "change-records", collection }] })
-      : [];
+    const datasetAt = await this.serverDatasetsFor(
+      server,
+      indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : [])),
+    );
+    const [waiting] =
+      roster.kind === "unknown"
+        ? checkAutomationReach(roster, {
+            id: "",
+            collection,
+            codeFiles: [],
+            steps: [{ kind: "change-records", collection }],
+          })
+        : [];
     const automations = indexed.file.entries.map((entry): CollectionAutomationSummary => {
-      if (entry.status === "invalid") return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
+      if (entry.status === "invalid")
+        return { valid: false, id: entry.id, name: entry.name, diagnostics: entry.diagnostics };
       const { automation } = entry;
       const summary = {
-        valid: true as const, automationId: collectionAutomationId(dataset.definition.datasetId, automation.id), automation,
-        definitionHash: definitionHash(automation), cannotRun: this.serverCannotRun(server, automation, datasetAt), lastRun: null,
+        valid: true as const,
+        automationId: collectionAutomationId(dataset.definition.datasetId, automation.id),
+        automation,
+        definitionHash: definitionHash(automation),
+        cannotRun: this.serverCannotRun(server, automation, datasetAt),
+        lastRun: null,
       };
-      if (roster.kind === "unknown") return { ...summary, reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" } };
+      if (roster.kind === "unknown")
+        return {
+          ...summary,
+          reach: { kind: "waiting", reason: waiting && !waiting.allowed ? waiting.reason : "" },
+        };
       let steps: ReachStep[];
-      try { steps = this.buildInventory(collectionPath, automation, datasetAt).reach; }
-      catch (error) { steps = [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }]; }
-      const reach = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps })
-        .map((step): CollectionAutomationStepReach => (step.allowed ? { verdict: "allowed" } : { verdict: "stopped", reason: step.reason }));
+      try {
+        steps = this.buildInventory(collectionPath, automation, datasetAt).reach;
+      } catch (error) {
+        steps = [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }];
+      }
+      const reach = checkAutomationReach(roster, {
+        id: automation.id,
+        collection,
+        codeFiles: codeFilesOf(automation, collectionPath),
+        steps,
+      }).map((step): CollectionAutomationStepReach =>
+        step.allowed ? { verdict: "allowed" } : { verdict: "stopped", reason: step.reason },
+      );
       return { ...summary, reach: { kind: "checked", steps: reach } };
     });
-    const codeFiles = indexed.file.entries.flatMap((entry) => entry.status === "valid" ? codeFilesOf(entry.automation, collectionPath) : []);
-    const addsStay = roster.kind === "unknown" ? [] : dataset.definition.tables
-      .filter((table) => datasetUndoDeletes(roster, collection, dataset.definition, table.tableId, dataset.grants, codeFiles).length === 0)
-      .map((table) => table.name);
-    return { status: "read", contentHash: indexed.contentHash, automations, addsStay,
-      onServer: { runs: server.runs === null ? null : server.runs !== "off" }, ...you };
+    const codeFiles = indexed.file.entries.flatMap((entry) =>
+      entry.status === "valid" ? codeFilesOf(entry.automation, collectionPath) : [],
+    );
+    const addsStay =
+      roster.kind === "unknown"
+        ? []
+        : dataset.definition.tables
+            .filter(
+              (table) =>
+                datasetUndoDeletes(
+                  roster,
+                  collection,
+                  dataset.definition,
+                  table.tableId,
+                  dataset.grants,
+                  codeFiles,
+                ).length === 0,
+            )
+            .map((table) => table.name);
+    return {
+      status: "read",
+      contentHash: indexed.contentHash,
+      automations,
+      addsStay,
+      onServer: { runs: server.runs === null ? null : server.runs !== "off" },
+      ...you,
+    };
   }
 
   /**
@@ -3208,29 +4229,59 @@ export class CollectionAutomations {
     describe: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<AutomationButtonState> {
     const disabled = (reason: string) => ({ kind: "disabled" as const, reason });
-    const { collectionPath, dataset: { definition } } = server;
+    const {
+      collectionPath,
+      dataset: { definition },
+    } = server;
     const table = datasetTableNamed(definition, button.table);
-    if (table === undefined || description.datasetId !== definition.datasetId || !datasetButtonAccess(description, table.name, [])) {
+    if (
+      table === undefined ||
+      description.datasetId !== definition.datasetId ||
+      !datasetButtonAccess(description, table.name, [])
+    ) {
       return disabled(noAccessReason(table?.name ?? button.table ?? definition.name));
     }
-    const field = table.fields.find((candidate) => candidate.type === "button" && candidate.name === button.field);
+    const field = table.fields.find(
+      (candidate) => candidate.type === "button" && candidate.name === button.field,
+    );
     if (field === undefined) return disabled(`${button.field} is not a button in ${table.name}.`);
     if (server.runs === "off") return disabled(AUTOMATION_SERVER_OFF);
-    const resolved = resolveButton((await this.parsedFile(collectionPath))?.file ?? null, button.field,
-      (named) => named === table.name || (named === null && definition.tables.length === 1), definition.name);
+    const resolved = resolveButton(
+      (await this.parsedFile(collectionPath))?.file ?? null,
+      button.field,
+      (named) => named === table.name || (named === null && definition.tables.length === 1),
+      definition.name,
+    );
     if (resolved.kind === "state") return resolved.state;
     const { automation } = resolved;
     let inventory: AutomationInventory;
-    try { inventory = this.buildInventory(collectionPath, automation, await this.serverDatasetsFor(server, [automation])); }
-    catch (error) { return disabled(errorText(error)); }
-    if (!await canPressInventory(inventory, describe)) return disabled(noAccessReason(table.name));
+    try {
+      inventory = this.buildInventory(
+        collectionPath,
+        automation,
+        await this.serverDatasetsFor(server, [automation]),
+      );
+    } catch (error) {
+      return disabled(errorText(error));
+    }
+    if (!(await canPressInventory(inventory, describe)))
+      return disabled(noAccessReason(table.name));
     if (roster.kind !== "unknown") {
-      const reaches = checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: codeFilesOf(automation, collectionPath), steps: inventory.reach });
+      const reaches = checkAutomationReach(roster, {
+        id: automation.id,
+        collection: collectionNamed(collectionPath),
+        codeFiles: codeFilesOf(automation, collectionPath),
+        steps: inventory.reach,
+      });
       for (const [index, reach] of reaches.entries()) {
-        if (!reach.allowed && inventory.reach[index]!.kind !== "dataset-field") return disabled(reach.reason);
+        if (!reach.allowed && inventory.reach[index]!.kind !== "dataset-field")
+          return disabled(reach.reason);
       }
     }
-    const ready = { kind: "ready" as const, automationId: collectionAutomationId(definition.datasetId, automation.id) };
+    const ready = {
+      kind: "ready" as const,
+      automationId: collectionAutomationId(definition.datasetId, automation.id),
+    };
     const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
     return irreversible.length === 0 ? ready : { ...ready, irreversible };
   }
@@ -3241,23 +4292,32 @@ export class CollectionAutomations {
    * index lacks opens its host to be indexed.
    */
   private async datasetFolder(datasetId: string): Promise<string | null> {
-    const find = () => [...this.datasets].find(([, dataset]) => dataset.definition.datasetId === datasetId)?.[0] ?? null;
+    const find = () =>
+      [...this.datasets].find(([, dataset]) => dataset.definition.datasetId === datasetId)?.[0] ??
+      null;
     if (find() === null) await this.enqueue(() => this.indexDatasets(true));
     return find();
   }
 
   /** A dataset Collection the index lacks, whose host may not be open yet: a person is asking about it, so open it. */
   private async openDataset(collectionPath: string): Promise<void> {
-    if (!this.collections.has(collectionPath) && !this.datasets.has(collectionPath) &&
-      await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`)) {
+    if (
+      !this.collections.has(collectionPath) &&
+      !this.datasets.has(collectionPath) &&
+      (await this.options.pathExists(`${collectionPath}/${DATASET_FILE_NAME}`))
+    ) {
       await this.enqueue(() => this.indexDatasets(true));
     }
   }
 
   /** Whether this document press already has a claim, so a resend needs no new confirmation. */
-  async documentPressed(input: { collectionPath: string; field: string; pressId: string }): Promise<boolean> {
+  async documentPressed(input: {
+    collectionPath: string;
+    field: string;
+    pressId: string;
+  }): Promise<boolean> {
     await this.ready();
-    return this.presses.has(input.pressId) || await this.pressInEngine(input) !== null;
+    return this.presses.has(input.pressId) || (await this.pressInEngine(input)) !== null;
   }
 
   /**
@@ -3268,28 +4328,45 @@ export class CollectionAutomations {
    * against this one before anything joins it. A press whose automation
    * left the file is not found, and is checked as new.
    */
-  private async pressInEngine(input: { collectionPath: string; field: string; pressId: string }): Promise<RememberedPress | null> {
+  private async pressInEngine(input: {
+    collectionPath: string;
+    field: string;
+    pressId: string;
+  }): Promise<RememberedPress | null> {
     const file = this.files.get(input.collectionPath)?.file;
     const collectionId = this.collectionIdOf(input.collectionPath);
     if (file?.status !== "read" || collectionId === null) return null;
     const ids = file.entries.flatMap((entry) => {
       if (entry.status === "valid") {
         const { when, id } = entry.automation;
-        return when.kind === "button" && when.field === input.field && when.table === null ? [id] : [];
+        return when.kind === "button" && when.field === input.field && when.table === null
+          ? [id]
+          : [];
       }
       return entry.id !== null && namesButton(entry.raw, input.field) ? [entry.id] : [];
     });
     const key = `press:${input.pressId}`;
     for (const id of new Set(ids)) {
       const automationId = collectionAutomationId(collectionId, id);
-      const found = await this.withLiveEngine((engine) => engine.getAutomationClaim({ automationId, key }));
+      const found = await this.withLiveEngine((engine) =>
+        engine.getAutomationClaim({ automationId, key }),
+      );
       if (found === null) throw new Error("The workspace engine is not running.");
       const claim = found.claim;
       if (claim === null) continue;
-      if (claim.change.kind !== "button" || claim.recordId === null || claim.change.onBehalfOf === null) {
+      if (
+        claim.change.kind !== "button" ||
+        claim.recordId === null ||
+        claim.change.onBehalfOf === null
+      ) {
         throw new Error("This press id already names another press.");
       }
-      return { field: input.field, recordId: claim.recordId, pressedBy: claim.change.onBehalfOf, automationId };
+      return {
+        field: input.field,
+        recordId: claim.recordId,
+        pressedBy: claim.change.onBehalfOf,
+        automationId,
+      };
     }
     return null;
   }
@@ -3300,7 +4377,9 @@ export class CollectionAutomations {
    * plan, as when its record left, saved none, and neither did a trimmed
    * one, so without a record the run only ended.
    */
-  private async doneOutcome(claim: Pick<AutomationClaimSummary, "automationId" | "claimId">): Promise<"done" | "ended"> {
+  private async doneOutcome(
+    claim: Pick<AutomationClaimSummary, "automationId" | "claimId">,
+  ): Promise<"done" | "ended"> {
     const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
     return runs.some((run) => !run.superseded && run.outcome?.state === "done") ? "done" : "ended";
   }
@@ -3314,16 +4393,36 @@ export class CollectionAutomations {
    * Answers the press and the button's field, for the notice a failure sends.
    */
   async pressRelayed(
-    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string; confirmed: readonly string[] },
+    input: {
+      automationId: string;
+      collectionPath: string;
+      definitionHash: string;
+      recordId: string;
+      pressId: string;
+      pressedBy: string;
+      confirmed: readonly string[];
+    },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<{ pressed: CollectionAutomationPress; field: string | null }> {
     await this.ready();
     const authority = await this.pressAuthority(input.pressId);
-    if (authority.automationId !== input.automationId || authority.collectionPath !== input.collectionPath || authority.definitionHash !== input.definitionHash ||
-      authority.recordId !== input.recordId || authority.userId !== input.pressedBy || JSON.stringify(authority.confirmed) !== JSON.stringify([...input.confirmed].sort())) throw new Error(SHARED_BUTTON_DENIED);
+    if (
+      authority.automationId !== input.automationId ||
+      authority.collectionPath !== input.collectionPath ||
+      authority.definitionHash !== input.definitionHash ||
+      authority.recordId !== input.recordId ||
+      authority.userId !== input.pressedBy ||
+      JSON.stringify(authority.confirmed) !== JSON.stringify([...input.confirmed].sort())
+    )
+      throw new Error(SHARED_BUTTON_DENIED);
     const id = this.locate(input.automationId);
     const automation = this.definitionFor(input.automationId);
-    if (id === null || automation === null || automation.when.kind !== "button" || automation.when.table !== null) {
+    if (
+      id === null ||
+      automation === null ||
+      automation.when.kind !== "button" ||
+      automation.when.table !== null
+    ) {
       throw new Error("This button no longer runs an automation in its Collection.");
     }
     // The relay allowed the press for the Collection at this path, so it
@@ -3331,24 +4430,48 @@ export class CollectionAutomations {
     if (id.collectionPath !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
     const field = automation.when.field;
     // The press runs only the automation the person saw when they pressed.
-    if (definitionHash(automation) !== input.definitionHash) throw new Error(changedSincePressed(field));
-    const resolved = resolveButton(this.files.get(id.collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(id.collectionPath).name);
+    if (definitionHash(automation) !== input.definitionHash)
+      throw new Error(changedSincePressed(field));
+    const resolved = resolveButton(
+      this.files.get(id.collectionPath)?.file ?? null,
+      field,
+      (table) => table === null,
+      collectionNamed(id.collectionPath).name,
+    );
     if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
       throw new Error(`${field} now runs another automation. Press it again.`);
     }
     const inspection = await this.inspectAuthority(authority);
-    if (this.locate(input.automationId)?.collectionPath !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
+    if (this.locate(input.automationId)?.collectionPath !== input.collectionPath)
+      throw new Error(MOVED_SINCE_PRESSED);
     if (inspection.kind === "unchecked") throw new AutomationRunWait(inspection.reason);
     if (inspection.kind !== "ready") throw new Error(inspection.reason);
-    if (inspection.irreversible.some(action => !authority.confirmed.includes(action.name))) throw new Error(changedSincePressed(field));
+    if (inspection.irreversible.some((action) => !authority.confirmed.includes(action.name)))
+      throw new Error(changedSincePressed(field));
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.
     const pressId = relayedPressId(input.pressId, input.definitionHash, input.collectionPath);
     await this.markHostClaims();
-    if (this.locate(input.automationId)?.collectionPath !== input.collectionPath) throw new Error(MOVED_SINCE_PRESSED);
+    if (this.locate(input.automationId)?.collectionPath !== input.collectionPath)
+      throw new Error(MOVED_SINCE_PRESSED);
     // People and local agents both press with the stored signed-in person's authority.
-    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: authority.recordId!, pressId, pressedBy: authority.userId, by: { kind: "human" }, confirmed: authority.confirmed }, watch,
-      async () => { await this.pressAuthority(input.pressId); }, async datasetId => this.presserDescription(await this.pressAuthority(input.pressId), datasetId));
+    const pressed = await this.press(
+      {
+        collectionPath: id.collectionPath,
+        field,
+        recordId: authority.recordId!,
+        pressId,
+        pressedBy: authority.userId,
+        by: { kind: "human" },
+        confirmed: authority.confirmed,
+      },
+      watch,
+      async () => {
+        await this.pressAuthority(input.pressId);
+      },
+      async (datasetId) =>
+        this.presserDescription(await this.pressAuthority(input.pressId), datasetId),
+    );
     return { pressed, field };
   }
 
@@ -3357,8 +4480,14 @@ export class CollectionAutomations {
     return this.options.resolveRelayedPress(hostPressId);
   }
 
-  private async presserDescription(authority: RelayButtonAuthority, datasetId: string): Promise<DatasetDescription> {
-    const result = await this.withLiveHost(host => describeButtonPresser(host, authority, datasetId), true);
+  private async presserDescription(
+    authority: RelayButtonAuthority,
+    datasetId: string,
+  ): Promise<DatasetDescription> {
+    const result = await this.withLiveHost(
+      (host) => describeButtonPresser(host, authority, datasetId),
+      true,
+    );
     if (result === null) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
     return result;
   }
@@ -3369,7 +4498,10 @@ export class CollectionAutomations {
   }
 
   /** One schema read per Collection in the host's received inspection batch. */
-  async inspectRelayedBatch(inspectionIds: readonly string[], signal?: AbortSignal): Promise<RelayButtonInspection[]> {
+  async inspectRelayedBatch(
+    inspectionIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<RelayButtonInspection[]> {
     const schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>();
     const results: RelayButtonInspection[] = [];
     for (const inspectionId of inspectionIds) {
@@ -3379,30 +4511,54 @@ export class CollectionAutomations {
     return results;
   }
 
-  private async inspectRelayedWithSchema(inspectionId: string, schemas: Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>): Promise<RelayButtonInspection> {
+  private async inspectRelayedWithSchema(
+    inspectionId: string,
+    schemas: Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>,
+  ): Promise<RelayButtonInspection> {
     try {
-      if (!this.options.resolveButtonInspection) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+      if (!this.options.resolveButtonInspection)
+        throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
       await this.ready();
       const authority = await this.options.resolveButtonInspection(inspectionId);
       if (this.collectionIdOf(authority.collectionPath) === null) {
         return { kind: "denied", reason: SHARED_BUTTON_MOVED };
       }
-      return await this.inspectAuthority({ ...authority, automationId: this.automationIdIn(authority.collectionPath, authority.automationId) }, schemas);
-    } catch (error) { return buttonInspectionFailure(error); }
+      return await this.inspectAuthority(
+        {
+          ...authority,
+          automationId: this.automationIdIn(authority.collectionPath, authority.automationId),
+        },
+        schemas,
+      );
+    } catch (error) {
+      return buttonInspectionFailure(error);
+    }
   }
 
-  private async isButtonField(path: string, field: string, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<boolean> {
+  private async isButtonField(
+    path: string,
+    field: string,
+    schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>(),
+  ): Promise<boolean> {
     let schemaRead = schemas.get(path);
     if (!schemaRead) {
-      schemaRead = this.options.readText(`${path}/${COLLECTION_SCHEMA_FILENAME}`).then(read =>
-        !read || read.truncated ? null : parseCollectionSchema(read.text));
+      schemaRead = this.options
+        .readText(`${path}/${COLLECTION_SCHEMA_FILENAME}`)
+        .then((read) => (!read || read.truncated ? null : parseCollectionSchema(read.text)));
       schemas.set(path, schemaRead);
     }
     const schema = await schemaRead;
-    return schema?.schema.fields.some(candidate => candidate.name === field && candidate.type === "button") ?? false;
+    return (
+      schema?.schema.fields.some(
+        (candidate) => candidate.name === field && candidate.type === "button",
+      ) ?? false
+    );
   }
 
-  private async inspectAuthority(authority: RelayButtonAuthority, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<RelayButtonInspection> {
+  private async inspectAuthority(
+    authority: RelayButtonAuthority,
+    schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>(),
+  ): Promise<RelayButtonInspection> {
     const moved = () => {
       const current = this.locate(authority.automationId);
       return current !== null && current.collectionPath !== authority.collectionPath;
@@ -3410,25 +4566,47 @@ export class CollectionAutomations {
     const denied = (cause: string, reason: string): RelayButtonInspection => {
       if (moved()) reason = SHARED_BUTTON_MOVED;
       if (reason !== SHARED_BUTTON_FIELD_CHANGED) {
-        this.options.onError(`inspect shared Button "${authority.automationId}": ${cause}`, new Error(reason));
+        this.options.onError(
+          `inspect shared Button "${authority.automationId}": ${cause}`,
+          new Error(reason),
+        );
       }
-      return {kind: "denied", reason: [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(reason) ? reason : SHARED_BUTTON_DENIED};
+      return {
+        kind: "denied",
+        reason: [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(
+          reason,
+        )
+          ? reason
+          : SHARED_BUTTON_DENIED,
+      };
     };
     try {
-      const id = this.locate(authority.automationId), automation = this.definitionFor(authority.automationId);
-      if (!id || !automation) return denied("definition-missing", "This Button's automation is unavailable. Refresh the Collection, then try again.");
+      const id = this.locate(authority.automationId),
+        automation = this.definitionFor(authority.automationId);
+      if (!id || !automation)
+        return denied(
+          "definition-missing",
+          "This Button's automation is unavailable. Refresh the Collection, then try again.",
+        );
       if (!automation.enabled) return denied("switched-off", "This Button's automation is off.");
-      if (automation.when.kind !== "button" || automation.when.table !== null) return denied("trigger-changed", "This automation no longer runs from this Button.");
-      if (id.collectionPath !== authority.collectionPath) return denied("collection-moved", SHARED_BUTTON_MOVED);
-      if (definitionHash(automation) !== authority.definitionHash) return denied("definition-mismatch", "This Button's automation changed. Refresh the Collection, then try again.");
-      if (!await this.isButtonField(id.collectionPath, automation.when.field, schemas)) {
+      if (automation.when.kind !== "button" || automation.when.table !== null)
+        return denied("trigger-changed", "This automation no longer runs from this Button.");
+      if (id.collectionPath !== authority.collectionPath)
+        return denied("collection-moved", SHARED_BUTTON_MOVED);
+      if (definitionHash(automation) !== authority.definitionHash)
+        return denied(
+          "definition-mismatch",
+          "This Button's automation changed. Refresh the Collection, then try again.",
+        );
+      if (!(await this.isButtonField(id.collectionPath, automation.when.field, schemas))) {
         return denied("field-changed", SHARED_BUTTON_FIELD_CHANGED);
       }
       const roster = await this.options.roster();
       if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
       let inventory: AutomationInventory;
-      try { inventory = this.inventory(id.collectionPath, automation); }
-      catch (error) {
+      try {
+        inventory = this.inventory(id.collectionPath, automation);
+      } catch (error) {
         if (error instanceof AutomationRunWait) throw error;
         if (this.datasetStoreFailed) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
         return denied(`inventory-unavailable: ${errorText(error)}`, SHARED_BUTTON_DENIED);
@@ -3436,18 +4614,41 @@ export class CollectionAutomations {
       const unsupported = this.cannotRun(id.collectionPath, automation);
       if (unsupported !== null) return denied("unsupported-operation", unsupported);
       const descriptions = new Map<string, DatasetDescription>();
-      for (const step of inventory.reach) if (step.kind === "dataset-operation" && !descriptions.has(step.datasetId)) {
-        descriptions.set(step.datasetId, await this.presserDescription(authority, step.datasetId));
-      }
-      const canPress = await canPressInventory(inventory, async datasetId => descriptions.get(datasetId)!);
+      for (const step of inventory.reach)
+        if (step.kind === "dataset-operation" && !descriptions.has(step.datasetId)) {
+          descriptions.set(
+            step.datasetId,
+            await this.presserDescription(authority, step.datasetId),
+          );
+        }
+      const canPress = await canPressInventory(inventory, async (datasetId) =>
+        descriptions.get(datasetId)!,
+      );
       if (!canPress) return denied("presser-access", SHARED_BUTTON_DENIED);
-      const state = await this.runnableButtonState(id.collectionPath, automation, roster, inventory.reach);
+      const state = await this.runnableButtonState(
+        id.collectionPath,
+        automation,
+        roster,
+        inventory.reach,
+      );
       if (state.kind !== "ready") {
-        return denied(state.denialCause ?? "reach-restricted", state.denialCause === "held-step" ? SHARED_BUTTON_HELD : state.reason);
+        return denied(
+          state.denialCause ?? "reach-restricted",
+          state.denialCause === "held-step" ? SHARED_BUTTON_HELD : state.reason,
+        );
       }
       if (moved()) return denied("collection-moved", SHARED_BUTTON_MOVED);
-      return { kind: "ready", automationId: authority.automationId, definitionHash: authority.definitionHash, irreversible: irreversibleActionsOf(automation, id.collectionPath, inventory) };
-    } catch (error) { return moved() ? denied("collection-moved", SHARED_BUTTON_MOVED) : buttonInspectionFailure(error); }
+      return {
+        kind: "ready",
+        automationId: authority.automationId,
+        definitionHash: authority.definitionHash,
+        irreversible: irreversibleActionsOf(automation, id.collectionPath, inventory),
+      };
+    } catch (error) {
+      return moved()
+        ? denied("collection-moved", SHARED_BUTTON_MOVED)
+        : buttonInspectionFailure(error);
+    }
   }
 
   /**
@@ -3455,17 +4656,29 @@ export class CollectionAutomations {
    * making one, or null when it holds none. A host that restarted resumes a
    * press only through this; one with no claim goes back to the relay first.
    */
-  async relayedClaim(input: { automationId: string; collectionPath: string; definitionHash: string; pressId: string }): Promise<{
+  async relayedClaim(input: {
+    automationId: string;
+    collectionPath: string;
+    definitionHash: string;
+    pressId: string;
+  }): Promise<{
     claimId: string;
     settled: Omit<PressSettled, "claimId"> | null;
   } | null> {
     const key = `press:${relayedPressId(input.pressId, input.definitionHash, input.collectionPath)}`;
-    const found = await this.withLiveEngine((engine) => engine.getAutomationClaim({ automationId: input.automationId, key }));
+    const found = await this.withLiveEngine((engine) =>
+      engine.getAutomationClaim({ automationId: input.automationId, key }),
+    );
     if (found === null) throw new Error("The workspace engine is not running.");
     const claim = found.claim;
     if (!claim) return null;
-    if (claim.state === "failed") return { claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
-    if (claim.state === "done") return { claimId: claim.claimId, settled: { outcome: await this.doneOutcome(claim), error: null } };
+    if (claim.state === "failed")
+      return { claimId: claim.claimId, settled: { outcome: "failed", error: claim.error ?? null } };
+    if (claim.state === "done")
+      return {
+        claimId: claim.claimId,
+        settled: { outcome: await this.doneOutcome(claim), error: null },
+      };
     return { claimId: claim.claimId, settled: null };
   }
 
@@ -3475,11 +4688,22 @@ export class CollectionAutomations {
     roster: ReachRoster,
     describe?: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<AutomationButtonState> {
-    const resolved = resolveButton(this.files.get(collectionPath)?.file ?? null, field, (table) => table === null, collectionNamed(collectionPath).name);
+    const resolved = resolveButton(
+      this.files.get(collectionPath)?.file ?? null,
+      field,
+      (table) => table === null,
+      collectionNamed(collectionPath).name,
+    );
     if (resolved.kind === "state") return resolved.state;
     const unsupported = this.cannotRun(collectionPath, resolved.automation);
     if (unsupported !== null) return { kind: "disabled", reason: unsupported };
-    return this.checkedButtonState(collectionPath, resolved.automation, roster, collectionNamed(collectionPath).name, describe);
+    return this.checkedButtonState(
+      collectionPath,
+      resolved.automation,
+      roster,
+      collectionNamed(collectionPath).name,
+      describe,
+    );
   }
 
   private async checkedButtonState(
@@ -3490,11 +4714,20 @@ export class CollectionAutomations {
     describe?: (datasetId: string) => Promise<DatasetDescription>,
   ): Promise<AutomationButtonState> {
     let inventory: AutomationInventory;
-    try { inventory = this.inventory(collectionPath, automation); }
-    catch (error) { return { kind: "disabled", reason: errorText(error) }; }
-    if (!await canPressInventory(inventory, describe)) return { kind: "disabled", reason: noAccessReason(accessName) };
-    const state = await this.runnableButtonState(collectionPath, automation, roster, inventory.reach);
-    if (state.kind !== "ready") return {kind: state.kind, reason: state.reason};
+    try {
+      inventory = this.inventory(collectionPath, automation);
+    } catch (error) {
+      return { kind: "disabled", reason: errorText(error) };
+    }
+    if (!(await canPressInventory(inventory, describe)))
+      return { kind: "disabled", reason: noAccessReason(accessName) };
+    const state = await this.runnableButtonState(
+      collectionPath,
+      automation,
+      roster,
+      inventory.reach,
+    );
+    if (state.kind !== "ready") return { kind: state.kind, reason: state.reason };
     const irreversible = irreversibleActionsOf(automation, collectionPath, inventory);
     return irreversible.length === 0 ? state : { ...state, irreversible };
   }
@@ -3505,20 +4738,46 @@ export class CollectionAutomations {
    * editor to allow it. A dataset field formulas cannot see is hidden from
    * them, and stops nothing.
    */
-  private async runnableButtonState(collectionPath: string, automation: Automation, roster: ReachRoster, inventory?: readonly ReachStep[]): Promise<AutomationButtonState & {denialCause?: "unsupported-operation" | "inventory-unavailable" | "reach-restricted" | "held-step"}> {
+  private async runnableButtonState(
+    collectionPath: string,
+    automation: Automation,
+    roster: ReachRoster,
+    inventory?: readonly ReachStep[],
+  ): Promise<
+    AutomationButtonState & {
+      denialCause?:
+        | "unsupported-operation"
+        | "inventory-unavailable"
+        | "reach-restricted"
+        | "held-step";
+    }
+  > {
     const unsupported = inventory === undefined ? this.cannotRun(collectionPath, automation) : null;
-    if (unsupported !== null) return { kind: "disabled", reason: unsupported, denialCause: "unsupported-operation" };
+    if (unsupported !== null)
+      return { kind: "disabled", reason: unsupported, denialCause: "unsupported-operation" };
     const automationId = this.automationIdIn(collectionPath, automation.id);
     if (roster.kind === "unknown") return { kind: "ready", automationId };
     let steps: readonly ReachStep[];
     try {
       steps = inventory ?? this.reachSteps(collectionPath, automation);
-    } catch (error) { return { kind: "disabled", reason: errorText(error), denialCause: "inventory-unavailable" }; }
-    for (const [index, reach] of checkAutomationReach(roster, { id: automation.id, collection: collectionNamed(collectionPath), codeFiles: codeFilesOf(automation, collectionPath), steps }).entries()) {
-      if (!reach.allowed && steps[index]!.kind !== "dataset-field") return { kind: "disabled", reason: reach.reason, denialCause: "reach-restricted" };
+    } catch (error) {
+      return { kind: "disabled", reason: errorText(error), denialCause: "inventory-unavailable" };
+    }
+    for (const [index, reach] of checkAutomationReach(roster, {
+      id: automation.id,
+      collection: collectionNamed(collectionPath),
+      codeFiles: codeFilesOf(automation, collectionPath),
+      steps,
+    }).entries()) {
+      if (!reach.allowed && steps[index]!.kind !== "dataset-field")
+        return { kind: "disabled", reason: reach.reason, denialCause: "reach-restricted" };
     }
     if (await this.recordVerdicts(roster, [{ automationId, collectionPath, automation }], steps)) {
-      return { kind: "disabled", reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.`, denialCause: "held-step" };
+      return {
+        kind: "disabled",
+        reason: `Automation "${automation.name}" is waiting. Allow its step in Notices.`,
+        denialCause: "held-step",
+      };
     }
     return { kind: "ready", automationId };
   }
@@ -3555,7 +4814,8 @@ export class CollectionAutomations {
     const movedReason = () => {
       const current = this.locate(input.automationId);
       return parsed !== null && current !== null && current.collectionPath !== parsed.collectionPath
-        ? "This Collection moved. Open it where it is now. Undo this run there." : null;
+        ? "This Collection moved. Open it where it is now. Undo this run there."
+        : null;
     };
     // Held from before the first read to the end, like Try again's.
     if (this.changing.has(input.claimId)) return { status: "refused", reason: BUSY_CLAIM_REFUSAL };
@@ -3565,9 +4825,13 @@ export class CollectionAutomations {
       await this.historyBatch;
       const claim = await this.findClaim(input.automationId, input.claimId, true);
       if (claim === null) throw new Error("The workspace engine is not running.");
-      if (claim === "missing") return { status: "refused", reason: "dohc no longer has this run on this computer." };
+      if (claim === "missing")
+        return { status: "refused", reason: "dohc no longer has this run on this computer." };
       if (claim.state !== "done" && claim.state !== "failed") {
-        return { status: "refused", reason: "This run has not finished. Undo it once it finishes." };
+        return {
+          status: "refused",
+          reason: "This run has not finished. Undo it once it finishes.",
+        };
       }
       const stored = await this.options.store.runsOf(input.automationId, input.claimId);
       if (report) Object.assign(report, stored);
@@ -3576,71 +4840,154 @@ export class CollectionAutomations {
         ? stored.runs.filter((run) => definitionHashes.has(run.definitionHash))
         : stored.runs;
       if (unreadable) {
-        return { status: "refused", reason: "dohc could not read this run's saved changes in .dohc/local/automations, so it undid nothing." };
+        return {
+          status: "refused",
+          reason:
+            "dohc could not read this run's saved changes in .dohc/local/automations, so it undid nothing.",
+        };
       }
-      const statusRow: CollectionAutomationRun = { claimId: input.claimId, state: claim.state, error: null,
-        createdAtMs: 0, updatedAtMs: 0, trigger: claim.history.trigger, definitionChanged: false,
-        neverStarted: false, chainStopped: false, undone: false, undoUnfinished: runs.some(run => run.undo === "started"), writes: stepWritesOf(runs).map(entry => entry.write) };
+      const statusRow: CollectionAutomationRun = {
+        claimId: input.claimId,
+        state: claim.state,
+        error: null,
+        createdAtMs: 0,
+        updatedAtMs: 0,
+        trigger: claim.history.trigger,
+        definitionChanged: false,
+        neverStarted: false,
+        chainStopped: false,
+        undone: false,
+        undoUnfinished: runs.some((run) => run.undo === "started"),
+        writes: stepWritesOf(runs).map((entry) => entry.write),
+      };
       await this.readSharedSettlement([{ stored: runs, row: statusRow }]);
-      const hasDatasets = runs.some((run) => run.steps.some((step) => step.effects.some((effect) => "rules" in effect)) ||
-        run.applied.some((entry) => entry.writes.some((write) => "rules" in write)));
+      const hasDatasets = runs.some(
+        (run) =>
+          run.steps.some((step) => step.effects.some((effect) => "rules" in effect)) ||
+          run.applied.some((entry) => entry.writes.some((write) => "rules" in write)),
+      );
       if (parsed === null) return { status: "refused", reason: LOST_COLLECTION_ERROR };
-      if (hasDatasets && await this.withLiveHost(() => true, true) !== true) {
+      if (hasDatasets && (await this.withLiveHost(() => true, true)) !== true) {
         throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
       }
-      const needsReverseReach = datasetUndoDeletesRecorded(runs) || runs.some((run) => run.applied.some((entry) =>
-        entry.writes.some((write) => write.kind === "dataset-action" && write.reverseOperationId !== undefined)));
+      const needsReverseReach =
+        datasetUndoDeletesRecorded(runs) ||
+        runs.some((run) =>
+          run.applied.some((entry) =>
+            entry.writes.some(
+              (write) => write.kind === "dataset-action" && write.reverseOperationId !== undefined,
+            ),
+          ),
+        );
       const definition = this.definitionFor(input.automationId);
       const codeFiles = definition === null ? [] : codeFilesOf(definition, parsed.collectionPath);
-      const source = needsReverseReach ? { roster: await this.options.roster(), collection: collectionNamed(parsed.collectionPath), codeFiles } : null;
+      const source = needsReverseReach
+        ? {
+            roster: await this.options.roster(),
+            collection: collectionNamed(parsed.collectionPath),
+            codeFiles,
+          }
+        : null;
       for (const run of runs) {
-        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost) return { status: "refused", reason: movedReason() ?? LOST_COLLECTION_ERROR };
+        if (rebaseRun(run, (id) => this.collectionPathOf(id)).lost)
+          return { status: "refused", reason: movedReason() ?? LOST_COLLECTION_ERROR };
       }
       let reverseReach: ReachStep[];
       try {
-        const reach = (host: DatasetUndoHost | null) => automationUndoReach(runs, this.targetResolver(), (id) => this.collectionPathOf(id), source, host);
+        const reach = (host: DatasetUndoHost | null) =>
+          automationUndoReach(
+            runs,
+            this.targetResolver(),
+            (id) => this.collectionPathOf(id),
+            source,
+            host,
+          );
         const checked = hasDatasets ? await this.withLiveHost(reach, true) : await reach(null);
-        if (checked === null) throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
+        if (checked === null)
+          throw new Error("The dataset host is unavailable. Reopen the workspace, then try again.");
         reverseReach = checked;
+      } catch (error) {
+        return { status: "refused", reason: movedReason() ?? errorText(error) };
       }
-      catch (error) { return { status: "refused", reason: movedReason() ?? errorText(error) }; }
       const moved = movedReason();
       if (moved !== null) return { status: "refused", reason: moved };
-      const denied = source && checkAutomationReach(source.roster, {
-        id: parsed.id, collection: collectionNamed(parsed.collectionPath), codeFiles, steps: reverseReach,
-      }).find((verdict) => !verdict.allowed);
+      const denied =
+        source &&
+        checkAutomationReach(source.roster, {
+          id: parsed.id,
+          collection: collectionNamed(parsed.collectionPath),
+          codeFiles,
+          steps: reverseReach,
+        }).find((verdict) => !verdict.allowed);
       if (denied && !denied.allowed) return { status: "refused", reason: denied.reason };
       // Every run of the claim changed records, one a person started over
       // under a newer definition too. One whose Undo stopped part way is
       // undone again: what is already back stays as it is. Once every run
       // is undone, Undo tries again only the fields it kept.
-      const pending = runs.filter((run) => run.undo !== "done" || sharedReversalsOf([run]).some(write => write.state === "not-accepted"));
-      const keptRetry = pending.find(run => run.undo === "started" && run.undoKeptScope !== undefined);
-      const kept = keptRetry ? runs.filter(run => run.undoKeptScope === keptRetry.undoKeptScope ||
-        run.undo === "done" && run.undoKept.length > 0 && keptRetry.undoKeptRuns?.includes(run.keySeed))
-        : pending.length === 0 ? runs.filter(run => run.undoKept.length > 0) : [];
+      const pending = runs.filter(
+        (run) =>
+          run.undo !== "done" ||
+          sharedReversalsOf([run]).some((write) => write.state === "not-accepted"),
+      );
+      const keptRetry = pending.find(
+        (run) => run.undo === "started" && run.undoKeptScope !== undefined,
+      );
+      const kept = keptRetry
+        ? runs.filter(
+            (run) =>
+              run.undoKeptScope === keptRetry.undoKeptScope ||
+              (run.undo === "done" &&
+                run.undoKept.length > 0 &&
+                keptRetry.undoKeptRuns?.includes(run.keySeed)),
+          )
+        : pending.length === 0
+          ? runs.filter((run) => run.undoKept.length > 0)
+          : [];
       if (runs.length > 0 && pending.length === 0 && kept.length === 0) {
         return { status: "refused", reason: "You already undid this run." };
       }
       // A dataset's Undo replays the receipts of what it sent, so it cannot try a kept field again.
-      if (kept.length > 0 && documentUndoKept(runs).length === 0) return { status: "refused", reason: DATASET_UNDO_KEPT };
-      if (kept.length > 0) return { status: "undone", ...(await this.undoKeptFields(kept, trash)).undone };
+      if (kept.length > 0 && documentUndoKept(runs).length === 0)
+        return { status: "refused", reason: DATASET_UNDO_KEPT };
+      if (kept.length > 0)
+        return { status: "undone", ...(await this.undoKeptFields(kept, trash)).undone };
       // Kept with the newest run this Undo reverses.
-      const newest = () => pending.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
+      const newest = () =>
+        pending.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
       // Dataset Undo checks everything before anything below is saved or
       // sent. It reads every run of the claim, those saved undone too, so a
       // retry after only some were saved done sends the same requests as
       // before and replays their receipts instead of writing again.
-      const checked = hasDatasets ? await this.datasetUndoCheck(input, collectionNamed(parsed.collectionPath), stored.runs, runs, pending) : null;
+      const checked = hasDatasets
+        ? await this.datasetUndoCheck(
+            input,
+            collectionNamed(parsed.collectionPath),
+            stored.runs,
+            runs,
+            pending,
+          )
+        : null;
       if (checked !== null && "status" in checked) return checked;
       // Saved before anything is reversed, so no run resumes over what this
       // puts back, even if it stops part way.
-      const unfinished = pending.filter(run => run.undo !== "done");
-      const scope = unfinished.find(run => run.undoScope !== undefined)?.undoScope ?? createHash("sha256")
-        .update(JSON.stringify((unfinished.length > 0 ? unfinished : pending).map(run => [run.automationId, run.claimId, run.keySeed]).sort())).digest("hex");
+      const unfinished = pending.filter((run) => run.undo !== "done");
+      const scope =
+        unfinished.find((run) => run.undoScope !== undefined)?.undoScope ??
+        createHash("sha256")
+          .update(
+            JSON.stringify(
+              (unfinished.length > 0 ? unfinished : pending)
+                .map((run) => [run.automationId, run.claimId, run.keySeed])
+                .sort(),
+            ),
+          )
+          .digest("hex");
       for (const run of pending) {
         if (run.undo === null || run.undoScope === undefined) {
-          await this.options.store.updateState(run, {...(run.undo === null ? {undo: "started" as const} : {}), undoScope: run.undoScope ?? scope});
+          await this.options.store.updateState(run, {
+            ...(run.undo === null ? { undo: "started" as const } : {}),
+            undoScope: run.undoScope ?? scope,
+          });
           run.undoScope ??= scope;
         }
       }
@@ -3648,35 +4995,58 @@ export class CollectionAutomations {
       // covers, before the first is sent, so an Undo that stops part way
       // never chooses again. They are kept with the newest of those runs.
       if (checked !== null && checked.covers.length > 0) {
-        const holder = checked.covers.reduce((latest, run) => (run.startedAtMs > latest.startedAtMs ? run : latest));
+        const holder = checked.covers.reduce((latest, run) =>
+          run.startedAtMs > latest.startedAtMs ? run : latest,
+        );
         const covers = checked.covers.map((run) => run.keySeed);
         await this.options.store.recordUndoCalls(holder, covers, checked.calls);
         holder.undoCovers.push(...covers);
         holder.undoCalls.push(...checked.calls);
       }
       const durable = this.undoDurability(pending, trash);
-      const reverse = (host: DatasetUndoHost | null) => undoAutomationRuns({
-        withReads: (work) => this.withLiveEngine(work), withRecordWrites: durable.withRecordWrites,
-        trash: durable.trash, collectionPathOf: (id) => this.collectionPathOf(id),
-        recordReversal: durable.recordReversal,
-      }, host, collectionNamed(parsed.collectionPath), async () => {
-        const roster = await this.options.cachedRoster();
-        const moved = movedReason();
-        if (moved !== null) throw new Error(moved);
-        if (roster.kind === "unknown") throw new Error(rosterProblem(roster, collectionNamed(parsed.collectionPath)));
-        return roster;
-      }, input.claimId, runs, async (request) => {
-        await this.options.store.recordUndoRequest(newest(), request);
-        newest().undoRequests.push(request);
-      }, this.runAbort.signal, codeFiles);
+      const reverse = (host: DatasetUndoHost | null) =>
+        undoAutomationRuns(
+          {
+            withReads: (work) => this.withLiveEngine(work),
+            withRecordWrites: durable.withRecordWrites,
+            trash: durable.trash,
+            collectionPathOf: (id) => this.collectionPathOf(id),
+            recordReversal: durable.recordReversal,
+          },
+          host,
+          collectionNamed(parsed.collectionPath),
+          async () => {
+            const roster = await this.options.cachedRoster();
+            const moved = movedReason();
+            if (moved !== null) throw new Error(moved);
+            if (roster.kind === "unknown")
+              throw new Error(rosterProblem(roster, collectionNamed(parsed.collectionPath)));
+            return roster;
+          },
+          input.claimId,
+          runs,
+          async (request) => {
+            await this.options.store.recordUndoRequest(newest(), request);
+            newest().undoRequests.push(request);
+          },
+          this.runAbort.signal,
+          codeFiles,
+        );
       const undone = hasDatasets ? await this.withLiveHost(reverse, true) : await reverse(null);
-      if (undone === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
+      if (undone === null)
+        throw new Error(
+          "dohc could not open this Collection. Reopen the workspace, then try again.",
+        );
       const { undone: result, keptFields, undoWrites } = undone;
       await durable.finish();
       // Keep this reversal's receipts with the runs it actually reversed.
       for (const run of [...pending].sort((a, b) => a.startedAtMs - b.startedAtMs)) {
-        await this.options.store.updateState(run, { undo: "done", undoKept: keptFields, undoWrites });
-        Object.assign(run, {undo: "done", undoKept: keptFields, undoWrites});
+        await this.options.store.updateState(run, {
+          undo: "done",
+          undoKept: keptFields,
+          undoWrites,
+        });
+        Object.assign(run, { undo: "done", undoKept: keptFields, undoWrites });
       }
       const sharedReversals = sharedReversalsOf(runs);
       if (sharedReversals.length > 0) result.sharedReversals = sharedReversals;
@@ -3690,7 +5060,7 @@ export class CollectionAutomations {
     // A prior attempt may have committed a trash operation or an idempotent
     // reversal which this attempt has nothing left to write.
     let pending = true;
-    const receipts = durableBatch<UndoWrite>(async writes => {
+    const receipts = durableBatch<UndoWrite>(async (writes) => {
       await sync();
       await this.recordUndoReversals(runs, writes);
     });
@@ -3704,23 +5074,43 @@ export class CollectionAutomations {
       await sync();
     };
     const withRecordWrites: CollectionAutomationsOptions["withUndoWrites"] = (signal, work) =>
-      this.options.withUndoWrites(signal, writes => work({...writes, setFields: input => {
-        // A completed idempotency key can refer to a commit before the crash.
-        pending = true;
-        return writes.setFields(input);
-      }}));
+      this.options.withUndoWrites(signal, (writes) =>
+        work({
+          ...writes,
+          setFields: (input) => {
+            // A completed idempotency key can refer to a commit before the crash.
+            pending = true;
+            return writes.setFields(input);
+          },
+        }),
+      );
     return {
       withRecordWrites,
-      trash: async (path: string) => {pending = true; await trash(path);},
+      trash: async (path: string) => {
+        pending = true;
+        await trash(path);
+      },
       recordReversal: (write: UndoWrite) => receipts.add(write),
       finish,
     };
   }
 
-  private async recordUndoReversals(runs: readonly StoredRun[], writes: readonly UndoWrite[]): Promise<void> {
-    const holder = runs.reduce((latest, run) => run.startedAtMs > latest.startedAtMs ? run : latest);
+  private async recordUndoReversals(
+    runs: readonly StoredRun[],
+    writes: readonly UndoWrite[],
+  ): Promise<void> {
+    const holder = runs.reduce((latest, run) =>
+      run.startedAtMs > latest.startedAtMs ? run : latest,
+    );
     await this.options.store.recordUndoWrites(holder, writes);
-    holder.undoWrites = [...new Map([...(holder.undoWrites ?? []), ...writes].map(write => [JSON.stringify([write.recordId, write.field]), write])).values()];
+    holder.undoWrites = [
+      ...new Map(
+        [...(holder.undoWrites ?? []), ...writes].map((write) => [
+          JSON.stringify([write.recordId, write.field]),
+          write,
+        ]),
+      ).values(),
+    ];
   }
 
   /** Undo again, for runs already undone, of only the fields it kept. */
@@ -3729,30 +5119,49 @@ export class CollectionAutomations {
     trash: (path: string) => Promise<void>,
   ): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[] }> {
     const only = documentUndoKept(runs);
-    const documentKeys = new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field])));
-    const datasetKept = [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
-      .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept])).values()];
-    const scope = runs.find(run => run.undo === "started" && run.undoKeptScope !== undefined)?.undoKeptScope ?? `kept:${randomUUID()}`;
-    const members = runs.map(run => run.keySeed);
+    const documentKeys = new Set(
+      only.map(({ recordId, field }) => JSON.stringify([recordId, field])),
+    );
+    const datasetKept = [
+      ...new Map(
+        runs
+          .flatMap((run) => run.undoKept)
+          .filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
+          .map((kept) => [JSON.stringify([kept.recordId, kept.field]), kept]),
+      ).values(),
+    ];
+    const scope =
+      runs.find((run) => run.undo === "started" && run.undoKeptScope !== undefined)
+        ?.undoKeptScope ?? `kept:${randomUUID()}`;
+    const members = runs.map((run) => run.keySeed);
     for (const run of runs) {
-      await this.options.store.updateState(run, {undo: "started", undoKeptScope: scope, undoKeptRuns: members});
+      await this.options.store.updateState(run, {
+        undo: "started",
+        undoKeptScope: scope,
+        undoKeptRuns: members,
+      });
       run.undoKeptScope = scope;
       run.undoKeptRuns = members;
     }
     const durable = this.undoDurability(runs, trash);
-    const { undone, keptFields, undoWrites } = await undoCollectionAutomationRuns({
-      withReads: (work) => this.withLiveEngine(work),
-      withRecordWrites: durable.withRecordWrites,
-      trash: durable.trash,
-      collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
-      recordReversal: durable.recordReversal,
-    }, runs, this.runAbort.signal, only);
+    const { undone, keptFields, undoWrites } = await undoCollectionAutomationRuns(
+      {
+        withReads: (work) => this.withLiveEngine(work),
+        withRecordWrites: durable.withRecordWrites,
+        trash: durable.trash,
+        collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
+        recordReversal: durable.recordReversal,
+      },
+      runs,
+      this.runAbort.signal,
+      only,
+    );
     await durable.finish();
     keptFields.push(...datasetKept);
     undone.changedSince += datasetKept.length;
     for (const run of runs) {
       await this.options.store.updateState(run, { undo: "done", undoKept: keptFields, undoWrites });
-      Object.assign(run, {undo: "done", undoKept: keptFields, undoWrites});
+      Object.assign(run, { undo: "done", undoKept: keptFields, undoWrites });
     }
     const sharedReversals = sharedReversalsOf(runs);
     if (sharedReversals.length > 0) undone.sharedReversals = sharedReversals;
@@ -3782,23 +5191,41 @@ export class CollectionAutomations {
   ): Promise<DatasetUndoChecked> {
     // Reach (ADR 0012) as it is now, for the editors of the automation the runs' saved id names.
     const roster = await this.options.roster();
-    if (roster.kind === "unknown" && datasetUndoDeletesRecorded(runs)) return { status: "refused", reason: rosterProblem(roster, collection) };
+    if (roster.kind === "unknown" && datasetUndoDeletesRecorded(runs))
+      return { status: "refused", reason: rosterProblem(roster, collection) };
     const covered = new Set(runs.flatMap((run) => run.undoCovers));
     const unplanned = pending.filter((run) => !covered.has(run.keySeed));
-    const added = unplanned.some((run) => run.applied.some(({ writes }) => writes.some((write) => write.kind === "dataset-created")));
+    const added = unplanned.some((run) =>
+      run.applied.some(({ writes }) => writes.some((write) => write.kind === "dataset-created")),
+    );
     const checked = await this.withLiveHost(async (host): Promise<DatasetUndoChecked> => {
       // A dataset change goes back only under the rules it ran under.
-      if (datasetUndoRulesChanged(host, runs)) return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
+      if (datasetUndoRulesChanged(host, runs))
+        return { status: "refused", reason: DATASET_UNDO_RULES_CHANGED };
       const lost = datasetUndoLostRun(host, claimRuns);
       if (lost !== null) return { status: "refused", reason: lost };
       if (unplanned.length === 0) return { collection, covers: [], calls: [] };
-      const codeFiles = runs.flatMap((run) => { const definition = this.definitionFor(run.automationId); return definition === null ? [] : codeFilesOf(definition, collection.path); });
-      const planned = await planDatasetUndo(host, { roster, collection, codeFiles }, input.claimId, runs, unplanned, this.runAbort.signal);
+      const codeFiles = runs.flatMap((run) => {
+        const definition = this.definitionFor(run.automationId);
+        return definition === null ? [] : codeFilesOf(definition, collection.path);
+      });
+      const planned = await planDatasetUndo(
+        host,
+        { roster, collection, codeFiles },
+        input.claimId,
+        runs,
+        unplanned,
+        this.runAbort.signal,
+      );
       const confirmed = !added ? { token: planned.preview.token, chosen: [] } : input.deletes;
-      const calls = confirmed?.token === planned.preview.token ? planned.send(confirmed.chosen) : null;
-      return calls === null ? { status: "confirm", preview: planned.preview } : { collection, covers: unplanned, calls };
+      const calls =
+        confirmed?.token === planned.preview.token ? planned.send(confirmed.chosen) : null;
+      return calls === null
+        ? { status: "confirm", preview: planned.preview }
+        : { collection, covers: unplanned, calls };
     }, true);
-    if (checked === null) throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
+    if (checked === null)
+      throw new Error("dohc could not open this Collection. Reopen the workspace, then try again.");
     return checked;
   }
 
@@ -3820,18 +5247,38 @@ export class CollectionAutomations {
     trash: (path: string) => Promise<void>,
     again = false,
     retentionId?: string,
-  ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; sharedReversals?: CollectionAutomationUndone["sharedReversals"]; errorMessage: string | null }> {
+  ): Promise<{
+    undone: number;
+    left: number;
+    reverted: number;
+    missing: number;
+    keptFields: KeptAutomationField[];
+    otherKept: number;
+    sharedReversals?: CollectionAutomationUndone["sharedReversals"];
+    errorMessage: string | null;
+  }> {
     const hashes = await this.restoreDefinitionHashes(definitions);
-    const result = { undone: 0, left: 0, reverted: 0, missing: 0, otherKept: 0, sharedReversals: [] as NonNullable<CollectionAutomationUndone["sharedReversals"]> };
+    const result = {
+      undone: 0,
+      left: 0,
+      reverted: 0,
+      missing: 0,
+      otherKept: 0,
+      sharedReversals: [] as NonNullable<CollectionAutomationUndone["sharedReversals"]>,
+    };
     const keptFields = new Map<string, KeptAutomationField>();
     const counts = () => {
-      const {sharedReversals, ...rest} = result;
+      const { sharedReversals, ...rest } = result;
       return { ...rest, ...(sharedReversals.length ? { sharedReversals } : {}) };
     };
     try {
       await this.undoEachRun(hashes, trash, result, again, keptFields, retentionId);
     } catch (error) {
-      return { ...counts(), keptFields: [...keptFields.values()], errorMessage: error instanceof Error ? error.message : String(error) };
+      return {
+        ...counts(),
+        keptFields: [...keptFields.values()],
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
     } finally {
       // Once for the whole pass, however many claims it undid.
       if (hashes.size > 0) this.options.onRunsChanged();
@@ -3839,15 +5286,21 @@ export class CollectionAutomations {
     return { ...counts(), keptFields: [...keptFields.values()], errorMessage: null };
   }
 
-  async retainRunsForRestore(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>, id: string): Promise<void> {
+  async retainRunsForRestore(
+    definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
+    id: string,
+  ): Promise<void> {
     await this.retainRestoreClaims(await this.restoreDefinitionHashes(definitions), id);
   }
 
-  private async restoreDefinitionHashes(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>) {
+  private async restoreDefinitionHashes(
+    definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
+  ) {
     const hashes = new Map<string, Set<string>>();
     for (const { collectionPath, id, definitionHash: hash } of definitions) {
       const automationId = await this.automationIdAt(collectionPath, id);
-      if (automationId !== null) hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
+      if (automationId !== null)
+        hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
     }
     return hashes;
   }
@@ -3858,7 +5311,12 @@ export class CollectionAutomations {
   ) {
     // Every claim of these automations, newest first across them all, so a
     // field two automations wrote in turn goes back in the reverse order.
-    const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim; stored: Awaited<ReturnType<AutomationRunStore["runsOf"]>> }> = [];
+    const claims: Array<{
+      automationId: string;
+      wanted: ReadonlySet<string>;
+      claim: HistoryClaim;
+      stored: Awaited<ReturnType<AutomationRunStore["runsOf"]>>;
+    }> = [];
     const reportClaims: typeof claims = [];
     this.restorePlanning += 1;
     let retentionId: string;
@@ -3871,45 +5329,75 @@ export class CollectionAutomations {
         if (listed === null) throw new Error("The workspace engine is not running.");
         for (const claim of listed) {
           const stored = await this.options.store.runsOf(automationId, claim.claimId);
-          const runs = stored.runs.filter(run => wanted.has(run.definitionHash));
-          if (stored.unreadable || runs.length > 0) reportClaims.push({automationId, wanted, claim, stored});
-          if (stored.unreadable || runs.some(run => run.undo !== "done") || documentUndoKept(runs).length > 0 ||
-            sharedReversalsOf(runs).some(write => write.state === "pending" || write.state === "not-accepted")) {
+          const runs = stored.runs.filter((run) => wanted.has(run.definitionHash));
+          if (stored.unreadable || runs.length > 0)
+            reportClaims.push({ automationId, wanted, claim, stored });
+          if (
+            stored.unreadable ||
+            runs.some((run) => run.undo !== "done") ||
+            documentUndoKept(runs).length > 0 ||
+            sharedReversalsOf(runs).some(
+              (write) => write.state === "pending" || write.state === "not-accepted",
+            )
+          ) {
             claims.push({ automationId, wanted, claim, stored });
           }
         }
       }
       claims.sort((left, right) => newerFirst(left.claim, right.claim));
       reportClaims.sort((left, right) => newerFirst(left.claim, right.claim));
-      retentionId = restoreId ?? `runs:${createHash("sha256").update(JSON.stringify([...hashes].map(([id, wanted]) => [id, [...wanted].sort()]).sort())).digest("hex")}`;
+      retentionId =
+        restoreId ??
+        `runs:${createHash("sha256")
+          .update(
+            JSON.stringify([...hashes].map(([id, wanted]) => [id, [...wanted].sort()]).sort()),
+          )
+          .digest("hex")}`;
       const restores = await this.options.store.pendingRestores();
-      const previous = restores.find(entry => entry.id === retentionId);
+      const previous = restores.find((entry) => entry.id === retentionId);
       const retained = await this.options.store.unfinishedUndos();
       if (retained === null) throw new Error("dohc could not read unfinished Undo progress.");
-      if (new Set([...retained, ...this.changing, ...claims.map(entry => entry.claim.claimId)]).size > MAX_HISTORY_KEEP) {
-        const otherRestores = new Set(restores.filter(entry => entry.id !== retentionId).flatMap(entry => entry.claims));
-        const unfinishedUndos = [...retained].filter(id => !otherRestores.has(id));
-        const next = otherRestores.size > unfinishedUndos.length
-          ? "Finish or dismiss another unfinished Stop and restore."
-          : "Finish unfinished Undos or undo these runs in run history.";
+      if (
+        new Set([...retained, ...this.changing, ...claims.map((entry) => entry.claim.claimId)])
+          .size > MAX_HISTORY_KEEP
+      ) {
+        const otherRestores = new Set(
+          restores.filter((entry) => entry.id !== retentionId).flatMap((entry) => entry.claims),
+        );
+        const unfinishedUndos = [...retained].filter((id) => !otherRestores.has(id));
+        const next =
+          otherRestores.size > unfinishedUndos.length
+            ? "Finish or dismiss another unfinished Stop and restore."
+            : "Finish unfinished Undos or undo these runs in run history.";
         throw new Error(`dohc can keep up to 10,000 runs for Undo. ${next}`);
       }
-      if (claims.length > 0 || previous) await this.options.store.savePendingRestore({id: retentionId, claims: claims.map(entry => entry.claim.claimId)});
+      if (claims.length > 0 || previous)
+        await this.options.store.savePendingRestore({
+          id: retentionId,
+          claims: claims.map((entry) => entry.claim.claimId),
+        });
     } finally {
       this.restorePlanning -= 1;
     }
-    return {claims, reportClaims, retentionId};
+    return { claims, reportClaims, retentionId };
   }
 
   private async undoEachRun(
     hashes: ReadonlyMap<string, ReadonlySet<string>>,
     trash: (path: string) => Promise<void>,
-    result: { undone: number; left: number; reverted: number; missing: number; otherKept: number; sharedReversals: NonNullable<CollectionAutomationUndone["sharedReversals"]> },
+    result: {
+      undone: number;
+      left: number;
+      reverted: number;
+      missing: number;
+      otherKept: number;
+      sharedReversals: NonNullable<CollectionAutomationUndone["sharedReversals"]>;
+    },
     again: boolean,
     keptFields: Map<string, KeptAutomationField>,
     restoreId?: string,
   ): Promise<void> {
-    const {claims, reportClaims, retentionId} = await this.retainRestoreClaims(hashes, restoreId);
+    const { claims, reportClaims, retentionId } = await this.retainRestoreClaims(hashes, restoreId);
     // The pass stops at the first claim whose Undo fails, so no older claim
     // is undone over one that stopped part way.
     try {
@@ -3918,10 +5406,11 @@ export class CollectionAutomations {
           result.left += 1;
           continue;
         }
-        const runs = stored.runs
-          .filter((run) => wanted.has(run.definitionHash));
+        const runs = stored.runs.filter((run) => wanted.has(run.definitionHash));
         const sharedReversals = sharedReversalsOf(runs);
-        const pending = runs.some((run) => run.undo !== "done") || sharedReversals.some(write => write.state === "not-accepted");
+        const pending =
+          runs.some((run) => run.undo !== "done") ||
+          sharedReversals.some((write) => write.state === "not-accepted");
         const kept = documentUndoKept(runs).length > 0;
         if (again ? pending || !kept : !pending && !kept) {
           continue;
@@ -3929,36 +5418,54 @@ export class CollectionAutomations {
         const target = { automationId, claimId: claim.claimId };
         let undone = await this.undoClaim({ ...target, deletes: null }, trash, wanted, stored);
         // Stop and restore leaves deletions for the person's confirmation in run history.
-        if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
-          undone = await this.undoClaim({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted, stored);
+        if (
+          undone.status === "confirm" &&
+          undone.preview.deletes + undone.preview.unchecked === 0
+        ) {
+          undone = await this.undoClaim(
+            { ...target, deletes: { token: undone.preview.token, chosen: [] } },
+            trash,
+            wanted,
+            stored,
+          );
         }
         if (undone.status === "undone") {
-          if (undone.sharedReversals?.some(write => write.state === "not-accepted")) {
+          if (undone.sharedReversals?.some((write) => write.state === "not-accepted")) {
             if (!again) result.left += 1;
           } else if (pending) result.undone += 1;
           result.reverted += undone.reverted;
           result.missing += undone.missing;
           if (pending) {
-            result.otherKept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions;
+            result.otherKept +=
+              undone.kept + undone.keptChanged + undone.irreversible + undone.actions;
           }
         } else if (!again) {
-          const currentRuns = stored.runs.filter(run => wanted.has(run.definitionHash));
-          const stillPending = currentRuns.some(run => run.undo !== "done") ||
-            sharedReversalsOf(currentRuns).some(write => write.state === "not-accepted");
+          const currentRuns = stored.runs.filter((run) => wanted.has(run.definitionHash));
+          const stillPending =
+            currentRuns.some((run) => run.undo !== "done") ||
+            sharedReversalsOf(currentRuns).some((write) => write.state === "not-accepted");
           const stillKept = documentUndoKept(currentRuns).length > 0;
           if (stored.unreadable || stillPending || stillKept) result.left += 1;
         }
       }
     } finally {
       if (restoreId === undefined) await this.options.store.removePendingRestore(retentionId);
-      const reported = new Map<string, NonNullable<CollectionAutomationUndone["sharedReversals"]>[number]>();
+      const reported = new Map<
+        string,
+        NonNullable<CollectionAutomationUndone["sharedReversals"]>[number]
+      >();
       for (const { wanted, stored } of reportClaims) {
-        const runs = stored.runs.filter(run => wanted.has(run.definitionHash));
-        for (const write of sharedReversalsOf(runs)) reported.set(sharedFileUpdateKey(write.draft), write);
+        const runs = stored.runs.filter((run) => wanted.has(run.definitionHash));
+        for (const write of sharedReversalsOf(runs))
+          reported.set(sharedFileUpdateKey(write.draft), write);
         for (const run of runs) {
           for (const { recordId, field, path, fieldName, datasetRecordId } of run.undoKept) {
-            const id = createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32);
-            if (!keptFields.has(id)) keptFields.set(id, { id, path, field: fieldName, recordId: datasetRecordId });
+            const id = createHash("sha256")
+              .update(JSON.stringify([recordId, field]))
+              .digest("hex")
+              .slice(0, 32);
+            if (!keptFields.has(id))
+              keptFields.set(id, { id, path, field: fieldName, recordId: datasetRecordId });
           }
         }
       }
@@ -3974,7 +5481,10 @@ export class CollectionAutomations {
     if (!parsed) return false;
     const indexed = await this.parsedFile(parsed.collectionPath);
     if (indexed?.file.status !== "read") return false;
-    return indexed.file.entries.some((entry) => entry.status === "valid" && entry.automation.id === parsed.id && entry.automation.enabled);
+    return indexed.file.entries.some(
+      (entry) =>
+        entry.status === "valid" && entry.automation.id === parsed.id && entry.automation.enabled,
+    );
   }
 
   /** The name an engine automation id's automation has in its file, or null. */
@@ -3984,7 +5494,8 @@ export class CollectionAutomations {
 
   /** Waits for the open that reads the index. Only the workspace's own open starts one. */
   private async ready(): Promise<void> {
-    if (this.opened === null) throw new Error("dohc is still opening this workspace's automations. Try again in a moment.");
+    if (this.opened === null)
+      throw new Error("dohc is still opening this workspace's automations. Try again in a moment.");
     await this.opened;
   }
 
@@ -3996,13 +5507,18 @@ export class CollectionAutomations {
     return next;
   }
 
-  private withLiveEngine<T>(work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null> {
+  private withLiveEngine<T>(
+    work: (engine: CollectionAutomationEngine) => Promise<T>,
+  ): Promise<T | null> {
     if (this.state === "disposed" || this.state === "paused") return Promise.resolve(null);
     return this.options.withEngine(work);
   }
 
   /** The dataset host, only while the executor runs. With `open`, opens it for what a person asked. */
-  private withLiveHost<T>(work: (host: DatasetAutomationHost) => T | Promise<T>, open = false): Promise<T | null> {
+  private withLiveHost<T>(
+    work: (host: DatasetAutomationHost) => T | Promise<T>,
+    open = false,
+  ): Promise<T | null> {
     if (this.state === "disposed" || this.state === "paused") return Promise.resolve(null);
     return this.options.withDatasetHost(work, open);
   }
@@ -4015,7 +5531,10 @@ export class CollectionAutomations {
    * changed between those kinds has claims in both. Null when either ledger
    * cannot be read.
    */
-  private async claimPage(automationId: string, page: { before?: string; limit: number }): Promise<ClaimPage | null> {
+  private async claimPage(
+    automationId: string,
+    page: { before?: string; limit: number },
+  ): Promise<ClaimPage | null> {
     const id = this.locate(automationId);
     const engine = await this.withLiveEngine(async (live): Promise<ClaimPage> => {
       const listed = await live.listAutomationClaims({ automationId, ...page });
@@ -4036,7 +5555,10 @@ export class CollectionAutomations {
     const claims = merged.slice(0, page.limit);
     const last = claims.at(-1);
     const more = merged.length > page.limit || pages.some((listed) => listed.next !== null);
-    return { claims, next: more && last !== undefined ? `${last.createdAtMs}:${last.claimId}` : null };
+    return {
+      claims,
+      next: more && last !== undefined ? `${last.createdAtMs}:${last.claimId}` : null,
+    };
   }
 
   /** Every claim of one automation that either ledger keeps on this computer, newest first. Null when either ledger cannot be read. */
@@ -4057,7 +5579,11 @@ export class CollectionAutomations {
    * Collection's own ledger first, then the engine. With `open`, opens the
    * dataset host for what a person asked. Null when a ledger cannot be read.
    */
-  private async findClaim(automationId: string, claimId: string, open: boolean): Promise<LedgerClaim | "missing" | null> {
+  private async findClaim(
+    automationId: string,
+    claimId: string,
+    open: boolean,
+  ): Promise<LedgerClaim | "missing" | null> {
     const id = this.locate(automationId);
     if (id !== null && this.datasets.has(id.collectionPath)) {
       const inLedger = await this.withLiveHost((ledger): LedgerClaim | "missing" => {
@@ -4109,7 +5635,11 @@ export class CollectionAutomations {
 
   private async readingIndex(work: () => Promise<void>): Promise<void> {
     this.indexReads += 1;
-    try { await work(); } finally { if (--this.indexReads === 0) this.notifyClaimed(); }
+    try {
+      await work();
+    } finally {
+      if (--this.indexReads === 0) this.notifyClaimed();
+    }
   }
 
   private loadIndex(): Promise<void> {
@@ -4157,13 +5687,20 @@ export class CollectionAutomations {
     const read = await this.options.readText(`${collection}/${COLLECTION_SCHEMA_FILENAME}`);
     if (read === null) return null;
     const parsed = read.truncated ? null : parseCollectionSchema(read.text);
-    const versionError = parsed && collectionVersionError(parsed.reasons, `${collection}/${COLLECTION_SCHEMA_FILENAME}`);
+    const versionError =
+      parsed &&
+      collectionVersionError(parsed.reasons, `${collection}/${COLLECTION_SCHEMA_FILENAME}`);
     if (versionError) return versionError;
     // A degraded schema still lists the fields it could read; a file that is
     // not a schema at all lists none.
-    const unreadable = parsed === null ||
-      parsed.reasons.some((reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping");
-    return unreadable ? unreadableSchema(collection) : new Set(parsed.schema.fields.map((field) => field.name));
+    const unreadable =
+      parsed === null ||
+      parsed.reasons.some(
+        (reason) => reason.code === "invalid-yaml" || reason.code === "root-not-mapping",
+      );
+    return unreadable
+      ? unreadableSchema(collection)
+      : new Set(parsed.schema.fields.map((field) => field.name));
   }
 
   /**
@@ -4171,13 +5708,18 @@ export class CollectionAutomations {
    * Collection does not have keeps it off until someone fixes the file or
    * the Collection: a write would add a field nobody defined.
    */
-  private cannotRun(collectionPath: string, automation: Automation, datasetAt?: DatasetAt): string | null {
+  private cannotRun(
+    collectionPath: string,
+    automation: Automation,
+    datasetAt?: DatasetAt,
+  ): string | null {
     const unsupported = this.unsupportedIn(collectionPath, automation, datasetAt);
     if (unsupported !== null) return unsupported;
     for (const { collection, field } of fieldsNamedBy(automation, collectionPath)) {
       const fields = this.schemaFields.get(collection);
       if (typeof fields === "string") return fields;
-      if (fields && !fields.has(field)) return `${field} is not a field in ${collectionNamed(collection).name}.`;
+      if (fields && !fields.has(field))
+        return `${field} is not a field in ${collectionNamed(collection).name}.`;
     }
     return null;
   }
@@ -4189,8 +5731,10 @@ export class CollectionAutomations {
     if (parsed === undefined) this.files.delete(collectionPath);
     else this.files.set(collectionPath, parsed);
     const collectionId = this.collectionIdOf(collectionPath);
-    if (collectionId !== null && this.unprovenPaths.has(collectionPath)) this.unprovenFolders.add(collectionId);
-    if (collectionId !== null && this.unprovenFolders.has(collectionId)) await this.proveFolder(collectionPath, parsed?.file);
+    if (collectionId !== null && this.unprovenPaths.has(collectionPath))
+      this.unprovenFolders.add(collectionId);
+    if (collectionId !== null && this.unprovenFolders.has(collectionId))
+      await this.proveFolder(collectionPath, parsed?.file);
   }
 
   /**
@@ -4199,18 +5743,29 @@ export class CollectionAutomations {
    * in every version it leaves `unprovenFolders`, so an automation written
    * after that runs as usual.
    */
-  private async proveFolder(collectionPath: string, here: AutomationsFileParseResult | undefined): Promise<void> {
+  private async proveFolder(
+    collectionPath: string,
+    here: AutomationsFileParseResult | undefined,
+  ): Promise<void> {
     const collectionId = this.collectionIdOf(collectionPath);
     const found = await this.automationFiles(collectionPath).catch((error: unknown) => {
       this.options.onError("list a Collection's automations in every version", error);
       return null;
     });
     await this.updateVerdicts(() => {
-      if (collectionId !== null && here?.status === "read") this.addUnprovenDefinitions(collectionId, here.entries);
-      const hereReads = here === undefined || (here.status === "read" && here.entries.every((entry) => entry.status === "valid"));
+      if (collectionId !== null && here?.status === "read")
+        this.addUnprovenDefinitions(collectionId, here.entries);
+      const hereReads =
+        here === undefined ||
+        (here.status === "read" && here.entries.every((entry) => entry.status === "valid"));
       const listed = found === null ? null : this.addListedDefinitions(found);
       for (const id of listed?.unread ?? []) this.unprovenFolders.add(id);
-      if (hereReads && found !== null && listed?.unread.size === 0 && !found.some((file) => file.collectionId === null)) {
+      if (
+        hereReads &&
+        found !== null &&
+        listed?.unread.size === 0 &&
+        !found.some((file) => file.collectionId === null)
+      ) {
         this.unprovenPaths.delete(collectionPath);
         if (collectionId !== null) this.unprovenFolders.delete(collectionId);
       }
@@ -4223,38 +5778,75 @@ export class CollectionAutomations {
    * version's list. A file that is not text, or text the engine did not give,
    * is null. Null when the engine is not running.
    */
-  private automationFiles(folder?: string): Promise<Array<{ folder: string; collectionId: string | null; text: string | null }> | null> {
+  private automationFiles(
+    folder?: string,
+  ): Promise<Array<{ folder: string; collectionId: string | null; text: string | null }> | null> {
     return this.withLiveEngine(async (engine) => {
       const { workspaceId } = engine;
       const files: Array<{ folder: string; collectionId: string | null; text: string | null }> = [];
       for (const version of await engine.listVersions({ workspaceId })) {
         const datasetId = async (path: string): Promise<string | null> => {
-          const descriptor = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${path}/${DATASET_FILE_NAME}` });
+          const descriptor = await engine.readTextFile({
+            workspaceId,
+            versionId: version.id,
+            path: `${path}/${DATASET_FILE_NAME}`,
+          });
           let data: unknown = null;
           try {
-            data = descriptor?.contentKind === "text" && descriptor.text !== null ? JSON.parse(descriptor.text) : null;
+            data =
+              descriptor?.contentKind === "text" && descriptor.text !== null
+                ? JSON.parse(descriptor.text)
+                : null;
           } catch {
             return null;
           }
-          return typeof data === "object" && data !== null && "datasetId" in data && typeof data.datasetId === "string" ? data.datasetId : null;
+          return typeof data === "object" &&
+            data !== null &&
+            "datasetId" in data &&
+            typeof data.datasetId === "string"
+            ? data.datasetId
+            : null;
         };
         let versionFolder = folder;
         if (folder !== undefined) {
           const wanted = this.collectionIdOf(folder);
-          const schema = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${folder}/${COLLECTION_SCHEMA_FILENAME}` });
+          const schema = await engine.readTextFile({
+            workspaceId,
+            versionId: version.id,
+            path: `${folder}/${COLLECTION_SCHEMA_FILENAME}`,
+          });
           const isDataset = this.datasets.has(folder);
-          const atPath = schema?.objectId ?? await datasetId(folder);
+          const atPath = schema?.objectId ?? (await datasetId(folder));
           if (wanted !== null && atPath !== wanted) {
             if (this.unprovenPaths.has(folder) || atPath === null) {
-              const read = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${folder}/${AUTOMATIONS_FILE_NAME}` });
-              if (read !== null) files.push({ folder, collectionId: atPath, text: read.contentKind === "text" ? read.text : null });
+              const read = await engine.readTextFile({
+                workspaceId,
+                versionId: version.id,
+                path: `${folder}/${AUTOMATIONS_FILE_NAME}`,
+              });
+              if (read !== null)
+                files.push({
+                  folder,
+                  collectionId: atPath,
+                  text: read.contentKind === "text" ? read.text : null,
+                });
             }
-            const listed = await engine.listTextFileMetadata({ workspaceId, versionId: version.id });
-            let found = listed.find((file) => file.objectId === wanted && posix.basename(file.path) === COLLECTION_SCHEMA_FILENAME);
+            const listed = await engine.listTextFileMetadata({
+              workspaceId,
+              versionId: version.id,
+            });
+            let found = listed.find(
+              (file) =>
+                file.objectId === wanted &&
+                posix.basename(file.path) === COLLECTION_SCHEMA_FILENAME,
+            );
             if (isDataset) {
               found = undefined;
               for (const file of listed) {
-                if (posix.basename(file.path) === DATASET_FILE_NAME && await datasetId(posix.dirname(file.path)) === wanted) {
+                if (
+                  posix.basename(file.path) === DATASET_FILE_NAME &&
+                  (await datasetId(posix.dirname(file.path))) === wanted
+                ) {
                   found = file;
                   break;
                 }
@@ -4264,23 +5856,35 @@ export class CollectionAutomations {
             versionFolder = posix.dirname(found.path);
           }
         }
-        const paths = versionFolder !== undefined
-          ? [`${versionFolder}/${AUTOMATIONS_FILE_NAME}`]
-          : (await engine.listTextFileMetadata({ workspaceId, versionId: version.id }))
-            .map((file) => file.path)
-            .filter((path) => posix.basename(path) === AUTOMATIONS_FILE_NAME && posix.dirname(path) !== ".");
+        const paths =
+          versionFolder !== undefined
+            ? [`${versionFolder}/${AUTOMATIONS_FILE_NAME}`]
+            : (await engine.listTextFileMetadata({ workspaceId, versionId: version.id }))
+                .map((file) => file.path)
+                .filter(
+                  (path) =>
+                    posix.basename(path) === AUTOMATIONS_FILE_NAME && posix.dirname(path) !== ".",
+                );
         for (const path of paths) {
           const read = await engine.readTextFile({ workspaceId, versionId: version.id, path });
           // A version without this Collection's file has nothing to hold.
           if (read === null && folder !== undefined) continue;
           // The engine gives a binary file as empty text, which would read as no automations.
           const collectionPath = posix.dirname(path);
-          const schema = await engine.readTextFile({ workspaceId, versionId: version.id, path: `${collectionPath}/${COLLECTION_SCHEMA_FILENAME}` });
+          const schema = await engine.readTextFile({
+            workspaceId,
+            versionId: version.id,
+            path: `${collectionPath}/${COLLECTION_SCHEMA_FILENAME}`,
+          });
           let collectionId = schema?.objectId;
           if (collectionId === undefined) {
-            collectionId = await datasetId(collectionPath) ?? undefined;
+            collectionId = (await datasetId(collectionPath)) ?? undefined;
           }
-          files.push({ folder: collectionPath, collectionId: collectionId ?? null, text: read?.contentKind === "text" ? read.text : null });
+          files.push({
+            folder: collectionPath,
+            collectionId: collectionId ?? null,
+            text: read?.contentKind === "text" ? read.text : null,
+          });
         }
       }
       return files;
@@ -4302,13 +5906,22 @@ export class CollectionAutomations {
     for (const [collectionPath, indexed] of this.files) {
       const collectionId = this.collectionIdOf(collectionPath);
       if (indexed.file.status !== "read" || collectionId === null) continue;
-      const valid = indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : []));
-      const on = valid.filter((automation) => automation.enabled).map((automation) => automation.id);
+      const valid = indexed.file.entries.flatMap((entry) =>
+        entry.status === "valid" ? [entry.automation] : [],
+      );
+      const on = valid
+        .filter((automation) => automation.enabled)
+        .map((automation) => automation.id);
       // Saved by Collection id, so a Collection that moved keeps its set.
       const before = saved?.get(collectionId);
       for (const { id, name, enabled } of valid) {
         if (enabled || !before?.includes(id)) continue;
-        this.options.onSwitchedOff({ collectionPath, id, automationId: collectionAutomationId(collectionId, id), name });
+        this.options.onSwitchedOff({
+          collectionPath,
+          id,
+          automationId: collectionAutomationId(collectionId, id),
+          name,
+        });
       }
       if (before !== undefined && isDeepStrictEqual(before, on)) continue;
       next.set(collectionId, on);
@@ -4348,7 +5961,8 @@ export class CollectionAutomations {
       return null;
     }
     if (listed === null) return null;
-    for (const { datasetId, error } of listed.failures) this.options.onError(`read dataset ${datasetId}'s rules`, error);
+    for (const { datasetId, error } of listed.failures)
+      this.options.onError(`read dataset ${datasetId}'s rules`, error);
     const folders = new Map<string, IndexedDataset>();
     const unplaced = new Set<string>();
     for (const definition of listed.definitions) {
@@ -4358,9 +5972,18 @@ export class CollectionAutomations {
         continue;
       }
       // Index approved destinations even when they have no automations file.
-      folders.set(folder, { definition, approved: null, generated: null, grants: { workspaceId: "", grants: [] } });
+      folders.set(folder, {
+        definition,
+        approved: null,
+        generated: null,
+        grants: { workspaceId: "", grants: [] },
+      });
       try {
-        const metadata = await this.withLiveHost((host) => ({ approved: host.revision(definition.datasetId), generated: host.generated(definition.datasetId), grants: host.dataGrants(definition.datasetId) }));
+        const metadata = await this.withLiveHost((host) => ({
+          approved: host.revision(definition.datasetId),
+          generated: host.generated(definition.datasetId),
+          grants: host.dataGrants(definition.datasetId),
+        }));
         if (metadata === null) throw new Error(`The dataset host for ${folder} is unavailable.`);
         folders.set(folder, { definition, ...metadata });
       } catch (error) {
@@ -4380,7 +6003,10 @@ export class CollectionAutomations {
     } catch {
       // A descriptor that is not JSON names no dataset.
     }
-    return typeof described === "object" && described !== null && "datasetId" in described && typeof described.datasetId === "string"
+    return typeof described === "object" &&
+      described !== null &&
+      "datasetId" in described &&
+      typeof described.datasetId === "string"
       ? described.datasetId
       : null;
   }
@@ -4388,35 +6014,69 @@ export class CollectionAutomations {
   /** Why dohc cannot run an automation in this indexed Collection yet, or null. */
   private inventory(collectionPath: string, automation: Automation): AutomationInventory {
     const cached = this.inventories.get(automation);
-    if (cached?.revision === this.targetRevision && cached.chat === this.chat && cached.source === collectionPath) {
+    if (
+      cached?.revision === this.targetRevision &&
+      cached.chat === this.chat &&
+      cached.source === collectionPath
+    ) {
       if (cached.result instanceof Error) throw cached.result;
       return cached.result;
     }
     let result: AutomationInventory | Error;
-    try { result = this.buildInventory(collectionPath, automation); }
-    catch (error) { result = error instanceof Error ? error : new Error(String(error)); }
-    this.inventories.set(automation, { revision: this.targetRevision, chat: this.chat, source: collectionPath, result });
+    try {
+      result = this.buildInventory(collectionPath, automation);
+    } catch (error) {
+      result = error instanceof Error ? error : new Error(String(error));
+    }
+    this.inventories.set(automation, {
+      revision: this.targetRevision,
+      chat: this.chat,
+      source: collectionPath,
+      result,
+    });
     if (result instanceof Error) throw result;
     return result;
   }
 
   /** `datasetAt` finds a dataset Collection by folder: the index's, unless the caller shows a server's. */
-  private buildInventory(collectionPath: string, automation: Automation, datasetAt: DatasetAt = (path) => this.datasets.get(path)): AutomationInventory {
-    return automationInventory(automation, collectionPath, (path) => {
-      const dataset = datasetAt(path);
-      if (dataset !== undefined) {
-        if (dataset.generated === null || dataset.approved === null) throw new AutomationRunWait(`The dataset host for ${path} is unavailable.`);
-        return { kind: "dataset", collection: collectionNamed(path), approved: dataset.approved,
-          generated: dataset.generated, grants: dataset.grants };
-      }
-      if (!this.collections.has(path)) throw new Error(`dohc cannot find an approved Collection at ${path}. Check its files and rules.`);
-      const fields = this.schemaFields.get(path) ?? null;
-      if (typeof fields === "string") throw new Error(fields);
-      return { kind: "document", collection: collectionNamed(path), fields };
-    }, this.chat);
+  private buildInventory(
+    collectionPath: string,
+    automation: Automation,
+    datasetAt: DatasetAt = (path) => this.datasets.get(path),
+  ): AutomationInventory {
+    return automationInventory(
+      automation,
+      collectionPath,
+      (path) => {
+        const dataset = datasetAt(path);
+        if (dataset !== undefined) {
+          if (dataset.generated === null || dataset.approved === null)
+            throw new AutomationRunWait(`The dataset host for ${path} is unavailable.`);
+          return {
+            kind: "dataset",
+            collection: collectionNamed(path),
+            approved: dataset.approved,
+            generated: dataset.generated,
+            grants: dataset.grants,
+          };
+        }
+        if (!this.collections.has(path))
+          throw new Error(
+            `dohc cannot find an approved Collection at ${path}. Check its files and rules.`,
+          );
+        const fields = this.schemaFields.get(path) ?? null;
+        if (typeof fields === "string") throw new Error(fields);
+        return { kind: "document", collection: collectionNamed(path), fields };
+      },
+      this.chat,
+    );
   }
 
-  private unsupportedIn(collectionPath: string, automation: Automation, datasetAt?: DatasetAt): string | null {
+  private unsupportedIn(
+    collectionPath: string,
+    automation: Automation,
+    datasetAt?: DatasetAt,
+  ): string | null {
     const dataset = datasetAt ? datasetAt(collectionPath) : this.datasets.get(collectionPath);
     if (dataset !== undefined) {
       const subscription = datasetSubscriptionFor(automation, dataset.definition);
@@ -4426,13 +6086,18 @@ export class CollectionAutomations {
       if (datasetAt) this.buildInventory(collectionPath, automation, datasetAt);
       else this.inventory(collectionPath, automation);
       return null;
-    } catch (error) { return errorText(error); }
+    } catch (error) {
+      return errorText(error);
+    }
   }
 
   /** Uses the indexed destination metadata, as every reach consumer does. */
   private reachSteps(collectionPath: string, automation: Automation): ReachStep[] {
-    try { return this.inventory(collectionPath, automation).reach; }
-    catch (error) { return [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }]; }
+    try {
+      return this.inventory(collectionPath, automation).reach;
+    } catch (error) {
+      return [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }];
+    }
   }
 
   private definitionFor(automationId: string): Automation | null {
@@ -4484,7 +6149,12 @@ export class CollectionAutomations {
       // A stopped step fails the run, and a held one waits for a current editor.
       const verdict = this.verdicts.get(reachVerdictKey(automationId, hash, step))?.verdict;
       if (verdict === "stopped" || verdict === "held") return false;
-      if ("collection" in reach && !this.datasets.has(reach.collection.path) && !(await writable(reach.collection.path))) return false;
+      if (
+        "collection" in reach &&
+        !this.datasets.has(reach.collection.path) &&
+        !(await writable(reach.collection.path))
+      )
+        return false;
     }
     return true;
   }
@@ -4508,7 +6178,8 @@ export class CollectionAutomations {
     for (const [collectionPath, indexed] of this.files) {
       if (indexed.file.status !== "read") continue;
       for (const entry of indexed.file.entries) {
-        if (entry.status !== "valid" || this.cannotRun(collectionPath, entry.automation) !== null) continue;
+        if (entry.status !== "valid" || this.cannotRun(collectionPath, entry.automation) !== null)
+          continue;
         const automationId = this.automationIdIn(collectionPath, entry.automation.id);
         automations.push({ automationId, collectionPath, automation: entry.automation });
       }
@@ -4527,27 +6198,39 @@ export class CollectionAutomations {
         const group = this.groups?.group(trigger.group);
         if (!group || "problem" in group) continue;
         desired.set(automationId, {
-          automationId, groupId: group.channelId, ...(trigger.startsWith !== null ? { startsWith: trigger.startsWith } : {}),
+          automationId,
+          groupId: group.channelId,
+          ...(trigger.startsWith !== null ? { startsWith: trigger.startsWith } : {}),
         });
         continue;
       }
       // A dataset's record changes claim in its own ledger.
       if (this.datasets.has(collectionPath)) continue;
       const subscription = subscriptionFor(trigger);
-      if (subscription !== null) desired.set(automationId, { automationId, path: collectionPath, ...subscription });
+      if (subscription !== null)
+        desired.set(automationId, { automationId, path: collectionPath, ...subscription });
     }
     return desired;
   }
 
-  private desiredDatasetSubscriptions(): Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }> {
-    const desired = new Map<string, { datasetId: string; subscription: DatasetAutomationSubscription }>();
+  private desiredDatasetSubscriptions(): Map<
+    string,
+    { datasetId: string; subscription: DatasetAutomationSubscription }
+  > {
+    const desired = new Map<
+      string,
+      { datasetId: string; subscription: DatasetAutomationSubscription }
+    >();
     for (const { automationId, collectionPath, automation } of this.everyAutomation()) {
       const definition = this.datasets.get(collectionPath)?.definition;
       if (definition === undefined || !automation.enabled) continue;
       // A button claims when pressed, so it watches nothing.
       const watched = datasetSubscriptionFor(automation, definition);
       if (watched === null || "problem" in watched) continue;
-      desired.set(automationId, { datasetId: definition.datasetId, subscription: { automationId, ...watched, definitionHash: definitionDigest(automation) } });
+      desired.set(automationId, {
+        datasetId: definition.datasetId,
+        subscription: { automationId, ...watched, definitionHash: definitionDigest(automation) },
+      });
     }
     return desired;
   }
@@ -4556,26 +6239,33 @@ export class CollectionAutomations {
   private isSubscribed(held: HeldClaim): boolean {
     return held.source === "engine"
       ? this.desiredSubscriptions().has(held.claim.automationId)
-      : this.desiredDatasetSubscriptions().get(held.claim.automationId)?.datasetId === held.claim.datasetId;
+      : this.desiredDatasetSubscriptions().get(held.claim.automationId)?.datasetId ===
+          held.claim.datasetId;
   }
 
   /** Why a Group-message automation's Group cannot start it, or null. */
   private groupProblem(automation: Automation): string | null {
     // A Group only a draft names was never looked up, so it is unknown here, not missing.
-    if (automation.when.kind !== "group-message" || !this.groupsLookedUp.has(automation.when.group)) return null;
+    if (automation.when.kind !== "group-message" || !this.groupsLookedUp.has(automation.when.group))
+      return null;
     const group = this.groups?.group(automation.when.group);
     return group && "problem" in group ? group.problem : null;
   }
 
   /** Finds each Group a Group-message automation names, for its subscription. */
   private async loadGroups(): Promise<void> {
-    const groups = new Set(this.everyAutomation().flatMap(({ automation }) =>
-      automation.when.kind === "group-message" ? [automation.when.group] : []));
+    const groups = new Set(
+      this.everyAutomation().flatMap(({ automation }) =>
+        automation.when.kind === "group-message" ? [automation.when.group] : [],
+      ),
+    );
     if (groups.size === 0) return;
     try {
       // Only Groups are read, so no roster is needed.
       const directory = await this.options.chat.directory(
-        { kind: "owner", ownerUserId: null, grants: [] }, { groups, people: new Set() });
+        { kind: "owner", ownerUserId: null, grants: [] },
+        { groups, people: new Set() },
+      );
       if (directory) {
         this.groups = directory;
         this.groupsLookedUp = groups;
@@ -4599,16 +6289,26 @@ export class CollectionAutomations {
       if (!this.verdictsUnreadable && this.verdictsDirty) {
         // An edited automation starts its verdicts again, so the old
         // definition's go.
-        const hashes = new Map(this.everyAutomation().map(({ automationId, automation }) => [automationId, definitionHash(automation)]));
+        const hashes = new Map(
+          this.everyAutomation().map(({ automationId, automation }) => [
+            automationId,
+            definitionHash(automation),
+          ]),
+        );
         for (const [key, verdict] of this.verdicts) {
           const hash = hashes.get(verdict.automationId);
           if (hash !== undefined && hash !== verdict.definitionHash) this.verdicts.delete(key);
         }
         const pending = this.reachPending;
         await this.options.store.saveReachVerdicts({
-          verdicts: [...this.verdicts.values()], hostRecord: this.hostRecord, unproven: [...this.unproven],
-          unprovenAll: this.unprovenAll, unprovenFolders: [...this.unprovenFolders], unprovenPaths: [...this.unprovenPaths],
-          pending, taken: this.reachTakenAt,
+          verdicts: [...this.verdicts.values()],
+          hostRecord: this.hostRecord,
+          unproven: [...this.unproven],
+          unprovenAll: this.unprovenAll,
+          unprovenFolders: [...this.unprovenFolders],
+          unprovenPaths: [...this.unprovenPaths],
+          pending,
+          taken: this.reachTakenAt,
         });
         this.savedPending = pending;
         this.verdictsDirty = false;
@@ -4634,8 +6334,11 @@ export class CollectionAutomations {
     previous: StoredReachVerdict | undefined,
     next: ReturnType<typeof nextReachVerdict>,
   ): ReturnType<typeof nextReachVerdict> {
-    return previous === undefined && next.verdict === "allowed" && (this.unprovenAll ||
-      this.unproven.has(definitionKey(automationId, hash)) || inUnprovenFolder(this.unprovenFolders, automationId))
+    return previous === undefined &&
+      next.verdict === "allowed" &&
+      (this.unprovenAll ||
+        this.unproven.has(definitionKey(automationId, hash)) ||
+        inUnprovenFolder(this.unprovenFolders, automationId))
       ? { verdict: "held", stoppedFor: null }
       : next;
   }
@@ -4645,10 +6348,14 @@ export class CollectionAutomations {
    * automation ids they name, and the Collections whose file did not read
    * or holds an entry that did not.
    */
-  private addListedDefinitions(files: ReadonlyArray<{ folder: string; collectionId: string | null; text: string | null }>): { named: Set<string>; unread: Set<string> } {
+  private addListedDefinitions(
+    files: ReadonlyArray<{ folder: string; collectionId: string | null; text: string | null }>,
+  ): { named: Set<string>; unread: Set<string> } {
     const named = new Set<string>();
     const unread = new Set<string>();
-    const paths = new Set(files.filter((file) => file.collectionId === null).map((file) => file.folder));
+    const paths = new Set(
+      files.filter((file) => file.collectionId === null).map((file) => file.folder),
+    );
     for (const { folder, collectionId, text } of files) {
       if (collectionId === null) {
         this.unprovenPaths.add(folder);
@@ -4673,10 +6380,18 @@ export class CollectionAutomations {
   }
 
   /** Every valid definition in a Collection's file joins `unproven`, whether it can run yet or not. */
-  private addUnprovenDefinitions(collectionId: string, entries: Extract<AutomationsFileParseResult, { status: "read" }>["entries"]): void {
+  private addUnprovenDefinitions(
+    collectionId: string,
+    entries: Extract<AutomationsFileParseResult, { status: "read" }>["entries"],
+  ): void {
     for (const entry of entries) {
       if (entry.status === "valid") {
-        this.unproven.add(definitionKey(collectionAutomationId(collectionId, entry.automation.id), definitionHash(entry.automation)));
+        this.unproven.add(
+          definitionKey(
+            collectionAutomationId(collectionId, entry.automation.id),
+            definitionHash(entry.automation),
+          ),
+        );
       }
     }
   }
@@ -4733,8 +6448,17 @@ export class CollectionAutomations {
       this.hostRecord = record.generation;
       const { reach } = record;
       if (reach !== null) {
-        const taken = new Map(reach.verdicts.map((verdict) =>
-          [reachVerdictKey(verdict.automationId, verdict.definitionHash, verdict.step, verdict.recipient?.id), verdict]));
+        const taken = new Map(
+          reach.verdicts.map((verdict) => [
+            reachVerdictKey(
+              verdict.automationId,
+              verdict.definitionHash,
+              verdict.step,
+              verdict.recipient?.id,
+            ),
+            verdict,
+          ]),
+        );
         for (const [key, verdict] of taken) {
           const merged = mergedReachVerdict(this.verdicts.get(key), verdict);
           if (merged) this.verdicts.set(key, { ...merged, seq: ++this.verdictSeq });
@@ -4748,8 +6472,13 @@ export class CollectionAutomations {
           const id = this.collectionIdOf(path);
           if (id !== null) folders.add(id);
         }
-        this.holdAllowed((key, verdict) => !taken.has(key) && (reach.unprovenAll ||
-          unproven.has(definitionKey(verdict.automationId, verdict.definitionHash)) || inUnprovenFolder(folders, verdict.automationId)));
+        this.holdAllowed(
+          (key, verdict) =>
+            !taken.has(key) &&
+            (reach.unprovenAll ||
+              unproven.has(definitionKey(verdict.automationId, verdict.definitionHash)) ||
+              inUnprovenFolder(folders, verdict.automationId)),
+        );
         for (const key of unproven) this.unproven.add(key);
         for (const folder of folders) this.unprovenFolders.add(folder);
         if (reach.unprovenAll) {
@@ -4793,14 +6522,23 @@ export class CollectionAutomations {
 
   /** Whether a step waits only because its Collection's automations file does not read in some version. */
   private fileUnread(verdict: StoredReachVerdict): boolean {
-    return verdict.verdict === "held" && verdict.stoppedFor === null && inUnprovenFolder(this.unprovenFolders, verdict.automationId);
+    return (
+      verdict.verdict === "held" &&
+      verdict.stoppedFor === null &&
+      inUnprovenFolder(this.unprovenFolders, verdict.automationId)
+    );
   }
 
   /** Holds each allowed verdict `unproven` picks until a current editor confirms it. */
   private holdAllowed(unproven: (key: string, verdict: StoredReachVerdict) => boolean): void {
     for (const [key, verdict] of this.verdicts) {
       if (verdict.verdict === "allowed" && unproven(key, verdict)) {
-        this.verdicts.set(key, { ...verdict, verdict: "held", stoppedFor: null, seq: ++this.verdictSeq });
+        this.verdicts.set(key, {
+          ...verdict,
+          verdict: "held",
+          stoppedFor: null,
+          seq: ++this.verdictSeq,
+        });
       }
     }
   }
@@ -4811,8 +6549,14 @@ export class CollectionAutomations {
       ? ["unreadable"]
       : [
           ...this.heldUnprovenPaths().map((path) => `unidentified ${path}`),
-          ...this.holds().map((hold) => `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step, hold.recipient)} ${hold.seq} ${hold.fileUnread}`),
-          ...this.stops().map((stop) => `stopped ${reachVerdictKey(stop.automationId, stop.definitionHash, stop.step)} ${stop.seq}`),
+          ...this.holds().map(
+            (hold) =>
+              `held ${reachVerdictKey(hold.automationId, hold.definitionHash, hold.step, hold.recipient)} ${hold.seq} ${hold.fileUnread}`,
+          ),
+          ...this.stops().map(
+            (stop) =>
+              `stopped ${reachVerdictKey(stop.automationId, stop.definitionHash, stop.step)} ${stop.seq}`,
+          ),
         ].sort();
     if (isDeepStrictEqual(shown, this.publishedHolds)) return;
     this.publishedHolds = shown;
@@ -4832,15 +6576,23 @@ export class CollectionAutomations {
    * of these automations is held. A step that starts to wait raises its
    * notice once.
    */
-  private async recordVerdicts(roster: Exclude<ReachRoster, { kind: "unknown" }>, automations?: readonly OwnedAutomation[], resolved?: readonly ReachStep[]): Promise<boolean> {
+  private async recordVerdicts(
+    roster: Exclude<ReachRoster, { kind: "unknown" }>,
+    automations?: readonly OwnedAutomation[],
+    resolved?: readonly ReachStep[],
+  ): Promise<boolean> {
     await this.loadChat(roster);
     automations ??= this.everyAutomation();
     const owned = automations;
     const inventories = new Map<string, readonly ReachStep[]>();
     for (const { automationId, collectionPath, automation } of owned) {
-      try { inventories.set(automationId, resolved ?? this.inventory(collectionPath, automation).reach); }
-      catch (error) {
-        if (!(error instanceof AutomationRunWait)) inventories.set(automationId, [{ kind: "unavailable", reason: errorText(error), identity: "unavailable" }]);
+      try {
+        inventories.set(automationId, resolved ?? this.inventory(collectionPath, automation).reach);
+      } catch (error) {
+        if (!(error instanceof AutomationRunWait))
+          inventories.set(automationId, [
+            { kind: "unavailable", reason: errorText(error), identity: "unavailable" },
+          ]);
       }
     }
     return await this.updateVerdicts(() => {
@@ -4852,14 +6604,30 @@ export class CollectionAutomations {
         const hash = definitionHash(automation);
         const steps = inventories.get(automationId);
         if (steps === undefined) continue;
-        checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collectionPath), steps }).forEach((reach, index) => {
+        checkAutomationReach(roster, {
+          id: automation.id,
+          collection,
+          codeFiles: codeFilesOf(automation, collectionPath),
+          steps,
+        }).forEach((reach, index) => {
           const step = reachStepId(steps[index]!, index);
           const key = reachVerdictKey(automationId, hash, step);
           const previous = this.verdicts.get(key);
-          const next = this.unprovenHold(automationId, hash, previous, nextReachVerdict(previous, reach, automation.enabled));
+          const next = this.unprovenHold(
+            automationId,
+            hash,
+            previous,
+            nextReachVerdict(previous, reach, automation.enabled),
+          );
           if (next.verdict === "held") held = true;
           if (sameReachVerdict(previous, next)) return;
-          this.verdicts.set(key, { automationId, definitionHash: hash, step, ...next, seq: ++this.verdictSeq });
+          this.verdicts.set(key, {
+            automationId,
+            definitionHash: hash,
+            step,
+            ...next,
+            seq: ++this.verdictSeq,
+          });
         });
       }
       return held;
@@ -4877,7 +6645,11 @@ export class CollectionAutomations {
     // before this decides, and does not drop its Group subscriptions only
     // to add them again. Once a host is named this waits for nothing.
     const reads = this.relayReads.signal;
-    if (this.everyAutomation().some(({ automation }) => automation.enabled && automation.when.kind === "group-message")) {
+    if (
+      this.everyAutomation().some(
+        ({ automation }) => automation.enabled && automation.when.kind === "group-message",
+      )
+    ) {
       await this.options.requestHost(reads);
     }
     // The workspace closed while a relay read was out: change nothing, so
@@ -4907,7 +6679,9 @@ export class CollectionAutomations {
     for (const [automationId, subscription] of desired) {
       if (isGroupSubscription(subscription)) continue;
       if (!all && isDeepStrictEqual(this.subscribed.get(automationId), subscription)) continue;
-      const subscribed = await this.withLiveEngine((engine) => engine.subscribeAutomation(subscription));
+      const subscribed = await this.withLiveEngine((engine) =>
+        engine.subscribeAutomation(subscription),
+      );
       if (subscribed === null) continue;
       this.subscribed.set(automationId, subscription);
       changed = true;
@@ -4917,7 +6691,11 @@ export class CollectionAutomations {
     // host's, its engine watches no Groups, as off the host, so a release it
     // makes is stale and the relay keeps the last host's handover for the
     // next computer.
-    await this.reconcileGroups(verdictsTaken ? generation : null, [...desired.values()].filter(isGroupSubscription), all);
+    await this.reconcileGroups(
+      verdictsTaken ? generation : null,
+      [...desired.values()].filter(isGroupSubscription),
+      all,
+    );
     await this.reconcileDatasets(all);
   }
 
@@ -4927,13 +6705,19 @@ export class CollectionAutomations {
    * generation's handover first. The engine is asked only when its set may
    * differ from the one wanted.
    */
-  private async reconcileGroups(generation: number | null, wanted: GroupSubscription[], all: boolean): Promise<void> {
+  private async reconcileGroups(
+    generation: number | null,
+    wanted: GroupSubscription[],
+    all: boolean,
+  ): Promise<void> {
     const tracked = [...this.subscribed.values()].filter(isGroupSubscription);
     if (generation === null) {
-      if (all || this.groupSubscriptionsUncertain || tracked.length > 0) await this.releaseEngineGroups();
+      if (all || this.groupSubscriptionsUncertain || tracked.length > 0)
+        await this.releaseEngineGroups();
       return;
     }
-    const byAutomation = (left: GroupSubscription, right: GroupSubscription) => left.automationId.localeCompare(right.automationId);
+    const byAutomation = (left: GroupSubscription, right: GroupSubscription) =>
+      left.automationId.localeCompare(right.automationId);
     const same = isDeepStrictEqual([...tracked].sort(byAutomation), [...wanted].sort(byAutomation));
     if (all || this.groupSubscriptionsUncertain || !same || this.watchedGeneration !== generation) {
       await this.watchEngineGroups(generation, wanted);
@@ -4953,7 +6737,10 @@ export class CollectionAutomations {
     const input = {
       generation,
       subscriptions: wanted.map(({ automationId, groupId, startsWith }) =>
-        startsWith === undefined ? { automationId, groupId } : { automationId, groupId, startsWith }),
+        startsWith === undefined
+          ? { automationId, groupId }
+          : { automationId, groupId, startsWith },
+      ),
     };
     let answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups(input));
     if (answer?.needsHandover) {
@@ -4969,7 +6756,9 @@ export class CollectionAutomations {
         return;
       }
       this.handoverUnreadAt = null;
-      answer = await this.withLiveEngine((engine) => engine.watchAutomationGroups({ ...input, relay }));
+      answer = await this.withLiveEngine((engine) =>
+        engine.watchAutomationGroups({ ...input, relay }),
+      );
     }
     if (answer === null || answer.needsHandover) return;
     for (const [automationId, subscription] of [...this.subscribed]) {
@@ -4999,7 +6788,10 @@ export class CollectionAutomations {
       return;
     }
     if (skips === null) return;
-    const newest: Array<[GroupMessagesSkipped, number | null]> = [["ahead", skips.aheadAtMs], ["late", skips.lateAtMs]];
+    const newest: Array<[GroupMessagesSkipped, number | null]> = [
+      ["ahead", skips.aheadAtMs],
+      ["late", skips.lateAtMs],
+    ];
     for (const [reason, atMs] of newest) {
       if (atMs === null || atMs <= this.groupSkipsTold[reason]) continue;
       try {
@@ -5021,11 +6813,14 @@ export class CollectionAutomations {
     this.groupSubscriptionsUncertain = true;
     const released = await this.withLiveEngine((engine) => engine.releaseAutomationGroups());
     if (released === null) return null;
-    const tracked = [...this.subscribed].filter(([, subscription]) => isGroupSubscription(subscription));
+    const tracked = [...this.subscribed].filter(([, subscription]) =>
+      isGroupSubscription(subscription),
+    );
     for (const [automationId] of tracked) this.subscribed.delete(automationId);
     this.watchedGeneration = null;
     this.groupSubscriptionsUncertain = false;
-    if (tracked.length > 0) await this.options.store.saveSubscriptions([...this.subscribed.values()]);
+    if (tracked.length > 0)
+      await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     return released;
   }
 
@@ -5038,13 +6833,17 @@ export class CollectionAutomations {
         if (!current.automationId.startsWith(COLLECTION_AUTOMATION_PREFIX)) continue;
         const wanted = desired.get(current.automationId);
         if (wanted?.datasetId === datasetId) {
-          if (!all && isDeepStrictEqual(current, wanted.subscription)) desired.delete(current.automationId);
+          if (!all && isDeepStrictEqual(current, wanted.subscription))
+            desired.delete(current.automationId);
           continue;
         }
         ledger.unsubscribe(datasetId, current.automationId);
       }
-      for (const { datasetId, subscription } of desired.values()) ledger.subscribe(datasetId, subscription);
-    }).catch((error: unknown) => this.options.onError("update dataset automation subscriptions", error));
+      for (const { datasetId, subscription } of desired.values())
+        ledger.subscribe(datasetId, subscription);
+    }).catch((error: unknown) =>
+      this.options.onError("update dataset automation subscriptions", error),
+    );
   }
 
   private async drain(): Promise<void> {
@@ -5065,9 +6864,10 @@ export class CollectionAutomations {
           const { claimId } = held.claim;
           // From here this drain owns the claim: it settles, waits, or is left
           // to its ledger's recovery. One that still waits goes straight back.
-          const action = stop.aborted || this.waitingFor.has(claimId)
-            ? { kind: "release" as const }
-            : await this.execute(held, stop);
+          const action =
+            stop.aborted || this.waitingFor.has(claimId)
+              ? { kind: "release" as const }
+              : await this.execute(held, stop);
           ran = action?.kind !== "release";
           if (action === null) continue;
           // Released at the end, so this drain does not take the claim again.
@@ -5075,7 +6875,8 @@ export class CollectionAutomations {
             release.push(held);
             if (action.waitsFor) {
               this.waitingFor.set(claimId, action.waitsFor);
-              if (isPress(held) && action.waitsFor !== "dataset") this.options.onPressWaiting({ claimId, reason: action.waitsFor });
+              if (isPress(held) && action.waitsFor !== "dataset")
+                this.options.onPressWaiting({ claimId, reason: action.waitsFor });
             }
             continue;
           }
@@ -5090,7 +6891,8 @@ export class CollectionAutomations {
       if (isEngineStoreBusyRefusal(error)) this.scheduleBusyRetry();
       else this.options.onError("drain Collection automation claims", error);
     } finally {
-      for (const held of release) this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
+      for (const held of release)
+        this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
       if (!stop.aborted) await this.payOwed(true);
       this.flushRunsFinished();
     }
@@ -5105,7 +6907,9 @@ export class CollectionAutomations {
 
   /** The engine's oldest pending claim, else the dataset ledger's. */
   private async nextClaim(): Promise<HeldClaim | null> {
-    const claim = await this.withLiveEngine((engine) => engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }));
+    const claim = await this.withLiveEngine((engine) =>
+      engine.claimNextAutomation({ automationIdPrefix: COLLECTION_AUTOMATION_PREFIX }),
+    );
     if (claim !== null) return { source: "engine", claim };
     const dataset = await this.withLiveHost((ledger) => ledger.next());
     return dataset === null ? null : { source: "dataset", claim: dataset };
@@ -5125,7 +6929,10 @@ export class CollectionAutomations {
         answered = (await this.answer(held, action, live)) === true;
       } catch (error) {
         // The dataset ledger refuses only an attempt that is no longer current.
-        if ((held.source === "dataset" || isInvalidInputRefusal(error)) && (await this.stillRunning(held, live)) === false) {
+        if (
+          (held.source === "dataset" || isInvalidInputRefusal(error)) &&
+          (await this.stillRunning(held, live)) === false
+        ) {
           this.owed.delete(id);
           this.waitingFor.delete(id);
         } else {
@@ -5154,8 +6961,12 @@ export class CollectionAutomations {
 
   /** Tells the claim's ledger to release or settle it. Null when that ledger is unavailable. */
   private answer(held: HeldClaim, action: ClaimAction, live: boolean): Promise<true | null> {
-    const settle: SettleInput | null = action.kind === "release" ? null
-      : action.input.state === "failed" ? { state: "failed", error: errorText(action.input.error) } : { state: "done" };
+    const settle: SettleInput | null =
+      action.kind === "release"
+        ? null
+        : action.input.state === "failed"
+          ? { state: "failed", error: errorText(action.input.error) }
+          : { state: "done" };
     if (held.source === "dataset") {
       return this.withLedger(live, (ledger) => {
         if (settle === null) ledger.release(held.claim);
@@ -5166,18 +6977,29 @@ export class CollectionAutomations {
     const claimId = held.claim.claimId;
     return this.withEngineAt(live, async (engine) => {
       if (settle === null) await engine.releaseAutomationClaim({ claimId });
-      else await engine.settleAutomationClaim(settle.state === "failed" ? { claimId, state: "failed", error: settle.error } : { claimId, state: "done" });
+      else
+        await engine.settleAutomationClaim(
+          settle.state === "failed"
+            ? { claimId, state: "failed", error: settle.error }
+            : { claimId, state: "done" },
+        );
       return true as const;
     });
   }
 
   /** The engine, or at close any engine still answering. */
-  private withEngineAt<T>(live: boolean, work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null> {
+  private withEngineAt<T>(
+    live: boolean,
+    work: (engine: CollectionAutomationEngine) => Promise<T>,
+  ): Promise<T | null> {
     return live ? this.withLiveEngine(work) : this.options.withEngine(work);
   }
 
   /** The dataset ledger, or at close any ledger still open. */
-  private withLedger<T>(live: boolean, work: (ledger: DatasetAutomationHost) => T | Promise<T>): Promise<T | null> {
+  private withLedger<T>(
+    live: boolean,
+    work: (ledger: DatasetAutomationHost) => T | Promise<T>,
+  ): Promise<T | null> {
     return live ? this.withLiveHost(work) : this.options.withDatasetHost(work, false);
   }
 
@@ -5187,9 +7009,13 @@ export class CollectionAutomations {
     try {
       if (held.source === "dataset") {
         const found = await this.withLedger(live, (ledger) => ledger.claim(automationId, claimId));
-        return found === null ? null : found.state === "running" && found.attempts === held.claim.attempts;
+        return found === null
+          ? null
+          : found.state === "running" && found.attempts === held.claim.attempts;
       }
-      const found = await this.withEngineAt(live, (engine) => engine.getAutomationClaim({ claimId }));
+      const found = await this.withEngineAt(live, (engine) =>
+        engine.getAutomationClaim({ claimId }),
+      );
       return found?.claim == null ? null : found.claim.state === "running";
     } catch {
       return null;
@@ -5217,7 +7043,9 @@ export class CollectionAutomations {
   }
 
   /** Whether a claim's run saved steps it has not finished: it resumes wherever its Collection is now. */
-  private async hasSavedPlan(claim: Pick<AutomationClaim, "automationId" | "claimId">): Promise<boolean> {
+  private async hasSavedPlan(
+    claim: Pick<AutomationClaim, "automationId" | "claimId">,
+  ): Promise<boolean> {
     const { runs } = await this.options.store.runsOf(claim.automationId, claim.claimId);
     return runs.some((run) => run.outcome?.state !== "done" && !run.superseded);
   }
@@ -5247,44 +7075,81 @@ export class CollectionAutomations {
     const locationChanged = (): ClaimAction | null => {
       const current = this.locate(claim.automationId);
       if (bound !== null && current !== null && bound.place !== placeHash(current.collectionPath)) {
-        return { kind: "settle", input: { state: "failed", error: MOVED_SINCE_PRESSED }, outcome: "failed", settled: () => this.afterSettle() };
+        return {
+          kind: "settle",
+          input: { state: "failed", error: MOVED_SINCE_PRESSED },
+          outcome: "failed",
+          settled: () => this.afterSettle(),
+        };
       }
       if (current === null && id !== null) return release;
       return current?.collectionPath !== id?.collectionPath ? release : null;
     };
     // A due time or a Group message names only its Collection, of either kind.
-    const recordless = held.source === "engine" && (held.claim.change.kind === "schedule" || held.claim.change.kind === "message");
-    const inCollection = id !== null && (held.source === "engine"
-      ? recordless || (definition === undefined &&
-        (this.inDocumentCollection(held.claim, id.collectionPath) || await this.hasSavedPlan(held.claim)))
-      : definition?.datasetId === held.claim.datasetId);
+    const recordless =
+      held.source === "engine" &&
+      (held.claim.change.kind === "schedule" || held.claim.change.kind === "message");
+    const inCollection =
+      id !== null &&
+      (held.source === "engine"
+        ? recordless ||
+          (definition === undefined &&
+            (this.inDocumentCollection(held.claim, id.collectionPath) ||
+              (await this.hasSavedPlan(held.claim))))
+        : definition?.datasetId === held.claim.datasetId);
     let moved = locationChanged();
     if (moved !== null) return moved;
     // A due time or a message for a dataset whose store failed to open, or
     // whose folder's descriptor no longer names it, waits for the dataset
     // instead of being lost.
     const collectionId = parseCollectionAutomationId(claim.automationId)?.collectionId;
-    if (recordless && id === null && collectionId !== undefined && this.waitsForDataset(collectionId)) {
+    if (
+      recordless &&
+      id === null &&
+      collectionId !== undefined &&
+      this.waitsForDataset(collectionId)
+    ) {
       this.datasetWaits.set(claim.claimId, collectionId);
-      void this.enqueue(() => this.indexDatasets(true))
-        .catch((error: unknown) => this.options.onError("open this workspace's dataset store", error));
+      void this.enqueue(() => this.indexDatasets(true)).catch((error: unknown) =>
+        this.options.onError("open this workspace's dataset store", error),
+      );
       return { kind: "release", waitsFor: "dataset" };
     }
     if (id === null || automation === null || !automation.enabled || !inCollection) {
       // The automation is gone or off, so its subscription is stale.
-      if (id !== null && !this.isSubscribed(held)) void this.enqueue(() => this.dropStaleSubscription(held));
-      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.afterSettle() };
+      if (id !== null && !this.isSubscribed(held))
+        void this.enqueue(() => this.dropStaleSubscription(held));
+      return {
+        kind: "settle",
+        input: { state: "done" },
+        outcome: "skipped",
+        settled: () => this.afterSettle(),
+      };
     }
     // A record change or a press on a dataset cannot start an automation
     // that now starts on a schedule or a Group message, as a document's
     // change that no longer matches its trigger starts nothing.
     if (held.source === "dataset" && !("table" in automation.when)) {
-      return { kind: "settle", input: { state: "done" }, outcome: "skipped", settled: () => this.markSettled(claim, automation) };
+      return {
+        kind: "settle",
+        input: { state: "done" },
+        outcome: "skipped",
+        settled: () => this.markSettled(claim, automation),
+      };
     }
     // A relayed press runs only the automation its presser saw, and only in
     // the folder the relay allowed it in, however long it waited.
-    if (bound !== null && bound.definition !== definitionHash(automation) && automation.when.kind === "button") {
-      return { kind: "settle", input: { state: "failed", error: changedSincePressed(automation.when.field) }, outcome: "failed", settled: () => this.afterSettle() };
+    if (
+      bound !== null &&
+      bound.definition !== definitionHash(automation) &&
+      automation.when.kind === "button"
+    ) {
+      return {
+        kind: "settle",
+        input: { state: "failed", error: changedSincePressed(automation.when.field) },
+        outcome: "failed",
+        settled: () => this.afterSettle(),
+      };
     }
     // A claim this version cannot run, or that names a field its Collection
     // lacks, fails with the reason the panel shows, so it reaches the failure
@@ -5295,8 +7160,9 @@ export class CollectionAutomations {
     }
     const resuming = await this.hasSavedPlan(claim);
     if (!resuming) {
-      try { this.inventory(id.collectionPath, automation); }
-      catch (error) {
+      try {
+        this.inventory(id.collectionPath, automation);
+      } catch (error) {
         if (error instanceof AutomationRunWait) {
           this.datasetWaits.set(claim.claimId, collectionId ?? id.collectionPath);
           return { kind: "release", waitsFor: "dataset" };
@@ -5306,7 +7172,12 @@ export class CollectionAutomations {
       if (unsupported !== null) {
         moved = locationChanged();
         if (moved !== null) return moved;
-        return { kind: "settle", input: { state: "failed", error: unsupported }, outcome: "failed", settled: () => this.afterSettle() };
+        return {
+          kind: "settle",
+          input: { state: "failed", error: unsupported },
+          outcome: "failed",
+          settled: () => this.afterSettle(),
+        };
       }
     }
     // Every step needs the roster, even one inside the Collection: someone
@@ -5321,10 +7192,22 @@ export class CollectionAutomations {
       if (wakesAgent(automation)) {
         const collection = collectionNamed(id.collectionPath);
         const steps = this.reachSteps(id.collectionPath, automation);
-        const stopped = checkAutomationReach(roster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, id.collectionPath), steps })
-          .find((reach) => !reach.allowed);
-        const error = stopped && !stopped.allowed ? stopped.reason : "dohc could not check who can edit this Collection.";
-        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.afterSettle() };
+        const stopped = checkAutomationReach(roster, {
+          id: automation.id,
+          collection,
+          codeFiles: codeFilesOf(automation, id.collectionPath),
+          steps,
+        }).find((reach) => !reach.allowed);
+        const error =
+          stopped && !stopped.allowed
+            ? stopped.reason
+            : "dohc could not check who can edit this Collection.";
+        return {
+          kind: "settle",
+          input: { state: "failed", error },
+          outcome: "failed",
+          settled: () => this.afterSettle(),
+        };
       }
       return { kind: "release", waitsFor: "roster" };
     }
@@ -5346,7 +7229,10 @@ export class CollectionAutomations {
       if (taken === null) {
         return {
           kind: "settle",
-          input: { state: "failed", error: "This workspace's automations moved to another computer before this press ran." },
+          input: {
+            state: "failed",
+            error: "This workspace's automations moved to another computer before this press ran.",
+          },
           outcome: "failed",
           settled: () => this.afterSettle(),
         };
@@ -5355,16 +7241,38 @@ export class CollectionAutomations {
     }
     const collection = collectionNamed(id.collectionPath);
     const runner = runnerOf(held, definition?.datasetId);
-    const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => runner.kind === "document"
-      ? runCollectionAutomation(this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }, bound?.hostPressId), { claim: runner.claim, automation, collection, roster, signal, stopped: stop })
-      : runDatasetAutomation({ ...this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
-        { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
+    const outcome = await this.runWithDeadline(
+      claim.claimId,
+      stop,
+      (signal) =>
+        runner.kind === "document"
+          ? runCollectionAutomation(
+              this.runDependencies(
+                { automationId: claim.automationId, collectionPath: collection.path, automation },
+                bound?.hostPressId,
+              ),
+              { claim: runner.claim, automation, collection, roster, signal, stopped: stop },
+            )
+          : runDatasetAutomation(
+              {
+                ...this.runDependencies({
+                  automationId: claim.automationId,
+                  collectionPath: collection.path,
+                  automation,
+                }),
+                withHost: (work) => this.withLiveHost(work),
+                cachedRoster: () => this.options.cachedRoster(),
+              },
+              { held: runner.held, automation, collection, roster, signal, stopped: stop },
+            ),
+      hostHold,
+    );
     if (outcome === null) return null;
     if (outcome.kind === "failed" || outcome.kind === "wait" || outcome.kind === "skipped") {
       if (outcome.kind === "skipped" || this.locate(claim.automationId) !== null) {
         moved = locationChanged();
         if (moved !== null) return moved;
-      } else if (!await this.hasSavedPlan(claim)) {
+      } else if (!(await this.hasSavedPlan(claim))) {
         return release;
       }
     }
@@ -5384,18 +7292,36 @@ export class CollectionAutomations {
       case "done":
       case "skipped":
         await this.countTimeout(claim.automationId, false);
-        return { kind: "settle", input: { state: "done" }, outcome: outcome.kind, settled: () => this.markSettled(claim, automation) };
+        return {
+          kind: "settle",
+          input: { state: "done" },
+          outcome: outcome.kind,
+          settled: () => this.markSettled(claim, automation),
+        };
       case "failed-before":
         // Its run was counted when it failed.
-        return { kind: "settle", input: { state: "failed", error: outcome.error }, outcome: "failed", settled: () => this.afterSettle() };
+        return {
+          kind: "settle",
+          input: { state: "failed", error: outcome.error },
+          outcome: "failed",
+          settled: () => this.afterSettle(),
+        };
       case "failed": {
         let error = outcome.error;
-        if (await this.countTimeout(claim.automationId, outcome.timedOut) >= TIMEOUTS_BEFORE_SWITCH_OFF) {
+        if (
+          (await this.countTimeout(claim.automationId, outcome.timedOut)) >=
+          TIMEOUTS_BEFORE_SWITCH_OFF
+        ) {
           const note = await this.switchOff(id.collectionPath, automation, held, stop);
           if (note === null) return release;
           error = `${note} ${error}`;
         }
-        return { kind: "settle", input: { state: "failed", error }, outcome: "failed", settled: () => this.afterSettle() };
+        return {
+          kind: "settle",
+          input: { state: "failed", error },
+          outcome: "failed",
+          settled: () => this.afterSettle(),
+        };
       }
     }
   }
@@ -5410,10 +7336,14 @@ export class CollectionAutomations {
   }
 
   /** The engine has the claim as done, so its saved run can leave run history in time. */
-  private async markSettled(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation): Promise<void> {
+  private async markSettled(
+    claim: Pick<AutomationClaim, "automationId" | "claimId">,
+    automation: Automation,
+  ): Promise<void> {
     try {
       const runs = await runsForClaim(this.options.store, claim, automation);
-      if (!runs.unreadable && runs.done && !runs.done.settled) await this.options.store.updateState(runs.done, { settled: true });
+      if (!runs.unreadable && runs.done && !runs.done.settled)
+        await this.options.store.updateState(runs.done, { settled: true });
     } catch (error) {
       this.options.onError(`record automation claim "${claim.claimId}" as done`, error);
     }
@@ -5434,7 +7364,8 @@ export class CollectionAutomations {
     const now = this.nowMs();
     // A settle paid while the workspace closes starts no pass and no timer.
     if (this.state !== "open") return this.historyPruning;
-    if (this.historyPrunedAtMs !== null && now - this.historyPrunedAtMs < HISTORY_PRUNE_INTERVAL_MS) return this.historyPruning;
+    if (this.historyPrunedAtMs !== null && now - this.historyPrunedAtMs < HISTORY_PRUNE_INTERVAL_MS)
+      return this.historyPruning;
     this.historyPrunedAtMs = now;
     // An automation that stopped running expires too, while the workspace stays open.
     if (this.historyTimer) clearTimeout(this.historyTimer);
@@ -5453,7 +7384,8 @@ export class CollectionAutomations {
   }
 
   private async expireHistory(generation: number): Promise<void> {
-    const current = () => this.generation === generation && this.state === "open" && this.restorePlanning === 0;
+    const current = () =>
+      this.generation === generation && this.state === "open" && this.restorePlanning === 0;
     // Runs one batch, which an Undo waits for; the event loop runs after it.
     const batch = async <T>(work: Promise<T>): Promise<T> => {
       this.historyBatch = work.catch(() => undefined);
@@ -5467,7 +7399,9 @@ export class CollectionAutomations {
       if (undoing === null) return null;
       const kept = [...new Set([...undoing, ...this.changing])];
       if (kept.length > MAX_HISTORY_KEEP) {
-        throw new Error(`${kept.length} runs have an unfinished Undo or change, more than the ${MAX_HISTORY_KEEP} a prune can keep, so run history keeps everything until some finish.`);
+        throw new Error(
+          `${kept.length} runs have an unfinished Undo or change, more than the ${MAX_HISTORY_KEEP} a prune can keep, so run history keeps everything until some finish.`,
+        );
       }
       return kept;
     };
@@ -5479,13 +7413,17 @@ export class CollectionAutomations {
         more = (await batch(prune(kept)))?.more === true;
       }
     };
-    await batches((kept) => this.withLiveEngine((engine) => engine.pruneAutomationHistory({ keep: kept })));
+    await batches((kept) =>
+      this.withLiveEngine((engine) => engine.pruneAutomationHistory({ keep: kept })),
+    );
     await batches((kept) => this.withLiveHost((host) => host.pruneHistory(kept)));
     // Saved runs last, so a failed claim's runs stay until its ledger lets it go.
     const now = this.nowMs();
     let from: string | null = null;
     while (current()) {
-      from = await batch(this.options.store.expire(now, (claim) => this.standingOf(claim, current), from));
+      from = await batch(
+        this.options.store.expire(now, (claim) => this.standingOf(claim, current), from),
+      );
       if (from === null) break;
     }
   }
@@ -5503,13 +7441,17 @@ export class CollectionAutomations {
     if (this.changing.has(claim.claimId)) return "open";
     // A pass the workspace closed under asks no ledger, even one it waited
     // for: each ledger is asked only once it is at hand.
-    const dataset = await this.withLiveHost((ledger) => (current() ? { held: ledger.claim(claim.automationId, claim.claimId) } : "stale"));
+    const dataset = await this.withLiveHost((ledger) =>
+      current() ? { held: ledger.claim(claim.automationId, claim.claimId) } : "stale",
+    );
     if (dataset === "stale") return "unknown";
     // Only a dataset Collection's claim can be in its dataset's ledger, which cannot say while its host is closed.
     if (dataset === null && claim.datasetId !== null) return "unknown";
     let state = dataset?.held?.state;
     if (state === undefined) {
-      const engine = await this.withLiveEngine(async (live) => (current() ? await live.getAutomationClaim({ claimId: claim.claimId }) : "stale"));
+      const engine = await this.withLiveEngine(async (live) =>
+        current() ? await live.getAutomationClaim({ claimId: claim.claimId }) : "stale",
+      );
       if (engine === null || engine === "stale") return "unknown";
       if (engine.claim === null) return "gone";
       state = engine.claim.state;
@@ -5537,22 +7479,32 @@ export class CollectionAutomations {
     const cancelDeadline = (this.options.deadline ?? startDeadline)(abort);
     let grace: ReturnType<typeof setTimeout> | undefined;
     const outlived = new Promise<"outlived">((resolve) => {
-      controller.signal.addEventListener("abort", () => {
-        grace = setTimeout(() => resolve("outlived"), DEADLINE_GRACE_MS);
-      }, { once: true });
+      controller.signal.addEventListener(
+        "abort",
+        () => {
+          grace = setTimeout(() => resolve("outlived"), DEADLINE_GRACE_MS);
+        },
+        { once: true },
+      );
     });
     try {
-      const run = Promise.resolve().then(() => runClaim(controller.signal)).catch((error: unknown): CollectionAutomationRunOutcome =>
-        isEngineStoreBusyRefusal(error)
-          ? { kind: "wait", reason: "busy" }
-          : { kind: "failed", error: errorText(error), timedOut: controller.signal.aborted });
+      const run = Promise.resolve()
+        .then(() => runClaim(controller.signal))
+        .catch((error: unknown): CollectionAutomationRunOutcome =>
+          isEngineStoreBusyRefusal(error)
+            ? { kind: "wait", reason: "busy" }
+            : { kind: "failed", error: errorText(error), timedOut: controller.signal.aborted },
+        );
       // The hold ends only when the run's writes have really stopped, even
       // after the deadline's grace, or a close, gave up waiting for them.
       started = true;
       void run.finally(() => onStopped?.());
       const outcome = await Promise.race([run, outlived]);
       if (outcome === "outlived") {
-        this.options.onError(`run automation claim "${claimId}"`, new Error("A write did not stop after the deadline."));
+        this.options.onError(
+          `run automation claim "${claimId}"`,
+          new Error("A write did not stop after the deadline."),
+        );
         return null;
       }
       return outcome;
@@ -5569,29 +7521,50 @@ export class CollectionAutomations {
    * recordVerdicts does for steps. A person an editor's leaving allowed
    * waits for Allow.
    */
-  private async recipientVerdicts(input: Parameters<CollectionAutomationRunDependencies["recipientVerdicts"]>[0]) {
-    return await this.updateVerdicts(() => input.recipients.map(({ step: ordinal, id, name, action, reach }) => {
-      const step = String(ordinal);
-      // Without the saved verdicts every step waits.
-      if (this.verdictsUnreadable) return "held" as const;
-      const key = reachVerdictKey(input.automationId, input.definitionHash, step, id);
-      const previous = this.verdicts.get(key);
-      const next = this.unprovenHold(input.automationId, input.definitionHash, previous, nextReachVerdict(previous, reach, true));
-      if (!sameReachVerdict(previous, next)) {
-        this.verdicts.set(key, {
-          automationId: input.automationId, definitionHash: input.definitionHash, step,
-          recipient: { id, name, action }, ...next, seq: ++this.verdictSeq,
-        });
-      }
-      return next.verdict;
-    }));
+  private async recipientVerdicts(
+    input: Parameters<CollectionAutomationRunDependencies["recipientVerdicts"]>[0],
+  ) {
+    return await this.updateVerdicts(() =>
+      input.recipients.map(({ step: ordinal, id, name, action, reach }) => {
+        const step = String(ordinal);
+        // Without the saved verdicts every step waits.
+        if (this.verdictsUnreadable) return "held" as const;
+        const key = reachVerdictKey(input.automationId, input.definitionHash, step, id);
+        const previous = this.verdicts.get(key);
+        const next = this.unprovenHold(
+          input.automationId,
+          input.definitionHash,
+          previous,
+          nextReachVerdict(previous, reach, true),
+        );
+        if (!sameReachVerdict(previous, next)) {
+          this.verdicts.set(key, {
+            automationId: input.automationId,
+            definitionHash: input.definitionHash,
+            step,
+            recipient: { id, name, action },
+            ...next,
+            seq: ++this.verdictSeq,
+          });
+        }
+        return next.verdict;
+      }),
+    );
   }
 
   /** Finds where automations post again, when any automation does. */
   private async loadChat(roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<void> {
-    const sending = [...this.files.values()].flatMap((indexed) => indexed.file.status === "read"
-      ? indexed.file.entries.flatMap((entry) => entry.status === "valid" ? [entry.automation] : []) : [])
-      .filter((automation) => sendsMessages(automation) || automation.when.kind === "group-message");
+    const sending = [...this.files.values()]
+      .flatMap((indexed) =>
+        indexed.file.status === "read"
+          ? indexed.file.entries.flatMap((entry) =>
+              entry.status === "valid" ? [entry.automation] : [],
+            )
+          : [],
+      )
+      .filter(
+        (automation) => sendsMessages(automation) || automation.when.kind === "group-message",
+      );
     if (sending.length === 0) return;
     try {
       this.chat = (await this.options.chat.directory(roster, chatNeedsOf(sending))) ?? this.chat;
@@ -5610,38 +7583,74 @@ export class CollectionAutomations {
     });
   }
 
-  private runDependencies(owned?: OwnedAutomation, hostPressId?: string): CollectionAutomationRunDependencies {
+  private runDependencies(
+    owned?: OwnedAutomation,
+    hostPressId?: string,
+  ): CollectionAutomationRunDependencies {
     let checkedAuthority: RelayedPressAuthority | undefined;
     return {
-      ...(hostPressId === undefined ? {} : {
-        checkPresser: async () => {
-          const authority = await this.pressAuthority(hostPressId);
-          if (!owned || authority.automationId !== owned.automationId || authority.collectionPath !== owned.collectionPath || authority.definitionHash !== definitionHash(owned.automation)) throw new Error(SHARED_BUTTON_DENIED);
-          checkedAuthority = authority;
-        },
-        authorizeDataset: async (datasetId: string, operationId: string): Promise<DatasetOperationCeiling> => {
-          const authority = checkedAuthority ?? await this.pressAuthority(hostPressId);
-          const roster = await this.options.roster();
-          if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
-          const result = await this.withLiveHost(host => {
-            const authorize: DatasetOperationCeiling = (targetId, targetOperationId) => {
-              const currentAuthority = authority.current?.() ?? authority;
-              if (!owned || targetId !== datasetId) throw new Error(SHARED_BUTTON_DENIED);
-              const described = describeButtonPresser(host, currentAuthority, targetId);
-              if (!described.operations.some(operation => operation.operationId === targetOperationId)) throw new Error(SHARED_BUTTON_DENIED);
-              const revision = host.revision(targetId), operation = revision.definition.operations.find(value => value.operationId === targetOperationId);
-              if (!operation || !owned) throw new Error(SHARED_BUTTON_DENIED);
-              const target: ReachStep = { kind: "dataset-operation", collection: collectionNamed(datasetBaseFolder(revision.definition)), datasetId: targetId,
-                operations: revision.definition.operations, grants: host.dataGrants(targetId), operation };
-              if (checkAutomationReach(roster, { id: owned.automation.id, collection: collectionNamed(owned.collectionPath), codeFiles: codeFilesOf(owned.automation, owned.collectionPath), steps: [target] }).some(verdict => !verdict.allowed)) throw new Error(SHARED_BUTTON_DENIED);
-            };
-            authorize(datasetId, operationId);
-            return authorize;
-          });
-          if (result === null) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
-          return result;
-        },
-      }),
+      ...(hostPressId === undefined
+        ? {}
+        : {
+            checkPresser: async () => {
+              const authority = await this.pressAuthority(hostPressId);
+              if (
+                !owned ||
+                authority.automationId !== owned.automationId ||
+                authority.collectionPath !== owned.collectionPath ||
+                authority.definitionHash !== definitionHash(owned.automation)
+              )
+                throw new Error(SHARED_BUTTON_DENIED);
+              checkedAuthority = authority;
+            },
+            authorizeDataset: async (
+              datasetId: string,
+              operationId: string,
+            ): Promise<DatasetOperationCeiling> => {
+              const authority = checkedAuthority ?? (await this.pressAuthority(hostPressId));
+              const roster = await this.options.roster();
+              if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+              const result = await this.withLiveHost((host) => {
+                const authorize: DatasetOperationCeiling = (targetId, targetOperationId) => {
+                  const currentAuthority = authority.current?.() ?? authority;
+                  if (!owned || targetId !== datasetId) throw new Error(SHARED_BUTTON_DENIED);
+                  const described = describeButtonPresser(host, currentAuthority, targetId);
+                  if (
+                    !described.operations.some(
+                      (operation) => operation.operationId === targetOperationId,
+                    )
+                  )
+                    throw new Error(SHARED_BUTTON_DENIED);
+                  const revision = host.revision(targetId),
+                    operation = revision.definition.operations.find(
+                      (value) => value.operationId === targetOperationId,
+                    );
+                  if (!operation || !owned) throw new Error(SHARED_BUTTON_DENIED);
+                  const target: ReachStep = {
+                    kind: "dataset-operation",
+                    collection: collectionNamed(datasetBaseFolder(revision.definition)),
+                    datasetId: targetId,
+                    operations: revision.definition.operations,
+                    grants: host.dataGrants(targetId),
+                    operation,
+                  };
+                  if (
+                    checkAutomationReach(roster, {
+                      id: owned.automation.id,
+                      collection: collectionNamed(owned.collectionPath),
+                      codeFiles: codeFilesOf(owned.automation, owned.collectionPath),
+                      steps: [target],
+                    }).some((verdict) => !verdict.allowed)
+                  )
+                    throw new Error(SHARED_BUTTON_DENIED);
+                };
+                authorize(datasetId, operationId);
+                return authorize;
+              });
+              if (result === null) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+              return result;
+            },
+          }),
       targets: this.targetResolver(),
       isButtonField: (path, field) => this.isButtonField(path, field),
       withHost: (work) => this.withLiveHost(work),
@@ -5695,7 +7704,12 @@ export class CollectionAutomations {
    * sentence the failure notice adds, or null when a pause or close stopped
    * the run before the write.
    */
-  private async switchOff(collectionPath: string, automation: Automation, held: HeldClaim, stop: AbortSignal): Promise<string | null> {
+  private async switchOff(
+    collectionPath: string,
+    automation: Automation,
+    held: HeldClaim,
+    stop: AbortSignal,
+  ): Promise<string | null> {
     const path = `${collectionPath}/${AUTOMATIONS_FILE_NAME}`;
     const name = `"${automation.name}"`;
     let switchedOff = false;
@@ -5703,38 +7717,68 @@ export class CollectionAutomations {
       const read = await this.options.readText(path);
       const parsed = read && !read.truncated ? parseAutomationsFile(read.text) : null;
       if (read && !read.truncated && parsed?.status === "read") {
-        const off = (entries: readonly AutomationEntry[]) => entries.map((entry): AutomationEntry =>
-          entry.status === "valid" && entry.automation.id === automation.id
-            ? { status: "valid", automation: { ...entry.automation, enabled: false } }
-            : entry);
+        const off = (entries: readonly AutomationEntry[]) =>
+          entries.map((entry): AutomationEntry =>
+            entry.status === "valid" && entry.automation.id === automation.id
+              ? { status: "valid", automation: { ...entry.automation, enabled: false } }
+              : entry,
+          );
         const written = writeAutomationsFile(off(parsed.entries));
         if (stop.aborted) return null;
         const automationId = this.automationIdIn(collectionPath, automation.id);
-        if (written.status === "ok" && (await this.options.writeText(path, written.text, read.contentHash, automationId)).status === "written") {
+        if (
+          written.status === "ok" &&
+          (await this.options.writeText(path, written.text, read.contentHash, automationId))
+            .status === "written"
+        ) {
           switchedOff = true;
-          const breaker: StoredCircuitBreaker = { automationId, claimId: held.claim.claimId,
-            datasetInstance: held.source === "dataset" ? JSON.stringify([held.claim.datasetId, held.claim.hostEpoch]) : null,
-            reason: "consecutive-timeouts", collectionPath, run: held.claim.run };
+          const breaker: StoredCircuitBreaker = {
+            automationId,
+            claimId: held.claim.claimId,
+            datasetInstance:
+              held.source === "dataset"
+                ? JSON.stringify([held.claim.datasetId, held.claim.hostEpoch])
+                : null,
+            reason: "consecutive-timeouts",
+            collectionPath,
+            run: held.claim.run,
+          };
           this.pendingCircuitBreakers.set(automationFailureKey(breaker), breaker);
           this.timeouts.delete(automationId);
           const indexed = this.files.get(collectionPath);
           if (indexed?.file.status === "read") {
-            this.files.set(collectionPath, { ...indexed, file: { status: "read", entries: off(indexed.file.entries) } });
+            this.files.set(collectionPath, {
+              ...indexed,
+              file: { status: "read", entries: off(indexed.file.entries) },
+            });
           }
           // Its own switch off is no person's, so no notice names one.
           const saved = this.enabledSaved?.get(collectionPath);
           if (saved?.includes(automation.id)) {
-            this.enabledSaved!.set(collectionPath, saved.filter((id) => id !== automation.id));
+            this.enabledSaved!.set(
+              collectionPath,
+              saved.filter((id) => id !== automation.id),
+            );
           }
           const persist = async (context: string, write: () => Promise<void>) => {
-            try { await write(); } catch (error) { this.options.onError(context, error); }
+            try {
+              await write();
+            } catch (error) {
+              this.options.onError(context, error);
+            }
           };
           await persist("save the automation's switch-off outcome", async () => {
             await this.options.store.recordCircuitBreaker(breaker);
-            if (this.pendingCircuitBreakers.get(automationFailureKey(breaker)) === breaker) this.pendingCircuitBreakers.delete(automationFailureKey(breaker));
+            if (this.pendingCircuitBreakers.get(automationFailureKey(breaker)) === breaker)
+              this.pendingCircuitBreakers.delete(automationFailureKey(breaker));
           });
-          await persist("reset the automation's timeout count", () => this.options.store.saveTimeouts(this.timeouts));
-          if (this.enabledSaved) await persist("save the switched-on automations", () => this.options.store.saveEnabledAutomations(this.enabledSaved!));
+          await persist("reset the automation's timeout count", () =>
+            this.options.store.saveTimeouts(this.timeouts),
+          );
+          if (this.enabledSaved)
+            await persist("save the switched-on automations", () =>
+              this.options.store.saveEnabledAutomations(this.enabledSaved!),
+            );
           return AUTOMATION_SWITCHED_OFF_BODY;
         }
       }
@@ -5757,7 +7801,9 @@ export class CollectionAutomations {
     const stored = this.subscribed.get(automationId);
     const path = stored && !isGroupSubscription(stored) ? stored.path : held.claim.collectionPath;
     if (path === null) return;
-    const removed = await this.withLiveEngine((engine) => engine.unsubscribeAutomation({ automationId, path }));
+    const removed = await this.withLiveEngine((engine) =>
+      engine.unsubscribeAutomation({ automationId, path }),
+    );
     if (removed !== null && this.subscribed.delete(automationId)) {
       await this.options.store.saveSubscriptions([...this.subscribed.values()]);
     }
@@ -5769,18 +7815,27 @@ const unreadableSchema = (collection: string) =>
 
 type RecordSubscription = Extract<StoredSubscription, { path: string }>;
 type GroupSubscription = Extract<StoredSubscription, { groupId: string }>;
-const isGroupSubscription = (subscription: StoredSubscription): subscription is GroupSubscription => "groupId" in subscription;
+const isGroupSubscription = (subscription: StoredSubscription): subscription is GroupSubscription =>
+  "groupId" in subscription;
 
-function reachDestination(reach: ReachStep): Pick<CollectionAutomationHold, "target" | "action"> | null {
+function reachDestination(
+  reach: ReachStep,
+): Pick<CollectionAutomationHold, "target" | "action"> | null {
   return reach.kind === "post"
     ? { target: reach.group.name, action: "post" as const }
     : reach.kind === "read-group"
       ? { target: reach.group.name, action: "read" }
-    : reach.kind === "notify"
-      ? { target: reach.person.name, action: "notify" }
-    : reach.kind === "personal"
-      ? { target: "your agent", action: "wake" }
-    : "collection" in reach
-      ? { target: reach.collection.name, action: reach.kind === "find-records" || reach.kind === "dataset-field" ? "find" as const : "change" as const }
-      : null;
+      : reach.kind === "notify"
+        ? { target: reach.person.name, action: "notify" }
+        : reach.kind === "personal"
+          ? { target: "your agent", action: "wake" }
+          : "collection" in reach
+            ? {
+                target: reach.collection.name,
+                action:
+                  reach.kind === "find-records" || reach.kind === "dataset-field"
+                    ? ("find" as const)
+                    : ("change" as const),
+              }
+            : null;
 }

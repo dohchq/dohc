@@ -37,8 +37,11 @@ export function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
   return loadProjectionModule().then(({ yDocToArtifactMarkdown }) => {
     const rebuilt = new Y.Doc();
     Y.applyUpdate(rebuilt, snapshot);
-    try { return yDocToArtifactMarkdown(rebuilt); }
-    finally { rebuilt.destroy(); }
+    try {
+      return yDocToArtifactMarkdown(rebuilt);
+    } finally {
+      rebuilt.destroy();
+    }
   });
 }
 
@@ -55,18 +58,12 @@ function crudeMarkdownFromDoc(doc: Y.Doc): string {
   const frontmatter = doc.getMap("frontmatter");
   const frontmatterLines: string[] = [];
   for (const [key, value] of frontmatter.entries()) {
-    if (
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "boolean"
-    ) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
       frontmatterLines.push(`${key}: ${String(value)}`);
     }
   }
   const frontmatterText =
-    frontmatterLines.length > 0
-      ? `---\n${frontmatterLines.join("\n")}\n---\n\n`
-      : "";
+    frontmatterLines.length > 0 ? `---\n${frontmatterLines.join("\n")}\n---\n\n` : "";
   const blockText = (node: Y.XmlText | Y.XmlElement | Y.XmlHook): string => {
     if (node instanceof Y.XmlText) return node.toString();
     if (node instanceof Y.XmlElement) {
@@ -86,15 +83,9 @@ const YDOC_RECOVERY_MARKER = "dohc-ydoc-recovery-v1";
 // The encoder always appends the comment last, after the crude fallback.
 // A payload the encoder cannot have produced still has to be strippable: the
 // user must never be shown the encoding, whatever state it reached disk in.
-const RECOVERY_COMMENT = new RegExp(
-  `\\n*<!-- ${YDOC_RECOVERY_MARKER}:([\\s\\S]*?) -->$`,
-  "u",
-);
+const RECOVERY_COMMENT = new RegExp(`\\n*<!-- ${YDOC_RECOVERY_MARKER}:([\\s\\S]*?) -->$`, "u");
 
-export function durableMarkdownFromSnapshot(
-  doc: Y.Doc,
-  snapshot: Uint8Array,
-): string {
+export function durableMarkdownFromSnapshot(doc: Y.Doc, snapshot: Uint8Array): string {
   const fallback = crudeMarkdownFromDoc(doc);
   if (doc.getMap("meta").get("contentKind") === "plain-text") return fallback;
   const separator = fallback.length > 0 ? "\n\n" : "";
@@ -102,9 +93,7 @@ export function durableMarkdownFromSnapshot(
   // in an inert Markdown comment until the async projection replaces this
   // whole fallback. A failed chunk load or renderer exit can lose formatting
   // from the readable fallback, but it cannot lose the document structure.
-  return `${fallback}${separator}<!-- ${YDOC_RECOVERY_MARKER}:${bytesToBase64(
-    snapshot,
-  )} -->`;
+  return `${fallback}${separator}<!-- ${YDOC_RECOVERY_MARKER}:${bytesToBase64(snapshot)} -->`;
 }
 
 // Rebuilding the document is the only step that can fail on the DATA, so it

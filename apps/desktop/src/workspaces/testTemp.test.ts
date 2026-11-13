@@ -79,31 +79,33 @@ describe("test scratch", () => {
     await sweepScratchParent(parent, join(parent, THIS_RUN), Date.now());
 
     expect(await pathExists(empty), "an empty root of an exited process must be swept").toBe(false);
-    expect(await pathExists(working), "a recent root that holds work waits for the age limit").toBe(true);
+    expect(await pathExists(working), "a recent root that holds work waits for the age limit").toBe(
+      true,
+    );
   });
 
   // `join` folds `.` and `..` away before mkdtemp adds its suffix, so a scratch
   // named for a direction lands beside the run root, or beside the managed
   // parent — loose in %TEMP%, seen by neither the reporter nor the sweep.
-  it.each([".", ".."])(
-    "keeps a scratch named %j inside the run root",
-    async (prefix) => {
-      const scratch = await createTestScratch(prefix);
+  it.each([".", ".."])("keeps a scratch named %j inside the run root", async (prefix) => {
+    const scratch = await createTestScratch(prefix);
 
-      expect(
-        dirname(scratch),
-        "a prefix that is a direction, not a name, must not move the scratch",
-      ).toBe(testScratchRunRoot());
-    },
-  );
+    expect(
+      dirname(scratch),
+      "a prefix that is a direction, not a name, must not move the scratch",
+    ).toBe(testScratchRunRoot());
+  });
 
   // The relay deployment refuses a path that resolves elsewhere, and macOS
   // temp directories resolve into /private.
-  it.skipIf(process.platform === "win32")("gives a path with every link already resolved", async () => {
-    const scratch = await createTestScratch("resolved-");
+  it.skipIf(process.platform === "win32")(
+    "gives a path with every link already resolved",
+    async () => {
+      const scratch = await createTestScratch("resolved-");
 
-    expect(scratch).toBe(await realpath(scratch));
-  });
+      expect(scratch).toBe(await realpath(scratch));
+    },
+  );
 
   // A link is a leaf, not a door. Reading through one asks about a tree the
   // abandoned run does not own, and the answer pins it: an external target
@@ -196,10 +198,9 @@ describe("test scratch", () => {
     try {
       await cleanupSuiteTestScratch();
 
-      expect(
-        await pathExists(handedDown),
-        "a suite must not remove a root it was handed",
-      ).toBe(true);
+      expect(await pathExists(handedDown), "a suite must not remove a root it was handed").toBe(
+        true,
+      );
     } finally {
       if (previous === undefined) delete process.env.DOHC_TEST_SCRATCH_ROOT;
       else process.env.DOHC_TEST_SCRATCH_ROOT = previous;
@@ -260,10 +261,7 @@ describe("test scratch", () => {
       "an aged directory that is not run-shaped is not this sweep's to remove",
     ).toBe(true);
     // And the guard did not just turn the sweep off.
-    expect(
-      await pathExists(mine),
-      "an aged run-shaped root must still be swept",
-    ).toBe(false);
+    expect(await pathExists(mine), "an aged run-shaped root must still be swept").toBe(false);
   });
 
   // Names both sweeps must agree about, and the answer. The Rust twin holds

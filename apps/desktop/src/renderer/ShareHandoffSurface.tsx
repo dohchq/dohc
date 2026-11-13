@@ -1,4 +1,4 @@
-import type {RelayShareReceivedRow} from "../ipc/bridgeContract";
+import type { RelayShareReceivedRow } from "../ipc/bridgeContract";
 import { useMouseBackButton } from "./useMouseBackButton";
 import { useRequestSequence } from "./useRequestSequence";
 import { ArrowLeft } from "lucide-react";
@@ -17,8 +17,7 @@ const REFUSED_COPY =
   "dohc could not open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
 const NETWORK_COPY =
   "dohc could not reach the server. Check your connection, then choose Try again.";
-const BUSY_COPY =
-  "The server is busy right now. Wait a moment, then choose Try again.";
+const BUSY_COPY = "The server is busy right now. Wait a moment, then choose Try again.";
 const MISSING_COPY =
   "dohc could not find this share in your account. The person who shared it may have ended it.";
 // A Group invitation or message request waits in Chats.
@@ -32,7 +31,8 @@ export type HandoffChatsOutcome =
 // What Chats found when it could not show the invitation. `late`: Chats did
 // not answer in time.
 const CHATS_OUTCOME_COPY = {
-  absent: "This invitation isn't in this account's list in Chats. The person who shared it may have ended it.",
+  absent:
+    "This invitation isn't in this account's list in Chats. The person who shared it may have ended it.",
   failed: "dohc could not read Chats to find this invitation. Check your connection.",
   late: "dohc could not open this invitation in Chats yet.",
 } as const;
@@ -45,13 +45,15 @@ type ReceivedShareState =
   // `inputs` counts input before the lookup, so a click elsewhere during it
   // keeps Join from taking focus.
   | { kind: "chats"; shareId: string; inputs: number }
-  | { kind: "ready"; shareId: string; shareCode: string; liveEditing: boolean; share: RelayShareReceivedRow };
+  | {
+      kind: "ready";
+      shareId: string;
+      shareCode: string;
+      liveEditing: boolean;
+      share: RelayShareReceivedRow;
+    };
 
-function HandoffCard(props: {
-  title: string;
-  onBack?: () => void;
-  children?: ReactNode;
-}) {
+function HandoffCard(props: { title: string; onBack?: () => void; children?: ReactNode }) {
   useMouseBackButton(props.onBack);
   return (
     <div
@@ -71,24 +73,26 @@ function HandoffCard(props: {
   );
 }
 
-export function ShareHandoffSurface(props: {
-  status: ShareHandoffStatus;
-  onWorkspaceReady: (workspace: Workspace) => void;
-  onBack: () => void;
-  onOpened: () => void;
-  // Whether the person has a workspace of their own, not only shared views.
-  ownWorkspace?: boolean;
-  // Shows Chats at a Group invitation or message request, where it waits
-  // with Join or Accept. Without it, the card says where to find it.
-  openInChats?: (invitation: { shareId: string; inputs: number }) => void;
-  // Why Chats has not shown it yet, and Try again, which reads Chats again.
-  chatsOutcome?: HandoffChatsOutcome;
-  onRetryChats?: () => void;
-  mountInto?: {
-    workspaceId: string;
-    onMounted: (label: string, access: ShareAccess | null) => void;
-  };
-} & ConnectionNoticeHost) {
+export function ShareHandoffSurface(
+  props: {
+    status: ShareHandoffStatus;
+    onWorkspaceReady: (workspace: Workspace) => void;
+    onBack: () => void;
+    onOpened: () => void;
+    // Whether the person has a workspace of their own, not only shared views.
+    ownWorkspace?: boolean;
+    // Shows Chats at a Group invitation or message request, where it waits
+    // with Join or Accept. Without it, the card says where to find it.
+    openInChats?: (invitation: { shareId: string; inputs: number }) => void;
+    // Why Chats has not shown it yet, and Try again, which reads Chats again.
+    chatsOutcome?: HandoffChatsOutcome;
+    onRetryChats?: () => void;
+    mountInto?: {
+      workspaceId: string;
+      onMounted: (label: string, access: ShareAccess | null) => void;
+    };
+  } & ConnectionNoticeHost,
+) {
   const shareId = props.status.status === "done" ? props.status.shareId : null;
   const [lookupAttempt, setLookupAttempt] = useState(0);
   const [receivedShare, setReceivedShare] = useState<ReceivedShareState>({
@@ -97,9 +101,7 @@ export function ShareHandoffSurface(props: {
   const lookupRequest = useRequestSequence();
   // The acceptance card has no Back control; Cancel is its way out, so the
   // mouse's back button follows Cancel there.
-  useMouseBackButton(
-    props.status.status === "waiting-for-acceptance" ? props.onBack : undefined,
-  );
+  useMouseBackButton(props.status.status === "waiting-for-acceptance" ? props.onBack : undefined);
 
   useEffect(() => {
     const request = lookupRequest.next();
@@ -121,7 +123,13 @@ export function ShareHandoffSurface(props: {
             ? { kind: "missing", shareId }
             : "chats" in result
               ? { kind: "chats", shareId, inputs }
-              : { kind: "ready", shareId, shareCode: result.share.shareCode, share: result.share, liveEditing: opensForLiveEditing(result.share) },
+              : {
+                  kind: "ready",
+                  shareId,
+                  shareCode: result.share.shareCode,
+                  share: result.share,
+                  liveEditing: opensForLiveEditing(result.share),
+                },
         );
       })
       .catch(() => {
@@ -134,13 +142,18 @@ export function ShareHandoffSurface(props: {
     };
   }, [lookupAttempt, shareId]);
 
-  const chatsInvitation = receivedShare.kind === "chats" && receivedShare.shareId === shareId && props.openInChats !== undefined
-    ? receivedShare : null;
+  const chatsInvitation =
+    receivedShare.kind === "chats" &&
+    receivedShare.shareId === shareId &&
+    props.openInChats !== undefined
+      ? receivedShare
+      : null;
   const opensInChats = chatsInvitation !== null;
   const openInChats = useRef(props.openInChats);
   openInChats.current = props.openInChats;
   useEffect(() => {
-    if (chatsInvitation) openInChats.current?.({ shareId: chatsInvitation.shareId, inputs: chatsInvitation.inputs });
+    if (chatsInvitation)
+      openInChats.current?.({ shareId: chatsInvitation.shareId, inputs: chatsInvitation.inputs });
   }, [chatsInvitation]);
 
   if (props.status.status === "idle") return null;
@@ -199,9 +212,8 @@ export function ShareHandoffSurface(props: {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
-          This share link belongs to a different server ({props.status.linkRelayUrl})
-          than the one you're signed in to. Sign in to that server, then choose Open
-          in dohc again.
+          This share link belongs to a different server ({props.status.linkRelayUrl}) than the one
+          you're signed in to. Sign in to that server, then choose Open in dohc again.
         </p>
       </HandoffCard>
     );
@@ -217,10 +229,7 @@ export function ShareHandoffSurface(props: {
     );
   }
 
-  if (
-    props.status.status === "failed-network" ||
-    props.status.status === "failed-busy"
-  ) {
+  if (props.status.status === "failed-network" || props.status.status === "failed-busy") {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
@@ -228,7 +237,11 @@ export function ShareHandoffSurface(props: {
         </p>
         <SecondaryButton
           type="button"
-          onClick={() => void bridge().retryShareHandoff().catch(() => undefined)}
+          onClick={() =>
+            void bridge()
+              .retryShareHandoff()
+              .catch(() => undefined)
+          }
         >
           Try again
         </SecondaryButton>
@@ -236,10 +249,7 @@ export function ShareHandoffSurface(props: {
     );
   }
 
-  if (
-    receivedShare.kind === "ready" &&
-    receivedShare.shareId === shareId
-  ) {
+  if (receivedShare.kind === "ready" && receivedShare.shareId === shareId) {
     return (
       <OpenSharedView
         key={receivedShare.shareId}
@@ -259,46 +269,46 @@ export function ShareHandoffSurface(props: {
     );
   }
 
-  if (
-    receivedShare.kind === "missing" &&
-    receivedShare.shareId === shareId
-  ) {
+  if (receivedShare.kind === "missing" && receivedShare.shareId === shareId) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
           {MISSING_COPY}
         </p>
-        <SecondaryButton
-          type="button"
-          onClick={() => setLookupAttempt((attempt) => attempt + 1)}
-        >
+        <SecondaryButton type="button" onClick={() => setLookupAttempt((attempt) => attempt + 1)}>
           Check again
         </SecondaryButton>
       </HandoffCard>
     );
   }
 
-  if (
-    receivedShare.kind === "chats" &&
-    receivedShare.shareId === shareId &&
-    !opensInChats
-  ) {
+  if (receivedShare.kind === "chats" && receivedShare.shareId === shareId && !opensInChats) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
-        <p role="status" data-testid="handoff-opens-in-chats" className="m-0 text-xs leading-relaxed text-muted">
+        <p
+          role="status"
+          data-testid="handoff-opens-in-chats"
+          className="m-0 text-xs leading-relaxed text-muted"
+        >
           {props.ownWorkspace ? CHATS_COPY : NO_OWN_WORKSPACE_COPY}
         </p>
       </HandoffCard>
     );
   }
 
-  const chatsOutcome = opensInChats && props.chatsOutcome?.shareId === shareId ? props.chatsOutcome : null;
+  const chatsOutcome =
+    opensInChats && props.chatsOutcome?.shareId === shareId ? props.chatsOutcome : null;
   if (chatsOutcome !== null) {
-    const copy = chatsOutcome.outcome === "off" ? chatsOutcome.copy : CHATS_OUTCOME_COPY[chatsOutcome.outcome];
+    const copy =
+      chatsOutcome.outcome === "off" ? chatsOutcome.copy : CHATS_OUTCOME_COPY[chatsOutcome.outcome];
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <div className="flex items-start gap-2">
-          <p role="alert" data-testid={`handoff-chats-${chatsOutcome.outcome}`} className="m-0 min-w-0 flex-1 text-xs leading-relaxed text-danger">
+          <p
+            role="alert"
+            data-testid={`handoff-chats-${chatsOutcome.outcome}`}
+            className="m-0 min-w-0 flex-1 text-xs leading-relaxed text-danger"
+          >
             {copy}
           </p>
           <CopyButton label="Copy" pinName iconOnly getText={() => copy} />
@@ -312,19 +322,13 @@ export function ShareHandoffSurface(props: {
     );
   }
 
-  if (
-    receivedShare.kind === "failed" &&
-    receivedShare.shareId === shareId
-  ) {
+  if (receivedShare.kind === "failed" && receivedShare.shareId === shareId) {
     return (
       <HandoffCard title="Open a share" onBack={props.onBack}>
         <p role="alert" className="m-0 text-xs leading-relaxed text-danger">
           {NETWORK_COPY}
         </p>
-        <SecondaryButton
-          type="button"
-          onClick={() => setLookupAttempt((attempt) => attempt + 1)}
-        >
+        <SecondaryButton type="button" onClick={() => setLookupAttempt((attempt) => attempt + 1)}>
           Try again
         </SecondaryButton>
       </HandoffCard>

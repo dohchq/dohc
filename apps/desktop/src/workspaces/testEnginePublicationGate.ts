@@ -6,7 +6,10 @@ import { writeFile } from "node:fs/promises";
 // a new FSEvents stream delivers anything.
 const GATE_POLL_MS = 25;
 
-export async function waitForEnginePublicationGate(gate: string, signal: AbortSignal): Promise<void> {
+export async function waitForEnginePublicationGate(
+  gate: string,
+  signal: AbortSignal,
+): Promise<void> {
   signal.throwIfAborted();
   if (!existsSync(gate)) return;
   await writeFile(gate + ".waiting", "waiting");
@@ -15,9 +18,17 @@ export async function waitForEnginePublicationGate(gate: string, signal: AbortSi
       clearInterval(timer);
       signal.removeEventListener("abort", aborted);
     };
-    const aborted = () => {stop(); reject(signal.reason);};
-    const timer = setInterval(() => {if (!existsSync(gate)) {stop(); resolve();}}, GATE_POLL_MS);
-    signal.addEventListener("abort", aborted, {once: true});
+    const aborted = () => {
+      stop();
+      reject(signal.reason);
+    };
+    const timer = setInterval(() => {
+      if (!existsSync(gate)) {
+        stop();
+        resolve();
+      }
+    }, GATE_POLL_MS);
+    signal.addEventListener("abort", aborted, { once: true });
     if (signal.aborted) aborted();
   });
 }

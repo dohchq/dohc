@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatsNav } from "../workbench/ChatsView";
-import {
-  chatsNavigationLeavesConversation,
-  chatsNavigationRequiresRemount,
-} from "./chatsNav";
+import { chatsNavigationLeavesConversation, chatsNavigationRequiresRemount } from "./chatsNav";
 
 describe("targeted chat navigation", () => {
   const threadNav = (threadId: string, focusMessageId?: string): ChatsNav => ({
@@ -39,26 +36,30 @@ describe("targeted chat navigation", () => {
       ),
     ).toBe(true);
     expect(
-      chatsNavigationRequiresRemount(
-        threadNav("thread-1", "message-1"),
-        threadNav("thread-1"),
-      ),
+      chatsNavigationRequiresRemount(threadNav("thread-1", "message-1"), threadNav("thread-1")),
     ).toBe(false);
   });
 
   it("remounts an agent conversation for a jump to one of its messages", () => {
     const thread = threadNav("thread-1");
     if (thread.level !== "thread") throw new Error("thread nav");
-    const lane = (focusMessageId?: string): ChatsNav =>
-      ({ level: "channel", channel: thread.channel, ...(focusMessageId ? { focusMessageId } : {}) });
+    const lane = (focusMessageId?: string): ChatsNav => ({
+      level: "channel",
+      channel: thread.channel,
+      ...(focusMessageId ? { focusMessageId } : {}),
+    });
     expect(chatsNavigationRequiresRemount(lane(), lane("message-2"))).toBe(true);
     expect(chatsNavigationRequiresRemount(lane("message-2"), lane())).toBe(false);
-    expect(chatsNavigationRequiresRemount(lane(), { ...lane(), lane: "chat" } as ChatsNav)).toBe(true);
+    expect(chatsNavigationRequiresRemount(lane(), { ...lane(), lane: "chat" } as ChatsNav)).toBe(
+      true,
+    );
   });
 
   it("keeps drafts for a message jump but clears them for another conversation", () => {
     const focused = threadNav("thread-1", "message-1");
-    expect(chatsNavigationLeavesConversation(focused, threadNav("thread-1", "message-2"))).toBe(false);
+    expect(chatsNavigationLeavesConversation(focused, threadNav("thread-1", "message-2"))).toBe(
+      false,
+    );
     expect(chatsNavigationLeavesConversation(focused, threadNav("thread-2"))).toBe(true);
     expect(chatsNavigationLeavesConversation(focused, focused)).toBe(false);
   });

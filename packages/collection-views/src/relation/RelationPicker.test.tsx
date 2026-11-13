@@ -71,9 +71,7 @@ describe("RelationPicker", () => {
     };
     const executor = vi
       .fn()
-      .mockResolvedValueOnce(
-        makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
-      )
+      .mockResolvedValueOnce(makeQueryResult([TARGETS[0]!], { nextCursor: cursor }))
       .mockResolvedValueOnce(makeQueryResult([TARGETS[1]!]));
     let writeId = 0;
     const emit = vi.fn(() => ++writeId);
@@ -113,9 +111,7 @@ describe("RelationPicker", () => {
     };
     // Every page carries a cursor: a huge (or non-advancing) related
     // collection must not drain forever or hold every record.
-    const executor = vi.fn(async () =>
-      makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
-    );
+    const executor = vi.fn(async () => makeQueryResult([TARGETS[0]!], { nextCursor: cursor }));
     render(
       <RelationPicker
         acknowledgedWriteId={0}
@@ -127,9 +123,7 @@ describe("RelationPicker", () => {
       />,
     );
 
-    expect(
-      await screen.findByText("The list shows only the first 5 records."),
-    ).toBeDefined();
+    expect(await screen.findByText("The list shows only the first 5 records.")).toBeDefined();
     expect(executor).toHaveBeenCalledTimes(5);
     expect(screen.getAllByRole("option")).toHaveLength(5);
   });
@@ -260,17 +254,13 @@ describe("RelationPicker", () => {
     );
     expect(screen.getByText("Loading records...")).toBeDefined();
     gate.resolve(makeQueryResult([]));
-    expect(
-      await screen.findByText("No records in the related collection yet."),
-    ).toBeDefined();
+    expect(await screen.findByText("No records in the related collection yet.")).toBeDefined();
   });
 
   it("clears the prior collection's records while the next query is in flight", async () => {
     const gate = deferred<CollectionQueryResult>();
     const executor = vi.fn((query: { collectionPath: string }) =>
-      query.collectionPath === "tasks"
-        ? Promise.resolve(makeQueryResult(TARGETS))
-        : gate.promise,
+      query.collectionPath === "tasks" ? Promise.resolve(makeQueryResult(TARGETS)) : gate.promise,
     );
     let writeId = 0;
     const emit = vi.fn(() => ++writeId);
@@ -293,9 +283,7 @@ describe("RelationPicker", () => {
     expect(screen.getByText("Loading records...")).toBeDefined();
     expect(emit).not.toHaveBeenCalled();
 
-    gate.resolve(
-      makeQueryResult([makeRecord("proj-1", [indexedValue("title", "Roadmap")])]),
-    );
+    gate.resolve(makeQueryResult([makeRecord("proj-1", [indexedValue("title", "Roadmap")])]));
     expect(await screen.findByRole("option", { name: "Roadmap" })).toBeDefined();
   });
 

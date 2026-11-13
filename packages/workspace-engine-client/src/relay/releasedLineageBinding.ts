@@ -19,7 +19,13 @@ type RetainedAuthor =
 /** Where a piece of retained work is, without who made it. */
 type ContributionLocator =
   | { kind: "carried"; deliveryId: string; updateDigest: string; journalCursor: number }
-  | { kind: "outbox"; outboxId: string; sequence: number; deliveryId: string; updateDigest: string };
+  | {
+      kind: "outbox";
+      outboxId: string;
+      sequence: number;
+      deliveryId: string;
+      updateDigest: string;
+    };
 
 export type RetainedContribution = ContributionLocator & { authors: [RetainedAuthor] };
 
@@ -75,7 +81,8 @@ const invalid = (field: string) => new TypeError(`Invalid released-lineage bindi
 function fields(value: unknown, keys: readonly string[], field: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid(field);
   const actual = Object.keys(value);
-  if (actual.length !== keys.length || !keys.every(key => Object.hasOwn(value, key))) throw invalid(field);
+  if (actual.length !== keys.length || !keys.every((key) => Object.hasOwn(value, key)))
+    throw invalid(field);
   return value as Record<string, unknown>;
 }
 
@@ -85,8 +92,20 @@ function text(value: unknown, field: string): string {
   return value;
 }
 
-function integer(value: unknown, min: number, field: string, max = Number.MAX_SAFE_INTEGER): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < min || value > max || Object.is(value, -0)) throw invalid(field);
+function integer(
+  value: unknown,
+  min: number,
+  field: string,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < min ||
+    value > max ||
+    Object.is(value, -0)
+  )
+    throw invalid(field);
   return value;
 }
 
@@ -97,26 +116,41 @@ function sha256(value: unknown, field: string): string {
 
 /** An actor or principal as the engine admits one: bounded, with no control character. */
 function identifier(value: unknown, field: string): string {
-  if (Buffer.byteLength(text(value, field), "utf8") > MAX_IDENTIFIER_BYTES || /\p{Cc}/u.test(value as string)) throw invalid(field);
+  if (
+    Buffer.byteLength(text(value, field), "utf8") > MAX_IDENTIFIER_BYTES ||
+    /\p{Cc}/u.test(value as string)
+  )
+    throw invalid(field);
   return value as string;
 }
 
-const nullable = <T>(value: unknown, read: (value: unknown) => T): T | null => value === null ? null : read(value);
+const nullable = <T>(value: unknown, read: (value: unknown) => T): T | null =>
+  value === null ? null : read(value);
 
 /** UTF-8 byte order, as Rust compares strings. */
-const compareText = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+const compareText = (a: string, b: string) =>
+  Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 
 /** The engine's `Ord` on contributions: kind, then each field in declaration order, authors last by their canonical JSON. */
 function compareContribution(a: RetainedContribution, b: RetainedContribution): number {
   if (a.kind !== b.kind) return a.kind === "carried" ? -1 : 1;
   const authors = () => compareText(canonical(a.authors), canonical(b.authors));
   if (a.kind === "carried" && b.kind === "carried") {
-    return compareText(a.deliveryId, b.deliveryId) || compareText(a.updateDigest, b.updateDigest) ||
-      a.journalCursor - b.journalCursor || authors();
+    return (
+      compareText(a.deliveryId, b.deliveryId) ||
+      compareText(a.updateDigest, b.updateDigest) ||
+      a.journalCursor - b.journalCursor ||
+      authors()
+    );
   }
   if (a.kind === "outbox" && b.kind === "outbox") {
-    return compareText(a.outboxId, b.outboxId) || a.sequence - b.sequence ||
-      compareText(a.deliveryId, b.deliveryId) || compareText(a.updateDigest, b.updateDigest) || authors();
+    return (
+      compareText(a.outboxId, b.outboxId) ||
+      a.sequence - b.sequence ||
+      compareText(a.deliveryId, b.deliveryId) ||
+      compareText(a.updateDigest, b.updateDigest) ||
+      authors()
+    );
   }
   return 0;
 }
@@ -127,90 +161,157 @@ function compareContribution(a: RetainedContribution, b: RetainedContribution): 
  * always names a depth, a person none.
  */
 function author(value: unknown): RetainedAuthor {
-  const kind = typeof value === "object" && value !== null ? (value as {kind?: unknown}).kind : undefined;
+  const kind =
+    typeof value === "object" && value !== null ? (value as { kind?: unknown }).kind : undefined;
   const row = value as Record<string, unknown>;
-  const optional = (...keys: string[]) => keys.filter(key => typeof value === "object" && value !== null && Object.hasOwn(value, key));
-  const behalf = (decoded: RetainedAuthor & {onBehalfOf?: string}) => {
-    if (Object.hasOwn(row, "onBehalfOf")) decoded.onBehalfOf = identifier(row.onBehalfOf, "author onBehalfOf");
+  const optional = (...keys: string[]) =>
+    keys.filter((key) => typeof value === "object" && value !== null && Object.hasOwn(value, key));
+  const behalf = (decoded: RetainedAuthor & { onBehalfOf?: string }) => {
+    if (Object.hasOwn(row, "onBehalfOf"))
+      decoded.onBehalfOf = identifier(row.onBehalfOf, "author onBehalfOf");
     return decoded;
   };
   switch (kind) {
     case "unattributed":
       fields(value, ["kind"], "author");
-      return {kind};
+      return { kind };
     case "agent": {
-      fields(value, ["agentId", "kind", ...optional("agentRunId", "depth", "onBehalfOf")], "author");
-      const decoded = behalf({kind, agentId: identifier(row.agentId, "author agentId")}) as RetainedAuthor & {kind: "agent"};
-      if (Object.hasOwn(row, "depth")) decoded.depth = integer(row.depth, 1, "author depth", MAX_CHAIN_DEPTH);
-      if (Object.hasOwn(row, "agentRunId")) decoded.agentRunId = identifier(row.agentRunId, "author agentRunId");
+      fields(
+        value,
+        ["agentId", "kind", ...optional("agentRunId", "depth", "onBehalfOf")],
+        "author",
+      );
+      const decoded = behalf({
+        kind,
+        agentId: identifier(row.agentId, "author agentId"),
+      }) as RetainedAuthor & { kind: "agent" };
+      if (Object.hasOwn(row, "depth"))
+        decoded.depth = integer(row.depth, 1, "author depth", MAX_CHAIN_DEPTH);
+      if (Object.hasOwn(row, "agentRunId"))
+        decoded.agentRunId = identifier(row.agentRunId, "author agentRunId");
       return decoded;
     }
     case "automation":
       fields(value, ["automationId", "depth", "kind", ...optional("onBehalfOf")], "author");
-      return behalf({kind, automationId: identifier(row.automationId, "author automationId"),
-        depth: integer(row.depth, 0, "author depth", MAX_CHAIN_DEPTH)});
+      return behalf({
+        kind,
+        automationId: identifier(row.automationId, "author automationId"),
+        depth: integer(row.depth, 0, "author depth", MAX_CHAIN_DEPTH),
+      });
     case "human":
       fields(value, ["humanId", "kind", ...optional("onBehalfOf")], "author");
-      return behalf({kind, humanId: identifier(row.humanId, "author humanId")});
+      return behalf({ kind, humanId: identifier(row.humanId, "author humanId") });
     default:
       throw invalid("author kind");
   }
 }
 
 function locator(value: unknown): ContributionLocator {
-  const kind = typeof value === "object" && value !== null ? (value as {kind?: unknown}).kind : undefined;
+  const kind =
+    typeof value === "object" && value !== null ? (value as { kind?: unknown }).kind : undefined;
   if (kind === "carried") {
-    const row = fields(value, ["deliveryId", "journalCursor", "kind", "updateDigest"], "carried contribution");
-    return {kind, deliveryId: text(row.deliveryId, "deliveryId"), updateDigest: sha256(row.updateDigest, "updateDigest"),
-      journalCursor: integer(row.journalCursor, 1, "journalCursor")};
+    const row = fields(
+      value,
+      ["deliveryId", "journalCursor", "kind", "updateDigest"],
+      "carried contribution",
+    );
+    return {
+      kind,
+      deliveryId: text(row.deliveryId, "deliveryId"),
+      updateDigest: sha256(row.updateDigest, "updateDigest"),
+      journalCursor: integer(row.journalCursor, 1, "journalCursor"),
+    };
   }
   if (kind === "outbox") {
-    const row = fields(value, ["deliveryId", "kind", "outboxId", "sequence", "updateDigest"], "outbox contribution");
-    return {kind, outboxId: text(row.outboxId, "outboxId"), sequence: integer(row.sequence, 1, "sequence"),
-      deliveryId: text(row.deliveryId, "deliveryId"), updateDigest: sha256(row.updateDigest, "updateDigest")};
+    const row = fields(
+      value,
+      ["deliveryId", "kind", "outboxId", "sequence", "updateDigest"],
+      "outbox contribution",
+    );
+    return {
+      kind,
+      outboxId: text(row.outboxId, "outboxId"),
+      sequence: integer(row.sequence, 1, "sequence"),
+      deliveryId: text(row.deliveryId, "deliveryId"),
+      updateDigest: sha256(row.updateDigest, "updateDigest"),
+    };
   }
   throw invalid("contribution kind");
 }
 
 function contribution(value: unknown): RetainedContribution {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid("contribution");
-  const {authors, ...located} = value as Record<string, unknown>;
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw invalid("contribution");
+  const { authors, ...located } = value as Record<string, unknown>;
   if (!Array.isArray(authors) || authors.length !== 1) throw invalid("authors");
-  return {...locator(located), authors: [author(authors[0])]};
+  return { ...locator(located), authors: [author(authors[0])] };
 }
 
 /** A retained contribution, authors included, with exactly the contract's fields. */
-export const decodeRetainedContribution = (value: unknown): RetainedContribution => contribution(value);
+export const decodeRetainedContribution = (value: unknown): RetainedContribution =>
+  contribution(value);
 
 /** A contribution's canonical JSON: equal for the same work by the same authors. */
-export const canonicalRetainedContribution = (value: RetainedContribution): string => canonical(contribution(value));
+export const canonicalRetainedContribution = (value: RetainedContribution): string =>
+  canonical(contribution(value));
 
 function commitment(value: unknown): UnprovenCommitment {
   const row = fields(value, ["count", "digest"], "unproven");
-  if (typeof row.digest !== "string" || !/^[0-9a-f]{64}$/.test(row.digest)) throw invalid("unproven digest");
-  return {count: integer(row.count, 1, "unproven count"), digest: row.digest};
+  if (typeof row.digest !== "string" || !/^[0-9a-f]{64}$/.test(row.digest))
+    throw invalid("unproven digest");
+  return { count: integer(row.count, 1, "unproven count"), digest: row.digest };
 }
 
 function tail(value: unknown): ProtectedTail {
   const row = fields(value, ["activationId", "namespace", "release", "unproven"], "tail");
-  const release = nullable(row.release, value => {
+  const release = nullable(row.release, (value) => {
     const bound = fields(value, ["path", "restoreGeneration"], "release");
-    return {path: text(bound.path, "release path"), restoreGeneration: integer(bound.restoreGeneration, 0, "release restoreGeneration")};
+    return {
+      path: text(bound.path, "release path"),
+      restoreGeneration: integer(bound.restoreGeneration, 0, "release restoreGeneration"),
+    };
   });
-  return {namespace: text(row.namespace, "namespace"), activationId: text(row.activationId, "activationId"), release,
-    unproven: nullable(row.unproven, commitment)};
+  return {
+    namespace: text(row.namespace, "namespace"),
+    activationId: text(row.activationId, "activationId"),
+    release,
+    unproven: nullable(row.unproven, commitment),
+  };
 }
 
 /** The binding `value` holds, with exactly the contract's fields. */
 export function decodeReleasedLineageBinding(value: unknown): ReleasedLineageBinding {
-  const row = fields(value, ["currentPath", "headDigest", "incoming", "lineageClaimId", "mainVersionId", "objectId",
-    "restoreGeneration", "tails", "version", "workspaceId"], "binding");
+  const row = fields(
+    value,
+    [
+      "currentPath",
+      "headDigest",
+      "incoming",
+      "lineageClaimId",
+      "mainVersionId",
+      "objectId",
+      "restoreGeneration",
+      "tails",
+      "version",
+      "workspaceId",
+    ],
+    "binding",
+  );
   if (row.version !== 3) throw invalid("version");
-  const incoming = fields(row.incoming, ["originId", "originSeq", "relayNamespace", "relaySeq", "replicationEpoch", "streamIdentity"], "incoming");
-  const tails = nullable(row.tails, value => {
+  const incoming = fields(
+    row.incoming,
+    ["originId", "originSeq", "relayNamespace", "relaySeq", "replicationEpoch", "streamIdentity"],
+    "incoming",
+  );
+  const tails = nullable(row.tails, (value) => {
     if (!Array.isArray(value) || value.length === 0) throw invalid("tails");
     const list = value.map(tail);
-    if (list.some((item, index) => index > 0 && compareText(list[index - 1]!.namespace, item.namespace) >= 0)) throw invalid("tail order");
+    if (
+      list.some(
+        (item, index) => index > 0 && compareText(list[index - 1]!.namespace, item.namespace) >= 0,
+      )
+    )
+      throw invalid("tail order");
     return list;
   });
   return {
@@ -219,10 +320,12 @@ export function decodeReleasedLineageBinding(value: unknown): ReleasedLineageBin
     mainVersionId: text(row.mainVersionId, "mainVersionId"),
     objectId: text(row.objectId, "objectId"),
     lineageClaimId: text(row.lineageClaimId, "lineageClaimId"),
-    currentPath: nullable(row.currentPath, value => text(value, "currentPath")),
-    restoreGeneration: nullable(row.restoreGeneration, value => integer(value, 0, "restoreGeneration")),
+    currentPath: nullable(row.currentPath, (value) => text(value, "currentPath")),
+    restoreGeneration: nullable(row.restoreGeneration, (value) =>
+      integer(value, 0, "restoreGeneration"),
+    ),
     incoming: {
-      relayNamespace: nullable(incoming.relayNamespace, value => text(value, "relayNamespace")),
+      relayNamespace: nullable(incoming.relayNamespace, (value) => text(value, "relayNamespace")),
       replicationEpoch: text(incoming.replicationEpoch, "replicationEpoch"),
       streamIdentity: text(incoming.streamIdentity, "streamIdentity"),
       originId: text(incoming.originId, "originId"),
@@ -246,15 +349,22 @@ function canonical(value: unknown): string {
 /** `value` as the engine writes canonical JSON: keys in UTF-8 byte order at every depth, no whitespace. */
 export const canonicalJson = (value: unknown): string => canonical(value);
 
-const listCommitment = (list: RetainedContribution[]): UnprovenCommitment =>
-  ({count: list.length, digest: createHash("sha256").update(CONTRIBUTIONS_DOMAIN, "utf8").update(canonical(list), "utf8").digest("hex")});
+const listCommitment = (list: RetainedContribution[]): UnprovenCommitment => ({
+  count: list.length,
+  digest: createHash("sha256")
+    .update(CONTRIBUTIONS_DOMAIN, "utf8")
+    .update(canonical(list), "utf8")
+    .digest("hex"),
+});
 
 /**
  * The commitment a tail's unproven work names: how many contributions there
  * are, and `SHA256(UTF8("dohc:released-tail-contributions:v2\0") || canonical
  * JSON of all of them, authors included, in canonical order)`, in lowercase hex.
  */
-export function releasedTailContributionsCommitment(contributions: readonly unknown[]): UnprovenCommitment {
+export function releasedTailContributionsCommitment(
+  contributions: readonly unknown[],
+): UnprovenCommitment {
   if (contributions.length === 0) throw invalid("unproven");
   return listCommitment(contributions.map(contribution).sort(compareContribution));
 }
@@ -264,9 +374,12 @@ export function releasedTailContributionsCommitment(contributions: readonly unkn
  * as a tail's commitment, none of them hashing as the canonical empty array.
  * They must already be in canonical order, each once.
  */
-export function mergedContributionsCommitment(contributions: readonly unknown[]): UnprovenCommitment {
+export function mergedContributionsCommitment(
+  contributions: readonly unknown[],
+): UnprovenCommitment {
   const list = contributions.map(contribution);
-  if (list.some((item, index) => index > 0 && compareContribution(list[index - 1]!, item) >= 0)) throw invalid("merged order");
+  if (list.some((item, index) => index > 0 && compareContribution(list[index - 1]!, item) >= 0))
+    throw invalid("merged order");
   return listCommitment(list);
 }
 
@@ -278,7 +391,11 @@ export function canonicalReleasedLineageBinding(binding: ReleasedLineageBinding)
 /** The binding `text` encodes, refusing anything but its canonical JSON. */
 export function releasedLineageBindingFromCanonical(text: string): ReleasedLineageBinding {
   let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { throw invalid("JSON"); }
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw invalid("JSON");
+  }
   const binding = decodeReleasedLineageBinding(parsed);
   if (canonicalReleasedLineageBinding(binding) !== text) throw invalid("canonical form");
   return binding;
@@ -286,5 +403,8 @@ export function releasedLineageBindingFromCanonical(text: string): ReleasedLinea
 
 /** `SHA256(UTF8("dohc:released-lineage-binding:v3\0") || canonical bytes)`, in lowercase hex. */
 export function releasedLineageBindingDigest(binding: ReleasedLineageBinding): string {
-  return createHash("sha256").update(DIGEST_DOMAIN, "utf8").update(canonicalReleasedLineageBinding(binding), "utf8").digest("hex");
+  return createHash("sha256")
+    .update(DIGEST_DOMAIN, "utf8")
+    .update(canonicalReleasedLineageBinding(binding), "utf8")
+    .digest("hex");
 }

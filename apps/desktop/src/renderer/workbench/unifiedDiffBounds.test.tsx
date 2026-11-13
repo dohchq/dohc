@@ -30,9 +30,7 @@ function hugeBody(marker: string): string {
   return out.join("\n") + "\n";
 }
 
-function momentDetail(
-  overrides: Partial<EngineMomentDetailRecord> = {},
-): EngineMomentDetailRecord {
+function momentDetail(overrides: Partial<EngineMomentDetailRecord> = {}): EngineMomentDetailRecord {
   return {
     id: "m-1",
     versionId: "main",
@@ -61,7 +59,10 @@ describe("history diff page", () => {
     vi.stubGlobal("dohcDesktop", bridgeMock);
   });
 
-  function renderPage(moment: EngineMomentDetailRecord, registerActiveUndo: (handler: ActiveUndoHandler | null) => void = () => {}) {
+  function renderPage(
+    moment: EngineMomentDetailRecord,
+    registerActiveUndo: (handler: ActiveUndoHandler | null) => void = () => {},
+  ) {
     bridgeMock.readEngineMoment.mockResolvedValue({ moment });
     const props = {
       workspaceId: "ws-1",
@@ -90,19 +91,27 @@ describe("history diff page", () => {
       finish = resolve;
     });
     const restoreEngineMomentFile = vi.fn().mockReturnValue(pending);
-    if (undo) restoreEngineMomentFile.mockResolvedValueOnce({ restored: "text", restoredMomentId: "undo-1" });
+    if (undo)
+      restoreEngineMomentFile.mockResolvedValueOnce({
+        restored: "text",
+        restoredMomentId: "undo-1",
+      });
     bridgeMock.readEngineMoment.mockResolvedValue({ moment: momentDetail() });
     vi.stubGlobal("dohcDesktop", { ...bridgeMock, restoreEngineMomentFile });
     const view = render(
       <EngineMomentDiffPage
         workspaceId="ws-1"
         tabPath={momentDiffTabPath("m-1")}
-        onBeforeRestore={async () => () => { order.push("release"); }}
+        onBeforeRestore={async () => () => {
+          order.push("release");
+        }}
         onOpenFile={noop}
         onOpenRulesFile={noop}
         onPathResolved={noop}
         registerActiveUndo={noop}
-        onRestored={() => { order.push("restored"); }}
+        onRestored={() => {
+          order.push("restored");
+        }}
         onStopAndRestore={() => {}}
         onError={noop}
         onSettled={noop}
@@ -113,72 +122,107 @@ describe("history diff page", () => {
       />,
     );
     await act(async () => {});
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+    });
     if (undo) {
       expect(order).toEqual(["restored", "release"]);
       order.length = 0;
-      await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-undo-restore")); });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("engine-diff-undo-restore"));
+      });
     }
     expect(restoreEngineMomentFile).toHaveBeenCalledTimes(undo ? 2 : 1);
     view.unmount();
-    await act(async () => { finish({ restored: "text", restoredMomentId: "restore-2" }); await pending; });
+    await act(async () => {
+      finish({ restored: "text", restoredMomentId: "restore-2" });
+      await pending;
+    });
     expect(order).toEqual(["restored", "release"]);
   });
 
   // A failure is the shell's toast and Notices row, so the live region
   // announces only a restore that happened.
-  it.each([false, true])("updates an existing live region with the restore outcome (failure: %s)", async (failure) => {
-    let resolve!: (result: { restored: "text"; restoredMomentId: string }) => void;
-    let reject!: (error: Error) => void;
-    const pending = new Promise<{ restored: "text"; restoredMomentId: string }>((done, fail) => {
-      resolve = done;
-      reject = fail;
-    });
-    vi.stubGlobal("dohcDesktop", { ...bridgeMock, restoreEngineMomentFile: vi.fn().mockReturnValue(pending) });
-    renderPage(momentDetail());
-    await screen.findByTestId("engine-diff-lines");
-    const status = screen.getByRole("status");
-    expect(status.getAttribute("aria-live")).toBe("polite");
-    expect(status.textContent).toBe("");
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
-    await act(async () => {
-      if (failure) reject(new Error("Could not restore this file."));
-      else resolve({ restored: "text", restoredMomentId: "restore-1" });
-      await pending.catch(() => undefined);
-    });
-    expect(screen.getByRole("status")).toBe(status);
-    if (failure) {
+  it.each([false, true])(
+    "updates an existing live region with the restore outcome (failure: %s)",
+    async (failure) => {
+      let resolve!: (result: { restored: "text"; restoredMomentId: string }) => void;
+      let reject!: (error: Error) => void;
+      const pending = new Promise<{ restored: "text"; restoredMomentId: string }>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      vi.stubGlobal("dohcDesktop", {
+        ...bridgeMock,
+        restoreEngineMomentFile: vi.fn().mockReturnValue(pending),
+      });
+      renderPage(momentDetail());
+      await screen.findByTestId("engine-diff-lines");
+      const status = screen.getByRole("status");
+      expect(status.getAttribute("aria-live")).toBe("polite");
       expect(status.textContent).toBe("");
-      expect(onError).toHaveBeenCalledWith("dohc could not restore notes/plan.md.", expect.any(Error), expect.any(Function), "history-restore:notes/plan.md", "notes/plan.md");
-      return;
-    }
-    expect(onError).not.toHaveBeenCalled();
-    expect(status.textContent).toBe("Restored the earlier state. Undo restore is available here.");
-    expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
-    // The button beside the line says Undo restore, so only a screen reader
-    // hears that it is there.
-    expect(status.querySelector(".sr-only")?.textContent).toBe(" Undo restore is available here.");
-  });
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+      });
+      await act(async () => {
+        if (failure) reject(new Error("Could not restore this file."));
+        else resolve({ restored: "text", restoredMomentId: "restore-1" });
+        await pending.catch(() => undefined);
+      });
+      expect(screen.getByRole("status")).toBe(status);
+      if (failure) {
+        expect(status.textContent).toBe("");
+        expect(onError).toHaveBeenCalledWith(
+          "dohc could not restore notes/plan.md.",
+          expect.any(Error),
+          expect.any(Function),
+          "history-restore:notes/plan.md",
+          "notes/plan.md",
+        );
+        return;
+      }
+      expect(onError).not.toHaveBeenCalled();
+      expect(status.textContent).toBe(
+        "Restored the earlier state. Undo restore is available here.",
+      );
+      expect(status.contains(screen.getByTestId("engine-diff-restore-status"))).toBe(true);
+      // The button beside the line says Undo restore, so only a screen reader
+      // hears that it is there.
+      expect(status.querySelector(".sr-only")?.textContent).toBe(
+        " Undo restore is available here.",
+      );
+    },
+  );
 
   // Restore and Undo restore take each other's place, so a press hands the
   // focus over and the keyboard can undo at once.
   it("hands the focus from Restore to Undo restore and back", async () => {
     vi.stubGlobal("dohcDesktop", {
       ...bridgeMock,
-      restoreEngineMomentFile: vi.fn().mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" }),
+      restoreEngineMomentFile: vi
+        .fn()
+        .mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" }),
     });
     const registerActiveUndo = vi.fn<(handler: ActiveUndoHandler | null) => void>();
     renderPage(momentDetail(), registerActiveUndo);
     await screen.findByTestId("engine-diff-lines");
     screen.getByTestId("engine-diff-restore-file").focus();
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+    });
     expect(document.activeElement).toBe(screen.getByTestId("engine-diff-undo-restore"));
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-undo-restore")); });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-undo-restore"));
+    });
     expect(document.activeElement).toBe(screen.getByTestId("engine-diff-restore-file"));
     // The Undo shortcut on Undo restore hands it back too.
-    await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-restore-file")); });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
+    });
     expect(document.activeElement).toBe(screen.getByTestId("engine-diff-undo-restore"));
-    await act(async () => { await registerActiveUndo.mock.lastCall?.[0]?.run(); });
+    await act(async () => {
+      await registerActiveUndo.mock.lastCall?.[0]?.run();
+    });
     expect(document.activeElement).toBe(screen.getByTestId("engine-diff-restore-file"));
   });
 
@@ -254,27 +298,34 @@ describe("history diff page", () => {
   const bytes = (byteLength: number) => ({ sha256: "a".repeat(64), byteLength });
 
   it.each([
-    ["binary", { beforeText: null, afterText: null, beforeBinary: bytes(10), afterBinary: bytes(12) }, "engine-diff-binary"],
+    [
+      "binary",
+      { beforeText: null, afterText: null, beforeBinary: bytes(10), afterBinary: bytes(12) },
+      "engine-diff-binary",
+    ],
     ["protected", { protected: true, beforeText: null, afterText: null }, "engine-diff-protected"],
-  ] as const)("keeps the %s page, with no lines and no counts", async (_kind, overrides, testId) => {
-    renderPage(momentDetail(overrides));
-    await screen.findByTestId(testId);
-    expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
-    expect(screen.queryByTestId("engine-diff-counts")).toBeNull();
-    expect(screen.getByTestId("engine-diff-restore-file")).toBeTruthy();
-  });
+  ] as const)(
+    "keeps the %s page, with no lines and no counts",
+    async (_kind, overrides, testId) => {
+      renderPage(momentDetail(overrides));
+      await screen.findByTestId(testId);
+      expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
+      expect(screen.queryByTestId("engine-diff-counts")).toBeNull();
+      expect(screen.getByTestId("engine-diff-restore-file")).toBeTruthy();
+    },
+  );
 
   it("keeps a text side readable when the other side became binary", async () => {
-    renderPage(momentDetail({ beforeText: "the old words\n", afterText: null, afterBinary: bytes(2048) }));
+    renderPage(
+      momentDetail({ beforeText: "the old words\n", afterText: null, afterBinary: bytes(2048) }),
+    );
     await screen.findByTestId("engine-diff-binary-side");
     const lines = screen.getByTestId("engine-diff-lines").querySelectorAll("code");
     expect([...lines].map((line) => line.textContent)).toEqual(["Removed: the old words"]);
   });
 
   it("draws a 10 MiB moment without building a line per body line", async () => {
-    renderPage(
-      momentDetail({ beforeText: hugeBody("a"), afterText: hugeBody("b") }),
-    );
+    renderPage(momentDetail({ beforeText: hugeBody("a"), afterText: hugeBody("b") }));
     const body = await screen.findByTestId("engine-diff-lines");
     // The display bound holds: 800 diff lines plus the note that names the
     // rest. Before the fix this built 500,000 diff lines and 500,000 numbered

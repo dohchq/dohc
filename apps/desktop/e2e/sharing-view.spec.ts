@@ -38,7 +38,11 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     await seedWorkspaceRegistry(temp, [
-      { workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" } },
+      {
+        workspaceId,
+        rootPath: temp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" },
+      },
     ]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
@@ -92,7 +96,11 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await row.getByRole("button", { name: "Copy code" }).focus({ timeout: remainingMs() });
       await page.keyboard.press("Enter");
-      await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() }).toBe(shareCode);
+      await expect
+        .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), {
+          timeout: remainingMs(),
+        })
+        .toBe(shareCode);
     });
 
     // The rail button closes and reopens the same view.
@@ -106,15 +114,22 @@ test("sharing view: lists a share this workspace granted and ends it", async () 
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "End share…" }).click();
     const confirm = page.getByTestId("sharing-end-confirm");
-    await expect(confirm).toContainText(`End this share? ${RECIPIENT_EMAIL} keeps a read-only copy`);
+    await expect(confirm).toContainText(
+      `End this share? ${RECIPIENT_EMAIL} keeps a read-only copy`,
+    );
     await confirm.getByTestId("sharing-end").click();
     await expect(confirm).toBeHidden();
 
     // The relay ended it: the recipient's next fetch is refused.
     await expect
-      .poll(async () => (await relayJson(relay!.baseUrl, RECIPIENT_TOKEN, `/sync/shares/${shareId}/log?since=0`)).status, {
-        timeout: 30_000,
-      })
+      .poll(
+        async () =>
+          (await relayJson(relay!.baseUrl, RECIPIENT_TOKEN, `/sync/shares/${shareId}/log?since=0`))
+            .status,
+        {
+          timeout: 30_000,
+        },
+      )
       .toBe(404);
   } finally {
     // Stop the relay before removing the temp tree it holds open (Windows EBUSY).
@@ -143,17 +158,37 @@ test("sharing view: a removed share on this computer, its skipped changes, and R
     ]);
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
-    await seedWorkspaceRegistry(temp, [{
-      workspaceId, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" },
-      shareMounts: [{
-        shareId, label: "notes", granterEmail: "sam@dohc.test", relayUrl: relay.baseUrl, recipientEmail: "e2e-granter@dohc.test",
-        grantedSelector: { paths: ["notes.md"], versionId: null, access: "view" },
-        skippedOps: {
-          ops: [{ originId: "origin-sam", originSeq: 4, opKind: "write", code: "share-boundary-violation", detail: "notes/draft.md", atMs: 1 }],
-          more: 0, generation: 2,
-        },
-      }],
-    }]);
+    await seedWorkspaceRegistry(temp, [
+      {
+        workspaceId,
+        rootPath: temp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: "e2e-granter" },
+        shareMounts: [
+          {
+            shareId,
+            label: "notes",
+            granterEmail: "sam@dohc.test",
+            relayUrl: relay.baseUrl,
+            recipientEmail: "e2e-granter@dohc.test",
+            grantedSelector: { paths: ["notes.md"], versionId: null, access: "view" },
+            skippedOps: {
+              ops: [
+                {
+                  originId: "origin-sam",
+                  originSeq: 4,
+                  opKind: "write",
+                  code: "share-boundary-violation",
+                  detail: "notes/draft.md",
+                  atMs: 1,
+                },
+              ],
+              more: 0,
+              generation: 2,
+            },
+          },
+        ],
+      },
+    ]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,

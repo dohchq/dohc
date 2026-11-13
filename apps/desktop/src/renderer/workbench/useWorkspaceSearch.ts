@@ -2,12 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { WorkspaceSearchPayload } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { bridge } from "../bridge";
-import {
-  applyBatch,
-  beginSearch,
-  idleSearchModel,
-  type SearchModel,
-} from "./search-model";
+import { applyBatch, beginSearch, idleSearchModel, type SearchModel } from "./search-model";
 
 const UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
 // The daemon may legitimately remain in Starting/Importing until its 120s
@@ -58,10 +53,7 @@ export interface WorkspaceSearchApi {
   clear: () => void;
 }
 
-type WorkspaceSearchErrorReporter = (
-  error: unknown,
-  retry: () => void,
-) => void;
+type WorkspaceSearchErrorReporter = (error: unknown, retry: () => void) => void;
 
 // Owns the streamed-search lifecycle for one workspace: mints search ids,
 // folds validated batches into the pure model, and drops stale batches by
@@ -149,8 +141,7 @@ export function useWorkspaceSearch(
   const issue = useCallback(
     function issue(active: ActiveSearch): void {
       const isCurrent = () =>
-        activeSearchRef.current === active &&
-        modelRef.current.searchId === active.payload.searchId;
+        activeSearchRef.current === active && modelRef.current.searchId === active.payload.searchId;
       const fail = (error: unknown) => {
         if (!isCurrent()) return;
         // The search never started (unknown workspace, vanished root), or its
@@ -196,18 +187,14 @@ export function useWorkspaceSearch(
               }
               const now = performance.now();
               active.updatingStartedAtMs ??= now;
-              const remainingMs =
-                active.updatingStartedAtMs + UPDATING_RETRY_DEADLINE_MS - now;
+              const remainingMs = active.updatingStartedAtMs + UPDATING_RETRY_DEADLINE_MS - now;
               if (remainingMs <= 0) {
                 fail(new Error("Workspace is still updating."));
                 return;
               }
               const delay = Math.min(
                 UPDATING_RETRY_DELAYS_MS[
-                  Math.min(
-                    active.retryCount,
-                    UPDATING_RETRY_DELAYS_MS.length - 1,
-                  )
+                  Math.min(active.retryCount, UPDATING_RETRY_DELAYS_MS.length - 1)
                 ],
                 remainingMs,
               );

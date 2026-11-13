@@ -4,7 +4,11 @@ import { createDohcMcpServer } from "./server";
 
 // Test-only transport. Listing tools performs no workspace reads or writes.
 export async function advertisedCapabilityTools(shareAccess?: "view" | "comment" | "edit") {
-  const server = createDohcMcpServer({ root: "/capability-snapshot", home: "/capability-home", shareAccess });
+  const server = createDohcMcpServer({
+    root: "/capability-snapshot",
+    home: "/capability-home",
+    shareAccess,
+  });
   const client = new Client({ name: "capability-snapshot", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   try {

@@ -158,9 +158,7 @@ describe("windowPreviewForRow (lead-trim so the match survives end-truncation)",
     expect(windowed.leadTrimmed).toBe(true);
     expect(windowed.matchStart).toBe(PREVIEW_LEAD_CONTEXT_CHARS);
     // The mark substring is intact in the rendered window, near its start.
-    expect(windowed.text.slice(windowed.matchStart, windowed.matchEnd)).toBe(
-      "jumptargettoken",
-    );
+    expect(windowed.text.slice(windowed.matchStart, windowed.matchEnd)).toBe("jumptargettoken");
     expect(windowed.text).toBe("ies the jumptargettoken here");
   });
 

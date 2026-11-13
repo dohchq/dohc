@@ -21,10 +21,7 @@ import {
   isEngineWorkspaceOpenRefusedError,
   type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
-import {
-  daemonCaptureLifecycleAnswer,
-  mockLiveSessions,
-} from "../testing/liveEngineSessions";
+import { daemonCaptureLifecycleAnswer, mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
@@ -74,11 +71,7 @@ function recordingSessions(): {
   return { sessions, runOptions };
 }
 
-function captureWith(
-  root: string,
-  sessions: EngineWorkspaceSessions,
-  onProviderOpen = () => {},
-) {
+function captureWith(root: string, sessions: EngineWorkspaceSessions, onProviderOpen = () => {}) {
   const doc = new Y.Doc();
   doc.getText("plainText").insert(0, "seed");
   return createWorkspaceEngineCapture({
@@ -112,11 +105,15 @@ function captureWith(
 describe("the document open's capture-chain hold", () => {
   // The daemon's answer to opening a file a new folder's import has not
   // captured yet. The active version is not fenced: only this open waits.
-  const importRefusal = () => new DaemonRefusalError({
-    code: "OVERLOADED",
-    message: "Workspace is still updating. Try again.",
-    retry: "afterBackoff",
-  }, undefined);
+  const importRefusal = () =>
+    new DaemonRefusalError(
+      {
+        code: "OVERLOADED",
+        message: "Workspace is still updating. Try again.",
+        retry: "afterBackoff",
+      },
+      undefined,
+    );
 
   function importingClient(loopback: VersionedLoopbackEngine) {
     const handlers = new Set<(event: Event) => void>();
@@ -125,15 +122,21 @@ describe("the document open's capture-chain hold", () => {
       handlers,
       methods,
       wake(name: "capture.importProgress" | "capture.initialSettled") {
-        for (const handler of [...handlers]) handler({
-          name, payload: { workspaceId: WORKSPACE_ID }, seq: 1, sessionGeneration: 1,
-        });
+        for (const handler of [...handlers])
+          handler({
+            name,
+            payload: { workspaceId: WORKSPACE_ID },
+            seq: 1,
+            sessionGeneration: 1,
+          });
       },
       client: {
         close: () => undefined,
         onEvent(handler: (event: Event) => void) {
           handlers.add(handler);
-          return () => { handlers.delete(handler); };
+          return () => {
+            handlers.delete(handler);
+          };
         },
         async sendRequest(request: Request): Promise<Response> {
           methods.push(request.method);
@@ -143,7 +146,7 @@ describe("the document open's capture-chain hold", () => {
           if (request.method === "workspace.close") {
             return { id: request.id, result: { closed: true } };
           }
-          return daemonCaptureLifecycleAnswer(request) ?? await loopback.sendRequest(request);
+          return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
         },
       },
     };
@@ -198,20 +201,27 @@ describe("the document open's capture-chain hold", () => {
       let captured = false;
       let providerOpens = 0;
       const sleep = vi.fn(async () => undefined);
-      const sessions = new EngineWorkspaceSessions({ currentClient: () => daemon.client }, { sleep });
+      const sessions = new EngineWorkspaceSessions(
+        { currentClient: () => daemon.client },
+        { sleep },
+      );
       const engine = captureWith(root, sessions, () => {
         providerOpens += 1;
         if (!captured) throw importRefusal();
       });
       engine.start();
       await engine.flush();
-      const workspaceOpens = () => daemon.methods.filter((method) => method === "workspace.open").length;
+      const workspaceOpens = () =>
+        daemon.methods.filter((method) => method === "workspace.open").length;
       const opensBefore = workspaceOpens();
       vi.useFakeTimers();
       try {
-        const opening = engine.openYDocSession({
-          path: "note.md", onRemoteUpdate: () => undefined,
-        }).catch((error: unknown) => error);
+        const opening = engine
+          .openYDocSession({
+            path: "note.md",
+            onRemoteUpdate: () => undefined,
+          })
+          .catch((error: unknown) => error);
         await vi.advanceTimersByTimeAsync(42_000);
         expect(providerOpens).toBe(1);
         if (outcome === "captured" || outcome === "settled") {
@@ -284,9 +294,7 @@ describe("the document open's capture-chain hold", () => {
         if (request.method === "workspace.close") {
           return { id: request.id, result: { closed: true } };
         }
-        return (
-          daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request))
-        );
+        return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
       },
     };
     const sessions = new EngineWorkspaceSessions(
@@ -308,10 +316,11 @@ describe("the document open's capture-chain hold", () => {
       .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
       .catch((error: unknown) => error);
 
-    expect(refusal, "drop withRetryBudget from the task -> the version read runs its full ladder and this is an EngineWorkspaceRebindError instead, which main maps to a plain fallback rather than engineMayHoldDocument.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-    expect((refusal as Error).message).toContain(
-      `limit of ${YDOC_OPEN_RETRY_DEADLINE_MS}ms`,
-    );
+    expect(
+      refusal,
+      "drop withRetryBudget from the task -> the version read runs its full ladder and this is an EngineWorkspaceRebindError instead, which main maps to a plain fallback rather than engineMayHoldDocument.",
+    ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+    expect((refusal as Error).message).toContain(`limit of ${YDOC_OPEN_RETRY_DEADLINE_MS}ms`);
     // The budget stopped the ladder well inside the six attempts it would
     // otherwise have spent holding the chain.
     expect(sleeps.length).toBeLessThanOrEqual(3);
@@ -349,19 +358,11 @@ describe("the document open's capture-chain hold", () => {
           }
           return await new Promise<never>((_resolve, reject) => {
             setTimeout(() => {
-              reject(
-                new EngineRequestDeadlineError(
-                  request.id,
-                  request.method,
-                  deadlineMs,
-                ),
-              );
+              reject(new EngineRequestDeadlineError(request.id, request.method, deadlineMs));
             }, deadlineMs);
           });
         }
-        return (
-          daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request))
-        );
+        return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
       },
     };
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
@@ -397,7 +398,10 @@ describe("the document open's capture-chain hold", () => {
 
       await vi.advanceTimersByTimeAsync(1);
       const refusal = await opening;
-      expect(refusal, "translate the deadline into a plain transport error -> the run ladder retries it, each retry costs another full bound, and the refusal that eventually reaches main names the retry budget instead of the limit that actually fired.").toBeInstanceOf(YdocOpenTimedOutError);
+      expect(
+        refusal,
+        "translate the deadline into a plain transport error -> the run ladder retries it, each retry costs another full bound, and the refusal that eventually reaches main names the retry budget instead of the limit that actually fired.",
+      ).toBeInstanceOf(YdocOpenTimedOutError);
       expect((refusal as Error).message).toContain(
         `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached`,
       );
@@ -460,19 +464,11 @@ describe("the document open's capture-chain hold", () => {
               leaseHeld = true;
             }, deadlineMs / 2);
             setTimeout(() => {
-              reject(
-                new EngineRequestDeadlineError(
-                  request.id,
-                  request.method,
-                  deadlineMs,
-                ),
-              );
+              reject(new EngineRequestDeadlineError(request.id, request.method, deadlineMs));
             }, deadlineMs);
           });
         }
-        return (
-          daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request))
-        );
+        return daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request));
       },
     };
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
@@ -501,7 +497,10 @@ describe("the document open's capture-chain hold", () => {
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
       expect((retry as Error).message).toBe("ydoc-session-busy");
-      expect(isEngineWorkspaceOpenRefusedError(retry), "drop the busy refusal from the read-only family -> this is `false`, main answers a plain `available: false`, and the renderer puts a writable plain editor over a document the daemon still holds.").toBe(true);
+      expect(
+        isEngineWorkspaceOpenRefusedError(retry),
+        "drop the busy refusal from the read-only family -> this is `false`, main answers a plain `available: false`, and the renderer puts a writable plain editor over a document the daemon still holds.",
+      ).toBe(true);
     } finally {
       vi.useRealTimers();
       await engine.stop();
@@ -602,8 +601,7 @@ describe("the document open's capture-chain hold", () => {
           lineage: "absent" as const,
           unsettled: false,
           applyLocalUpdate: async () => undefined,
-          settleNow: async () =>
-            ({ sha256: "a".repeat(64), content: "" }) as never,
+          settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => {
             throw closeError;
@@ -619,10 +617,7 @@ describe("the document open's capture-chain hold", () => {
       });
     }
 
-    async function refusalFrom(
-      root: string,
-      closeError: unknown,
-    ): Promise<unknown> {
+    async function refusalFrom(root: string, closeError: unknown): Promise<unknown> {
       const { sessions } = recordingSessions();
       const engine = captureRefusingRelease(root, sessions, closeError);
       engine.start();
@@ -653,7 +648,10 @@ describe("the document open's capture-chain hold", () => {
         ),
       );
 
-      expect(refusal, "attach the release failure as `refusal.cause` and throw the artifact refusal anyway -> main answers a bare `available:false` and the renderer opens the writable plain editor over a session the daemon still holds.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(
+        refusal,
+        "attach the release failure as `refusal.cause` and throw the artifact refusal anyway -> main answers a bare `available:false` and the renderer opens the writable plain editor over a session the daemon still holds.",
+      ).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
     });
 
@@ -693,10 +691,8 @@ describe("the document open's capture-chain hold", () => {
             lineage: absent ? ("absent" as const) : ("existing" as const),
             unsettled: false,
             applyLocalUpdate: async () => undefined,
-            settleNow: async () =>
-              ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
+            settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
+            applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
             close: async () => {
               closes += 1;
               // The refusal release: the budget stopped waiting for it.
@@ -755,12 +751,12 @@ describe("the document open's capture-chain hold", () => {
       const root = await createTestScratch("dohc-ydoc-deadline-");
       await write(root, "note.md", "uncaptured bytes\n");
 
-      const refusal = await refusalFrom(
-        root,
-        new Error("ydoc close refused: unsettled-close"),
-      );
+      const refusal = await refusalFrom(root, new Error("ydoc close refused: unsettled-close"));
 
-      expect(refusal, "rethrow only budget refusals -> YDocUncapturedArtifactError, a plain fallback, and two writers on one path.").toBeInstanceOf(YDocSessionUnreleasedError);
+      expect(
+        refusal,
+        "rethrow only budget refusals -> YDocUncapturedArtifactError, a plain fallback, and two writers on one path.",
+      ).toBeInstanceOf(YDocSessionUnreleasedError);
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
       // Named for the agent reading it, with the daemon's own refusal kept.
       expect((refusal as Error).cause).toMatchObject({
@@ -791,8 +787,7 @@ describe("the document open's capture-chain hold", () => {
       await write(root, "note.md", uncaptured);
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();
-      const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> =
-        [];
+      const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
       let evicts = 0;
       const engine = createWorkspaceEngineCapture({
         workspaceId: WORKSPACE_ID,
@@ -807,13 +802,9 @@ describe("the document open's capture-chain hold", () => {
           lineage: "absent" as const,
           unsettled: false,
           applyLocalUpdate: async () => undefined,
-          settleNow: async () =>
-            ({ sha256: "a".repeat(64), content: "" }) as never,
+          settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
-          close: async (closeOptions?: {
-            settle?: boolean;
-            settleOnRefusal?: boolean;
-          }) => {
+          close: async (closeOptions?: { settle?: boolean; settleOnRefusal?: boolean }) => {
             closeCalls.push({ ...closeOptions });
             // The daemon keeps refusing: the lineage is dirty and the file it
             // would settle over is still uncaptured.
@@ -839,7 +830,10 @@ describe("the document open's capture-chain hold", () => {
         .catch((error: unknown) => error);
       // The session is gone, so the refusal may describe the disk again: the
       // file is really there and the plain editor shows its real bytes.
-      expect(first, "drop the evict fallback (#665) -> a YDocSessionUnreleasedError, an orphan holding its lease, and a path that stays read-only until the daemon restarts.").toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(
+        first,
+        "drop the evict fallback (#665) -> a YDocSessionUnreleasedError, an orphan holding its lease, and a path that stays read-only until the daemon restarts.",
+      ).toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicts).toBe(1);
 
       // "Try again" binds a fresh session rather than discharging a retained
@@ -850,7 +844,10 @@ describe("the document open's capture-chain hold", () => {
       expect(retry).toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicts).toBe(2);
 
-      expect(closeCalls, "discharge with `{ settle: false }` alone -> the provider escalates the repeated refusal to a settling close, and the doc lands on top of the user's uncaptured bytes.").toEqual([
+      expect(
+        closeCalls,
+        "discharge with `{ settle: false }` alone -> the provider escalates the repeated refusal to a settling close, and the doc lands on top of the user's uncaptured bytes.",
+      ).toEqual([
         { settle: false, settleOnRefusal: false },
         { settle: false, settleOnRefusal: false },
       ]);
@@ -885,10 +882,8 @@ describe("the document open's capture-chain hold", () => {
             lineage: evicted ? ("existing" as const) : ("absent" as const),
             unsettled: false,
             applyLocalUpdate: async () => undefined,
-            settleNow: async () =>
-              ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
+            settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
+            applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
             close: async () => {
               throw new DaemonRefusalError(
                 {
@@ -918,7 +913,10 @@ describe("the document open's capture-chain hold", () => {
         path: "note.md",
         onRemoteUpdate: () => undefined,
       });
-      expect(session.doc, "drop the evict fallback in `closeEntry` (#665) -> this open answers YDocSessionUnreleasedError from the retained orphan, and every later one does too.").toBe(doc);
+      expect(
+        session.doc,
+        "drop the evict fallback in `closeEntry` (#665) -> this open answers YDocSessionUnreleasedError from the retained orphan, and every later one does too.",
+      ).toBe(doc);
       expect(opens).toBe(2);
       // Nothing was written on the way out.
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(excluded);
@@ -936,11 +934,7 @@ describe("the document open's capture-chain hold", () => {
       const root = await createTestScratch("dohc-ydoc-deadline-");
       const excluded = "small, policy-excluded content\n";
       await write(root, "note.md", excluded);
-      await write(
-        root,
-        ".dohc/files.toml",
-        '[[rule]]\npath = "note.md"\ntracked = false\n',
-      );
+      await write(root, ".dohc/files.toml", '[[rule]]\npath = "note.md"\ntracked = false\n');
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();
       let evicted = false;
@@ -962,10 +956,8 @@ describe("the document open's capture-chain hold", () => {
             lineage: evicted ? ("existing" as const) : ("absent" as const),
             unsettled: false,
             applyLocalUpdate: async () => undefined,
-            settleNow: async () =>
-              ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
+            settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
+            applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
             close: async () => {
               throw new DaemonRefusalError(
                 {
@@ -995,7 +987,10 @@ describe("the document open's capture-chain hold", () => {
         path: "note.md",
         onRemoteUpdate: () => undefined,
       });
-      expect(session.doc, "sever the `policyTracksPath` clause of `captureWillReachPath` (treat every path as capture-reachable) -> this second open refuses again instead of binding, because the disk-size clause alone never excludes a few plain bytes.").toBe(doc);
+      expect(
+        session.doc,
+        "sever the `policyTracksPath` clause of `captureWillReachPath` (treat every path as capture-reachable) -> this second open refuses again instead of binding, because the disk-size clause alone never excludes a few plain bytes.",
+      ).toBe(doc);
       expect(opens).toBe(2);
       // Nothing was written on the way out.
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(excluded);
@@ -1016,8 +1011,7 @@ describe("the document open's capture-chain hold", () => {
       await write(root, "note.md", uncaptured);
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();
-      const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> =
-        [];
+      const closeCalls: Array<{ settle?: boolean; settleOnRefusal?: boolean }> = [];
       const engine = createWorkspaceEngineCapture({
         workspaceId: WORKSPACE_ID,
         rootPath: root,
@@ -1031,13 +1025,9 @@ describe("the document open's capture-chain hold", () => {
           lineage: "absent" as const,
           unsettled: false,
           applyLocalUpdate: async () => undefined,
-          settleNow: async () =>
-            ({ sha256: "a".repeat(64), content: "" }) as never,
+          settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
           applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
-          close: async (closeOptions?: {
-            settle?: boolean;
-            settleOnRefusal?: boolean;
-          }) => {
+          close: async (closeOptions?: { settle?: boolean; settleOnRefusal?: boolean }) => {
             closeCalls.push({ ...closeOptions });
             throw new Error("unsettled-close");
           },
@@ -1059,12 +1049,13 @@ describe("the document open's capture-chain hold", () => {
 
       // A version switch sweeps live sessions for the paths it is about to
       // rewrite, and this orphan is one of them.
-      await engine
-        .settleAndCloseLiveSessionsForPath("note.md")
-        .catch(() => undefined);
+      await engine.settleAndCloseLiveSessionsForPath("note.md").catch(() => undefined);
 
       for (const call of closeCalls) {
-        expect(call, "drop the entry-level policy -> the sweep's `{ settle: false }` arrives without `settleOnRefusal: false`, the provider escalates, and the doc lands on the user's uncaptured bytes.").toMatchObject({ settle: false, settleOnRefusal: false });
+        expect(
+          call,
+          "drop the entry-level policy -> the sweep's `{ settle: false }` arrives without `settleOnRefusal: false`, the provider escalates, and the doc lands on the user's uncaptured bytes.",
+        ).toMatchObject({ settle: false, settleOnRefusal: false });
       }
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
       await engine.stop();
@@ -1075,12 +1066,12 @@ describe("the document open's capture-chain hold", () => {
       // No file: the sibling branch, which would otherwise claim the open
       // raced a writer and fall back the same silent way.
 
-      const refusal = await refusalFrom(
-        root,
-        new EngineWorkspaceShuttingDownError(),
-      );
+      const refusal = await refusalFrom(root, new EngineWorkspaceShuttingDownError());
 
-      expect(isEngineWorkspaceOpenRefusedError(refusal), "keep `released = false` as the only classification -> the raced refusal downgrades a quitting app to the plain editor.").toBe(true);
+      expect(
+        isEngineWorkspaceOpenRefusedError(refusal),
+        "keep `released = false` as the only classification -> the raced refusal downgrades a quitting app to the plain editor.",
+      ).toBe(true);
       expect(refusal).not.toBeInstanceOf(YDocOpenRacedError);
     });
   });

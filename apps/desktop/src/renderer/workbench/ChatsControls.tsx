@@ -118,9 +118,9 @@ export function ShareReadFailureNotice(props: {
       <span className="min-w-0 flex-1 text-[11px] leading-4 text-muted">
         {props.failure.kind === "unreachable"
           ? `dohc could not read your shares.${staleLine}`
-          : `dohc cannot list this many shares. ${overLimitSentences(
-              props.failure,
-            ).join(" ")}${staleLine}`}
+          : `dohc cannot list this many shares. ${overLimitSentences(props.failure).join(
+              " ",
+            )}${staleLine}`}
       </span>
       {props.failure.kind === "unreachable" ? (
         <button
@@ -150,7 +150,9 @@ export function ChatHeader(props: {
   large?: boolean;
 }) {
   return (
-    <div className={`flex shrink-0 items-center border-b border-line ${props.large ? "h-12 gap-2 pl-5 pr-4" : "h-9 gap-1.5 px-2"}`}>
+    <div
+      className={`flex shrink-0 items-center border-b border-line ${props.large ? "h-12 gap-2 pl-5 pr-4" : "h-9 gap-1.5 px-2"}`}
+    >
       {props.onBack ? (
         <button
           type="button"
@@ -255,7 +257,6 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
   );
 }
 
-
 // Over an agent DM's composer, only when the agent can't answer: what's
 // wrong, and the one action that fixes it. An agent that's off is a state,
 // not a fault, so it reads without the warning.
@@ -263,7 +264,10 @@ export function ComposerNotice(props: { testId: string; children: React.ReactNod
 // you unarchive it.
 export function ArchivedLine(props: { onUnarchive: () => void }) {
   return (
-    <div data-testid="chats-archived-line" className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5">
+    <div
+      data-testid="chats-archived-line"
+      className="flex shrink-0 items-center gap-1.5 border-b border-line bg-panel-2/40 px-3 py-1.5"
+    >
       <Archive size={12} aria-hidden className="shrink-0 text-subtle" />
       <span className="min-w-0 flex-1 truncate text-[11px] text-muted">Archived</span>
       <button
@@ -278,12 +282,22 @@ export function ArchivedLine(props: { onUnarchive: () => void }) {
   );
 }
 
-export function AgentProblemLine(props: { words: string; action: string; off?: boolean; onAction?: (() => void) | undefined }) {
+export function AgentProblemLine(props: {
+  words: string;
+  action: string;
+  off?: boolean;
+  onAction?: (() => void) | undefined;
+}) {
   return (
-    <div data-testid="chats-agent-problem" className="mx-5 mb-1 mt-2 flex min-h-7 items-center gap-2 text-[13px] text-muted">
-      {props.off
-        ? <PowerOff size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
-        : <TriangleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />}
+    <div
+      data-testid="chats-agent-problem"
+      className="mx-5 mb-1 mt-2 flex min-h-7 items-center gap-2 text-[13px] text-muted"
+    >
+      {props.off ? (
+        <PowerOff size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
+      ) : (
+        <TriangleAlert size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
+      )}
       <span className="min-w-0 truncate">{props.words}</span>
       {props.onAction ? (
         <button

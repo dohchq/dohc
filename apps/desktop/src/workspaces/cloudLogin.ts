@@ -48,7 +48,13 @@ export interface CloudLoginOptions {
 export interface CloudLogin {
   start(serverUrl: string): Promise<{ userCode: string; verificationUri: string }>;
   poll(): Promise<{ status: "pending" | "complete" | "denied" | "expired"; email?: string }>;
-  status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string; networkAccess?: "private" | "public" }>;
+  status(): Promise<{
+    connected: boolean;
+    email?: string;
+    serverUrl?: string;
+    relayUrl?: string;
+    networkAccess?: "private" | "public";
+  }>;
   logout(): Promise<void>;
   // Atomically clear the saved session only while it still matches the given
   // identity. Runs inside the store's mutation queue, so a login save cannot
@@ -104,10 +110,7 @@ async function adoptCredentialTransition(
 ): Promise<void> {
   const failures: unknown[] = [];
 
-  for (const cleanup of [
-    options.stopEngines,
-    options.closeRelayTransportWorkspaces,
-  ]) {
+  for (const cleanup of [options.stopEngines, options.closeRelayTransportWorkspaces]) {
     try {
       await cleanup();
     } catch (error) {
@@ -172,10 +175,7 @@ export async function runCloudLogoutTransition(
 
 function throwTransitionFailures(failures: unknown[]): never {
   if (failures.length === 1) throw failures[0];
-  throw new AggregateError(
-    failures,
-    "The server connection change did not complete.",
-  );
+  throw new AggregateError(failures, "The server connection change did not complete.");
 }
 
 type PendingLogin = {
@@ -206,9 +206,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
     userId: string;
     token: string;
   } | null = null;
-  function matchesInvalidatedSession(
-    credentials: CloudCredentials | null,
-  ): boolean {
+  function matchesInvalidatedSession(credentials: CloudCredentials | null): boolean {
     return (
       invalidatedSession !== null &&
       credentials !== null &&
@@ -292,9 +290,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
   }
   // Callers run it inside the store's mutation queue, so a login save cannot
   // land between the compare and the clear.
-  async function clearSavedIf(
-    matches: (saved: CloudCredentials) => boolean,
-  ): Promise<void> {
+  async function clearSavedIf(matches: (saved: CloudCredentials) => boolean): Promise<void> {
     const saved = await options.store.load();
     if (saved === null || !matches(saved)) return;
     const dead = { serverUrl: saved.serverUrl, userId: saved.userId, token: saved.token };
@@ -309,9 +305,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       // Fail loudly — the next read or invalidation retries the
       // deletion.
       invalidatedSession = dead;
-      await options.store
-        .saveInvalidMarker(markerFor(dead))
-        .catch(() => undefined);
+      await options.store.saveInvalidMarker(markerFor(dead)).catch(() => undefined);
       throw error;
     }
   }
@@ -343,9 +337,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
 
   function failCloudLoginIdentity(attempt: PendingLogin): never {
     if (pending === attempt && attempt.epoch === attemptEpoch) pending = null;
-    throw new Error(
-      "The server could not confirm your identity. Contact its administrator.",
-    );
+    throw new Error("The server could not confirm your identity. Contact its administrator.");
   }
 
   function mutateStore<Result>(run: () => Promise<Result>): Promise<Result> {
@@ -463,7 +455,9 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       });
       if (attemptEpoch !== epoch) throw new Error("Server sign-in was cancelled.");
       if (!response.ok) {
-        throw new Error("This server could not start sign-in. Try again or contact its administrator.");
+        throw new Error(
+          "This server could not start sign-in. Try again or contact its administrator.",
+        );
       }
       const data = (await response.json()) as {
         device_code: string;
@@ -475,13 +469,24 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       let verificationUri: URL;
       try {
         verificationUri = new URL(data.verification_uri_complete ?? data.verification_uri);
-        if (canonicalCloudOrigin(verificationUri.origin, insecureLoopback) !== descriptor.authUrl ||
-            verificationUri.username || verificationUri.password || verificationUri.hash ||
-            typeof data.device_code !== "string" || !data.device_code || data.device_code.length > 2048 ||
-            typeof data.user_code !== "string" || !data.user_code || data.user_code.length > 128 ||
-            verificationUri.href.length > 2048) throw new Error("invalid device authorization");
+        if (
+          canonicalCloudOrigin(verificationUri.origin, insecureLoopback) !== descriptor.authUrl ||
+          verificationUri.username ||
+          verificationUri.password ||
+          verificationUri.hash ||
+          typeof data.device_code !== "string" ||
+          !data.device_code ||
+          data.device_code.length > 2048 ||
+          typeof data.user_code !== "string" ||
+          !data.user_code ||
+          data.user_code.length > 128 ||
+          verificationUri.href.length > 2048
+        )
+          throw new Error("invalid device authorization");
       } catch {
-        throw new Error("This server returned an invalid sign-in address. Contact its administrator.");
+        throw new Error(
+          "This server returned an invalid sign-in address. Contact its administrator.",
+        );
       }
       pending = {
         epoch,
@@ -538,11 +543,14 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
     },
 
     async invalidateSessionIf(expected) {
-      await mutateStore(() => clearSavedIf((saved) =>
-        saved.token === expected.token &&
-        saved.serverUrl === expected.serverUrl &&
-        saved.userId === expected.userId,
-      ));
+      await mutateStore(() =>
+        clearSavedIf(
+          (saved) =>
+            saved.token === expected.token &&
+            saved.serverUrl === expected.serverUrl &&
+            saved.userId === expected.userId,
+        ),
+      );
     },
 
     async invalidateAccount(account) {

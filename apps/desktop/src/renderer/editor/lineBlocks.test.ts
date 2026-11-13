@@ -29,7 +29,10 @@ describe("blockForLine", () => {
   });
 
   it("names no start line above the first block, or in an empty body", () => {
-    expect(blockForLine("\n\nText", 1).startLine, "drop the startLine guard in blockTargetForLine -> the slice starts at -1 and the offset points at a line the block does not own.").toBe(0);
+    expect(
+      blockForLine("\n\nText", 1).startLine,
+      "drop the startLine guard in blockTargetForLine -> the slice starts at -1 and the offset points at a line the block does not own.",
+    ).toBe(0);
     expect(blockForLine("", 4).startLine).toBe(0);
   });
 });
@@ -75,8 +78,7 @@ describe("blockForLine — the index", () => {
   it("treats a fenced block's blank lines and markers as inert", () => {
     //  1 "Before"  2 ""  3 "```js"  4 "const a = 1;"  5 ""
     //  6 "# not a heading"  7 "```"  8 ""  9 "After"
-    const body =
-      "Before\n\n```js\nconst a = 1;\n\n# not a heading\n```\n\nAfter";
+    const body = "Before\n\n```js\nconst a = 1;\n\n# not a heading\n```\n\nAfter";
     expect(blockForLine(body, 1).index).toBe(0);
     expect(blockForLine(body, 3).index).toBe(1);
     expect(blockForLine(body, 6).index).toBe(1);
@@ -325,12 +327,8 @@ describe("blockForLine — the index", () => {
       expect(blockForLine(`> a\n> ${inner}\nMatched\n\nAfter`, 3).index).toBe(0);
     }
     // A quoted fence ends it for either kind.
-    expect(
-      blockForLine("> a\n> ```\n> code\n> ```\nMatched\n\nAfter", 5).index,
-    ).toBe(1);
-    expect(
-      blockForLine("> [!note]\n> ```\n> code\n> ```\nMatched\n\nAfter", 5).index,
-    ).toBe(1);
+    expect(blockForLine("> a\n> ```\n> code\n> ```\nMatched\n\nAfter", 5).index).toBe(1);
+    expect(blockForLine("> [!note]\n> ```\n> code\n> ```\nMatched\n\nAfter", 5).index).toBe(1);
   });
 
   it("reads a quoted fence by the contract of the quote it is in", () => {
@@ -479,9 +477,7 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("- outer\n  - a\n    - b\n\n  matched\n\nAfter", 5).index).toBe(0);
     expect(blockForLine("- outer\n  -    nested\n\n  matched\n\nAfter", 4).index).toBe(0);
     // The outer column still governs, so content short of it still breaks out.
-    expect(
-      blockForLine("-    outer\n     - nested\n\n  matched\n\nAfter", 4).index,
-    ).toBe(1);
+    expect(blockForLine("-    outer\n     - nested\n\n  matched\n\nAfter", 4).index).toBe(1);
     // A SIBLING at the top level does move it.
     expect(blockForLine("- a\n\n-    b\n\n  para\n\nAfter", 5).index).toBe(1);
   });
@@ -762,9 +758,7 @@ function editorBlocks(body: string): string[] {
   const texts: string[] = [];
   // An atom (display math) carries no text children — what it shows the
   // reader is its `tex` attribute, so read that when there is no text.
-  root.forEach((node) =>
-    texts.push(node.textContent || String(node.attrs?.tex ?? "")),
-  );
+  root.forEach((node) => texts.push(node.textContent || String(node.attrs?.tex ?? "")));
   return texts;
 }
 
@@ -1174,32 +1168,164 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
     ].map(([body, lazy, after]) => ({
       name: `an underindented lazy line stays in its item: ${body}`,
       body: body as string,
-      lands: [[lazy as number, "lazy"], [after as number, "After"]] as [number, string][],
+      lands: [
+        [lazy as number, "lazy"],
+        [after as number, "After"],
+      ] as [number, string][],
     })),
-    { name: "a lazy line leaves a deep or empty item: - a\n      b\n lazy\n\nAfter", body: "- a\n      b\n lazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
-    { name: "a lazy line leaves a deep or empty item: - a\n  - b\n      c\n lazy\n\nAfter", body: "- a\n  - b\n      c\n lazy\n\nAfter", lands: [[4, "lazy"], [6, "After"]] as [number, string][] },
-    { name: "a lazy line leaves a deep or empty item: - a\n      b\nlazy\n\nAfter", body: "- a\n      b\nlazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
-    { name: "a lazy line leaves a deep or empty item: -\nlazy\n\nAfter", body: "-\nlazy\n\nAfter", lands: [[2, "lazy"], [4, "After"]] as [number, string][] },
-    { name: "a lazy line leaves a deep or empty item: -     a\nlazy\n\nAfter", body: "-     a\nlazy\n\nAfter", lands: [[2, "lazy"], [4, "After"]] as [number, string][] },
-    { name: "a lazy line leaves a deep or empty item: - a\n  \tb\n lazy\n\nAfter", body: "- a\n  \tb\n lazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
-    { name: "r25-deep-marker-bullet", body: "-    a\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
-    { name: "r25-deep-marker-ordered", body: "1.    a\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
-    { name: "r25-heading-marker", body: "- # h\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
-    { name: "r25-heading-continuation", body: "- a\n  # h\nlazy\n\nAfter", lands: [[3,"lazy"],[5,"After"]] as [number, string][] },
-    { name: "r25-fence-marker", body: "- ```\n  x\n  ```\nlazy\n\nAfter", lands: [[4,"lazy"],[6,"After"]] as [number, string][] },
-    { name: "r25-fence-continuation", body: "- a\n  ```\n  x\n  ```\nlazy\n\nAfter", lands: [[5,"lazy"],[7,"After"]] as [number, string][] },
-    { name: "r25-rule-marker", body: "- ---\nlazy\n\nAfter", lands: [[2,"lazy"],[4,"After"]] as [number, string][] },
-    { name: "r25-rule-continuation", body: "- a\n  - - -\nlazy\n\nAfter", lands: [[3,"lazy"],[5,"After"]] as [number, string][] },
-    { name: "r26-hashtag-prose-resumes", body: "- #tag\n  plain\nlazy\n\nAfter", lands: [[3, "lazy"], [5, "After"]] as [number, string][] },
-    { name: "r26-hashtag-next", body: "- a\n#tag\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-hashtag-marker", body: "- #tag\nlazy\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-hashtag-continuation", body: "- a\n  #tag\nlazy\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-hashtag-number", body: "- #1 priority\nnext\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-html-next", body: "- a\n<!-- note -->\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-deep-heading", body: "- a\n    # h\nlazy\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-deep-fence", body: "- a\n    ```\n    x\n    ```\nlazy\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-deep-ordered-heading", body: "1. a\n      # h\nlazy\n\nAfter", lands: [] as [number,string][] },
-    { name: "r26-five-space-marker-fence", body: "-     ```\nnext\n\n# H", lands: [] as [number,string][] },
+    {
+      name: "a lazy line leaves a deep or empty item: - a\n      b\n lazy\n\nAfter",
+      body: "- a\n      b\n lazy\n\nAfter",
+      lands: [
+        [3, "lazy"],
+        [5, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "a lazy line leaves a deep or empty item: - a\n  - b\n      c\n lazy\n\nAfter",
+      body: "- a\n  - b\n      c\n lazy\n\nAfter",
+      lands: [
+        [4, "lazy"],
+        [6, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "a lazy line leaves a deep or empty item: - a\n      b\nlazy\n\nAfter",
+      body: "- a\n      b\nlazy\n\nAfter",
+      lands: [
+        [3, "lazy"],
+        [5, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "a lazy line leaves a deep or empty item: -\nlazy\n\nAfter",
+      body: "-\nlazy\n\nAfter",
+      lands: [
+        [2, "lazy"],
+        [4, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "a lazy line leaves a deep or empty item: -     a\nlazy\n\nAfter",
+      body: "-     a\nlazy\n\nAfter",
+      lands: [
+        [2, "lazy"],
+        [4, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "a lazy line leaves a deep or empty item: - a\n  \tb\n lazy\n\nAfter",
+      body: "- a\n  \tb\n lazy\n\nAfter",
+      lands: [
+        [3, "lazy"],
+        [5, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-deep-marker-bullet",
+      body: "-    a\nlazy\n\nAfter",
+      lands: [
+        [2, "lazy"],
+        [4, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-deep-marker-ordered",
+      body: "1.    a\nlazy\n\nAfter",
+      lands: [
+        [2, "lazy"],
+        [4, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-heading-marker",
+      body: "- # h\nlazy\n\nAfter",
+      lands: [
+        [2, "lazy"],
+        [4, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-heading-continuation",
+      body: "- a\n  # h\nlazy\n\nAfter",
+      lands: [
+        [3, "lazy"],
+        [5, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-fence-marker",
+      body: "- ```\n  x\n  ```\nlazy\n\nAfter",
+      lands: [
+        [4, "lazy"],
+        [6, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-fence-continuation",
+      body: "- a\n  ```\n  x\n  ```\nlazy\n\nAfter",
+      lands: [
+        [5, "lazy"],
+        [7, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-rule-marker",
+      body: "- ---\nlazy\n\nAfter",
+      lands: [
+        [2, "lazy"],
+        [4, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r25-rule-continuation",
+      body: "- a\n  - - -\nlazy\n\nAfter",
+      lands: [
+        [3, "lazy"],
+        [5, "After"],
+      ] as [number, string][],
+    },
+    {
+      name: "r26-hashtag-prose-resumes",
+      body: "- #tag\n  plain\nlazy\n\nAfter",
+      lands: [
+        [3, "lazy"],
+        [5, "After"],
+      ] as [number, string][],
+    },
+    { name: "r26-hashtag-next", body: "- a\n#tag\n\nAfter", lands: [] as [number, string][] },
+    { name: "r26-hashtag-marker", body: "- #tag\nlazy\n\nAfter", lands: [] as [number, string][] },
+    {
+      name: "r26-hashtag-continuation",
+      body: "- a\n  #tag\nlazy\n\nAfter",
+      lands: [] as [number, string][],
+    },
+    {
+      name: "r26-hashtag-number",
+      body: "- #1 priority\nnext\n\nAfter",
+      lands: [] as [number, string][],
+    },
+    { name: "r26-html-next", body: "- a\n<!-- note -->\n\nAfter", lands: [] as [number, string][] },
+    {
+      name: "r26-deep-heading",
+      body: "- a\n    # h\nlazy\n\nAfter",
+      lands: [] as [number, string][],
+    },
+    {
+      name: "r26-deep-fence",
+      body: "- a\n    ```\n    x\n    ```\nlazy\n\nAfter",
+      lands: [] as [number, string][],
+    },
+    {
+      name: "r26-deep-ordered-heading",
+      body: "1. a\n      # h\nlazy\n\nAfter",
+      lands: [] as [number, string][],
+    },
+    {
+      name: "r26-five-space-marker-fence",
+      body: "-     ```\nnext\n\n# H",
+      lands: [] as [number, string][],
+    },
     {
       name: "three lists, two marker changes",
       body: "- a\n\n* b\n\n- c\n\nAfter",
@@ -1811,9 +1937,10 @@ describe("blockForLine — the index agrees with the editor's own parse", () => 
   for (const document of documents) {
     it(document.name, () => {
       const blocks = editorBlocks(document.body);
-      expect(blockForLine(document.body, Number.MAX_SAFE_INTEGER).index + 1, "let quotes resume across a blank line (or stop lists from resuming) -> the counts disagree here and every later line slips.").toBe(
-        blocks.length,
-      );
+      expect(
+        blockForLine(document.body, Number.MAX_SAFE_INTEGER).index + 1,
+        "let quotes resume across a blank line (or stop lists from resuming) -> the counts disagree here and every later line slips.",
+      ).toBe(blocks.length);
       for (const [line, blockText] of document.lands) {
         expect(blocks[blockForLine(document.body, line).index]).toContain(blockText);
       }

@@ -72,9 +72,7 @@ async function run(command, args, options = {}) {
   });
   const [code, signal] = await once(child, "exit");
   if (code !== 0) {
-    throw new Error(
-      `${command} exited ${code ?? `after signal ${signal ?? "unknown"}`}.`,
-    );
+    throw new Error(`${command} exited ${code ?? `after signal ${signal ?? "unknown"}`}.`);
   }
 }
 
@@ -148,7 +146,9 @@ export async function runProfilingScenarios({
 }
 
 async function sha256File(path) {
-  return createHash("sha256").update(await readFile(path)).digest("hex");
+  return createHash("sha256")
+    .update(await readFile(path))
+    .digest("hex");
 }
 
 async function sha256Tree(root) {
@@ -298,8 +298,7 @@ function summarizeArtifacts(artifacts) {
     excalidraw: excalidraw
       ? {
           ...commonSummary(excalidraw),
-          elementCount:
-            artifacts["excalidraw-profile"].fixture?.elementCount ?? null,
+          elementCount: artifacts["excalidraw-profile"].fixture?.elementCount ?? null,
           pointerFrames: excalidraw.pointerFrames,
           actualDragDurationMs: excalidraw.actualDragDurationMs,
           taskDurationSeconds: excalidraw.performance?.delta?.TaskDuration ?? null,
@@ -313,8 +312,7 @@ function summarizeArtifacts(artifacts) {
           typedCharacters: bigDoc.typedCharacters,
           typingDurationMs: bigDoc.typingDurationMs,
           elapsedMs: bigDoc.elapsedMs,
-          markdownOpenMs:
-            bigDoc.rendererMarks?.after?.measures?.["markdown-open"] ?? null,
+          markdownOpenMs: bigDoc.rendererMarks?.after?.measures?.["markdown-open"] ?? null,
           taskDurationSeconds: bigDoc.performance?.delta?.TaskDuration ?? null,
           scriptDurationSeconds: bigDoc.performance?.delta?.ScriptDuration ?? null,
         }
@@ -358,10 +356,7 @@ async function main() {
   if (options.tiny) seedArgs.push("--tiny");
   await run(process.execPath, seedArgs);
 
-
-  const seedManifest = JSON.parse(
-    await readFile(join(fixtures, "seed-manifest.json"), "utf8"),
-  );
+  const seedManifest = JSON.parse(await readFile(join(fixtures, "seed-manifest.json"), "utf8"));
   const stagedEngine = join(
     desktopRoot,
     "target",
@@ -393,10 +388,7 @@ async function main() {
       totalMemoryBytes: totalmem(),
     },
   };
-  await writeFile(
-    join(options.output, "run.json"),
-    `${JSON.stringify(runEnvelope, null, 2)}\n`,
-  );
+  await writeFile(join(options.output, "run.json"), `${JSON.stringify(runEnvelope, null, 2)}\n`);
 
   const env = {
     ...process.env,

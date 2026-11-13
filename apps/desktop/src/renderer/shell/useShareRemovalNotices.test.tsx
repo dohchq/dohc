@@ -53,10 +53,16 @@ afterEach(cleanup);
 describe("useShareRemovalNotices", () => {
   it("files an already-ended notice without an Undo action or deadline", () => {
     const { result } = renderNotices();
-    act(() => result.current.notices.removed(removal({undo: undefined, message: "This share has already ended."})));
+    act(() =>
+      result.current.notices.removed(
+        removal({ undo: undefined, message: "This share has already ended." }),
+      ),
+    );
     expect(result.current.shell.shellErrors).toHaveLength(1);
     expect(result.current.shell.shellErrors[0]).toMatchObject({
-      tone: "success", message: "This share has already ended.", retry: null,
+      tone: "success",
+      message: "This share has already ended.",
+      retry: null,
     });
     expect(result.current.shell.shellErrors[0]?.action).toBeUndefined();
   });
@@ -82,7 +88,11 @@ describe("useShareRemovalNotices", () => {
     // The removal counts as a change to the shares, and so does its Undo.
     expect(sharesChanged).toHaveBeenCalledTimes(1);
     await act(async () => result.current.shell.runShellErrorAction(notice!.id));
-    expect(bridgeMock.undoRelayShare).toHaveBeenCalledWith({ workspaceId: "ws-a", shareId: "share-1", undoId: "undo-1" });
+    expect(bridgeMock.undoRelayShare).toHaveBeenCalledWith({
+      workspaceId: "ws-a",
+      shareId: "share-1",
+      undoId: "undo-1",
+    });
     expect(restored).toHaveBeenCalledTimes(1);
     expect(sharesChanged).toHaveBeenCalledTimes(2);
     expect(result.current.shell.shellErrors.map((error) => [error.tone, error.message])).toEqual([
@@ -93,17 +103,23 @@ describe("useShareRemovalNotices", () => {
   it("reports a failed Undo with Try again and the cause, and Try again asks the relay again", async () => {
     const restored = vi.fn();
     bridgeMock.undoRelayShare
-      .mockRejectedValueOnce(new Error(
-        "Error invoking remote method 'desktop:undo-relay-share': DaemonRefusalError [SHARE_UNAVAILABLE]: grant row missing",
-      ))
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'desktop:undo-relay-share': DaemonRefusalError [SHARE_UNAVAILABLE]: grant row missing",
+        ),
+      )
       .mockResolvedValueOnce({ shareId: "share-1" });
     const { result } = renderNotices();
     act(() => result.current.notices.removed(removal({ restored })));
 
-    await act(async () => result.current.shell.runShellErrorAction(result.current.shell.shellErrors[0]!.id));
+    await act(async () =>
+      result.current.shell.runShellErrorAction(result.current.shell.shellErrors[0]!.id),
+    );
     const failure = result.current.shell.shellErrors[0]!;
     expect(failure.tone).toBeUndefined();
-    expect(failure.message).toBe("dohc could not undo this removal. This share is no longer available.");
+    expect(failure.message).toBe(
+      "dohc could not undo this removal. This share is no longer available.",
+    );
     expect(failure.retry).not.toBeNull();
     expect(failure.details).toEqual([
       ["Cause", "DaemonRefusalError [SHARE_UNAVAILABLE]: grant row missing"],
@@ -120,17 +136,30 @@ describe("useShareRemovalNotices", () => {
 
   it("explains an Undo after the receipt expired instead of asking the relay", async () => {
     const { result } = renderNotices();
-    act(() => result.current.notices.removed(removal({ undo: { undoId: "undo-1", expiresAtMs: Date.now() - 1 } })));
+    act(() =>
+      result.current.notices.removed(
+        removal({ undo: { undoId: "undo-1", expiresAtMs: Date.now() - 1 } }),
+      ),
+    );
 
-    await act(async () => result.current.shell.runShellErrorAction(result.current.shell.shellErrors[0]!.id));
+    await act(async () =>
+      result.current.shell.runShellErrorAction(result.current.shell.shellErrors[0]!.id),
+    );
     expect(bridgeMock.undoRelayShare).not.toHaveBeenCalled();
     expect(result.current.shell.shellErrors).toHaveLength(1);
-    expect(result.current.shell.shellErrors[0]).toMatchObject({ message: SHARE_UNDO_EXPIRED, retry: null });
+    expect(result.current.shell.shellErrors[0]).toMatchObject({
+      message: SHARE_UNDO_EXPIRED,
+      retry: null,
+    });
   });
 
   it("ignores a removal from another workspace and an Undo that lands after a switch", async () => {
     let finish!: (value: { shareId: string }) => void;
-    bridgeMock.undoRelayShare.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    bridgeMock.undoRelayShare.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
     const { result, rerender } = renderNotices();
     act(() => result.current.notices.removed(removal({ workspaceId: "ws-other" })));
     expect(result.current.shell.shellErrors).toEqual([]);
@@ -152,10 +181,23 @@ describe("useShareRemovalNotices", () => {
       "Error invoking remote method 'desktop:revoke-relay-share': DaemonRefusalError [OVERLOADED]: busy",
     );
     const { result } = renderNotices();
-    act(() => result.current.notices.failed({ workspaceId: "ws-other", message: "dohc could not end this share.", cause }));
+    act(() =>
+      result.current.notices.failed({
+        workspaceId: "ws-other",
+        message: "dohc could not end this share.",
+        cause,
+      }),
+    );
     expect(result.current.shell.shellErrors).toEqual([]);
 
-    act(() => result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not end this share.", cause, retry }));
+    act(() =>
+      result.current.notices.failed({
+        workspaceId: "ws-a",
+        message: "dohc could not end this share.",
+        cause,
+        retry,
+      }),
+    );
     expect(result.current.shell.shellErrors[0]).toMatchObject({
       message: "dohc could not end this share. dohc is busy. Try again in a moment.",
       details: [["Cause", "DaemonRefusalError [OVERLOADED]: busy"]],
@@ -174,9 +216,24 @@ describe("useShareRemovalNotices", () => {
     const c2 = agentDisconnectIdentity("grant-1", "c2");
     const { result } = renderNotices();
     act(() => {
-      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: c1 });
-      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Codex.", cause, identity: c1 });
-      result.current.notices.failed({ workspaceId: "ws-a", message: "dohc could not disconnect Agent.", cause, identity: c2 });
+      result.current.notices.failed({
+        workspaceId: "ws-a",
+        message: "dohc could not disconnect Codex.",
+        cause,
+        identity: c1,
+      });
+      result.current.notices.failed({
+        workspaceId: "ws-a",
+        message: "dohc could not disconnect Codex.",
+        cause,
+        identity: c1,
+      });
+      result.current.notices.failed({
+        workspaceId: "ws-a",
+        message: "dohc could not disconnect Agent.",
+        cause,
+        identity: c2,
+      });
     });
     expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual([c1, c2]);
     const set = result.current.disconnected;
@@ -191,7 +248,9 @@ describe("useShareRemovalNotices", () => {
     act(() => result.current.notices.agentDisconnected(mine));
     expect(result.current.shell.shellErrors.map((error) => error.identity)).toEqual([c2]);
     expect(result.current.disconnected.has(disconnectedAgentKey(mine))).toBe(true);
-    expect(result.current.disconnected.has(disconnectedAgentKey({ ...mine, connectionId: "c2" }))).toBe(false);
+    expect(
+      result.current.disconnected.has(disconnectedAgentKey({ ...mine, connectionId: "c2" })),
+    ).toBe(false);
     expect(set.size).toBe(0);
     // The notices keep one identity while the set changes, so a Disconnect
     // re-renders no other surface.

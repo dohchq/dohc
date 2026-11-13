@@ -19,9 +19,7 @@ const mounts = [
 const roots: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 function shareTarget(shareId: string): ShareViewFilesTarget {
@@ -37,7 +35,9 @@ describe("createOwnedWorkspaceReadPort", () => {
   it("skips a full owner listing for an unrestricted local search", async () => {
     const listOwnedFiles = vi.fn(async () => ({ files: [] }));
     const port = createOwnedWorkspaceReadPort({
-      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
+      lookupFiles: async () => {
+        throw Error("Unexpected exact lookup");
+      },
       listFiles: listOwnedFiles,
       hasShareState: false,
       searchSources: [],
@@ -58,7 +58,9 @@ describe("createOwnedWorkspaceReadPort", () => {
       folders: ["notes"],
     }));
     const port = createOwnedWorkspaceReadPort({
-      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
+      lookupFiles: async () => {
+        throw Error("Unexpected exact lookup");
+      },
       listFiles: listOwnedFiles,
       hasShareState: true,
       searchSources: [],
@@ -100,7 +102,9 @@ describe("createOwnedWorkspaceReadPort", () => {
     const repaired: string[] = [];
     const failures: string[] = [];
     const port = createOwnedWorkspaceReadPort({
-      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
+      lookupFiles: async () => {
+        throw Error("Unexpected exact lookup");
+      },
       listFiles: async () =>
         overlayCanonicalShareMountFiles({
           disk: await listFiles(root),
@@ -116,10 +120,7 @@ describe("createOwnedWorkspaceReadPort", () => {
         const id = shareId(target);
         repaired.push(id);
         if (id === DAMAGED_SHARE_ID) throw new Error("damaged projection");
-        await writeFile(
-          join(root, "shared-with-me", "healthy", "missing.md"),
-          "healthy needle\n",
-        );
+        await writeFile(join(root, "shared-with-me", "healthy", "missing.md"), "healthy needle\n");
         return new Set<string>();
       },
       onSearchSourceFailure: (source) => failures.push(shareId(source.target)),
@@ -155,7 +156,9 @@ describe("createOwnedWorkspaceReadPort", () => {
       folders: [] as string[],
     };
     const port = createOwnedWorkspaceReadPort({
-      lookupFiles: async () => { throw Error("Unexpected exact lookup"); },
+      lookupFiles: async () => {
+        throw Error("Unexpected exact lookup");
+      },
       listFiles: async () =>
         overlayCanonicalShareMountFiles({
           disk: await listFiles(root),

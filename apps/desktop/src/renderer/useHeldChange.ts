@@ -25,7 +25,12 @@ export function useHeldChange(
       const { change } = await bridge().readHeldChange({ workspaceId, path });
       if (requests.isCurrent(request)) setHeld(change ? { workspaceId, path } : null);
     } catch (error) {
-      if (requests.isCurrent(request)) report.current?.("dohc could not check whether this note has a held change.", error, () => void read());
+      if (requests.isCurrent(request))
+        report.current?.(
+          "dohc could not check whether this note has a held change.",
+          error,
+          () => void read(),
+        );
     }
   }, [workspaceId, path, requests]);
   useEffect(() => {

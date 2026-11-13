@@ -17,34 +17,71 @@ describe("sync relay startup guards", () => {
 
   it("keeps public Edit routes closed in production without a release marker", async () => {
     const root = await tempRoot("closed-public-edit-release");
-    const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
-    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
-    const relay = await spawnRunningRelay(relayPath, {
-      ...productionEnv,
-      DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
-      DOHC_PUBLIC_EDIT_RELEASE: undefined, DOHC_RELAY_LINK_LIVE: undefined,
-      DOHC_RELAY_NAMED_LIVE_CONFIG: undefined, DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: undefined,
-    }, {projectionHandshake: true, emptyDeletionJobs: true});
+    const configPath = join(root, "deployment.json"),
+      relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({
+      configPath,
+      relayPath,
+      continuityDirectory: join(root, "continuity"),
+    });
+    const relay = await spawnRunningRelay(
+      relayPath,
+      {
+        ...productionEnv,
+        DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath,
+        SYNC_RELAY_DB_PATH: undefined,
+        DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+        DOHC_PUBLIC_EDIT_RELEASE: undefined,
+        DOHC_RELAY_LINK_LIVE: undefined,
+        DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
+        DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: undefined,
+      },
+      { projectionHandshake: true, emptyDeletionJobs: true },
+    );
     const baseUrl = relay.baseUrl;
     expect((await fetch(baseUrl + "/health")).status).toBe(200);
-    for (const path of ["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]) {
-      expect((await fetch(baseUrl + path, {method: "POST"})).status).toBe(404);
+    for (const path of [
+      "/sync/live/link-tickets",
+      "/sync/live/link-session",
+      "/sync/live/link-document",
+    ]) {
+      expect((await fetch(baseUrl + path, { method: "POST" })).status).toBe(404);
     }
   });
 
   it("refuses a production release marker without a configured live host", async () => {
     const root = await tempRoot("public-edit-release-no-host");
-    const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
-    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
-    const {code, stderr} = await spawnRelayExpectExit({
-      ...productionEnv, DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
-      DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}', DOHC_RELAY_LINK_LIVE: undefined,
-      DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
-      DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxSessions: 4, retentionMs: 60000,
-        maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000}),
-    }, {projectionHandshake: true, emptyDeletionJobs: true});
+    const configPath = join(root, "deployment.json"),
+      relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({
+      configPath,
+      relayPath,
+      continuityDirectory: join(root, "continuity"),
+    });
+    const { code, stderr } = await spawnRelayExpectExit(
+      {
+        ...productionEnv,
+        DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath,
+        SYNC_RELAY_DB_PATH: undefined,
+        DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+        DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}',
+        DOHC_RELAY_LINK_LIVE: undefined,
+        DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
+        DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({
+          maxSessions: 4,
+          retentionMs: 60000,
+          maxPendingRequests: 2,
+          maxRequestBytes: 1038,
+          maxResponseBytes: 4152,
+          timeoutMs: 1000,
+        }),
+      },
+      { projectionHandshake: true, emptyDeletionJobs: true },
+    );
     expect(code).toBe(1);
-    expect(stderr).toContain("Public Edit release requires link live routes and the configured service host");
+    expect(stderr).toContain(
+      "Public Edit release requires link live routes and the configured service host",
+    );
   });
 
   it.each([
@@ -65,9 +102,7 @@ describe("sync relay startup guards", () => {
     },
   );
 
-  describe.each([
-    ["localhost", "test", "http://localhost:48123"],
-  ] as const)(
+  describe.each([["localhost", "test", "http://localhost:48123"]] as const)(
     "permits an HTTP %s public origin in %s",
     (label, nodeEnv, origin) => {
       it.skipIf(loopbackListenDenied)("starts", async () => {
@@ -113,9 +148,6 @@ describe("sync relay startup guards", () => {
       FORCE_COLOR: "0",
     });
     expect(code).toBe(1);
-    expect(stderr).toContain(
-      "FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.",
-    );
+    expect(stderr).toContain("FATAL: DOHC_RELAY_EXCHANGE_KEY must be at least 32 characters.");
   });
-
 });

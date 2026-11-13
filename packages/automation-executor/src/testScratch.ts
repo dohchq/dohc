@@ -8,7 +8,9 @@ import type { AutomationStoreFolder } from "./automationRunStore";
 
 const scratch: string[] = [];
 afterEach(async () => {
-  await Promise.all(scratch.splice(0).map((path) => rm(path, { recursive: true, force: true, maxRetries: 8 })));
+  await Promise.all(
+    scratch.splice(0).map((path) => rm(path, { recursive: true, force: true, maxRetries: 8 })),
+  );
 });
 
 /** A new empty folder for one test. */

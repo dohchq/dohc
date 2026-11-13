@@ -2,7 +2,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseEditResult, DatabaseSnapshotResult, DohcDesktopBridge } from "../ipc/bridgeContract";
+import type {
+  DatabaseEditResult,
+  DatabaseSnapshotResult,
+  DohcDesktopBridge,
+} from "../ipc/bridgeContract";
 import { DatabaseStudioView } from "./DatabaseStudioView";
 import { deferred } from "../testing/deferred";
 
@@ -60,13 +64,13 @@ function walletPage(category: string, path = baseSnapshot.path): DatabaseEditRes
 const bridgeMock = {
   readWorkspaceDatabase: vi.fn(async () => cloneSnapshot()),
   readWorkspaceDatabasePage: vi.fn(),
-  applyDatabaseEdit: vi.fn<DohcDesktopBridge["applyDatabaseEdit"]>(async () => walletPage("Groceries")),
+  applyDatabaseEdit: vi.fn<DohcDesktopBridge["applyDatabaseEdit"]>(async () =>
+    walletPage("Groceries"),
+  ),
 };
 
 function renderStudio() {
-  return render(
-    <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" />,
-  );
+  return render(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" />);
 }
 
 // Answers for the next writes, which the test settles in any order. One may
@@ -130,7 +134,9 @@ describe("DatabaseStudioView", () => {
     const write = deferred<DatabaseEditResult>();
     bridgeMock.applyDatabaseEdit.mockImplementationOnce(() => write.promise);
     const onError = vi.fn();
-    render(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />);
+    render(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />,
+    );
     await screen.findByTestId("db-cell-category-txn_001");
 
     await user.click(cell("category", "txn_001"));
@@ -147,7 +153,15 @@ describe("DatabaseStudioView", () => {
       failure,
       expect.any(Function),
       // The cell's identity: workspace, database, table, row key and column.
-      ["database-cell", "ws-1", "imports/wallet.sqlite", "wallet", "id", "txn_001", "category"].join("\0"),
+      [
+        "database-cell",
+        "ws-1",
+        "imports/wallet.sqlite",
+        "wallet",
+        "id",
+        "txn_001",
+        "category",
+      ].join("\0"),
     );
     expect(screen.queryByTestId("db-edit-error")).toBeNull();
 
@@ -182,7 +196,9 @@ describe("DatabaseStudioView", () => {
     other.path = "imports/other.sqlite";
     other.tables[0]!.rows[0]!.category = "Rent";
     bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(other);
-    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/other.sqlite" onError={onError} />);
+    rerender(
+      <DatabaseStudioView workspaceId="ws-1" path="imports/other.sqlite" onError={onError} />,
+    );
     await waitFor(() => expect(cell("category", "txn_001").textContent).toBe("Rent"));
 
     act(() => (onError.mock.calls[0]![2] as () => void)());
@@ -201,7 +217,9 @@ describe("DatabaseStudioView", () => {
       const user = userEvent.setup();
       const writes = writeAnswers(2);
       const onError = vi.fn();
-      render(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />);
+      render(
+        <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" onError={onError} />,
+      );
       await screen.findByTestId("db-cell-category-txn_001");
 
       // Food to Groceries, then Groceries to Travel, before either answers.
@@ -216,12 +234,15 @@ describe("DatabaseStudioView", () => {
 
       for (const index of order) {
         await act(async () => {
-          if (outcomes[index] === "save") writes[index]!.resolve(walletPage(index === 0 ? "Groceries" : "Travel"));
+          if (outcomes[index] === "save")
+            writes[index]!.resolve(walletPage(index === 0 ? "Groceries" : "Travel"));
           else writes[index]!.reject(new Error("database is locked"));
         });
       }
       await waitFor(() => expect(cell("category", "txn_001").textContent).toBe(shown));
-      expect(onError).toHaveBeenCalledTimes(outcomes.filter((outcome) => outcome === "fail").length);
+      expect(onError).toHaveBeenCalledTimes(
+        outcomes.filter((outcome) => outcome === "fail").length,
+      );
     },
   );
 
@@ -310,14 +331,10 @@ describe("DatabaseStudioView", () => {
     const missing = cloneSnapshot();
     missing.tables[0]!.rows = missing.tables[0]!.rows.slice(1);
     bridgeMock.readWorkspaceDatabase.mockResolvedValueOnce(missing);
-    rerender(
-      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={1} />,
-    );
+    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={1} />);
     await waitFor(() => expect(screen.queryByTestId("db-cell-input")).toBeNull());
-    rerender(
-      <DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={2} />,
-    );
-    expect((await screen.findByTestId("db-cell-input") as HTMLInputElement).value).toBe(
+    rerender(<DatabaseStudioView workspaceId="ws-1" path="imports/wallet.sqlite" refreshKey={2} />);
+    expect(((await screen.findByTestId("db-cell-input")) as HTMLInputElement).value).toBe(
       "Uncommitted draft",
     );
     expect(bridgeMock.applyDatabaseEdit).not.toHaveBeenCalled();
@@ -343,12 +360,12 @@ describe("DatabaseStudioView", () => {
       .mockImplementationOnce(() => oldRead.promise)
       .mockResolvedValueOnce(newSnapshot);
 
-    const { rerender } = render(
-      <DatabaseStudioView workspaceId="old" path="imports/old.sqlite" />,
-    );
+    const { rerender } = render(<DatabaseStudioView workspaceId="old" path="imports/old.sqlite" />);
     rerender(<DatabaseStudioView workspaceId="new" path="imports/new.sqlite" />);
 
-    expect((await screen.findByTestId("db-cell-category-new_001")).textContent).toBe("New workspace");
+    expect((await screen.findByTestId("db-cell-category-new_001")).textContent).toBe(
+      "New workspace",
+    );
     await act(async () => {
       oldRead.resolve(cloneSnapshot());
     });

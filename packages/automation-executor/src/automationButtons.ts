@@ -24,7 +24,10 @@ export type AutomationButtonState =
  * id for another Collection and is what a press confirms; `label` is what the question shows,
  * with the name added where two actions share a label.
  */
-export interface IrreversibleAction { name: string; label: string }
+export interface IrreversibleAction {
+  name: string;
+  label: string;
+}
 
 export const NO_AUTOMATION = "No automation uses this button.";
 export const BUTTON_CHECKING = "dohc is checking whether you can use this button.";
@@ -40,7 +43,8 @@ export function changedSincePressed(field: string): string {
 }
 
 // The file contract loads each mapping as a Map.
-const entryOf = (value: unknown, key: string): unknown => (value instanceof Map ? value.get(key) : undefined);
+const entryOf = (value: unknown, key: string): unknown =>
+  value instanceof Map ? value.get(key) : undefined;
 
 /** An entry the file contract refused whose trigger still names this button. */
 export function namesButton(raw: unknown, field: string): boolean {
@@ -62,17 +66,27 @@ export function resolveButton(
   inTable: (table: string | null) => boolean,
   collectionName: string,
 ): ButtonResolution {
-  const disabled = (reason: string): ButtonResolution => ({ kind: "state", state: { kind: "disabled", reason } });
-  if (file?.status === "unreadable") return disabled(`dohc cannot read automations.yaml in ${collectionName}. Fix it in Automations.`);
+  const disabled = (reason: string): ButtonResolution => ({
+    kind: "state",
+    state: { kind: "disabled", reason },
+  });
+  if (file?.status === "unreadable")
+    return disabled(
+      `dohc cannot read automations.yaml in ${collectionName}. Fix it in Automations.`,
+    );
   const entries = file?.entries ?? [];
   const using = entries.flatMap((entry) =>
-    entry.status === "valid" && entry.automation.when.kind === "button" &&
-      entry.automation.when.field === field && inTable(entry.automation.when.table)
+    entry.status === "valid" &&
+    entry.automation.when.kind === "button" &&
+    entry.automation.when.field === field &&
+    inTable(entry.automation.when.table)
       ? [entry.automation]
-      : []);
+      : [],
+  );
   const on = using.filter((automation) => automation.enabled);
   if (on.length === 1) return { kind: "one", automation: on[0]! };
-  if (on.length > 1) return disabled(`${on.length === 2 ? "Two" : on.length} automations use ${field}. Keep one.`);
+  if (on.length > 1)
+    return disabled(`${on.length === 2 ? "Two" : on.length} automations use ${field}. Keep one.`);
   if (using.length > 0) return disabled(`${using[0]!.name} is off. Turn it on in Automations.`);
   if (entries.some((entry) => entry.status === "invalid" && namesButton(entry.raw, field))) {
     return disabled(`The automation for ${field} has a problem. Fix it in Automations.`);
@@ -85,12 +99,19 @@ export function resolveButton(
  * them press a dataset table's button: a writable operation on the table,
  * and every operation the button's steps invoke.
  */
-export function datasetButtonAccess(description: DatasetDescription, tableName: string, invoked: readonly string[]): boolean {
+export function datasetButtonAccess(
+  description: DatasetDescription,
+  tableName: string,
+  invoked: readonly string[],
+): boolean {
   const table = description.tables.find((candidate) => candidate.name === tableName);
   if (!table) return false;
   const names = new Set(description.operations.map((operation) => operation.name));
-  return description.operations.some((operation) => operation.tableId === table.tableId && !operation.readOnly) &&
-    invoked.every((name) => names.has(name));
+  return (
+    description.operations.some(
+      (operation) => operation.tableId === table.tableId && !operation.readOnly,
+    ) && invoked.every((name) => names.has(name))
+  );
 }
 
 export const SHARED_DATASET_BUTTONS = "dohc can't run buttons on shared dataset Collections yet.";
@@ -100,6 +121,14 @@ export const SHARED_DATASET_BUTTONS = "dohc can't run buttons on shared dataset 
  * which runs no automations yet, so no button runs. Someone who cannot edit
  * the button's table is told that, as anywhere else.
  */
-export function sharedDatasetButtonState(description: DatasetDescription, tableName: string): Extract<AutomationButtonState, { kind: "disabled" }> {
-  return { kind: "disabled", reason: datasetButtonAccess(description, tableName, []) ? SHARED_DATASET_BUTTONS : noAccessReason(tableName) };
+export function sharedDatasetButtonState(
+  description: DatasetDescription,
+  tableName: string,
+): Extract<AutomationButtonState, { kind: "disabled" }> {
+  return {
+    kind: "disabled",
+    reason: datasetButtonAccess(description, tableName, [])
+      ? SHARED_DATASET_BUTTONS
+      : noAccessReason(tableName),
+  };
 }

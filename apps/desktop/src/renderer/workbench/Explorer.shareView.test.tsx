@@ -31,9 +31,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
       { path: "other.md", kind: "file" },
     ],
     folders: [],
-    editorGroups: [
-      { id: "group-1", tabs: [{ path: "note.md" }], activeTab: "note.md", size: 1 },
-    ],
+    editorGroups: [{ id: "group-1", tabs: [{ path: "note.md" }], activeTab: "note.md", size: 1 }],
     activeEditorGroup: "group-1",
     dirtyPaths: new Set(),
     shareView: null,
@@ -86,7 +84,12 @@ describe("the delete confirmation states where the file goes", () => {
       fireEvent.click(rows[0]!);
       fireEvent.keyDown(rows[0]!, { key: "Delete" });
       expect(screen.queryByTestId("delete-confirm")).toBeNull();
-      await waitFor(() => expect(deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "workspace-1", relativePath: "note.md" }));
+      await waitFor(() =>
+        expect(deleteWorkspacePath).toHaveBeenCalledWith({
+          workspaceId: "workspace-1",
+          relativePath: "note.md",
+        }),
+      );
     } finally {
       vi.unstubAllGlobals();
     }

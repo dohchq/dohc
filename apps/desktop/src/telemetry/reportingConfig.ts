@@ -73,6 +73,7 @@ export function posthogProject(key: string, host: string): { key: string; base: 
   } catch {
     return null;
   }
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return null;
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash)
+    return null;
   return { key: key.trim(), base };
 }

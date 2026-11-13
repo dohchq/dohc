@@ -22,7 +22,7 @@ import { PINNED_NODE } from "../../apps/desktop/scripts/pinned-node.mjs";
 import { testScratchParent } from "./scratch-leak-report.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const sha256 = bytes => createHash("sha256").update(bytes).digest("hex");
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 export function stagesReaderNode(platform = process.platform, arch = process.arch) {
   return ["darwin", "linux"].includes(platform) && Boolean(PINNED_NODE[`${platform}-${arch}`]);
@@ -30,7 +30,8 @@ export function stagesReaderNode(platform = process.platform, arch = process.arc
 
 function pinnedHash() {
   const pin = process.platform !== "win32" && PINNED_NODE[`${process.platform}-${process.arch}`];
-  if (!pin) throw new Error(`No reader test Node is pinned for ${process.platform}-${process.arch}.`);
+  if (!pin)
+    throw new Error(`No reader test Node is pinned for ${process.platform}-${process.arch}.`);
   return pin.sha256;
 }
 
@@ -40,15 +41,22 @@ export function readerTestNode({ parent = testScratchParent(), hash = pinnedHash
 
 // Loaded on use: the gate imports this file, and its wiring test copies only what the gate reads.
 async function readPinnedNode(stagedNodePaths) {
-  const { readPinnedCompilerNode } = await import("../../apps/desktop/scripts/stage-app-compiler.mjs");
+  const { readPinnedCompilerNode } =
+    await import("../../apps/desktop/scripts/stage-app-compiler.mjs");
   return readPinnedCompilerNode({ stagedNodePaths });
 }
 
 /** Whether the Node is published. A damaged one is reported, never replaced. */
 async function published(node, hash) {
-  const bytes = await readFile(node).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+  const bytes = await readFile(node).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   if (bytes === null) return false;
-  if (sha256(bytes) !== hash) throw new Error(`${node} does not hold the pinned Node. Remove ${dirname(node)}, then run again.`);
+  if (sha256(bytes) !== hash)
+    throw new Error(
+      `${node} does not hold the pinned Node. Remove ${dirname(node)}, then run again.`,
+    );
   return true;
 }
 
@@ -58,13 +66,22 @@ async function removeAbandoned(folder) {
   for (const name of await readdir(folder)) {
     const owner = /\.tmp-(\d+)-[^-]+$/.exec(name)?.[1];
     if (!owner) continue;
-    try { process.kill(Number(owner), 0); continue; }
-    catch (error) { if (error.code !== "ESRCH") continue; }
+    try {
+      process.kill(Number(owner), 0);
+      continue;
+    } catch (error) {
+      if (error.code !== "ESRCH") continue;
+    }
     await rm(join(folder, name), { recursive: true, force: true });
   }
 }
 
-export async function stageReaderTestNode({ root = repoRoot, parent, hash = pinnedHash(), readNode = readPinnedNode } = {}) {
+export async function stageReaderTestNode({
+  root = repoRoot,
+  parent,
+  hash = pinnedHash(),
+  readNode = readPinnedNode,
+} = {}) {
   const node = readerTestNode({ parent, hash });
   const folder = dirname(dirname(node));
   await mkdir(folder, { recursive: true, mode: 0o700 });
@@ -76,9 +93,10 @@ export async function stageReaderTestNode({ root = repoRoot, parent, hash = pinn
   try {
     await writeFile(join(temporary, "node"), bytes, { mode: 0o555, flag: "wx" });
     // A non-empty folder already in place means another stager published first.
-    await rename(temporary, dirname(node)).catch(async error => {
+    await rename(temporary, dirname(node)).catch(async (error) => {
       if (!["ENOTEMPTY", "EEXIST"].includes(error.code)) throw error;
-      if (!(await published(node, hash))) throw new Error(`${dirname(node)} holds no Node. Remove it, then run again.`);
+      if (!(await published(node, hash)))
+        throw new Error(`${dirname(node)} holds no Node. Remove it, then run again.`);
     });
   } finally {
     await rm(temporary, { recursive: true, force: true });

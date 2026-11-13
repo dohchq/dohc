@@ -22,6 +22,7 @@ it("hands a repeat once, still hands a one-off after a loop, and stops after its
   reportRendererError("boundary", error(2));
   expect(send).toHaveBeenCalledTimes(2);
 
-  for (let line = 3; line < RENDERER_ERROR_REPORTS + 50; line += 1) reportRendererError("uncaught", error(line));
+  for (let line = 3; line < RENDERER_ERROR_REPORTS + 50; line += 1)
+    reportRendererError("uncaught", error(line));
   expect(send).toHaveBeenCalledTimes(RENDERER_ERROR_REPORTS);
 });

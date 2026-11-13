@@ -1,7 +1,11 @@
 import { isAbsolute, resolve } from "node:path";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
-import { backupRelayDeployment, checkRelayBackup, restoreRelayDeployment } from "./relayDeploymentRecovery";
+import {
+  backupRelayDeployment,
+  checkRelayBackup,
+  restoreRelayDeployment,
+} from "./relayDeploymentRecovery";
 import { salvageRelayContent } from "./relayContentSalvage";
 
 const usage = `initialize --config PATH --database PATH --continuity-directory NEW_PATH
@@ -42,32 +46,43 @@ async function main(args: string[]): Promise<void> {
     if (rest.length !== 4) throw new Error();
     const fields = new Map<string, string>();
     for (let index = 0; index < rest.length; index += 2) {
-      const key = rest[index]!, value = rest[index + 1]!;
-      if (!["--directory", "--output"].includes(key) || fields.has(key) || !isAbsolute(value)) throw new Error();
+      const key = rest[index]!,
+        value = rest[index + 1]!;
+      if (!["--directory", "--output"].includes(key) || fields.has(key) || !isAbsolute(value))
+        throw new Error();
       fields.set(key, value);
     }
     const result = await salvageRelayContent(fields.get("--directory")!, fields.get("--output")!);
-    console.log(`Exported ${result.exported} files; skipped ${result.skipped}. Read recovery.json before using the output.`);
+    console.log(
+      `Exported ${result.exported} files; skipped ${result.skipped}. Read recovery.json before using the output.`,
+    );
     return;
   }
   if (["backup", "check-backup", "restore"].includes(action ?? "")) {
     if (rest.length !== 4) throw new Error();
     const fields = new Map<string, string>();
     for (let index = 0; index < rest.length; index += 2) {
-      const key = rest[index]!, value = rest[index + 1]!;
-      if (!["--config", "--directory"].includes(key) || fields.has(key) || !isAbsolute(value)) throw new Error();
+      const key = rest[index]!,
+        value = rest[index + 1]!;
+      if (!["--config", "--directory"].includes(key) || fields.has(key) || !isAbsolute(value))
+        throw new Error();
       fields.set(key, value);
     }
-    const config = fields.get("--config")!, directory = fields.get("--directory")!;
+    const config = fields.get("--config")!,
+      directory = fields.get("--directory")!;
     if (action === "backup") {
       await backupRelayDeployment(config, directory);
-      console.log("Relay snapshot saved. Auth, service-host data and independent continuity are not included.");
+      console.log(
+        "Relay snapshot saved. Auth, service-host data and independent continuity are not included.",
+      );
     } else if (action === "check-backup") {
       await checkRelayBackup(config, directory);
       console.log("Relay snapshot matches current independent continuity.");
     } else {
       const result = await restoreRelayDeployment(config, directory);
-      console.log(`Relay snapshot restored. Previous files: ${JSON.stringify(result.preservedDirectory)}`);
+      console.log(
+        `Relay snapshot restored. Previous files: ${JSON.stringify(result.preservedDirectory)}`,
+      );
     }
     return;
   }
@@ -75,7 +90,8 @@ async function main(args: string[]): Promise<void> {
     if (rest.length !== 4) throw new Error();
     const fields = new Map<string, string>();
     for (let index = 0; index < rest.length; index += 2) {
-      const key = rest[index]!, value = rest[index + 1]!;
+      const key = rest[index]!,
+        value = rest[index + 1]!;
       if (!["--config", "--host-id"].includes(key) || fields.has(key)) throw new Error();
       fields.set(key, value);
     }
@@ -84,17 +100,25 @@ async function main(args: string[]): Promise<void> {
     const hostId = parseHostControlIdentifier(fields.get("--host-id"), "host ID");
     const { storage } = openRelayDeployment(config);
     try {
-      const result = storage.provisionLiveHostControl({ mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding() });
+      const result = storage.provisionLiveHostControl({
+        mode: "service",
+        hostId,
+        updatedAtMs: Date.now(),
+        guard: storage.captureStanding(),
+      });
       if (!result.ok) throw new Error();
       console.log("Service host provisioned.");
-    } finally { storage.close(); }
+    } finally {
+      storage.close();
+    }
     return;
   }
   if (action !== "initialize" || rest.length !== 6) throw new Error();
   const fields = new Map<string, string>();
   const expected = ["--config", "--database", "--continuity-directory"];
   for (let index = 0; index < rest.length; index += 2) {
-    const key = rest[index]!, value = rest[index + 1]!;
+    const key = rest[index]!,
+      value = rest[index + 1]!;
     if (!expected.includes(key) || fields.has(key) || !isAbsolute(value)) throw new Error();
     fields.set(key, value);
   }
@@ -109,7 +133,7 @@ async function main(args: string[]): Promise<void> {
   console.log(`Deployment config: ${JSON.stringify(configPath)}`);
 }
 
-main(process.argv.slice(2)).catch(error => {
+main(process.argv.slice(2)).catch((error) => {
   console.error("Relay deployment command refused. Use --help for the required arguments.");
   if (error instanceof Error && error.message) console.error(error.message);
   process.exitCode = 1;

@@ -5,7 +5,16 @@ import { expect, it } from "vitest";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { createTestScratch } from "./testTemp";
-import { engine, compiledRelayMain, type LiveDaemonCapture, pushUntilDrained, openLiveDaemonCapture, openJoinedDaemonCapture, writeAndCapture, pullAndExpect } from "./twoDaemonSync.fixture";
+import {
+  engine,
+  compiledRelayMain,
+  type LiveDaemonCapture,
+  pushUntilDrained,
+  openLiveDaemonCapture,
+  openJoinedDaemonCapture,
+  writeAndCapture,
+  pullAndExpect,
+} from "./twoDaemonSync.fixture";
 
 // Quit stops waiting for a relay push the server has not answered. The
 // engine has not acknowledged the edit, so the next launch sends it.
@@ -66,4 +75,3 @@ it.skipIf(engine.missing)(
   },
   120_000,
 );
-

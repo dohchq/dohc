@@ -1,4 +1,12 @@
-import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliHelpRequest, type CliVerbSpec } from "./args";
+import {
+  CLI_COMMANDS,
+  DASH_RULE,
+  GLOBAL_FLAGS,
+  type CliCommandSpec,
+  type CliFlag,
+  type CliHelpRequest,
+  type CliVerbSpec,
+} from "./args";
 
 const WIDTH = 80;
 const where = "Run dohc inside a workspace folder while the dohc app is open.";
@@ -27,7 +35,9 @@ function table(rows: readonly (readonly [string, string])[]): string[] {
 }
 
 function flagRows(flags: readonly CliFlag[]): string[] {
-  return table(flags.map((flag) => [flag.value ? `${flag.name} <${flag.value}>` : flag.name, flag.text]));
+  return table(
+    flags.map((flag) => [flag.value ? `${flag.name} <${flag.value}>` : flag.name, flag.text]),
+  );
 }
 
 function paragraph(lines: readonly string[]): string[] {
@@ -88,11 +98,18 @@ function commandHelp(name: string, command: CliCommandSpec): string[] {
   ];
 }
 
-function verbHelp(commandName: string, command: CliCommandSpec, name: string, verb: CliVerbSpec): string[] {
+function verbHelp(
+  commandName: string,
+  command: CliCommandSpec,
+  name: string,
+  verb: CliVerbSpec,
+): string[] {
   const usage = ["dohc", commandName, name, verb.operands, "[options]"].filter(Boolean).join(" ");
   const details = [
     ...fieldLines(verb),
-    ...(verb.take ?? []).map((source) => `Set ${source.field} to ${source.path} from ${source.from}.`),
+    ...(verb.take ?? []).map(
+      (source) => `Set ${source.field} to ${source.path} from ${source.from}.`,
+    ),
     ...(verb.notes ?? []),
     ...(verb.freeText ? [`Put ${DASH_RULE}.`] : []),
   ];
@@ -113,10 +130,11 @@ export function renderCliHelp(request: CliHelpRequest): string {
   const [commandName, verbName] = request.help;
   const command = commandName === undefined ? undefined : CLI_COMMANDS[commandName];
   const verb = verbName === undefined ? undefined : command?.verbs[verbName];
-  const lines = !commandName || !command
-    ? topHelp()
-    : !verbName || !verb
-      ? commandHelp(commandName, command)
-      : verbHelp(commandName, command, verbName, verb);
+  const lines =
+    !commandName || !command
+      ? topHelp()
+      : !verbName || !verb
+        ? commandHelp(commandName, command)
+        : verbHelp(commandName, command, verbName, verb);
   return `${lines.join("\n")}\n`;
 }

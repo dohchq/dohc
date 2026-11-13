@@ -2,7 +2,12 @@ import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+  seedWorkspaceManifest,
+} from "./helpers/workspace";
 
 test("emoji reactions and floating mentions stay visible without moving the composer", async ({}, testInfo) => {
   const temp = await createTempWorkspace();
@@ -17,14 +22,19 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     // An empty Posts page has nothing to scroll.
     await expect(page.getByTestId("chats-channel-empty")).toBeVisible();
     for (const theme of ["light", "dark"]) {
-      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`posts-empty-${theme}.png`) });
     }
-    expect(await page.getByTestId("chats-feed-column").evaluate((node) => ({
-      overflowY: getComputedStyle(node).overflowY,
-      overflow: node.scrollHeight - node.clientHeight,
-    }))).toEqual({ overflowY: "auto", overflow: 0 });
+    expect(
+      await page.getByTestId("chats-feed-column").evaluate((node) => ({
+        overflowY: getComputedStyle(node).overflowY,
+        overflow: node.scrollHeight - node.clientHeight,
+      })),
+    ).toEqual({ overflowY: "auto", overflow: 0 });
     await page.getByTestId("chats-new-thread-composer").fill("Polished reactions");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     const view = page.locator("main");
@@ -33,7 +43,10 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     const frame = view.locator("form", { has: page.getByTestId("chats-composer") });
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"]) {
-      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await composer.fill("@");
       const menu = view.getByTestId("chats-mention-menu");
       await expect(menu).toBeVisible();
@@ -60,7 +73,10 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     const astronaut = page.getByRole("button", { name: "🧑🏽‍🚀", exact: true });
     await expect(astronaut).toBeVisible();
     for (const theme of ["light", "dark"]) {
-      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await waitForVisibleAnimations(page);
       await page.screenshot({ path: testInfo.outputPath(`reactions-${theme}.png`) });
     }
@@ -98,7 +114,9 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await card.getByTestId("chats-post-like").click();
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("otter");
     await page.getByRole("button", { name: "🦦", exact: true }).click();
-    await expect(card.locator('[data-testid="chats-post-reaction-pill"][data-emoji="🦦"]')).toBeVisible();
+    await expect(
+      card.locator('[data-testid="chats-post-reaction-pill"][data-emoji="🦦"]'),
+    ).toBeVisible();
     await page.getByTestId("chats-feed-link").click();
     const homeTrigger = view.getByTestId("chats-feed-like").first();
     // Home's actions sit in each row's toolbar, shown on hover and on focus.
@@ -111,24 +129,35 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     await homeTrigger.click();
     await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill("🦋");
     await page.getByRole("button", { name: "🦋", exact: true }).click();
-    await expect(view.locator('[data-testid="chats-feed-reaction-pill"][data-emoji="🦋"]')).toBeVisible();
+    await expect(
+      view.locator('[data-testid="chats-feed-reaction-pill"][data-emoji="🦋"]'),
+    ).toBeVisible();
     for (const emoji of ["1️⃣", "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"]) {
       await view.getByTestId("chats-feed-item").first().hover();
       await homeTrigger.click();
       await page.getByRole("textbox", { name: "Search emoji or paste any emoji" }).fill(emoji);
       await page.getByRole("button", { name: emoji, exact: true }).click();
-      await expect(view.getByTestId("chats-feed-reaction-pill").filter({ hasText: emoji })).toBeVisible();
+      await expect(
+        view.getByTestId("chats-feed-reaction-pill").filter({ hasText: emoji }),
+      ).toBeVisible();
     }
     for (const theme of ["light", "dark"]) {
-      await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       const homeCard = view.getByTestId("chats-feed-item").first();
       // Compared at rest: a hovered row takes a fill and rounded corners.
       await page.mouse.move(0, 0);
       await expect(homeCard).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await waitForVisibleAnimations(page);
-      const surface = await homeCard.evaluate(node => {
+      const surface = await homeCard.evaluate((node) => {
         const style = getComputedStyle(node);
-        return { background: style.backgroundColor, radius: style.borderRadius, padding: style.paddingLeft };
+        return {
+          background: style.backgroundColor,
+          radius: style.borderRadius,
+          padding: style.paddingLeft,
+        };
       });
       await page.screenshot({ path: testInfo.outputPath(`home-card-${theme}.png`) });
       await homeCard.getByRole("button").first().click();
@@ -141,5 +170,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
       await page.screenshot({ path: testInfo.outputPath(`opened-card-${theme}.png`) });
       await page.getByTestId("chats-feed-link").click();
     }
-  } finally { await cleanupDesktopWorkspace(desktop, temp); }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
 });

@@ -17,7 +17,11 @@ function fieldEntry(field: FieldDefinition): Record<string, unknown> {
   switch (field.type) {
     case "select":
     case "multi-select":
-      return { type: field.type, options: field.options, ...keptColors(field.options, field.colors) };
+      return {
+        type: field.type,
+        options: field.options,
+        ...keptColors(field.options, field.colors),
+      };
     case "relation":
       return { type: field.type, collection: field.collection, many: field.many };
     default:
@@ -50,10 +54,7 @@ export function serializeCollectionSchema(schema: CollectionSchema): string {
   return dump(document, { lineWidth: -1, sortKeys: false });
 }
 
-export function addField(
-  schema: CollectionSchema,
-  field: FieldDefinition,
-): CollectionSchema {
+export function addField(schema: CollectionSchema, field: FieldDefinition): CollectionSchema {
   return { ...schema, fields: [...schema.fields, field] };
 }
 
@@ -87,7 +88,8 @@ export function setFieldOptions(
   return {
     ...schema,
     fields: schema.fields.map((field) => {
-      if (field.name !== name || (field.type !== "select" && field.type !== "multi-select")) return field;
+      if (field.name !== name || (field.type !== "select" && field.type !== "multi-select"))
+        return field;
       const { colors: _previous, ...rest } = field;
       return { ...rest, options, ...keptColors(options, { ...field.colors, ...colors }) };
     }),
@@ -131,30 +133,18 @@ export function addSelectOption(
   };
 }
 
-export function addView(
-  schema: CollectionSchema,
-  view: ViewDefinition,
-): CollectionSchema {
+export function addView(schema: CollectionSchema, view: ViewDefinition): CollectionSchema {
   return { ...schema, views: [...schema.views, view] };
 }
 
-export function renameView(
-  schema: CollectionSchema,
-  from: string,
-  to: string,
-): CollectionSchema {
+export function renameView(schema: CollectionSchema, from: string, to: string): CollectionSchema {
   return {
     ...schema,
-    views: schema.views.map((view) =>
-      view.name === from ? { ...view, name: to } : view,
-    ),
+    views: schema.views.map((view) => (view.name === from ? { ...view, name: to } : view)),
   };
 }
 
-export function deleteView(
-  schema: CollectionSchema,
-  name: string,
-): CollectionSchema {
+export function deleteView(schema: CollectionSchema, name: string): CollectionSchema {
   return {
     ...schema,
     views: schema.views.filter((view) => view.name !== name),

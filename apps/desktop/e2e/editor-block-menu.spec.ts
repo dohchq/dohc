@@ -16,7 +16,9 @@ import {
 async function inView(row: Locator, list: Locator): Promise<boolean> {
   const [rowBox, listBox] = await Promise.all([row.boundingBox(), list.boundingBox()]);
   if (!rowBox || !listBox) return false;
-  return rowBox.y >= listBox.y - 0.5 && rowBox.y + rowBox.height <= listBox.y + listBox.height + 0.5;
+  return (
+    rowBox.y >= listBox.y - 0.5 && rowBox.y + rowBox.height <= listBox.y + listBox.height + 0.5
+  );
 }
 
 test("the block menu keeps the row Enter acts on in view as the keys move it", async () => {
@@ -24,10 +26,14 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "# Plan\n\nA paragraph to act on.\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: "plan.md", contents: "# Plan\n\nA paragraph to act on.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1300, 850));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.setSize(1300, 850),
+    );
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "plan.md");
     await explorerRow(page, "plan.md").click();
@@ -47,7 +53,10 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
     expect(await inView(remove, menu)).toBe(false);
 
     await page.keyboard.press("End");
-    await expect(menu).toHaveAttribute("aria-activedescendant", (await remove.getAttribute("id")) ?? "");
+    await expect(menu).toHaveAttribute(
+      "aria-activedescendant",
+      (await remove.getAttribute("id")) ?? "",
+    );
     expect(await inView(remove, menu)).toBe(true);
 
     await page.keyboard.press("Home");

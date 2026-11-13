@@ -107,9 +107,7 @@ async function createVersionViaMenu(page: Page, name: string): Promise<void> {
 
 async function switchVersionViaMenu(page: Page, name: string): Promise<void> {
   await openVersionMenu(page);
-  await page
-    .locator(`[data-testid="version-item"][data-version-name="${name}"]`)
-    .click();
+  await page.locator(`[data-testid="version-item"][data-version-name="${name}"]`).click();
   await expectActiveVersion(page, name);
 }
 
@@ -129,9 +127,7 @@ test("switching the active version while a rich doc stays open re-binds the edit
   const draftSentinel = "DRAFTONLY-only-on-draft";
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "plan.md", contents: `# Plan\n\n${mainSentinel}\n` },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: `# Plan\n\n${mainSentinel}\n` }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
@@ -158,11 +154,9 @@ test("switching the active version while a rich doc stays open re-binds the edit
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.type(` ${draftSentinel}`);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      "saved",
-      { timeout: 15_000 },
-    );
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
+      timeout: 15_000,
+    });
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(draftSentinel);
 
     // THE RE-BIND: switch back to Main while the same file stays open. Before
@@ -178,9 +172,13 @@ test("switching the active version while a rich doc stays open re-binds the edit
       .toBe(false);
     // Disk agrees: Main's plan.md never got the draft edit.
     await expect
-      .poll(async () => (await readFile(join(temp.rootPath, "plan.md"), "utf8")).includes(draftSentinel), {
-        timeout: 20_000,
-      })
+      .poll(
+        async () =>
+          (await readFile(join(temp.rootPath, "plan.md"), "utf8")).includes(draftSentinel),
+        {
+          timeout: 20_000,
+        },
+      )
       .toBe(false);
 
     // Switch back to Draft — the editor re-binds again and the draft edit

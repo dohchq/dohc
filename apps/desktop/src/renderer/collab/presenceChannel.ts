@@ -39,20 +39,17 @@ export interface PresenceTransport {
     incarnationId: string;
     state: unknown;
   }): Promise<PresenceSnapshot>;
-  leave(input: {
+  leave(input: { topic: string; clientId: string; incarnationId: string }): Promise<void>;
+  poll(input: {
     topic: string;
     clientId: string;
-    incarnationId: string;
-  }): Promise<void>;
-  poll(input: { topic: string; clientId: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
+    since: number;
+    signal: AbortSignal;
+  }): Promise<PresenceSnapshot>;
 }
 
 interface RelayPresenceTransport {
-  publish(input: {
-    topic: string;
-    clientId: string;
-    state: unknown;
-  }): Promise<PresenceSnapshot>;
+  publish(input: { topic: string; clientId: string; state: unknown }): Promise<PresenceSnapshot>;
   leave(input: { topic: string; clientId: string }): Promise<void>;
   poll(input: {
     topic: string;
@@ -80,7 +77,11 @@ interface RelayPresenceConfig {
   fetch?: typeof fetch;
 }
 
-function presenceUrl(config: RelayPresenceConfig, topic: string, query: Record<string, string>): string {
+function presenceUrl(
+  config: RelayPresenceConfig,
+  topic: string,
+  query: Record<string, string>,
+): string {
   const base =
     config.scope.kind === "workspace"
       ? `${config.baseUrl}/sync/${encodeURIComponent(config.scope.workspaceId)}/presence`
@@ -99,9 +100,7 @@ function parseSnapshot(value: unknown): PresenceSnapshot {
 // Build a relay-backed transport. The bearer token authenticates the actor;
 // the relay derives identity from it (never from the body), so this client
 // cannot claim another user's presence.
-export function createRelayPresenceTransport(
-  config: RelayPresenceConfig,
-): RelayPresenceTransport {
+export function createRelayPresenceTransport(config: RelayPresenceConfig): RelayPresenceTransport {
   const doFetch = config.fetch ?? fetch;
   const authHeaders = { authorization: `Bearer ${config.token}` };
   return {
@@ -123,11 +122,14 @@ export function createRelayPresenceTransport(
       if (!response.ok) throw new Error(`presence leave failed: ${response.status}`);
     },
     async poll({ topic, clientId, since, signal }) {
-      const response = await doFetch(presenceUrl(config, topic, { since: String(since), clientId }), {
-        method: "GET",
-        headers: authHeaders,
-        signal,
-      });
+      const response = await doFetch(
+        presenceUrl(config, topic, { since: String(since), clientId }),
+        {
+          method: "GET",
+          headers: authHeaders,
+          signal,
+        },
+      );
       if (!response.ok) throw new Error(`presence poll failed: ${response.status}`);
       return parseSnapshot(await response.json());
     },

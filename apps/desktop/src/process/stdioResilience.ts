@@ -14,10 +14,7 @@ import type { Writable } from "node:stream";
  */
 export function makeStreamWriteNonFatal(stream: Writable): () => void {
   const hadOwnWrite = Object.hasOwn(stream, "write");
-  const original = stream.write as (
-    this: Writable,
-    ...args: unknown[]
-  ) => boolean;
+  const original = stream.write as (this: Writable, ...args: unknown[]) => boolean;
   const guarded = (...args: unknown[]): boolean => {
     try {
       return original.call(stream, ...args);

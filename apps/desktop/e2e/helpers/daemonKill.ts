@@ -76,7 +76,7 @@ export async function engineDaemonPids(appPid: number): Promise<number[]> {
   const descendants = new Set<number>([appPid]);
   // A parent always precedes its children in creation order, but the table is
   // unordered — iterate to a fixed point instead of assuming.
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const row of rows) {
       if (descendants.has(row.pid) || !descendants.has(row.parentPid)) continue;
@@ -106,7 +106,7 @@ export async function hardKillAppTree(appPid: number): Promise<void> {
   }
   const rows = await processTable();
   const tree = new Set<number>([appPid]);
-  for (let changed = true; changed; ) {
+  for (let changed = true; changed;) {
     changed = false;
     for (const row of rows) {
       if (tree.has(row.pid) || !tree.has(row.parentPid)) continue;

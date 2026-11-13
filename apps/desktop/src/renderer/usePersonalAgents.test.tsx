@@ -3,38 +3,58 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PersonalAgentsEvent } from "../ipc/bridgeContract";
 import { deferred } from "../testing/deferred";
-import { knownPersonalAgents, usePersonalAgents, type PersonalAgentsState } from "./usePersonalAgents";
+import {
+  knownPersonalAgents,
+  usePersonalAgents,
+  type PersonalAgentsState,
+} from "./usePersonalAgents";
 
 const AGENT_ID = `p-${"a".repeat(26)}`;
 
 function event(name: string): PersonalAgentsEvent {
   return {
-    accounts: [{
-      accountKey: "https://server.test#https://relay.test#ana",
-      host: "relay.test",
-      agentLinkOrigin: "https://relay.test",
-      roster: {
-        revision: 1,
-        agents: [{
-          agentId: AGENT_ID, name, hue: "teal", reportedProduct: null, reportedVersion: null, status: "active",
-          createdAtMs: 1, signedInAtMs: 1, lastActionAtMs: null, reach: [{ workspaceId: "ws-a", level: "view" }],
-        }],
-        workspaces: [{ workspaceId: "ws-a", name: "Trip" }],
+    accounts: [
+      {
+        accountKey: "https://server.test#https://relay.test#ana",
+        host: "relay.test",
+        agentLinkOrigin: "https://relay.test",
+        roster: {
+          revision: 1,
+          agents: [
+            {
+              agentId: AGENT_ID,
+              name,
+              hue: "teal",
+              reportedProduct: null,
+              reportedVersion: null,
+              status: "active",
+              createdAtMs: 1,
+              signedInAtMs: 1,
+              lastActionAtMs: null,
+              reach: [{ workspaceId: "ws-a", level: "view" }],
+            },
+          ],
+          workspaces: [{ workspaceId: "ws-a", name: "Trip" }],
+        },
+        failure: null,
       },
-      failure: null,
-    }],
+    ],
   };
 }
 
 function names(state: PersonalAgentsState): string[] | null {
-  return knownPersonalAgents(state)?.map(agent => agent.name) ?? null;
+  return knownPersonalAgents(state)?.map((agent) => agent.name) ?? null;
 }
 
 let listener: ((event: PersonalAgentsEvent) => void) | null = null;
-const readPersonalAgents = vi.fn(async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] }));
+const readPersonalAgents = vi.fn(
+  async (_payload: { refresh: boolean }): Promise<PersonalAgentsEvent> => ({ accounts: [] }),
+);
 const onPersonalAgents = vi.fn((next: (event: PersonalAgentsEvent) => void) => {
   listener = next;
-  return () => { listener = null; };
+  return () => {
+    listener = null;
+  };
 });
 
 beforeEach(() => vi.stubGlobal("dohcDesktop", { readPersonalAgents, onPersonalAgents }));
@@ -102,7 +122,9 @@ describe("the personal agents a workspace reads", () => {
       throw new Error("main went away");
     });
     let answer: PersonalAgentsState | undefined;
-    await act(async () => { answer = await result.current.reload(); });
+    await act(async () => {
+      answer = await result.current.reload();
+    });
     expect(names(answer!)).toEqual(["Iris"]);
     expect(names(result.current.state)).toEqual(["Iris"]);
   });
@@ -115,7 +137,13 @@ describe("which personal agents are known", () => {
     expect(knownPersonalAgents({ status: "loading" })).toBeNull();
     expect(knownPersonalAgents({ status: "failed" })).toBeNull();
     expect(knownPersonalAgents({ status: "ready", accounts: [] })).toBeNull();
-    expect(knownPersonalAgents({ status: "ready", accounts: [...ready.accounts, unread] })).toBeNull();
-    expect(knownPersonalAgents({ status: "ready", accounts: ready.accounts })?.map(agent => agent.agentId)).toEqual([AGENT_ID]);
+    expect(
+      knownPersonalAgents({ status: "ready", accounts: [...ready.accounts, unread] }),
+    ).toBeNull();
+    expect(
+      knownPersonalAgents({ status: "ready", accounts: ready.accounts })?.map(
+        (agent) => agent.agentId,
+      ),
+    ).toEqual([AGENT_ID]);
   });
 });

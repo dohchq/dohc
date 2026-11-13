@@ -1,14 +1,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import {
-  SECRET_FILE_STORE_RELATIVE_PATH,
-  installWorkspaceDataKey,
-} from "./workspaceDataKey";
-import type {
-  Request,
-  Response,
-} from "@dohc/workspace-engine-client";
+import { SECRET_FILE_STORE_RELATIVE_PATH, installWorkspaceDataKey } from "./workspaceDataKey";
+import type { Request, Response } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import {
   EngineWorkspaceSessions,
@@ -60,18 +54,13 @@ describe("desktop workspace secret enrollment state", () => {
     });
 
     await expect(
-      readWorkspaceSecretState(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
-        sessions,
-      ),
+      readWorkspaceSecretState({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions),
     ).resolves.toBe("none");
     expect(daemon.requests.at(-1)).toMatchObject({
       method: "secrets.stateExists",
       params: { workspaceId: WORKSPACE_ID },
     });
-    const open = daemon.requests.find(
-      (request) => request.method === "workspace.open",
-    );
+    const open = daemon.requests.find((request) => request.method === "workspace.open");
     expect(open?.params).not.toHaveProperty("captureMode");
     await sessions.closeAll();
   });
@@ -102,9 +91,7 @@ describe("desktop workspace secret enrollment state", () => {
     });
     await readWorkspaceSecretState(workspace, sessions);
 
-    const opens = daemon.requests.filter(
-      (request) => request.method === "workspace.open",
-    );
+    const opens = daemon.requests.filter((request) => request.method === "workspace.open");
     expect(opens).toHaveLength(1);
     expect(opens[0]?.params).toMatchObject({
       workspaceId: WORKSPACE_ID,
@@ -126,10 +113,7 @@ describe("desktop workspace secret enrollment state", () => {
     await installWorkspaceDataKey(root, key);
 
     await expect(
-      readWorkspaceSecretState(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
-        sessions,
-      ),
+      readWorkspaceSecretState({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions),
     ).resolves.toBe("protected-key-present");
     const loaded = await readWorkspaceDataKeyForEnrollment(
       { workspaceId: WORKSPACE_ID, rootPath: root },
@@ -160,9 +144,7 @@ describe("desktop workspace secret enrollment state", () => {
       sessions,
     );
 
-    const open = daemon.requests.find(
-      (request) => request.method === "workspace.open",
-    );
+    const open = daemon.requests.find((request) => request.method === "workspace.open");
     expect(open?.params).toMatchObject({ rootDir: forwardSlashed });
     await sessions.closeAll();
   });
@@ -175,17 +157,11 @@ describe("desktop workspace secret enrollment state", () => {
     });
 
     await expect(
-      readWorkspaceSecretState(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
-        sessions,
-      ),
+      readWorkspaceSecretState({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions),
     ).resolves.toBe("none");
     expect(daemon.requests).toEqual([]);
     await expect(
-      readWorkspaceDataKeyForEnrollment(
-        { workspaceId: WORKSPACE_ID, rootPath: root },
-        sessions,
-      ),
+      readWorkspaceDataKeyForEnrollment({ workspaceId: WORKSPACE_ID, rootPath: root }, sessions),
     ).resolves.toBeNull();
     expect(daemon.requests).toEqual([]);
     expect(existsSync(join(root, SECRET_FILE_STORE_RELATIVE_PATH))).toBe(false);

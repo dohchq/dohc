@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AcceptShareHandoffPayload, DismissShareHandoffPayload, ShareHandoffStatus } from "./ipc/bridgeContract";
+import {
+  AcceptShareHandoffPayload,
+  DismissShareHandoffPayload,
+  ShareHandoffStatus,
+} from "./ipc/bridgeContract";
 
 const STATUSES = ShareHandoffStatus.options.map((option) => option.shape.status.value);
 
@@ -15,30 +19,26 @@ describe("share handoff status bridge", () => {
                 statusId: "status-1",
                 email: "current@dohc.test",
               }
-          : status === "failed-wrong-server"
-            ? {
-                status,
-                statusId: "status-1",
-                linkRelayUrl: "https://relay-a.example",
-              }
-          : status === "done"
-            ? { status, statusId: "status-1", shareId: "share-1" }
-            : { status, statusId: "status-1" };
+            : status === "failed-wrong-server"
+              ? {
+                  status,
+                  statusId: "status-1",
+                  linkRelayUrl: "https://relay-a.example",
+                }
+              : status === "done"
+                ? { status, statusId: "status-1", shareId: "share-1" }
+                : { status, statusId: "status-1" };
       expect(ShareHandoffStatus.parse(value)).toEqual(value);
     }
 
     for (const status of STATUSES.filter(
-      (value) =>
-        value !== "idle" &&
-        value !== "done" &&
-        value !== "failed-wrong-server",
+      (value) => value !== "idle" && value !== "done" && value !== "failed-wrong-server",
     )) {
       expect(ShareHandoffStatus.safeParse({ status }).success).toBe(false);
     }
-    expect(
-      ShareHandoffStatus.safeParse({ status: "idle", statusId: "status-1" })
-        .success,
-    ).toBe(false);
+    expect(ShareHandoffStatus.safeParse({ status: "idle", statusId: "status-1" }).success).toBe(
+      false,
+    );
     expect(
       ShareHandoffStatus.safeParse({
         status: "waiting-for-acceptance",
@@ -53,10 +53,9 @@ describe("share handoff status bridge", () => {
         email: "x".repeat(321),
       }).success,
     ).toBe(false);
-    expect(
-      ShareHandoffStatus.safeParse({ status: "done", statusId: "status-1" })
-        .success,
-    ).toBe(false);
+    expect(ShareHandoffStatus.safeParse({ status: "done", statusId: "status-1" }).success).toBe(
+      false,
+    );
     for (const linkRelayUrl of ["", "x".repeat(2049)]) {
       expect(
         ShareHandoffStatus.safeParse({
@@ -74,20 +73,17 @@ describe("share handoff status bridge", () => {
     ).toBe(false);
   });
 
-  it.each(["token"])(
-    "rejects the forbidden %s field from snapshots and events",
-    (field) => {
-      const raw = { status: "idle", [field]: "secret" };
-      expect(ShareHandoffStatus.safeParse(raw).success).toBe(false);
-      const acceptance = {
-        status: "waiting-for-acceptance",
-        statusId: "status-1",
-        email: "current@dohc.test",
-        [field]: "secret",
-      };
-      expect(ShareHandoffStatus.safeParse(acceptance).success).toBe(false);
-    },
-  );
+  it.each(["token"])("rejects the forbidden %s field from snapshots and events", (field) => {
+    const raw = { status: "idle", [field]: "secret" };
+    expect(ShareHandoffStatus.safeParse(raw).success).toBe(false);
+    const acceptance = {
+      status: "waiting-for-acceptance",
+      statusId: "status-1",
+      email: "current@dohc.test",
+      [field]: "secret",
+    };
+    expect(ShareHandoffStatus.safeParse(acceptance).success).toBe(false);
+  });
 
   it("requires only the captured status identity in action payloads", () => {
     expect(AcceptShareHandoffPayload.parse({ statusId: "status-1" })).toEqual({

@@ -7,7 +7,6 @@ import { deferred } from "../testing/deferred";
 import { FileInspector } from "./FileInspector";
 import { settleAfterUnmount } from "./FileInspector.draft-fixture";
 
-
 setupFileInspectorTests();
 
 afterEach(async () => {
@@ -15,7 +14,6 @@ afterEach(async () => {
   await settleAfterUnmount();
   vi.unstubAllGlobals();
 });
-
 
 describe("Read-only copy beside Open externally", () => {
   function stubBridge(readExternalOpen: DohcDesktopBridge["readExternalOpen"]) {
@@ -41,14 +39,16 @@ describe("Read-only copy beside Open externally", () => {
     expect(words.previousElementSibling?.getAttribute("aria-hidden")).toBe("true");
   });
 
-
   it.each([
     ["another file", "ws-1", "other.bin"],
     ["the same path in another workspace", "ws-2", "archive.bin"],
   ] as const)("never shows a late answer for one file on %s", async (_case, workspaceId, path) => {
     const late = deferred<{ readOnlyCopy: boolean }>();
     const read = stubBridge(async (input) =>
-      input.workspaceId === "ws-1" && input.relativePath === "archive.bin" ? late.promise : { readOnlyCopy: false });
+      input.workspaceId === "ws-1" && input.relativePath === "archive.bin"
+        ? late.promise
+        : { readOnlyCopy: false },
+    );
     const { rerender } = render(<FileInspector workspaceId="ws-1" path="archive.bin" />);
     await waitFor(() => expect(read).toHaveBeenCalledOnce());
 

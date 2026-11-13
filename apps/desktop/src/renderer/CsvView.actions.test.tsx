@@ -9,7 +9,10 @@ import { deferred } from "../testing/deferred";
 import { CsvControls, CsvView, CsvViewActions } from "./CsvView";
 import { documentVersionKey } from "./documentVersionKey";
 import { resetOrphanedDrafts } from "./orphanedDrafts";
-import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import {
+  acquireSharedLocalDocument,
+  resetSharedLocalDocumentsForTests,
+} from "./sharedLocalDocument";
 import { ConnectionNotices } from "./shell/connectionNotices";
 import { errorDetails } from "./shell/copyDetails";
 import { useShellError } from "./shell/useShellError";
@@ -24,7 +27,9 @@ const buffers: Array<ReturnType<typeof acquireSharedLocalDocument>["buffer"]> = 
 
 // A CSV as FileInspector hands it to its view.
 function csvFile(workspaceId: string, path: string, body: string) {
-  const { buffer, release } = acquireSharedLocalDocument(documentVersionKey(workspaceId, path, undefined));
+  const { buffer, release } = acquireSharedLocalDocument(
+    documentVersionKey(workspaceId, path, undefined),
+  );
   releases.push(release);
   buffers.push(buffer);
   const contentReadTicket = buffer.beginRead();
@@ -46,7 +51,9 @@ function csvFile(workspaceId: string, path: string, body: string) {
 }
 
 // The shell's error list and notice center, handing its error hook to the view.
-function Shell(props: { children: (onError: ReturnType<typeof useShellError>["reportButtonError"]) => ReactNode }) {
+function Shell(props: {
+  children: (onError: ReturnType<typeof useShellError>["reportButtonError"]) => ReactNode;
+}) {
   const shell = useShellError("ws-1");
   return (
     <>
@@ -70,7 +77,12 @@ function Shell(props: { children: (onError: ReturnType<typeof useShellError>["re
 }
 
 const SAVED: SaveState = { kind: "saved-here" };
-const importResult = (path: string): ImportResult => ({ operationId: "dohc-operation:test-import", path, tableName: "data", rowCount: 1 });
+const importResult = (path: string): ImportResult => ({
+  operationId: "dohc-operation:test-import",
+  path,
+  tableName: "data",
+  rowCount: 1,
+});
 // What the renderer receives when main's import rejects: Electron prefixes
 // the channel to the error's text.
 const importRejected = (text: string) =>
@@ -108,7 +120,13 @@ describe("CSV view actions", () => {
   it("draws one row of actions: the save state, Share, Table or Raw, then Import, in tab order", async () => {
     const user = userEvent.setup();
     const onShare = vi.fn();
-    render(<CsvView {...csvFile("ws-1", "data.csv", "name,count\nAda,1")} onShare={onShare} onOpenPath={vi.fn()} />);
+    render(
+      <CsvView
+        {...csvFile("ws-1", "data.csv", "name,count\nAda,1")}
+        onShare={onShare}
+        onOpenPath={vi.fn()}
+      />,
+    );
 
     const actions = screen.getAllByTestId("view-actions");
     expect(actions).toHaveLength(1);
@@ -125,7 +143,9 @@ describe("CSV view actions", () => {
     expect(mode("Table").getAttribute("aria-checked")).toBe("true");
     await user.tab();
     expect(document.activeElement).toBe(screen.getByTestId("csv-import-sqlite"));
-    expect(screen.getByTestId("csv-import-sqlite").getAttribute("aria-label")).toBe("Import to SQLite");
+    expect(screen.getByTestId("csv-import-sqlite").getAttribute("aria-label")).toBe(
+      "Import to SQLite",
+    );
     expect(screen.getByTestId("csv-import-sqlite").title).toBe("Import to SQLite");
     await user.click(screen.getByRole("button", { name: "Share file" }));
     expect(onShare).toHaveBeenCalledOnce();
@@ -140,7 +160,9 @@ describe("CSV view actions", () => {
     await user.keyboard("{ArrowRight}");
     expect(document.activeElement).toBe(mode("Raw"));
     expect(mode("Raw").getAttribute("aria-checked")).toBe("true");
-    expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe("name,count\nAda,1");
+    expect((screen.getByTestId("csv-raw-editor") as HTMLTextAreaElement).value).toBe(
+      "name,count\nAda,1",
+    );
 
     await user.keyboard("{ArrowLeft}");
     expect(document.activeElement).toBe(mode("Table"));
@@ -156,8 +178,12 @@ describe("CSV view actions", () => {
     const addColumn = screen.getByTestId("csv-add-column");
     expect(addRow.getAttribute("aria-label")).toBe("Add row");
     expect(addColumn.getAttribute("aria-label")).toBe("Add column");
-    expect(addRow.closest("tr")).toBe(screen.getByRole("table").querySelector("tbody tr:last-child"));
-    expect(addColumn.closest("th")).toBe(screen.getByRole("table").querySelector("thead th:last-child"));
+    expect(addRow.closest("tr")).toBe(
+      screen.getByRole("table").querySelector("tbody tr:last-child"),
+    );
+    expect(addColumn.closest("th")).toBe(
+      screen.getByRole("table").querySelector("thead th:last-child"),
+    );
 
     await user.click(addRow);
     expect(screen.getByLabelText("Row 2 column 1")).toBeTruthy();
@@ -171,26 +197,47 @@ describe("CSV view actions", () => {
 
   it.each([
     ["read-only", { readOnly: true }, "This document is shared with you to read.", "Read-only"],
-    ["too large", { truncated: true }, "This file is too large to edit in dohc.", "Too large to edit"],
-  ])("shows a %s table with its mark, without add controls, and with Import disabled", (_, lock, title, label) => {
-    render(<CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} {...lock} onOpenPath={vi.fn()} />);
+    [
+      "too large",
+      { truncated: true },
+      "This file is too large to edit in dohc.",
+      "Too large to edit",
+    ],
+  ])(
+    "shows a %s table with its mark, without add controls, and with Import disabled",
+    (_, lock, title, label) => {
+      render(
+        <CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} {...lock} onOpenPath={vi.fn()} />,
+      );
 
-    const state = screen.getByTestId("csv-save-state");
-    expect(state.className).not.toContain("sr-only");
-    expect(state.textContent).toBe(label);
-    expect(state.title).toBe(title);
-    expect(screen.queryByTestId("csv-add-row")).toBeNull();
-    expect(screen.queryByTestId("csv-add-column")).toBeNull();
-    expect((screen.getByTestId("csv-import-sqlite") as HTMLButtonElement).disabled).toBe(true);
-    expect(mode("Raw").hasAttribute("disabled")).toBe(false);
-  });
+      const state = screen.getByTestId("csv-save-state");
+      expect(state.className).not.toContain("sr-only");
+      expect(state.textContent).toBe(label);
+      expect(state.title).toBe(title);
+      expect(screen.queryByTestId("csv-add-row")).toBeNull();
+      expect(screen.queryByTestId("csv-add-column")).toBeNull();
+      expect((screen.getByTestId("csv-import-sqlite") as HTMLButtonElement).disabled).toBe(true);
+      expect(mode("Raw").hasAttribute("disabled")).toBe(false);
+    },
+  );
 
   it.each([
     ["saving", { kind: "saving" } as SaveState, "saving", true, "Saving…"],
-    ["failed", { kind: "error", reason: "disk full", issueId: null } as SaveState, "error", false, "Couldn't save"],
+    [
+      "failed",
+      { kind: "error", reason: "disk full", issueId: null } as SaveState,
+      "error",
+      false,
+      "Couldn't save",
+    ],
   ])("draws a %s save state in the tab row", (_, saveState, dataState, quiet, label) => {
     render(
-      <CsvViewActions saveState={saveState} mode="table" onModeChange={vi.fn()} onShare={vi.fn()} />,
+      <CsvViewActions
+        saveState={saveState}
+        mode="table"
+        onModeChange={vi.fn()}
+        onShare={vi.fn()}
+      />,
     );
     const state = screen.getByTestId("csv-save-state");
     expect(state.dataset.state).toBe(dataState);
@@ -238,7 +285,13 @@ describe("CSV view actions", () => {
     const onOpenPath = vi.fn();
     render(
       <Shell>
-        {(onError) => <CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} onOpenPath={onOpenPath} onError={onError} />}
+        {(onError) => (
+          <CsvView
+            {...csvFile("ws-1", "data.csv", "name\nAda")}
+            onOpenPath={onOpenPath}
+            onError={onError}
+          />
+        )}
       </Shell>,
     );
 
@@ -246,16 +299,20 @@ describe("CSV view actions", () => {
     const toast = await screen.findByTestId("workspace-shell-error");
     // What happened, naming the database, then the next step; the raw
     // message stays for Copy details.
-    expect(within(toast).getByText(
-      "dohc could not import this file to data.sqlite. That file already exists. Rename or move it, then try again.",
-    )).toBeTruthy();
+    expect(
+      within(toast).getByText(
+        "dohc could not import this file to data.sqlite. That file already exists. Rename or move it, then try again.",
+      ),
+    ).toBeTruthy();
     expect(toast.textContent).not.toContain("Database already exists");
     expect(within(screen.getByTestId("view-csv")).queryByText(/already exists/)).toBeNull();
     expect(screen.queryByTestId("csv-import-error")).toBeNull();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notices = screen.getByRole("dialog", { name: "Notices" });
-    expect(within(notices).getAllByText(/could not import this file to data\.sqlite/)).toHaveLength(1);
+    expect(within(notices).getAllByText(/could not import this file to data\.sqlite/)).toHaveLength(
+      1,
+    );
     await user.click(within(notices).getByRole("button", { name: "Try again" }));
     expect(importToDatabase).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
@@ -270,7 +327,13 @@ describe("CSV view actions", () => {
     const onOpenPath = vi.fn();
     render(
       <Shell>
-        {(onError) => <CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} onOpenPath={onOpenPath} onError={onError} />}
+        {(onError) => (
+          <CsvView
+            {...csvFile("ws-1", "data.csv", "name\nAda")}
+            onOpenPath={onOpenPath}
+            onError={onError}
+          />
+        )}
       </Shell>,
     );
 
@@ -281,7 +344,11 @@ describe("CSV view actions", () => {
     expect(button.getAttribute("aria-busy")).toBe("true");
 
     await user.click(screen.getByTestId("notice-center-toggle"));
-    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", {
+        name: "Try again",
+      }),
+    );
     expect(importToDatabase).toHaveBeenCalledTimes(2);
     expect(button.getAttribute("aria-busy")).toBe("true");
 
@@ -295,38 +362,53 @@ describe("CSV view actions", () => {
   it.each([
     ["a success opens the database", true],
     ["a failure files a new row", false],
-  ])("answers an old row's Try again with the running import's result after the CSV closed: %s", async (_, succeeds) => {
-    const user = userEvent.setup();
-    const running = deferred<ImportResult>();
-    importToDatabase.mockRejectedValueOnce(importRejected("Database already exists: data.sqlite"));
-    importToDatabase.mockReturnValueOnce(running.promise);
-    const onOpenPath = vi.fn();
-    const file = csvFile("ws-1", "data.csv", "name\nAda");
-    const shell = (open: boolean) => (
-      <Shell>{(onError) => (open ? <CsvView {...file} onOpenPath={onOpenPath} onError={onError} /> : null)}</Shell>
-    );
-    const view = render(shell(true));
+  ])(
+    "answers an old row's Try again with the running import's result after the CSV closed: %s",
+    async (_, succeeds) => {
+      const user = userEvent.setup();
+      const running = deferred<ImportResult>();
+      importToDatabase.mockRejectedValueOnce(
+        importRejected("Database already exists: data.sqlite"),
+      );
+      importToDatabase.mockReturnValueOnce(running.promise);
+      const onOpenPath = vi.fn();
+      const file = csvFile("ws-1", "data.csv", "name\nAda");
+      const shell = (open: boolean) => (
+        <Shell>
+          {(onError) =>
+            open ? <CsvView {...file} onOpenPath={onOpenPath} onError={onError} /> : null
+          }
+        </Shell>
+      );
+      const view = render(shell(true));
 
-    await user.click(screen.getByTestId("csv-import-sqlite"));
-    await screen.findByTestId("workspace-shell-error");
-    await user.click(screen.getByTestId("csv-import-sqlite"));
-    view.rerender(shell(false));
+      await user.click(screen.getByTestId("csv-import-sqlite"));
+      await screen.findByTestId("workspace-shell-error");
+      await user.click(screen.getByTestId("csv-import-sqlite"));
+      view.rerender(shell(false));
 
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
-    await user.keyboard("{Escape}");
-    expect(importToDatabase).toHaveBeenCalledTimes(2);
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      await user.click(
+        within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", {
+          name: "Try again",
+        }),
+      );
+      await user.keyboard("{Escape}");
+      expect(importToDatabase).toHaveBeenCalledTimes(2);
 
-    if (succeeds) {
-      await act(async () => running.resolve(importResult("data.sqlite")));
-      expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite");
-    } else {
-      await act(async () => running.reject(importRejected("Database already exists: data.sqlite")));
-      const toast = await screen.findByTestId("workspace-shell-error");
-      expect(toast.textContent).toContain("dohc could not import this file to data.sqlite.");
-      expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-    }
-  });
+      if (succeeds) {
+        await act(async () => running.resolve(importResult("data.sqlite")));
+        expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite");
+      } else {
+        await act(async () =>
+          running.reject(importRejected("Database already exists: data.sqlite")),
+        );
+        const toast = await screen.findByTestId("workspace-shell-error");
+        expect(toast.textContent).toContain("dohc could not import this file to data.sqlite.");
+        expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+      }
+    },
+  );
 
   it("answers a Try again pressed after the CSV closed: a failure files a new row, a success opens the database", async () => {
     const user = userEvent.setup();
@@ -336,7 +418,11 @@ describe("CSV view actions", () => {
     const onOpenPath = vi.fn();
     const file = csvFile("ws-1", "data.csv", "name\nAda");
     const shell = (open: boolean) => (
-      <Shell>{(onError) => (open ? <CsvView {...file} onOpenPath={onOpenPath} onError={onError} /> : null)}</Shell>
+      <Shell>
+        {(onError) =>
+          open ? <CsvView {...file} onOpenPath={onOpenPath} onError={onError} /> : null
+        }
+      </Shell>
     );
     const view = render(shell(true));
 
@@ -347,7 +433,11 @@ describe("CSV view actions", () => {
 
     const tryAgainInNotices = async () => {
       await user.click(screen.getByTestId("notice-center-toggle"));
-      await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Try again" }));
+      await user.click(
+        within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", {
+          name: "Try again",
+        }),
+      );
       await user.keyboard("{Escape}");
     };
     await tryAgainInNotices();
@@ -356,7 +446,9 @@ describe("CSV view actions", () => {
     expect(toast.textContent).toContain("dohc could not import this file to data.sqlite.");
 
     await tryAgainInNotices();
-    expect(importToDatabase).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceId: "ws-1", sourceRelativePath: "data.csv" }));
+    expect(importToDatabase).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workspaceId: "ws-1", sourceRelativePath: "data.csv" }),
+    );
     await waitFor(() => expect(onOpenPath).toHaveBeenCalledExactlyOnceWith("data.sqlite"));
   });
 
@@ -365,13 +457,23 @@ describe("CSV view actions", () => {
     importToDatabase.mockRejectedValueOnce(importRejected("The CSV has no header row."));
     render(
       <Shell>
-        {(onError) => <CsvView {...csvFile("ws-1", "data/rows.csv", "name\nAda")} onOpenPath={vi.fn()} onError={onError} />}
+        {(onError) => (
+          <CsvView
+            {...csvFile("ws-1", "data/rows.csv", "name\nAda")}
+            onOpenPath={vi.fn()}
+            onError={onError}
+          />
+        )}
       </Shell>,
     );
 
     await user.click(screen.getByTestId("csv-import-sqlite"));
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText("dohc could not import this file to data/rows.sqlite. The CSV has no header row.")).toBeTruthy();
+    expect(
+      within(toast).getByText(
+        "dohc could not import this file to data/rows.sqlite. The CSV has no header row.",
+      ),
+    ).toBeTruthy();
   });
 
   it("drops an import answer that arrives after the view closed", async () => {
@@ -380,7 +482,13 @@ describe("CSV view actions", () => {
     importToDatabase.mockReturnValue(answer.promise);
     const onError = vi.fn();
     const onOpenPath = vi.fn();
-    const view = render(<CsvView {...csvFile("ws-1", "data.csv", "name\nAda")} onOpenPath={onOpenPath} onError={onError} />);
+    const view = render(
+      <CsvView
+        {...csvFile("ws-1", "data.csv", "name\nAda")}
+        onOpenPath={onOpenPath}
+        onError={onError}
+      />,
+    );
 
     await user.click(screen.getByTestId("csv-import-sqlite"));
     view.unmount();
@@ -402,22 +510,38 @@ describe("text view actions", () => {
 
   it.each([
     ["saved", SAVED, {}, "saved", true, "Saved"],
-    ["failed", { kind: "error", reason: "disk full", issueId: null } as SaveState, {}, "error", false, "Couldn't save"],
+    [
+      "failed",
+      { kind: "error", reason: "disk full", issueId: null } as SaveState,
+      {},
+      "error",
+      false,
+      "Couldn't save",
+    ],
     ["read-only", SAVED, { readOnly: true }, "saved", false, "Read-only"],
-  ])("draws a %s text file's save state beside Share", (_, saveState, lock, dataState, quiet, label) => {
-    render(<TextViewActions testId="view-text" saveState={saveState} onShare={vi.fn()} {...lock} />);
-    const state = screen.getByTestId("view-text-save-state");
-    expect(state.dataset.state).toBe(dataState);
-    expect(state.className.includes("sr-only")).toBe(quiet);
-    expect(state.textContent).toBe(label);
-    expect(screen.getByRole("button", { name: "Share file" })).toBeTruthy();
-  });
+  ])(
+    "draws a %s text file's save state beside Share",
+    (_, saveState, lock, dataState, quiet, label) => {
+      render(
+        <TextViewActions testId="view-text" saveState={saveState} onShare={vi.fn()} {...lock} />,
+      );
+      const state = screen.getByTestId("view-text-save-state");
+      expect(state.dataset.state).toBe(dataState);
+      expect(state.className.includes("sr-only")).toBe(quiet);
+      expect(state.textContent).toBe(label);
+      expect(screen.getByRole("button", { name: "Share file" })).toBeTruthy();
+    },
+  );
 
   it("puts each group's actions in that group's tab row in a split", () => {
     render(
       <>
         <EditorGroupFrame tabs={(ref) => <div data-testid="left-row" ref={ref} />}>
-          <TextViewActions testId="view-text" saveState={{ kind: "error", reason: "disk full", issueId: null }} onShare={vi.fn()} />
+          <TextViewActions
+            testId="view-text"
+            saveState={{ kind: "error", reason: "disk full", issueId: null }}
+            onShare={vi.fn()}
+          />
         </EditorGroupFrame>
         <EditorGroupFrame tabs={(ref) => <div data-testid="right-row" ref={ref} />}>
           <CsvViewActions saveState={SAVED} mode="raw" onModeChange={vi.fn()} onShare={vi.fn()} />
@@ -429,7 +553,9 @@ describe("text view actions", () => {
     expect(within(left).getByTestId("view-text-save-state").textContent).toBe("Couldn't save");
     expect(within(left).queryByTestId("csv-raw-toggle")).toBeNull();
     expect(within(right).getByTestId("csv-save-state").dataset.state).toBe("saved");
-    expect(within(right).getByRole("radio", { name: "Raw" }).getAttribute("aria-checked")).toBe("true");
+    expect(within(right).getByRole("radio", { name: "Raw" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
     expect(screen.queryByTestId("view-actions")).toBeNull();
   });
 });

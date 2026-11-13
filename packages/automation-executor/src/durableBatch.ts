@@ -8,8 +8,13 @@ export function durableBatch<T>(save: (items: readonly T[]) => Promise<void>) {
   const flush = async () => {
     if (failed) throw failure;
     if (items.length === 0) return;
-    try { await save(items); }
-    catch (error) { failed = true; failure = error; throw error; }
+    try {
+      await save(items);
+    } catch (error) {
+      failed = true;
+      failure = error;
+      throw error;
+    }
     items = [];
   };
   return {

@@ -79,15 +79,16 @@ describe("resolveOutlineHeadingTarget", () => {
   ];
 
   it("uses workspace heading anchors and exact duplicate occurrences", () => {
-    expect(resolveOutlineHeadingTarget(headings, { anchor: "plan", occurrence: 1 }))
-      .toEqual(headings[1]);
-    expect(resolveOutlineHeadingTarget(headings, { anchor: "plan-1" }))
-      .toEqual(headings[1]);
+    expect(resolveOutlineHeadingTarget(headings, { anchor: "plan", occurrence: 1 })).toEqual(
+      headings[1],
+    );
+    expect(resolveOutlineHeadingTarget(headings, { anchor: "plan-1" })).toEqual(headings[1]);
   });
 
   it("decodes URL fragments before matching canonical Unicode anchors", () => {
-    expect(resolveOutlineHeadingTarget(headings, { anchor: "caf%C3%A9-plan" }))
-      .toEqual(headings[2]);
+    expect(resolveOutlineHeadingTarget(headings, { anchor: "caf%C3%A9-plan" })).toEqual(
+      headings[2],
+    );
   });
 
   it("uses the same globally unique allocation for literal suffix collisions", () => {
@@ -97,12 +98,15 @@ describe("resolveOutlineHeadingTarget", () => {
       { level: 2, text: "Foo", pos: 40 },
     ];
 
-    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-2", occurrence: 1 }))
-      .toEqual(colliding[2]);
-    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo", occurrence: 1 }))
-      .toEqual(colliding[2]);
-    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-1", occurrence: 1 }))
-      .toEqual(colliding[2]);
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-2", occurrence: 1 })).toEqual(
+      colliding[2],
+    );
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo", occurrence: 1 })).toEqual(
+      colliding[2],
+    );
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-1", occurrence: 1 })).toEqual(
+      colliding[2],
+    );
   });
 
   it("does not reinterpret a genuine literal suffixed-base occurrence", () => {
@@ -113,8 +117,9 @@ describe("resolveOutlineHeadingTarget", () => {
       { level: 2, text: "Foo-1", pos: 60 },
     ];
 
-    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-1", occurrence: 1 }))
-      .toEqual(colliding[3]);
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-1", occurrence: 1 })).toEqual(
+      colliding[3],
+    );
   });
 });
 
@@ -147,9 +152,7 @@ describe("MarkdownEditor heading navigation", () => {
     expect(duplicateHeadings).toHaveLength(2);
     await waitFor(() =>
       expect(
-        view.container
-          .querySelectorAll("h2")[1]
-          ?.classList.contains("dohc-target-flash"),
+        view.container.querySelectorAll("h2")[1]?.classList.contains("dohc-target-flash"),
       ).toBe(true),
     );
 
@@ -165,11 +168,9 @@ describe("MarkdownEditor heading navigation", () => {
     );
 
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
-    expect(
-      view.container
-        .querySelectorAll("h2")[1]
-        ?.classList.contains("dohc-target-flash"),
-    ).toBe(true);
+    expect(view.container.querySelectorAll("h2")[1]?.classList.contains("dohc-target-flash")).toBe(
+      true,
+    );
   });
 });
 
@@ -199,27 +200,26 @@ describe("MarkdownEditor block navigation", () => {
     const view = render(renderEditor({ index: 2, nonce: 1 }));
     await screen.findByTestId("markdown-editor");
 
-    await waitFor(() => expect(scrollIntoView, "drop the blockTarget effect -> nothing scrolls, and an engine-backed search result opens at the top of the document again.").toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(
-        view.container.querySelector(".dohc-target-flash")?.textContent,
-      ).toBe("Second para"),
+        scrollIntoView,
+        "drop the blockTarget effect -> nothing scrolls, and an engine-backed search result opens at the top of the document again.",
+      ).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(view.container.querySelector(".dohc-target-flash")?.textContent).toBe("Second para"),
     );
 
     // Retiring a consumed target must not clear the visible landing cue. The
     // flash owns its own lifetime; the target effect's cleanup owns only its
     // queued frame and listeners.
     view.rerender(renderEditor());
-    expect(
-      view.container.querySelector(".dohc-target-flash")?.textContent,
-    ).toBe("Second para");
+    expect(view.container.querySelector(".dohc-target-flash")?.textContent).toBe("Second para");
 
     view.rerender(renderEditor({ index: 3, nonce: 2 }));
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(
-        view.container.querySelector(".dohc-target-flash")?.textContent,
-      ).toBe("Third para"),
+      expect(view.container.querySelector(".dohc-target-flash")?.textContent).toBe("Third para"),
     );
   });
 
@@ -235,9 +235,7 @@ describe("MarkdownEditor block navigation", () => {
 
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
     await waitFor(() =>
-      expect(
-        view.container.querySelector(".dohc-target-flash")?.textContent,
-      ).toBe("Third para"),
+      expect(view.container.querySelector(".dohc-target-flash")?.textContent).toBe("Third para"),
     );
   });
 
@@ -300,14 +298,16 @@ describe("MarkdownEditor block navigation", () => {
     }
 
     it("scrolls the matched item of a long list, not the list", async () => {
-      const value = Array.from({ length: 60 }, (_, item) => `- Item ${item + 1}`)
-        .join("\n");
+      const value = Array.from({ length: 60 }, (_, item) => `- Item ${item + 1}`).join("\n");
       const { view, scrollIntoView } = renderJump(value, 47);
       await screen.findByTestId("markdown-editor");
       await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
 
       const { elements, text } = revealDom(view);
-      expect(text, "return null from intraBlockRange -> the flash covers the whole <ul> and the scrolled element is the list, so the reader lands on 'Item 1' with the match 46 items below the fold.").toBe("Item 47");
+      expect(
+        text,
+        "return null from intraBlockRange -> the flash covers the whole <ul> and the scrolled element is the list, so the reader lands on 'Item 1' with the match 46 items below the fold.",
+      ).toBe("Item 47");
       expect(scrollIntoView.mock.instances[0]).toBe(elements[0]);
       expect(elements[0]?.closest("li")?.textContent).toBe("Item 47");
     });
@@ -404,11 +404,12 @@ describe("MarkdownEditor block navigation", () => {
 
     const view = render(renderEditor({ index: 2, nonce: 1 }));
     await screen.findByTestId("markdown-editor");
-    await waitFor(() =>
-      expect(view.container.querySelector(".dohc-target-flash")).toBeTruthy(),
-    );
+    await waitFor(() => expect(view.container.querySelector(".dohc-target-flash")).toBeTruthy());
 
-    expect(revealCalls.length, "pass `pos + 1` as moveCursorTo in scrollToBlock -> the reveal takes the caret over, and this records the argument that did it.").toBeGreaterThan(0);
+    expect(
+      revealCalls.length,
+      "pass `pos + 1` as moveCursorTo in scrollToBlock -> the reveal takes the caret over, and this records the argument that did it.",
+    ).toBeGreaterThan(0);
     for (const call of revealCalls) expect(call).toBeUndefined();
   });
 });

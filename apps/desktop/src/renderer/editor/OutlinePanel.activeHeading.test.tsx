@@ -169,8 +169,7 @@ function renderActiveHeadingHarness(
       toJSON: () => {},
     }) satisfies DOMRect;
   scroller.getBoundingClientRect = () => rect(100, 200);
-  editorDom.getBoundingClientRect = () =>
-    rect(100 + editorTop - scroller.scrollTop, editorHeight);
+  editorDom.getBoundingClientRect = () => rect(100 + editorTop - scroller.scrollTop, editorHeight);
   editorContainer.append(editorDom, reactMount);
   scroller.appendChild(editorContainer);
   document.body.appendChild(scroller);
@@ -228,7 +227,11 @@ function renderActiveHeadingHarness(
       descendants(callback: (node: FakeHeadingNode, pos: number) => void) {
         for (const heading of shown) callback(node(heading), heading.pos);
       },
-      nodesBetween(from: number, to: number, callback: (node: FakeHeadingNode, pos: number) => void) {
+      nodesBetween(
+        from: number,
+        to: number,
+        callback: (node: FakeHeadingNode, pos: number) => void,
+      ) {
         for (const heading of shown) {
           if (heading.pos >= from && heading.pos < to) callback(node(heading), heading.pos);
         }
@@ -320,9 +323,9 @@ function renderActiveHeadingHarness(
           type: "childList",
         } as unknown as MutationRecord;
         for (const [callback, observations] of mutationObservers) {
-          if (observations.some(({ target, options }) =>
-            target === scroller && options.childList
-          )) {
+          if (
+            observations.some(({ target, options }) => target === scroller && options.childList)
+          ) {
             callback([record], {} as MutationObserver);
           }
         }
@@ -347,12 +350,15 @@ function renderActiveHeadingHarness(
           type: "attributes",
         } as unknown as MutationRecord;
         for (const [callback, observations] of mutationObservers) {
-          if (observations.some(({ target, options }) =>
-            target === editorDom
-            && options.attributes
-            && options.subtree
-            && options.attributeFilter?.includes("open")
-          )) {
+          if (
+            observations.some(
+              ({ target, options }) =>
+                target === editorDom &&
+                options.attributes &&
+                options.subtree &&
+                options.attributeFilter?.includes("open"),
+            )
+          ) {
             callback([record], {} as MutationObserver);
           }
         }
@@ -387,9 +393,7 @@ function renderActiveHeadingHarness(
       act(flushFrames);
     },
     activeText() {
-      return view.container
-        .querySelector<HTMLButtonElement>('[aria-current="true"]')
-        ?.textContent;
+      return view.container.querySelector<HTMLButtonElement>('[aria-current="true"]')?.textContent;
     },
     resize() {
       act(() => {
@@ -588,7 +592,7 @@ describe("OutlinePanel active heading", () => {
       ],
       [0, 200, 400],
     );
-    harness.emitDocumentTransaction({ mapPosition: (pos) => pos >= 5 ? pos + 1 : pos });
+    harness.emitDocumentTransaction({ mapPosition: (pos) => (pos >= 5 ? pos + 1 : pos) });
 
     expect(harness.renderCommits).not.toHaveBeenCalled();
     expect(harness.activeText()).toBe("Review");
@@ -637,7 +641,7 @@ describe("OutlinePanel active heading", () => {
       ],
       [0, 200, 300, 400, 700],
     );
-    const mapPosition = vi.fn((pos: number) => pos >= 20 ? pos + 10 : pos);
+    const mapPosition = vi.fn((pos: number) => (pos >= 20 ? pos + 10 : pos));
     harness.emitDocumentTransaction({ flush: false, mapPosition });
 
     expect(mapPosition).toHaveBeenCalledWith(20);
@@ -659,7 +663,7 @@ describe("OutlinePanel active heading", () => {
       ],
       [0, 200, 400],
     );
-    const mapPosition = vi.fn((pos: number) => pos === 20 ? 25 : pos);
+    const mapPosition = vi.fn((pos: number) => (pos === 20 ? 25 : pos));
     harness.emitDocumentTransaction({ flush: false, mapPosition });
 
     expect(mapPosition).toHaveBeenCalledWith(20);

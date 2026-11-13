@@ -1,7 +1,12 @@
 import { EditorState } from "@tiptap/pm/state";
 import { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { describe, expect, it, vi } from "vitest";
-import { extractOutline, resolveActiveHeadingIndex, updateOutline, type OutlineHeading } from "./outline";
+import {
+  extractOutline,
+  resolveActiveHeadingIndex,
+  updateOutline,
+  type OutlineHeading,
+} from "./outline";
 import { codeBlock, doc, heading, paragraph, randomEdit, schema, seededRandom } from "./testDocs";
 
 // Extraction over real ProseMirror documents (testDocs.ts). Positions are
@@ -146,7 +151,9 @@ describe("updateOutline", () => {
   });
 
   it("reads only the edited heading when typing in a note with 2,000 headings", () => {
-    const before = doc(...Array.from({ length: 2000 }, (_, index) => heading(2, `Section ${index}`)));
+    const before = doc(
+      ...Array.from({ length: 2000 }, (_, index) => heading(2, `Section ${index}`)),
+    );
     const outline = extractOutline(before);
     const state = EditorState.create({ doc: before });
     const middle = outline[1000]!.pos + 2;

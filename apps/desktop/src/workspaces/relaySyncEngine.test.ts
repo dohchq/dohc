@@ -12,10 +12,7 @@ import {
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RelayBusyError } from "./engineRelayClient";
-import {
-  createRelaySyncEngine,
-  type RelaySyncOperations,
-} from "./relaySyncEngine";
+import { createRelaySyncEngine, type RelaySyncOperations } from "./relaySyncEngine";
 import { type RelayLogChange, createRelayLogWait } from "./relayLogWait";
 import { relayApiFetch } from "./sharedChannels";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
@@ -26,7 +23,8 @@ import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 // exactly like the real capture implementation.
 const claimMock = vi.fn<() => Promise<void>>();
 const pushMock = vi.fn<RelaySyncOperations["push"]>();
-const pullMock = vi.fn<(materializePage: MaterializeRelayPullPage) => Promise<PullWorkspaceFromRelayResult>>();
+const pullMock =
+  vi.fn<(materializePage: MaterializeRelayPullPage) => Promise<PullWorkspaceFromRelayResult>>();
 const recoverMock = vi.fn<RelaySyncOperations["recoverOrigin"]>();
 
 function mockOperations(): RelaySyncOperations {
@@ -120,7 +118,12 @@ function relayWaits(options: { ignoreAbort?: boolean } = {}) {
   return {
     wait: (since: number, signal: AbortSignal) =>
       new Promise<RelayLogChange>((resolve, reject) => {
-        started.push({ since, signal, resolve: hasMore => resolve({hasMore, watched: false}), reject });
+        started.push({
+          since,
+          signal,
+          resolve: (hasMore) => resolve({ hasMore, watched: false }),
+          reject,
+        });
         if (!options.ignoreAbort) signal.addEventListener("abort", () => reject(signal.reason));
       }),
     read: (index: number) => started[index]!,
@@ -147,9 +150,7 @@ function engine(input: {
     capture: input.capture,
     onChange: input.onChange ?? vi.fn(),
     ...(input.syncSharedChannels ? { syncSharedChannels: input.syncSharedChannels } : {}),
-    ...(input.afterSuccessfulPull
-      ? { afterSuccessfulPull: input.afterSuccessfulPull }
-      : {}),
+    ...(input.afterSuccessfulPull ? { afterSuccessfulPull: input.afterSuccessfulPull } : {}),
     ...(input.afterPass ? { afterPass: input.afterPass } : {}),
     ...(input.idlePullMs === undefined ? {} : { idlePullMs: input.idlePullMs }),
     ...(input.waitForChange === undefined ? {} : { waitForChange: input.waitForChange }),
@@ -169,7 +170,9 @@ beforeEach(() => {
   recoverMock.mockReset();
   pushMock.mockImplementation(async () => ({
     pushed: 0,
-    hasMore: false, originsPushed: [], ownerAdmissionPending: [],
+    hasMore: false,
+    originsPushed: [],
+    ownerAdmissionPending: [],
     sharingDeclined: [],
   }));
   pullMock.mockImplementation(async () => pullResult());
@@ -187,16 +190,16 @@ afterEach(() => {
 
 describe("relaySyncEngine", () => {
   it("admits capture, document opens, and History while a fetch waits", async () => {
-    const {serialCapture, enqueue} = serialCaptureFake();
+    const { serialCapture, enqueue } = serialCaptureFake();
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const events: string[] = [];
     const operations: RelaySyncOperations = {
       ...mockOperations(),
-      pull: async runBatch => {
+      pull: async (runBatch) => {
         entered.resolve();
         await release.promise;
-        return runBatch(async materialize => {
+        return runBatch(async (materialize) => {
           events.push("apply");
           await materialize([]);
           events.push("commit");
@@ -204,13 +207,17 @@ describe("relaySyncEngine", () => {
         });
       },
     };
-    const sync = engine({capture: serialCapture, operations});
+    const sync = engine({ capture: serialCapture, operations });
     const syncing = sync.start();
     await entered.promise;
     try {
-      await Promise.all(["capture write", "document open", "History"].map(action => enqueue(async () => {
-        events.push(action);
-      })));
+      await Promise.all(
+        ["capture write", "document open", "History"].map((action) =>
+          enqueue(async () => {
+            events.push(action);
+          }),
+        ),
+      );
       expect(events).toEqual(["capture write", "document open", "History"]);
       expect(chainHeld).toBe(0);
     } finally {
@@ -226,14 +233,18 @@ describe("relaySyncEngine", () => {
     const fake = serialCaptureFake();
     const enqueue = fake.enqueue;
     const serialCapture = Object.assign(fake.serialCapture, {
-      openYDocSession: vi.fn(() => enqueue(async () => {
-        events.push("document opened");
-        return {} as Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
-      })),
-      writeAuthoredFile: vi.fn(() => enqueue(async () => {
-        events.push("authored write");
-        return { resolvedAbsolutePath: "/tmp/workspace/note.md", materializeOutcome: undefined };
-      })),
+      openYDocSession: vi.fn(() =>
+        enqueue(async () => {
+          events.push("document opened");
+          return {} as Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
+        }),
+      ),
+      writeAuthoredFile: vi.fn(() =>
+        enqueue(async () => {
+          events.push("authored write");
+          return { resolvedAbsolutePath: "/tmp/workspace/note.md", materializeOutcome: undefined };
+        }),
+      ),
     });
     const sync = engine({ capture: serialCapture });
     await sync.start();
@@ -243,13 +254,28 @@ describe("relaySyncEngine", () => {
       events.push("push 1");
       entered.resolve();
       await release.promise;
-      return { pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+      return {
+        pushed: 500,
+        hasMore: true,
+        originsPushed: [],
+        ownerAdmissionPending: [],
+        sharingDeclined: [],
+      };
     });
     pushMock.mockImplementationOnce(async () => {
       events.push("push 2");
-      return { pushed: 12, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+      return {
+        pushed: 12,
+        hasMore: false,
+        originsPushed: [],
+        ownerAdmissionPending: [],
+        sharingDeclined: [],
+      };
     });
-    pullMock.mockImplementation(async () => { events.push("pull"); return pullResult(); });
+    pullMock.mockImplementation(async () => {
+      events.push("pull");
+      return pullResult();
+    });
     sync.queueSync();
     const pass = sync.retryNow({ countsAsAttempt: true });
     await entered.promise;
@@ -260,11 +286,26 @@ describe("relaySyncEngine", () => {
     release.resolve();
     await pass;
     expect(events).toEqual(["push 1", "document opened", "authored write", "pull"]);
-    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 1, syncFailure: null });
+    expect(sync.snapshot()).toMatchObject({
+      syncing: false,
+      pendingChangeCount: 1,
+      syncFailure: null,
+    });
     sync.queueSync();
     await vi.advanceTimersToNextTimerAsync();
-    expect(events).toEqual(["push 1", "document opened", "authored write", "pull", "push 2", "pull"]);
-    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 0, syncFailure: null });
+    expect(events).toEqual([
+      "push 1",
+      "document opened",
+      "authored write",
+      "pull",
+      "push 2",
+      "pull",
+    ]);
+    expect(sync.snapshot()).toMatchObject({
+      syncing: false,
+      pendingChangeCount: 0,
+      syncFailure: null,
+    });
     await sync.stop();
   });
 
@@ -283,7 +324,13 @@ describe("relaySyncEngine", () => {
       }
       sent.push(selected);
       outbox.splice(0, selected.length);
-      return { pushed: selected.length, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+      return {
+        pushed: selected.length,
+        hasMore: false,
+        originsPushed: [],
+        ownerAdmissionPending: [],
+        sharingDeclined: [],
+      };
     });
     const { serialCapture, enqueue } = serialCaptureFake();
     const sync = engine({ capture: serialCapture });
@@ -306,7 +353,11 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersToNextTimerAsync();
     expect(sent).toEqual([["a"], ["b"]]);
     expect(outbox).toEqual([]);
-    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 0, syncFailure: null });
+    expect(sync.snapshot()).toMatchObject({
+      syncing: false,
+      pendingChangeCount: 0,
+      syncFailure: null,
+    });
     await sync.stop();
   });
 
@@ -338,7 +389,9 @@ describe("relaySyncEngine", () => {
     pullMock.mockRejectedValueOnce(new RelayUnreachableError());
     await sync.retryNow({ countsAsAttempt: true });
     expect(ended).toEqual([
-      { failed: false, syncing: true }, { failed: false, syncing: true }, { failed: false, syncing: true },
+      { failed: false, syncing: true },
+      { failed: false, syncing: true },
+      { failed: false, syncing: true },
       { failed: true, syncing: true },
     ]);
     expect(afterPass).toHaveBeenCalledTimes(5);
@@ -357,7 +410,11 @@ describe("relaySyncEngine", () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     pushMock.mockResolvedValueOnce({
-      pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [],
+      pushed: 500,
+      hasMore: true,
+      originsPushed: [],
+      ownerAdmissionPending: [],
+      sharingDeclined: [],
     });
     pullMock.mockImplementationOnce(async () => {
       entered.resolve();
@@ -366,10 +423,18 @@ describe("relaySyncEngine", () => {
     });
     const retried = sync.retryNow({ countsAsAttempt: true });
     await entered.promise;
-    expect(sync.snapshot()).toMatchObject({ syncing: true, pendingChangeCount: 1, syncFailure: failure });
+    expect(sync.snapshot()).toMatchObject({
+      syncing: true,
+      pendingChangeCount: 1,
+      syncFailure: failure,
+    });
     release.resolve();
     await retried;
-    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 1, syncFailure: null });
+    expect(sync.snapshot()).toMatchObject({
+      syncing: false,
+      pendingChangeCount: 1,
+      syncFailure: null,
+    });
     pushMock.mockRejectedValueOnce(new RelayUnreachableError());
     await vi.advanceTimersToNextTimerAsync();
     expect(sync.snapshot().syncFailure?.attempts).toBe(1);
@@ -379,7 +444,9 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(pushMock).toHaveBeenCalledTimes(pushes + 1);
     expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
-    expect(afterSuccessfulPull).toHaveBeenLastCalledWith(expect.objectContaining({ recovered: true }));
+    expect(afterSuccessfulPull).toHaveBeenLastCalledWith(
+      expect.objectContaining({ recovered: true }),
+    );
     await sync.stop();
     errorSpy.mockRestore();
   });
@@ -393,12 +460,18 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(100);
     const failure = sync.snapshot().syncFailure;
     pushMock.mockResolvedValueOnce({
-      pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [],
+      pushed: 500,
+      hasMore: true,
+      originsPushed: [],
+      ownerAdmissionPending: [],
+      sharingDeclined: [],
     });
     pullMock.mockRejectedValueOnce(new RelayUnreachableError());
     await sync.retryNow({ countsAsAttempt: true });
-    expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 1,
-      syncFailure: { sinceMs: failure!.sinceMs, attempts: 2 } });
+    expect(sync.snapshot()).toMatchObject({
+      pendingChangeCount: 1,
+      syncFailure: { sinceMs: failure!.sinceMs, attempts: 2 },
+    });
     await sync.stop();
     await vi.runAllTimersAsync();
     expect(pushMock).toHaveBeenCalledTimes(3);
@@ -419,15 +492,22 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
-
   it("claims before the first push and shares it across concurrent passes and push retries", async () => {
     pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
     const claimed = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<void>();
-    claimMock.mockImplementation(async () => { entered.resolve(); await claimed.promise; });
+    claimMock.mockImplementation(async () => {
+      entered.resolve();
+      await claimed.promise;
+    });
     const sync = engine({ capture: capture() });
     const started = sync.start();
-    await Promise.race([entered.promise, started.then(() => { throw new Error("push skipped claim"); })]);
+    await Promise.race([
+      entered.promise,
+      started.then(() => {
+        throw new Error("push skipped claim");
+      }),
+    ]);
     expect(sync.snapshot()).toMatchObject({ syncing: true, claimingIdentity: true });
     expect(pushMock).toHaveBeenCalledOnce();
     expect(pullMock).not.toHaveBeenCalled();
@@ -445,7 +525,9 @@ describe("relaySyncEngine", () => {
   });
 
   it("retries a network failure during claim before allowing a push", async () => {
-    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    pushMock
+      .mockRejectedValueOnce(new RelayIdentityMissingError())
+      .mockRejectedValueOnce(new RelayIdentityMissingError());
     claimMock.mockRejectedValueOnce(new RelayUnreachableError());
     const sync = engine({ capture: capture() });
     await expect(sync.start()).rejects.toThrow("could not reach");
@@ -459,7 +541,9 @@ describe("relaySyncEngine", () => {
   });
 
   it("retries a local claim failure without calling it an account refusal", async () => {
-    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    pushMock
+      .mockRejectedValueOnce(new RelayIdentityMissingError())
+      .mockRejectedValueOnce(new RelayIdentityMissingError());
     claimMock.mockRejectedValueOnce(new RelayWorkspaceUnavailableError());
     const sync = engine({ capture: capture() });
     await expect(sync.start()).rejects.toThrow("unavailable");
@@ -472,7 +556,9 @@ describe("relaySyncEngine", () => {
   });
 
   it("automatically retries a generic failure from a bare claim 404", async () => {
-    pushMock.mockRejectedValueOnce(new RelayIdentityMissingError()).mockRejectedValueOnce(new RelayIdentityMissingError());
+    pushMock
+      .mockRejectedValueOnce(new RelayIdentityMissingError())
+      .mockRejectedValueOnce(new RelayIdentityMissingError());
     claimMock.mockRejectedValueOnce(new Error("workspace operation failed"));
     const sync = engine({ capture: capture() });
     await expect(sync.start()).rejects.toThrow("workspace operation failed");
@@ -516,7 +602,10 @@ describe("relaySyncEngine", () => {
     pushMock.mockRejectedValueOnce(new RelayClaimRefusedError(message));
     const restarted = engine({ capture: capture() });
     await expect(restarted.start()).rejects.toThrow(message);
-    expect(restarted.snapshot().syncFailure).toMatchObject({ cause: "claim-refused", detail: message });
+    expect(restarted.snapshot().syncFailure).toMatchObject({
+      cause: "claim-refused",
+      detail: message,
+    });
     await restarted.retryNow({ countsAsAttempt: false });
     expect(claimMock).toHaveBeenCalledOnce();
     await restarted.retryNow({ countsAsAttempt: true });
@@ -530,7 +619,9 @@ describe("relaySyncEngine", () => {
       claim: claimMock,
       push: vi.fn(async () => ({
         pushed: 1,
-        hasMore: false, originsPushed: [], ownerAdmissionPending: [],
+        hasMore: false,
+        originsPushed: [],
+        ownerAdmissionPending: [],
         sharingDeclined: [],
       })),
       pull: vi.fn(async () => pullResult()),
@@ -557,14 +648,13 @@ describe("relaySyncEngine", () => {
   it("recovers injected origin divergence without crossing into TypeScript fallback", async () => {
     const operations: RelaySyncOperations = {
       claim: claimMock,
-      push: vi
-        .fn()
-        .mockRejectedValueOnce(new RelayOriginDivergedError())
-        .mockResolvedValue({
-          pushed: 1,
-          hasMore: false, originsPushed: [], ownerAdmissionPending: [],
-          sharingDeclined: [],
-        }),
+      push: vi.fn().mockRejectedValueOnce(new RelayOriginDivergedError()).mockResolvedValue({
+        pushed: 1,
+        hasMore: false,
+        originsPushed: [],
+        ownerAdmissionPending: [],
+        sharingDeclined: [],
+      }),
       pull: vi.fn(async () => pullResult()),
       recoverOrigin: vi.fn(async () => ({
         oldOriginId: "old",
@@ -696,7 +786,10 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(500);
     sync.queueSync();
     await vi.advanceTimersByTimeAsync(100);
-    expect(afterSuccessfulPull.mock.calls).toEqual([[expect.objectContaining({ recovered: true })], [expect.objectContaining({ recovered: false })]]);
+    expect(afterSuccessfulPull.mock.calls).toEqual([
+      [expect.objectContaining({ recovered: true })],
+      [expect.objectContaining({ recovered: false })],
+    ]);
 
     errorSpy.mockRestore();
     await sync.stop();
@@ -744,9 +837,23 @@ describe("relaySyncEngine", () => {
   });
 
   it("merges push and pull declines by object after a rename", async () => {
-    const decline = { objectId: "same-object", versionId: "main", lineagePruned: true, headBlobSha256: null,
-      path: "before.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
-    pushMock.mockResolvedValueOnce({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [decline] });
+    const decline = {
+      objectId: "same-object",
+      versionId: "main",
+      lineagePruned: true,
+      headBlobSha256: null,
+      path: "before.md",
+      constraint: "MAX_YDOC_UPDATE_BYTES",
+      limitBytes: 20,
+      observedBytes: 21,
+    };
+    pushMock.mockResolvedValueOnce({
+      pushed: 0,
+      hasMore: false,
+      originsPushed: [],
+      ownerAdmissionPending: [],
+      sharingDeclined: [decline],
+    });
     const result = pullResult();
     result.sharingDeclined = [{ ...decline, path: "after.md" }];
     pullMock.mockResolvedValueOnce(result);
@@ -757,10 +864,24 @@ describe("relaySyncEngine", () => {
   });
 
   it("keeps the same object's sharing declines in separate versions", async () => {
-    const main = { objectId: "same-object", versionId: "main", lineagePruned: true, headBlobSha256: null,
-      path: "large.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
+    const main = {
+      objectId: "same-object",
+      versionId: "main",
+      lineagePruned: true,
+      headBlobSha256: null,
+      path: "large.md",
+      constraint: "MAX_YDOC_UPDATE_BYTES",
+      limitBytes: 20,
+      observedBytes: 21,
+    };
     const draft = { ...main, versionId: "draft" };
-    pushMock.mockResolvedValueOnce({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [main, draft] });
+    pushMock.mockResolvedValueOnce({
+      pushed: 0,
+      hasMore: false,
+      originsPushed: [],
+      ownerAdmissionPending: [],
+      sharingDeclined: [main, draft],
+    });
     const result = pullResult();
     result.sharingDeclined = [{ ...draft, path: "renamed.md" }];
     pullMock.mockResolvedValueOnce(result);
@@ -777,7 +898,8 @@ describe("relaySyncEngine", () => {
         path: "notes/first.md",
         objectId: "notes/first.md",
         versionId: "main",
-        lineagePruned: false, headBlobSha256: null,
+        lineagePruned: false,
+        headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
@@ -786,7 +908,8 @@ describe("relaySyncEngine", () => {
         path: "notes/second.md",
         objectId: "notes/second.md",
         versionId: "main",
-        lineagePruned: false, headBlobSha256: null,
+        lineagePruned: false,
+        headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
@@ -829,7 +952,9 @@ describe("relaySyncEngine", () => {
         held.push(chainHeld);
         return {
           pushed: 1,
-          hasMore: false, originsPushed: ["origin_new"], ownerAdmissionPending: [],
+          hasMore: false,
+          originsPushed: ["origin_new"],
+          ownerAdmissionPending: [],
           sharingDeclined: [],
         };
       });
@@ -853,9 +978,7 @@ describe("relaySyncEngine", () => {
   });
 
   it("recovers, re-pushes, and retries when pull finds a diverged local origin", async () => {
-    pullMock
-      .mockRejectedValueOnce(new RelayOriginDivergedError())
-      .mockResolvedValue(pullResult());
+    pullMock.mockRejectedValueOnce(new RelayOriginDivergedError()).mockResolvedValue(pullResult());
     const held: number[] = [];
     const push = pushMock.getMockImplementation()!;
     pushMock.mockImplementation(async () => {
@@ -948,7 +1071,11 @@ describe("relaySyncEngine", () => {
   // edges-05: three failures had to pass before anyone heard, so a
   // 25-second outage never surfaced at all.
   it("reports the first failed pass with its cause and clears it on success", async () => {
-    const failures: Error[] = [new RelayUnreachableError(), new RelayBusyError(), new Error("relay said no")];
+    const failures: Error[] = [
+      new RelayUnreachableError(),
+      new RelayBusyError(),
+      new Error("relay said no"),
+    ];
     const changes = vi.fn();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     pullMock.mockImplementation(async () => {
@@ -1033,7 +1160,13 @@ describe("relaySyncEngine", () => {
     const sync = engine({ capture: capture() });
     await sync.start();
     pushMock.mockClear();
-    const more = { pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+    const more = {
+      pushed: 500,
+      hasMore: true,
+      originsPushed: [],
+      ownerAdmissionPending: [],
+      sharingDeclined: [],
+    };
     pushMock.mockResolvedValueOnce(more).mockResolvedValueOnce(more);
     await sync.pushRecorded();
     expect(pushMock).toHaveBeenCalledTimes(3);
@@ -1298,9 +1431,7 @@ describe("relaySyncEngine", () => {
   });
 
   it("recovers a bootstrap pull divergence without pushing before the first pull succeeds", async () => {
-    pullMock
-      .mockRejectedValueOnce(new RelayOriginDivergedError())
-      .mockResolvedValue(pullResult());
+    pullMock.mockRejectedValueOnce(new RelayOriginDivergedError()).mockResolvedValue(pullResult());
     const sync = createRelaySyncEngine({
       rootDir: "/tmp/workspace",
       relay: { baseUrl: "http://relay.test", token: "token" },
@@ -1336,7 +1467,9 @@ describe("relaySyncEngine", () => {
     // A running pass pulls, so the request adds no pass either.
     let release!: () => void;
     pullMock.mockImplementationOnce(async () => {
-      await new Promise<void>((resolve) => { release = resolve; });
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
       return pullResult();
     });
     sync.queuePull();
@@ -1412,7 +1545,9 @@ describe("relaySyncEngine", () => {
     onChange.mockClear();
     let release!: () => void;
     pullMock.mockImplementationOnce(async () => {
-      await new Promise<void>((resolve) => { release = resolve; });
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
       return pullResult();
     });
     sync.queuePull();
@@ -1567,7 +1702,9 @@ describe("relaySyncEngine", () => {
     // A local write's pass pulls before the other device's op lands.
     let finishPull!: () => void;
     pullMock.mockImplementationOnce(async () => {
-      await new Promise<void>((resolve) => { finishPull = resolve; });
+      await new Promise<void>((resolve) => {
+        finishPull = resolve;
+      });
       return pullResult({ nextCursor: 5 });
     });
     sync.queueSync();
@@ -1656,7 +1793,9 @@ describe("relaySyncEngine", () => {
       idlePullMs: 5 * 60_000,
       waitForChange: (since) => {
         reads.push(since);
-        return new Promise((resolve) => setTimeout(() => resolve({hasMore: false, watched: false}), 25_000));
+        return new Promise((resolve) =>
+          setTimeout(() => resolve({ hasMore: false, watched: false }), 25_000),
+        );
       },
     });
     await sync.start();
@@ -1688,7 +1827,9 @@ describe("relaySyncEngine", () => {
     await vi.advanceTimersByTimeAsync(0);
     let finishPull!: () => void;
     pullMock.mockImplementationOnce(async () => {
-      await new Promise<void>((resolve) => { finishPull = resolve; });
+      await new Promise<void>((resolve) => {
+        finishPull = resolve;
+      });
       return pullResult();
     });
     sync.queueSync();
@@ -1787,32 +1928,49 @@ describe("relaySyncEngine", () => {
     const bootstraps: Array<{ signal: AbortSignal; answer: () => void }> = [];
     let releaseBody!: () => void;
     let bodyCancelled!: () => void;
-    const cancelling = new Promise<void>((resolve) => { bodyCancelled = resolve; });
+    const cancelling = new Promise<void>((resolve) => {
+      bodyCancelled = resolve;
+    });
     const fetch = vi.fn(async (resource: string | URL | Request, init?: RequestInit) => {
       if (String(resource).endsWith("/bootstrap")) {
         // A coordinate read that ignores its abort.
         return await new Promise<Response>((resolve) => {
           bootstraps.push({
             signal: init!.signal!,
-            answer: () => resolve(Response.json({ ok: true, hasContent: true, replicationEpoch: "e", streamIdentity: "s" })),
+            answer: () =>
+              resolve(
+                Response.json({
+                  ok: true,
+                  hasContent: true,
+                  replicationEpoch: "e",
+                  streamIdentity: "s",
+                }),
+              ),
           });
         });
       }
       const body = new ReadableStream({
         cancel: () => {
           bodyCancelled();
-          return new Promise<void>((resolve) => { releaseBody = resolve; });
+          return new Promise<void>((resolve) => {
+            releaseBody = resolve;
+          });
         },
       });
       return new Response(body, { status: 409 });
     });
     const relay = { baseUrl: "http://relay.test", token: "token", fetch };
 
-    const first = engine({ capture: capture(), waitForChange: createRelayLogWait({ workspaceId: "w", relay }) });
+    const first = engine({
+      capture: capture(),
+      waitForChange: createRelayLogWait({ workspaceId: "w", relay }),
+    });
     await first.start();
     await vi.advanceTimersByTimeAsync(0);
     let firstStopped = false;
-    const firstStopping = first.stop().then(() => { firstStopped = true; });
+    const firstStopping = first.stop().then(() => {
+      firstStopped = true;
+    });
     expect(bootstraps[0]!.signal.aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
     expect(firstStopped).toBe(false);
@@ -1821,13 +1979,18 @@ describe("relaySyncEngine", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
 
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const second = engine({ capture: capture(), waitForChange: createRelayLogWait({ workspaceId: "w", relay }) });
+    const second = engine({
+      capture: capture(),
+      waitForChange: createRelayLogWait({ workspaceId: "w", relay }),
+    });
     await second.start();
     await vi.advanceTimersByTimeAsync(0);
     bootstraps[1]!.answer();
     await cancelling;
     let secondStopped = false;
-    const secondStopping = second.stop().then(() => { secondStopped = true; });
+    const secondStopping = second.stop().then(() => {
+      secondStopped = true;
+    });
     await vi.advanceTimersByTimeAsync(0);
     expect(secondStopped).toBe(false);
     releaseBody();
@@ -1843,21 +2006,35 @@ describe("relaySyncEngine", () => {
       token: "token",
       fetch: relayApiFetch(async (resource) =>
         String(resource).endsWith("/bootstrap")
-          ? Response.json({ ok: true, hasContent: true, replicationEpoch: "e", streamIdentity: "s" })
-          : refused),
+          ? Response.json({
+              ok: true,
+              hasContent: true,
+              replicationEpoch: "e",
+              streamIdentity: "s",
+            })
+          : refused,
+      ),
     };
     let releaseBody!: () => void;
     const cancel = vi.spyOn(ReadableStream.prototype, "cancel").mockImplementation(
-      () => new Promise<void>((resolve) => { releaseBody = resolve; }),
+      () =>
+        new Promise<void>((resolve) => {
+          releaseBody = resolve;
+        }),
     );
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const sync = engine({ capture: capture(), waitForChange: createRelayLogWait({ workspaceId: "w", relay }) });
+      const sync = engine({
+        capture: capture(),
+        waitForChange: createRelayLogWait({ workspaceId: "w", relay }),
+      });
       await sync.start();
       await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
       expect(cancel.mock.contexts).toEqual([refused.body]);
       let stopped = false;
-      const stopping = sync.stop().then(() => { stopped = true; });
+      const stopping = sync.stop().then(() => {
+        stopped = true;
+      });
       await vi.advanceTimersByTimeAsync(0);
       expect(stopped).toBe(false);
       releaseBody();
@@ -1925,9 +2102,23 @@ describe("relaySyncEngine", () => {
 });
 
 it("keeps owner admission pending after a successful pull and clears it only after publication", async () => {
-  const pending={workspaceId:"workspace",originId:"origin",originSeq:4,versionId:"main",objectId:"object",path:"notes.md"};
-  pushMock.mockResolvedValueOnce({pushed:0,hasMore: false, originsPushed:[],sharingDeclined:[],ownerAdmissionPending:[pending]});
-  const sync=engine({capture:capture()});await sync.start();
+  const pending = {
+    workspaceId: "workspace",
+    originId: "origin",
+    originSeq: 4,
+    versionId: "main",
+    objectId: "object",
+    path: "notes.md",
+  };
+  pushMock.mockResolvedValueOnce({
+    pushed: 0,
+    hasMore: false,
+    originsPushed: [],
+    sharingDeclined: [],
+    ownerAdmissionPending: [pending],
+  });
+  const sync = engine({ capture: capture() });
+  await sync.start();
   expect(sync.snapshot().ownerAdmissionPending).toEqual([pending]);
   expect(sync.snapshot().pendingChangeCount).toBe(1);
   await vi.advanceTimersByTimeAsync(500);
@@ -1939,21 +2130,45 @@ it("keeps owner admission pending after a successful pull and clears it only aft
 // #3089: the move guard's relay pass. It never cancels, moves or re-arms
 // ordinary work, and once its move stops waiting it skips its pull.
 describe("relaySyncEngine guard pass", () => {
-  const pushed = (hasMore = false) => ({ pushed: hasMore ? 500 : 0, hasMore, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] });
+  const pushed = (hasMore = false) => ({
+    pushed: hasMore ? 500 : 0,
+    hasMore,
+    originsPushed: [],
+    ownerAdmissionPending: [],
+    sharingDeclined: [],
+  });
   const live = () => new AbortController().signal;
-  const bootstrapEngine = () => createRelaySyncEngine({ rootDir: "/tmp/workspace", relay: { baseUrl: "http://relay.test", token: "token" },
-    operations: mockOperations(), capture: capture(), onChange: vi.fn(), joinBootstrap: true, debounceMs: 100,
-    initialBackoffMs: 500, maxBackoffMs: 2000, nowMs: () => 12345 });
+  const bootstrapEngine = () =>
+    createRelaySyncEngine({
+      rootDir: "/tmp/workspace",
+      relay: { baseUrl: "http://relay.test", token: "token" },
+      operations: mockOperations(),
+      capture: capture(),
+      onChange: vi.fn(),
+      joinBootstrap: true,
+      debounceMs: 100,
+      initialBackoffMs: 500,
+      maxBackoffMs: 2000,
+      nowMs: () => 12345,
+    });
   // Fake time since the call, at each pull.
   function pullTimes() {
     const started = Date.now();
     const times: number[] = [];
-    pullMock.mockImplementation(async () => { times.push(Date.now() - started); return pullResult(); });
+    pullMock.mockImplementation(async () => {
+      times.push(Date.now() - started);
+      return pullResult();
+    });
     return times;
   }
   function heldPush() {
-    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-    pushMock.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return pushed(); });
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    pushMock.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return pushed();
+    });
     return { entered: entered.promise, release: () => release.resolve() };
   }
 
@@ -2049,8 +2264,13 @@ describe("relaySyncEngine guard pass", () => {
     const afterSuccessfulPull = vi.fn(async () => undefined);
     const sync = engine({ capture: capture(), afterSuccessfulPull });
     await sync.start();
-    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-    pullMock.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return pullResult({ fetched: 1, applied: 1, nextCursor: 3 }); });
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    pullMock.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return pullResult({ fetched: 1, applied: 1, nextCursor: 3 });
+    });
     const controller = new AbortController();
     const guarded = sync.catchUp({ signal: controller.signal });
     await entered.promise;
@@ -2065,8 +2285,13 @@ describe("relaySyncEngine guard pass", () => {
   it("leaves a bootstrap engine pull-only when the move stopped waiting", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const sync = bootstrapEngine();
-    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-    pullMock.mockImplementationOnce(async () => { entered.resolve(); await release.promise; throw new RelayUnreachableError(); });
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    pullMock.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      throw new RelayUnreachableError();
+    });
     const started = sync.start().catch(() => undefined);
     await entered.promise;
     const controller = new AbortController();
@@ -2082,7 +2307,9 @@ describe("relaySyncEngine guard pass", () => {
     expect(pushMock).not.toHaveBeenCalled();
     await vi.runAllTimersAsync();
     expect(pushMock).toHaveBeenCalledTimes(1);
-    expect(pushMock.mock.invocationCallOrder[0]!).toBeGreaterThan(pullMock.mock.invocationCallOrder[1]!);
+    expect(pushMock.mock.invocationCallOrder[0]!).toBeGreaterThan(
+      pullMock.mock.invocationCallOrder[1]!,
+    );
     await sync.stop();
     errorSpy.mockRestore();
   });
@@ -2100,31 +2327,36 @@ describe("relaySyncEngine guard pass", () => {
     await sync.stop();
   });
 
-  it.each(["a relay watch notification", "a direct pull request"])("pulls for %s that arrived while a guard's push was held", async (request) => {
-    const waits = relayWaits();
-    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 5 }));
-    const sync = engine({ capture: capture(), waitForChange: waits.wait, idlePullMs: 60_000 });
-    await sync.start();
-    await vi.advanceTimersByTimeAsync(0);
-    pushMock.mockClear();
-    pullMock.mockClear();
-    pullMock.mockImplementation(async () => pullResult({ fetched: 1, applied: 1, nextCursor: 6 }));
-    const held = heldPush();
-    const controller = new AbortController();
-    const guarded = sync.catchUp({ signal: controller.signal });
-    await held.entered;
-    if (request === "a relay watch notification") waits.answer(true);
-    else sync.queuePull();
-    await vi.advanceTimersByTimeAsync(0);
-    controller.abort();
-    held.release();
-    await guarded;
-    // The ordinary pass queued behind the guard pulls, with no further request.
-    await vi.advanceTimersByTimeAsync(0);
-    expect(pullMock).toHaveBeenCalledTimes(1);
-    expect(pushMock).toHaveBeenCalledTimes(2);
-    await sync.stop();
-  });
+  it.each(["a relay watch notification", "a direct pull request"])(
+    "pulls for %s that arrived while a guard's push was held",
+    async (request) => {
+      const waits = relayWaits();
+      pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 5 }));
+      const sync = engine({ capture: capture(), waitForChange: waits.wait, idlePullMs: 60_000 });
+      await sync.start();
+      await vi.advanceTimersByTimeAsync(0);
+      pushMock.mockClear();
+      pullMock.mockClear();
+      pullMock.mockImplementation(async () =>
+        pullResult({ fetched: 1, applied: 1, nextCursor: 6 }),
+      );
+      const held = heldPush();
+      const controller = new AbortController();
+      const guarded = sync.catchUp({ signal: controller.signal });
+      await held.entered;
+      if (request === "a relay watch notification") waits.answer(true);
+      else sync.queuePull();
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      held.release();
+      await guarded;
+      // The ordinary pass queued behind the guard pulls, with no further request.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pullMock).toHaveBeenCalledTimes(1);
+      expect(pushMock).toHaveBeenCalledTimes(2);
+      await sync.stop();
+    },
+  );
 
   it("keeps the due time of a pull asked for during a held guard push while writes and later guards arrive", async () => {
     const sync = engine({ capture: capture() });

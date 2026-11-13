@@ -51,19 +51,27 @@ const SkipRecord = ShareSkippedOpsSummary.extend({
   lastUncountedBatch: z.array(z.string()).optional(),
 });
 const skipRecord = (value: unknown): ShareSkippedOps | null | undefined =>
-  value === undefined ? undefined : SkipRecord.safeParse(value).data ?? null;
+  value === undefined ? undefined : (SkipRecord.safeParse(value).data ?? null);
 
 function parseRecord(value: unknown): ForgottenShareView | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const grantedSelector = recordedShareSelector(raw.grantedSelector);
-  const receivedIdentity = raw.receivedIdentity === undefined ? undefined : receivedReferencePin(raw.receivedIdentity);
+  const receivedIdentity =
+    raw.receivedIdentity === undefined ? undefined : receivedReferencePin(raw.receivedIdentity);
   const skippedOps = skipRecord(raw.skippedOps);
-  if (!filled(raw.workspaceId) || !filled(raw.rootPath) || (raw.folder !== null && typeof raw.folder !== "string") ||
-    !filled(raw.shareId) || !filled(raw.recipientUserId) || !filled(raw.relayUrl) || grantedSelector === null ||
+  if (
+    !filled(raw.workspaceId) ||
+    !filled(raw.rootPath) ||
+    (raw.folder !== null && typeof raw.folder !== "string") ||
+    !filled(raw.shareId) ||
+    !filled(raw.recipientUserId) ||
+    !filled(raw.relayUrl) ||
+    grantedSelector === null ||
     (raw.granterUserId !== undefined && !filled(raw.granterUserId)) ||
     (raw.receivedIdentity !== undefined && receivedIdentity === undefined) ||
-    (raw.ended !== undefined && raw.ended !== true)) {
+    (raw.ended !== undefined && raw.ended !== true)
+  ) {
     return null;
   }
   return {
@@ -94,11 +102,14 @@ export function createForgottenShareViews(dependencies: {
 }) {
   const identify = dependencies.identify ?? folderIdentity;
   const readText = dependencies.readText ?? ((file: string) => readFile(file, "utf8"));
-  const writeText = dependencies.writeText ?? (async (file: string, text: string) => {
-    await mkdir(dirname(file), { recursive: true });
-    await atomicReplaceFile(file, (temporary) => writeFile(temporary, text));
-  });
-  const warn = dependencies.warn ?? ((message: string, error: unknown) => console.warn(message, error));
+  const writeText =
+    dependencies.writeText ??
+    (async (file: string, text: string) => {
+      await mkdir(dirname(file), { recursive: true });
+      await atomicReplaceFile(file, (temporary) => writeFile(temporary, text));
+    });
+  const warn =
+    dependencies.warn ?? ((message: string, error: unknown) => console.warn(message, error));
   // Forget and Open run one at a time, so neither acts on a record the other
   // has already replaced.
   let queue: Promise<unknown> = Promise.resolve();
@@ -122,22 +133,30 @@ export function createForgottenShareViews(dependencies: {
     } catch {
       return [];
     }
-    const forgotten = parsed && typeof parsed === "object" && "forgotten" in parsed ? parsed.forgotten : null;
+    const forgotten =
+      parsed && typeof parsed === "object" && "forgotten" in parsed ? parsed.forgotten : null;
     return Array.isArray(forgotten)
       ? forgotten.map(parseRecord).filter((record): record is ForgottenShareView => record !== null)
       : [];
   }
 
   const save = (records: ForgottenShareView[]) =>
-    writeText(dependencies.file, `${JSON.stringify({ version: 1, forgotten: records }, null, 2)}\n`);
+    writeText(
+      dependencies.file,
+      `${JSON.stringify({ version: 1, forgotten: records }, null, 2)}\n`,
+    );
 
   // The record for this workspace in this folder, or null. A file or folder
   // dohc cannot read matches nothing.
-  async function find(workspace: { workspaceId: string; rootPath: string }): Promise<ForgottenShareView | null> {
+  async function find(workspace: {
+    workspaceId: string;
+    rootPath: string;
+  }): Promise<ForgottenShareView | null> {
     try {
       const rootPath = spelling(workspace.rootPath);
-      const record = (await load()).find((each) =>
-        each.workspaceId === workspace.workspaceId && each.rootPath === rootPath);
+      const record = (await load()).find(
+        (each) => each.workspaceId === workspace.workspaceId && each.rootPath === rootPath,
+      );
       if (!record) return null;
       return (await identify(workspace.rootPath)) === record.folder ? record : null;
     } catch {
@@ -155,7 +174,13 @@ export function createForgottenShareViews(dependencies: {
     const grantedSelector = recordedShareSelector(shareView.grantedSelector);
     const receivedIdentity = receivedReferencePin(shareView.receivedIdentity);
     const skippedOps = skipRecord(shareView.skippedOps);
-    if (!filled(shareId) || !filled(recipientUserId) || !filled(relayUrl) || grantedSelector === null) return null;
+    if (
+      !filled(shareId) ||
+      !filled(recipientUserId) ||
+      !filled(relayUrl) ||
+      grantedSelector === null
+    )
+      return null;
     let folder: string | null;
     try {
       folder = await identify(workspace.rootPath);
@@ -185,12 +210,17 @@ export function createForgottenShareViews(dependencies: {
      * is gone leaves no record. Throws when the profile file can't be read or
      * written, so Forget can fail and keep the workspace listed.
      */
-    async remember(workspace: { workspaceId: string; rootPath: string }, shareView: ShareViewIdentity): Promise<void> {
+    async remember(
+      workspace: { workspaceId: string; rootPath: string },
+      shareView: ShareViewIdentity,
+    ): Promise<void> {
       const record = await recordOf(workspace, shareView);
       const rootPath = spelling(workspace.rootPath);
       await serial(async () => {
         const records = await load();
-        const kept = records.filter((each) => each.workspaceId !== workspace.workspaceId && each.rootPath !== rootPath);
+        const kept = records.filter(
+          (each) => each.workspaceId !== workspace.workspaceId && each.rootPath !== rootPath,
+        );
         if (record) await save([...kept, record]);
         else if (kept.length < records.length) await save(kept);
       });
@@ -201,7 +231,10 @@ export function createForgottenShareViews(dependencies: {
      * refresh, which runs only for the same account on the same server. Once
      * registered, the record goes; the next Forget saves it again.
      */
-    reopen(workspace: CreatedWorkspace, register: (entry: RegistryEntry) => unknown): Promise<RegistryEntry> {
+    reopen(
+      workspace: CreatedWorkspace,
+      register: (entry: RegistryEntry) => unknown,
+    ): Promise<RegistryEntry> {
       return serial(async () => {
         const record = await find(workspace);
         if (!record) {
@@ -209,7 +242,10 @@ export function createForgottenShareViews(dependencies: {
           return workspace;
         }
         if (record.skippedOps === null) {
-          warn("[desktop] a forgotten share's skipped-content record was damaged, so its notice is gone", record.workspaceId);
+          warn(
+            "[desktop] a forgotten share's skipped-content record was damaged, so its notice is gone",
+            record.workspaceId,
+          );
         }
         const entry: RegistryEntry = {
           ...workspace,

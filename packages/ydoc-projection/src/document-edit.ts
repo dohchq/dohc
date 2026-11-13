@@ -1,9 +1,9 @@
-import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from 'y-prosemirror'
-import * as Y from 'yjs'
-import { getDohcYDocBodyFragment } from './body-fragment.js'
-import { escapeHighlightMarkdown } from './dohc-markdown-extensions.js'
-import { frontmatterYaml } from './frontmatter.js'
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { updateYFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
+import * as Y from "yjs";
+import { getDohcYDocBodyFragment } from "./body-fragment.js";
+import { escapeHighlightMarkdown } from "./dohc-markdown-extensions.js";
+import { frontmatterYaml } from "./frontmatter.js";
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
@@ -11,7 +11,7 @@ import {
   parseRichdocMarkdown,
   serializeRichdocBody,
   startsWithFrontmatter,
-} from './import-export.js'
+} from "./import-export.js";
 
 // An agent reads a live document as Markdown and edits it by replacing text in
 // that Markdown. The edit reaches the Y.Doc as the smallest change to the
@@ -26,20 +26,20 @@ import {
 // These functions take and return encoded Y.Doc state, so a worker can run
 // them away from the thread that holds the live document.
 
-const BLOCK_SEPARATOR = '\n\n'
+const BLOCK_SEPARATOR = "\n\n";
 
 // What an agent can do when its edit would lose what a person types.
 export const DOCUMENT_OPEN_REFUSAL =
-  'Someone may be typing in this document, here or on a device it syncs to, and this edit ' +
-  'would remove a block, join two blocks, or change a block\'s kind, such as a paragraph ' +
-  'into a heading. Anything they type into that block meanwhile would be lost, so nothing ' +
-  'changed. Instead, change only the text inside blocks and add new blocks; ask the person ' +
-  'to make this change; or retry after they close the document.'
+  "Someone may be typing in this document, here or on a device it syncs to, and this edit " +
+  "would remove a block, join two blocks, or change a block's kind, such as a paragraph " +
+  "into a heading. Anything they type into that block meanwhile would be lost, so nothing " +
+  "changed. Instead, change only the text inside blocks and add new blocks; ask the person " +
+  "to make this change; or retry after they close the document.";
 
 export interface DocumentEdit {
   /** Markdown that occurs exactly once in the document. Omit it to add `replacement` at the end. */
-  find?: string
-  replacement: string
+  find?: string;
+  replacement: string;
 }
 
 export interface DocumentEditOptions {
@@ -48,38 +48,38 @@ export interface DocumentEditOptions {
    * a change to the block's text, but not the block's removal or a change of
    * its kind, so such an edit is refused.
    */
-  keepBlocks: boolean
+  keepBlocks: boolean;
 }
 
 interface Layout {
-  frontmatter: string
-  fragment: Y.XmlFragment
+  frontmatter: string;
+  fragment: Y.XmlFragment;
   /** The fragment's top-level elements, and the block each one reads as. */
-  elements: Y.XmlElement[]
-  blocks: ProseMirrorNode[]
+  elements: Y.XmlElement[];
+  blocks: ProseMirrorNode[];
   /** Each block's Markdown and where it sits in the body. */
-  chunks: Array<{ markdown: string; start: number; end: number }>
-  body: string
+  chunks: Array<{ markdown: string; start: number; end: number }>;
+  body: string;
 }
 
 /** The document in `state` as the Markdown an edit matches against. */
 export function documentMarkdown(state: Uint8Array): string {
-  return withDoc(state, (doc) => savedForm(markdownOfLayout(layoutOf(doc))))
+  return withDoc(state, (doc) => savedForm(markdownOfLayout(layoutOf(doc))));
 }
 
 /** A settled Markdown file as the Markdown an edit to it would match against. */
 export function settledDocumentMarkdown(markdown: string): string {
-  const doc = markdownToYDoc(markdown)
+  const doc = markdownToYDoc(markdown);
   try {
-    return savedForm(markdownOfLayout(layoutOf(doc)))
+    return savedForm(markdownOfLayout(layoutOf(doc)));
   } finally {
-    doc.destroy()
+    doc.destroy();
   }
 }
 
 // As the saved file ends: a note that isn't empty ends with one line break.
 function savedForm(markdown: string): string {
-  return markdown === '' || markdown.endsWith('\n') ? markdown : `${markdown}\n`
+  return markdown === "" || markdown.endsWith("\n") ? markdown : `${markdown}\n`;
 }
 
 /**
@@ -95,33 +95,33 @@ export function documentEditUpdate(
   return withDoc(state, (doc) => {
     // Reading the document can delete elements the schema refuses. That
     // happens before the edit starts recording, so the update never carries it.
-    const change = planEdit(layoutOf(doc), edit)
-    if (!change) return null
-    let update: Uint8Array | null = null
+    const change = planEdit(layoutOf(doc), edit);
+    if (!change) return null;
+    let update: Uint8Array | null = null;
     const record = (next: Uint8Array): void => {
-      update = update === null ? next : Y.mergeUpdates([update, next])
-    }
-    let removesBlock = false
-    doc.on('update', record)
+      update = update === null ? next : Y.mergeUpdates([update, next]);
+    };
+    let removesBlock = false;
+    doc.on("update", record);
     try {
       doc.transact((transaction) => {
-        change(doc)
-        if (options.keepBlocks) removesBlock = removesTextBlock(transaction)
-      })
+        change(doc);
+        if (options.keepBlocks) removesBlock = removesTextBlock(transaction);
+      });
     } finally {
-      doc.off('update', record)
+      doc.off("update", record);
     }
     if (removesBlock) {
-      throw new Error(DOCUMENT_OPEN_REFUSAL)
+      throw new Error(DOCUMENT_OPEN_REFUSAL);
     }
-    return update
-  })
+    return update;
+  });
 }
 
 // Frontmatter written into a body lands as blocks now and reads back as
 // frontmatter from the file.
 export const FRONTMATTER_REFUSAL =
-  'A new document starts without frontmatter. Write its body text only.'
+  "A new document starts without frontmatter. Write its body text only.";
 
 /**
  * The update that writes the first text into a new document. The text is
@@ -132,17 +132,17 @@ export function documentCreateUpdate(
   markdown: string,
   options: DocumentEditOptions,
 ): Uint8Array | null {
-  if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL)
-  return documentEditUpdate(state, { replacement: markdown }, options)
+  if (startsWithFrontmatter(markdown)) throw new Error(FRONTMATTER_REFUSAL);
+  return documentEditUpdate(state, { replacement: markdown }, options);
 }
 
 function withDoc<T>(state: Uint8Array, read: (doc: Y.Doc) => T): T {
-  const doc = new Y.Doc()
+  const doc = new Y.Doc();
   try {
-    Y.applyUpdate(doc, state)
-    return read(doc)
+    Y.applyUpdate(doc, state);
+    return read(doc);
   } finally {
-    doc.destroy()
+    doc.destroy();
   }
 }
 
@@ -150,88 +150,96 @@ function withDoc<T>(state: Uint8Array, read: (doc: Y.Doc) => T): T {
 // XmlText, and every element except a leaf such as an image or a line break.
 // Deleting characters inside a text keeps what others type around them.
 function removesTextBlock(transaction: Y.Transaction): boolean {
-  const schema = getDohcProseMirrorSchema()
-  let removes = false
+  const schema = getDohcProseMirrorSchema();
+  let removes = false;
   Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
-    if (!(struct instanceof Y.Item) || !(struct.content instanceof Y.ContentType)) return
-    const type = struct.content.type
-    const leaf = type instanceof Y.XmlElement && schema.nodes[type.nodeName]?.isLeaf === true
-    if (!leaf) removes = true
-  })
-  return removes
+    if (!(struct instanceof Y.Item) || !(struct.content instanceof Y.ContentType)) return;
+    const type = struct.content.type;
+    const leaf = type instanceof Y.XmlElement && schema.nodes[type.nodeName]?.isLeaf === true;
+    if (!leaf) removes = true;
+  });
+  return removes;
 }
 
 function layoutOf(doc: Y.Doc): Layout {
-  const values = getDohcYDocFrontmatter(doc)
-  const frontmatter = Object.keys(values).length > 0
-    ? `---\n${frontmatterYaml(values)}---\n\n`
-    : ''
-  const fragment = getDohcYDocBodyFragment(doc)
-  const blocks: ProseMirrorNode[] = []
-  yXmlFragmentToProseMirrorRootNode(fragment, getDohcProseMirrorSchema())
-    .forEach((block) => { blocks.push(block) })
+  const values = getDohcYDocFrontmatter(doc);
+  const frontmatter =
+    Object.keys(values).length > 0 ? `---\n${frontmatterYaml(values)}---\n\n` : "";
+  const fragment = getDohcYDocBodyFragment(doc);
+  const blocks: ProseMirrorNode[] = [];
+  yXmlFragmentToProseMirrorRootNode(fragment, getDohcProseMirrorSchema()).forEach((block) => {
+    blocks.push(block);
+  });
   // Read after the conversion, which deletes what the schema refuses.
-  const elements = fragment.toArray()
+  const elements = fragment.toArray();
   if (
     elements.length !== blocks.length ||
-    elements.some((element, index) =>
-      !(element instanceof Y.XmlElement) || element.nodeName !== blocks[index]!.type.name)
+    elements.some(
+      (element, index) =>
+        !(element instanceof Y.XmlElement) || element.nodeName !== blocks[index]!.type.name,
+    )
   ) {
-    throw new Error('dohc could not read the blocks of this document.')
+    throw new Error("dohc could not read the blocks of this document.");
   }
-  const chunks: Layout['chunks'] = []
-  let start = 0
+  const chunks: Layout["chunks"] = [];
+  let start = 0;
   for (const [index, block] of blocks.entries()) {
-    const markdown = blockMarkdown(block, index === 0)
-    chunks.push({ markdown, start, end: start + markdown.length })
-    start += markdown.length + BLOCK_SEPARATOR.length
+    const markdown = blockMarkdown(block, index === 0);
+    chunks.push({ markdown, start, end: start + markdown.length });
+    start += markdown.length + BLOCK_SEPARATOR.length;
   }
-  const body = chunks.map((chunk) => chunk.markdown).join(BLOCK_SEPARATOR)
-  return { frontmatter, fragment, elements: elements as Y.XmlElement[], blocks, chunks, body }
+  const body = chunks.map((chunk) => chunk.markdown).join(BLOCK_SEPARATOR);
+  return { frontmatter, fragment, elements: elements as Y.XmlElement[], blocks, chunks, body };
 }
 
 function markdownOfLayout(layout: Layout): string {
-  return layout.frontmatter + layout.body
+  return layout.frontmatter + layout.body;
 }
 
 function blockMarkdown(block: ProseMirrorNode, first: boolean): string {
-  if (block.type.name === 'horizontalRule') return first ? '***' : '---'
-  const root = escapeHighlightMarkdown({ type: 'doc', content: [block.toJSON()] })
-  return serializeRichdocBody(root).replace(/\n+$/u, '')
+  if (block.type.name === "horizontalRule") return first ? "***" : "---";
+  const root = escapeHighlightMarkdown({ type: "doc", content: [block.toJSON()] });
+  return serializeRichdocBody(root).replace(/\n+$/u, "");
 }
 
 function planEdit(layout: Layout, edit: DocumentEdit): ((doc: Y.Doc) => void) | null {
-  const replacement = edit.replacement.replaceAll('\r\n', '\n')
+  const replacement = edit.replacement.replaceAll("\r\n", "\n");
   if (edit.find === undefined) {
-    if (replacement.trim() === '') return null
+    if (replacement.trim() === "") return null;
     // New blocks follow the last block with text, ahead of any empty
     // paragraph the person's cursor may sit in.
-    let lastWithText = layout.chunks.length - 1
-    while (lastWithText >= 0 && layout.chunks[lastWithText]!.markdown === '') lastWithText -= 1
-    return blockChange(layout, lastWithText + 1, lastWithText, replacement)
+    let lastWithText = layout.chunks.length - 1;
+    while (lastWithText >= 0 && layout.chunks[lastWithText]!.markdown === "") lastWithText -= 1;
+    return blockChange(layout, lastWithText + 1, lastWithText, replacement);
   }
-  const find = edit.find.replaceAll('\r\n', '\n')
-  const at = uniqueMatch(savedForm(markdownOfLayout(layout)), find) - layout.frontmatter.length
+  const find = edit.find.replaceAll("\r\n", "\n");
+  const at = uniqueMatch(savedForm(markdownOfLayout(layout)), find) - layout.frontmatter.length;
   if (at < 0) {
-    throw new Error("The text is in the document's frontmatter. Document edits change the body only.")
+    throw new Error(
+      "The text is in the document's frontmatter. Document edits change the body only.",
+    );
   }
-  if (find === replacement) return null
-  return planBlockEdit(layout, at, at + find.length, replacement)
+  if (find === replacement) return null;
+  return planBlockEdit(layout, at, at + find.length, replacement);
 }
 
 function uniqueMatch(markdown: string, find: string): number {
-  const first = markdown.indexOf(find)
+  const first = markdown.indexOf(find);
   if (first < 0) {
-    throw new Error('The text to replace is not in the document. Read the document again and copy the text exactly.')
+    throw new Error(
+      "The text to replace is not in the document. Read the document again and copy the text exactly.",
+    );
   }
-  let count = 1
+  let count = 1;
   for (let at = markdown.indexOf(find, first + 1); at >= 0; at = markdown.indexOf(find, at + 1)) {
-    count += 1
+    count += 1;
   }
   if (count > 1) {
-    throw new Error(`The text to replace occurs ${count} times. Include more of the text around it so it occurs once.`)
+    throw new Error(
+      `The text to replace occurs ${count} times. Include more of the text around it so it occurs once.`,
+    );
   }
-  return first
+  return first;
 }
 
 // Rewrites the blocks that the body range [start, end) touches, counting a
@@ -243,13 +251,13 @@ function planBlockEdit(
   end: number,
   replacement: string,
 ): (doc: Y.Doc) => void {
-  const first = layout.chunks.findIndex((chunk) => chunk.end >= start)
-  let last = first
-  while (last + 1 < layout.chunks.length && layout.chunks[last + 1]!.start <= end) last += 1
-  const from = Math.min(layout.chunks[first]!.start, start)
-  const to = Math.max(layout.chunks[last]!.end, end)
-  const markdown = layout.body.slice(from, start) + replacement + layout.body.slice(end, to)
-  return blockChange(layout, first, last, markdown)
+  const first = layout.chunks.findIndex((chunk) => chunk.end >= start);
+  let last = first;
+  while (last + 1 < layout.chunks.length && layout.chunks[last + 1]!.start <= end) last += 1;
+  const from = Math.min(layout.chunks[first]!.start, start);
+  const to = Math.max(layout.chunks[last]!.end, end);
+  const markdown = layout.body.slice(from, start) + replacement + layout.body.slice(end, to);
+  return blockChange(layout, first, last, markdown);
 }
 
 // Replaces blocks first..last with the blocks `markdown` parses to; with
@@ -264,27 +272,27 @@ function blockChange(
   last: number,
   markdown: string,
 ): (doc: Y.Doc) => void {
-  const schema = getDohcProseMirrorSchema()
-  const replacement: ProseMirrorNode[] = []
-  if (markdown.trim() !== '') {
+  const schema = getDohcProseMirrorSchema();
+  const replacement: ProseMirrorNode[] = [];
+  if (markdown.trim() !== "") {
     schema.nodeFromJSON(parseRichdocMarkdown(markdown)).forEach((block) => {
-      replacement.push(block)
-    })
+      replacement.push(block);
+    });
   }
   const blocks = [
     ...layout.blocks.slice(0, first),
     ...replacement,
     ...layout.blocks.slice(last + 1),
-  ]
+  ];
   const target = schema.topNodeType.createChecked(
     null,
     blocks.length > 0 ? blocks : [schema.nodes.paragraph!.create()],
-  )
-  const mapping = new Map<Y.XmlElement, ProseMirrorNode>()
+  );
+  const mapping = new Map<Y.XmlElement, ProseMirrorNode>();
   layout.elements.forEach((element, index) => {
-    if (index < first || index > last) mapping.set(element, layout.blocks[index]!)
-  })
+    if (index < first || index > last) mapping.set(element, layout.blocks[index]!);
+  });
   return (doc) => {
-    updateYFragment(doc, layout.fragment, target, { mapping, isOMark: new Map() })
-  }
+    updateYFragment(doc, layout.fragment, target, { mapping, isOMark: new Map() });
+  };
 }

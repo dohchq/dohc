@@ -2,11 +2,26 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliVerbSpec } from "@dohc/cli/args";
+import {
+  CLI_COMMANDS,
+  DASH_RULE,
+  GLOBAL_FLAGS,
+  type CliCommandSpec,
+  type CliFlag,
+  type CliVerbSpec,
+} from "@dohc/cli/args";
 import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
-import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
+import {
+  OwnerAppPublicationResult,
+  type OwnerAppPublicationRequest,
+} from "@dohc/cli/app-publication";
 import { OwnerAppResponsesResult, type OwnerAppResponsesRequest } from "@dohc/cli/app-responses";
-import { CLI_JSON_SCHEMA_VERSION, cliResultSchemas, DECLARED_VERBS, type CliVerb as CliSocketVerb } from "@dohc/cli/protocol";
+import {
+  CLI_JSON_SCHEMA_VERSION,
+  cliResultSchemas,
+  DECLARED_VERBS,
+  type CliVerb as CliSocketVerb,
+} from "@dohc/cli/protocol";
 import { distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
 import { createDohcMcpServer } from "./server";
 import { DECLARED_TOOLS } from "./tools";
@@ -102,19 +117,29 @@ export const APP_RESPONSE_RESULTS: Record<string, OwnerAppResponsesRequest["acti
 
 // The socket verb whose result each `dohc history` verb prints.
 export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
-  operation: "historyOperation", undo: "historyUndo",
+  operation: "historyOperation",
+  undo: "historyUndo",
   list: "moments",
   show: "moment",
 };
 
 export const VERSION_RESULTS: Record<string, CliSocketVerb> = {
-  list: "versionList", compare: "versionCompare", conflicts: "versionConflicts",
-  create: "versionCreate", switch: "versionSwitch", merge: "versionMerge", resolve: "versionResolve",
+  list: "versionList",
+  compare: "versionCompare",
+  conflicts: "versionConflicts",
+  create: "versionCreate",
+  switch: "versionSwitch",
+  merge: "versionMerge",
+  resolve: "versionResolve",
 };
 
 export const SYNC_RESULTS: Record<string, CliSocketVerb> = { stop: "stopSync" };
 export const NOTICES_RESULTS: Record<string, CliSocketVerb> = { list: "notices" };
-const SHARE_RESULTS: Record<string, CliSocketVerb> = { copy: "shareCopy", agents: "shareAgents", disconnect: "shareDisconnect" };
+const SHARE_RESULTS: Record<string, CliSocketVerb> = {
+  copy: "shareCopy",
+  agents: "shareAgents",
+  disconnect: "shareDisconnect",
+};
 
 export const ACCESS_RESULTS: Record<string, CliSocketVerb> = {
   refresh: "accessRefresh",
@@ -136,9 +161,21 @@ export const ACCOUNT_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", held: "documentHeld", "held-change": "heldNoteChange", edit: "documentEdit", create: "documentCreate", "set-fields": "collectionSetFields", chats: "fileChats", comment: "fileChatStart",
-  "kept-edits": "liveKeptEdits", "save-recovery-copy": "saveRecoveryCopy", "retry-kept-edits": "retryKeptEdits", "stop-again": "stopAgain",
-  live: "liveDocuments", stop: "liveStop", resume: "liveResume",
+  read: "documentRead",
+  held: "documentHeld",
+  "held-change": "heldNoteChange",
+  edit: "documentEdit",
+  create: "documentCreate",
+  "set-fields": "collectionSetFields",
+  chats: "fileChats",
+  comment: "fileChatStart",
+  "kept-edits": "liveKeptEdits",
+  "save-recovery-copy": "saveRecoveryCopy",
+  "retry-kept-edits": "retryKeptEdits",
+  "stop-again": "stopAgain",
+  live: "liveDocuments",
+  stop: "liveStop",
+  resume: "liveResume",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
@@ -155,8 +192,10 @@ export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
 // Command lines for every `dohc chat` verb. reference.test.ts parses each one
 // and requires every flag the verb declares to appear in its examples.
 export const CHAT_EXAMPLES: Record<string, string[][]> = {
-  links: [["chat","links","general","--cursor","sealed"]],
-  "file-mentions": [["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"]],
+  links: [["chat", "links", "general", "--cursor", "sealed"]],
+  "file-mentions": [
+    ["chat", "file-mentions", "--subject", '{"path":"notes/plan.md"}', "--cursor", "sealed"],
+  ],
   groups: [["chat", "groups"]],
   link: [
     ["chat", "link", "--group", "#trip"],
@@ -164,23 +203,131 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
     ["chat", "link", "--message", "msg_1"],
     ["chat", "link", "--path", "plans/trip.md"],
   ],
-  "create-group": [["chat", "create-group", "needs-ice", "--purpose", "Questions for Ice", "--type", "posts"]],
+  "create-group": [
+    ["chat", "create-group", "needs-ice", "--purpose", "Questions for Ice", "--type", "posts"],
+  ],
   threads: [["chat", "threads", "general"]],
-  watch: [["chat", "watch", "--once", "--cursor", "cursor", "--group", "general", "--thread", "th_1", "--timeout", "25"]],
+  watch: [
+    [
+      "chat",
+      "watch",
+      "--once",
+      "--cursor",
+      "cursor",
+      "--group",
+      "general",
+      "--thread",
+      "th_1",
+      "--timeout",
+      "25",
+    ],
+  ],
   inbox: [["chat", "inbox"]],
-  show: [["chat", "show", "th_1", "--peek"], ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"]],
+  show: [
+    ["chat", "show", "th_1", "--peek"],
+    ["chat", "show", "general", "--before", "1730000000000:posts:th_1", "--limit", "20"],
+  ],
   post: [
-    ["chat", "post", "general", "--title", "Plan", "--attach", "notes.md", "--needs-decision", "--option", "Yes", "--option", "No", "--as-agent", "--agent", "Scout", "Ship", "it?"],
-    ["chat", "post", "general", "--as-agent", "--work", "working", "--link", "https://example.com/threads/7", "Fixing", "the", "login", "redirect"],
+    [
+      "chat",
+      "post",
+      "general",
+      "--title",
+      "Plan",
+      "--attach",
+      "notes.md",
+      "--needs-decision",
+      "--option",
+      "Yes",
+      "--option",
+      "No",
+      "--as-agent",
+      "--agent",
+      "Scout",
+      "Ship",
+      "it?",
+    ],
+    [
+      "chat",
+      "post",
+      "general",
+      "--as-agent",
+      "--work",
+      "working",
+      "--link",
+      "https://example.com/threads/7",
+      "Fixing",
+      "the",
+      "login",
+      "redirect",
+    ],
   ],
   reply: [
-    ["chat", "reply", "th_1", "--to", "msg_1", "--attach", "notes.md", "--needs-decision", "--option", "A", "Which?"],
-    ["chat", "reply", "th_1", "--resolve", "msg_2", "--choose", "Yes", "--as-agent", "--agent", "Scout", "Done"],
-    ["chat", "reply", "th_1", "--as-agent", "--work", "done", "--link", "https://example.com/pull/7", "Opened", "a", "pull", "request"],
+    [
+      "chat",
+      "reply",
+      "th_1",
+      "--to",
+      "msg_1",
+      "--attach",
+      "notes.md",
+      "--needs-decision",
+      "--option",
+      "A",
+      "Which?",
+    ],
+    [
+      "chat",
+      "reply",
+      "th_1",
+      "--resolve",
+      "msg_2",
+      "--choose",
+      "Yes",
+      "--as-agent",
+      "--agent",
+      "Scout",
+      "Done",
+    ],
+    [
+      "chat",
+      "reply",
+      "th_1",
+      "--as-agent",
+      "--work",
+      "done",
+      "--link",
+      "https://example.com/pull/7",
+      "Opened",
+      "a",
+      "pull",
+      "request",
+    ],
   ],
   retry: [["chat", "retry", "th_1"]],
   react: [["chat", "react", "msg_1", "👍"]],
-  grep: [["chat", "grep", "--group", "general", "--thread", "th_1", "--from", "agent", "--since", "7d", "-i", "-l", "-C", "2", "--limit", "10", "--regex", "launch"]],
+  grep: [
+    [
+      "chat",
+      "grep",
+      "--group",
+      "general",
+      "--thread",
+      "th_1",
+      "--from",
+      "agent",
+      "--since",
+      "7d",
+      "-i",
+      "-l",
+      "-C",
+      "2",
+      "--limit",
+      "10",
+      "--regex",
+      "launch",
+    ],
+  ],
   export: [
     ["chat", "export", "--all", "--out", "exports"],
     ["chat", "export", "--group", "general", "--out", "exports"],
@@ -190,102 +337,134 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 
 // What each MCP tool returns. A CLI verb means the tool passes on that
 // verb's result schema; a string is written from the tool in tools.ts.
-export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = distinct(mapNamed(DECLARED_TOOLS, ({ cli }) => ({ cli: cli.verb })), {
-  dohc_link:{cli:"link"},
-  dohc_read_share_copy: { cli: "shareCopy" },
-  dohc_list_link_agents: { cli: "shareAgents" },
-  dohc_disconnect_link_agent: { cli: "shareDisconnect" },
-  dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
-  dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
-  dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
-  dohc_stop_workspace_sync: { cli: "stopSync" },
-  dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, pendingShare?, heldFiles?, syncFailure?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `\"local\"` or `\"cloud\"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. `pendingShare` lists the paths of shared notes whose edits wait on this computer for the server; each file holds older text until the server accepts them, and dohc_read_document returns the current text. A shared view has neither `keptEdits` nor `pendingShare`. In a shared view, `heldFiles` is `{ count, files, message }` while dohc holds shared files back. Each of `files` is `{ path, reason, owner? }`, where `reason` is `local-collision` (a file from this computer is in the way) or `spelling-collision` (this disk treats two shared names as one). `message` says what the person must do. After a `local-collision` file moves, refreshing the shared view in dohc brings the shared file in. Only the person who shared the files can fix a `spelling-collision`. `syncFailure` is `{ code, message, detail }` while sync is failing. A shared view has no `syncFailure`. `code` is stable, such as `server-unreachable` or `conflict-wait-limit`. `message` says what happened and what to do. `detail` is the raw error to report. These fields are absent when the dohc app cannot answer.",
-  dohc_list_changes: { cli: "moments" },
-  dohc_read_change: { cli: "moment" },
-  dohc_read_operation: { cli: "historyOperation" },
-  dohc_undo_operation: { cli: "historyUndo" },
-  dohc_list_versions: { cli: "versionList" },
-  dohc_compare_version: { cli: "versionCompare" },
-  dohc_list_version_conflicts: { cli: "versionConflicts" },
-  dohc_create_version: { cli: "versionCreate" },
-  dohc_switch_version: { cli: "versionSwitch" },
-  dohc_merge_version: { cli: "versionMerge" },
-  dohc_resolve_version_conflict: { cli: "versionResolve" },
-  dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
-  dohc_read_file: "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content, warning? }`. `warning` is present when the file is a shared note whose edits wait for the server, so the file holds older text than the note. `content` is always the file's bytes. No `warning` does not mean the file is current: it is left out when the dohc app does not answer within 50 ms.",
-  dohc_list_kept_copies: { cli: "keptCopies" },
-  dohc_list_notices: { cli: "notices" },
-  dohc_save_kept_copy: { cli: "saveKeptCopy" },
-  dohc_restore_protected_copy: { cli: "restoreProtectedCopy" },
-  dohc_discard_protected_copy: { cli: "discardProtectedCopy" },
-  dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
-  dohc_retry_kept_edits: { cli: "retryKeptEdits" },
-  dohc_stop_again: { cli: "stopAgain" },
-  dohc_list_live_documents: { cli: "liveDocuments" },
-  dohc_stop_live_editing: { cli: "liveStop" },
-  dohc_resume_live_editing: { cli: "liveResume" },
-  dohc_list_retained_copies: { cli: "retainedCopies" },
-  dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
-  dohc_read_document: { cli: "documentRead" },
-  dohc_read_held_change: { cli: "documentHeld" },
-  dohc_edit_document: { cli: "documentEdit" },
-  dohc_create_document: { cli: "documentCreate" },
-  dohc_held_note_change: { cli: "heldNoteChange" },
-  dohc_search_files: "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
-  dohc_write_file: "`{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.",
-  dohc_create_directory: "`{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
-  dohc_duplicate_file: { cli: "fileDuplicate" },
-  dohc_move_path: "`{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/local/trash.",
-  dohc_delete_path: "`{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.",
-  dohc_detect_apps: "`{ ok: true, apps: { root, title, kind, confidence, entry?, packageManager?, scripts, configuredPreviewMode?, buildOutputs, configPath?, diagnostics }[], count, detector }`",
-  dohc_create_app: "`{ ok: true, appRoot, files }`, or `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists files published before the first failure.",
-  dohc_test_app: "`{ ok, app, checks: { name, ok, message?, path? }[] }`. `ok` is true when every check passes.",
-  dohc_import_data: "`{ ok: true, path, tableName, rowCount }`",
-  dohc_query_database: "`{ ok: true, rows }`, with at most 1,000 rows.",
-  dohc_list_file_chats: { cli: "fileChats" },
-  dohc_wait_for_messages: { cli: "watch" },
-  dohc_read_chat: { cli: "chat" },
-  dohc_list_groups: { cli: "groupsFull" },
-  dohc_create_group: "`{ ok: true, group: { id, name, slug, kind, purpose? } }`",
-  dohc_start_group_chat: "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
-  dohc_start_file_chat: { cli: "fileChatStart" },
-  dohc_reply_to_chat: "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`",
-  dohc_query_collection: { cli: "collectionQuery" },
-  dohc_read_record: { cli: "collectionRecord" },
-  dohc_set_record_fields: { cli: "collectionSetFields" },
-  dohc_create_record: { cli: "collectionCreateRecord" },
-  dohc_list_automations: { cli: "automationList" },
-  dohc_switch_automation: { cli: "automationSwitch" },
-  dohc_list_automation_runs: { cli: "automationRuns" },
-  dohc_read_automation_run: { cli: "automationRun" },
-  dohc_retry_automation_run: { cli: "automationRetry" },
-  dohc_retry_chat_run: { cli: "chatRetry" },
-  dohc_press_button: { cli: "automationPress" },
-  dohc_inspect_buttons: { cli: "automationButtons" },
-} as const);
+export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = distinct(
+  mapNamed(DECLARED_TOOLS, ({ cli }) => ({ cli: cli.verb })),
+  {
+    dohc_link: { cli: "link" },
+    dohc_read_share_copy: { cli: "shareCopy" },
+    dohc_list_link_agents: { cli: "shareAgents" },
+    dohc_disconnect_link_agent: { cli: "shareDisconnect" },
+    dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
+    dohc_publish_app:
+      "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
+    dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
+    dohc_stop_workspace_sync: { cli: "stopSync" },
+    dohc_workspace_status:
+      '`{ synced, scope, cloudConnected, credentialStatus, collectionsWaiting?, keptEdits?, pendingShare?, heldFiles?, syncFailure?, workspaceId?, serverUrl?, syncPause? }`. `scope` is `"local"` or `"cloud"`. `collectionsWaiting` is `true` while Collection updates wait for a sync that has not finished. Files and documents still save. To continue offline, stop sync. `keptEdits` lists `{ path, reason, incident, recovery, saveOnly?: true }` for each live document whose edits the server refused. Pass them to dohc_save_recovery_copy, dohc_retry_kept_edits or dohc_stop_again. When saveOnly is true, save a recovery copy instead. If recovery is unreadable, retry reads the edits again. `pendingShare` lists the paths of shared notes whose edits wait on this computer for the server; each file holds older text until the server accepts them, and dohc_read_document returns the current text. A shared view has neither `keptEdits` nor `pendingShare`. In a shared view, `heldFiles` is `{ count, files, message }` while dohc holds shared files back. Each of `files` is `{ path, reason, owner? }`, where `reason` is `local-collision` (a file from this computer is in the way) or `spelling-collision` (this disk treats two shared names as one). `message` says what the person must do. After a `local-collision` file moves, refreshing the shared view in dohc brings the shared file in. Only the person who shared the files can fix a `spelling-collision`. `syncFailure` is `{ code, message, detail }` while sync is failing. A shared view has no `syncFailure`. `code` is stable, such as `server-unreachable` or `conflict-wait-limit`. `message` says what happened and what to do. `detail` is the raw error to report. These fields are absent when the dohc app cannot answer.',
+    dohc_list_changes: { cli: "moments" },
+    dohc_read_change: { cli: "moment" },
+    dohc_read_operation: { cli: "historyOperation" },
+    dohc_undo_operation: { cli: "historyUndo" },
+    dohc_list_versions: { cli: "versionList" },
+    dohc_compare_version: { cli: "versionCompare" },
+    dohc_list_version_conflicts: { cli: "versionConflicts" },
+    dohc_create_version: { cli: "versionCreate" },
+    dohc_switch_version: { cli: "versionSwitch" },
+    dohc_merge_version: { cli: "versionMerge" },
+    dohc_resolve_version_conflict: { cli: "versionResolve" },
+    dohc_list_files: "`{ ok: true, root, entries: { path, kind, bytes?, mediaType? }[] }`",
+    dohc_read_file:
+      "`{ ok: true, path, mediaType, encoding, bytes, offsetBytes, sha256, truncated, content, warning? }`. `warning` is present when the file is a shared note whose edits wait for the server, so the file holds older text than the note. `content` is always the file's bytes. No `warning` does not mean the file is current: it is left out when the dohc app does not answer within 50 ms.",
+    dohc_list_kept_copies: { cli: "keptCopies" },
+    dohc_list_notices: { cli: "notices" },
+    dohc_save_kept_copy: { cli: "saveKeptCopy" },
+    dohc_restore_protected_copy: { cli: "restoreProtectedCopy" },
+    dohc_discard_protected_copy: { cli: "discardProtectedCopy" },
+    dohc_save_recovery_copy: { cli: "saveRecoveryCopy" },
+    dohc_retry_kept_edits: { cli: "retryKeptEdits" },
+    dohc_stop_again: { cli: "stopAgain" },
+    dohc_list_live_documents: { cli: "liveDocuments" },
+    dohc_stop_live_editing: { cli: "liveStop" },
+    dohc_resume_live_editing: { cli: "liveResume" },
+    dohc_list_retained_copies: { cli: "retainedCopies" },
+    dohc_delete_retained_copies: { cli: "deleteRetainedCopies" },
+    dohc_read_document: { cli: "documentRead" },
+    dohc_read_held_change: { cli: "documentHeld" },
+    dohc_edit_document: { cli: "documentEdit" },
+    dohc_create_document: { cli: "documentCreate" },
+    dohc_held_note_change: { cli: "heldNoteChange" },
+    dohc_search_files:
+      "`{ ok: true, query, root, mode, matches: { type, path, mediaType?, line?, column?, preview }[], matchCount, limitHit, skipped: { path, reason }[] }`",
+    dohc_write_file:
+      "`{ ok: true, path, bytes, sha256 }`. Uses the desktop `fileWrite` verb. On failure: `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists published files in a partial batch.",
+    dohc_create_directory:
+      "`{ ok: true, path }`, or `{ ok: true, path, unchanged: true }` when the folder exists.",
+    dohc_duplicate_file: { cli: "fileDuplicate" },
+    dohc_move_path:
+      "`{ ok: true, operationId, fromPath, toPath, withoutHistory?, replaced? }`. Uses the desktop `fileMove` verb. `withoutHistory` lists moved files with no History row: oversized files or non-UTF-8 text that History cannot keep as binary. `replaced` describes the old destination separately: `{ path, trashed, trashPath?, withoutHistory }`. `trashed` is true when the system trash took it; otherwise `trashPath` names its workspace trash entry. `replaced.withoutHistory` lists replaced files without History copies; other replaced files can be restored in History. On failure: `{ ok: false, reason, path?, deleted?, withoutHistory?, replaced? }`. The reason reports rollback's outcome. `withoutHistory` names moved files without History rows after rollback. `replaced` reports any old destination files retained in the workspace trash. `deleted` lists files History records as deleted after the failed move. They stay in the workspace's .dohc/local/trash.",
+    dohc_delete_path:
+      "`{ ok: true, operationId, undo, path, trashed, trashPath?, withoutHistory? }`. Uses the desktop `fileDelete` verb. `trashed` is true when the system trash took the entry; otherwise `trashPath` names its workspace trash entry. `withoutHistory` lists files deleted without History rows: oversized files or non-UTF-8 text that History cannot keep as binary. On failure: `{ ok: false, reason, deleted?, path?, withoutHistory? }`. `deleted` lists files History recorded as deleted before it refused `path`. `withoutHistory` names files already removed without History rows. The reason names their workspace trash location.",
+    dohc_detect_apps:
+      "`{ ok: true, apps: { root, title, kind, confidence, entry?, packageManager?, scripts, configuredPreviewMode?, buildOutputs, configPath?, diagnostics }[], count, detector }`",
+    dohc_create_app:
+      "`{ ok: true, appRoot, files }`, or `{ ok: false, reason, written?, path?, currentSha256? }`. `written` lists files published before the first failure.",
+    dohc_test_app:
+      "`{ ok, app, checks: { name, ok, message?, path? }[] }`. `ok` is true when every check passes.",
+    dohc_import_data: "`{ ok: true, path, tableName, rowCount }`",
+    dohc_query_database: "`{ ok: true, rows }`, with at most 1,000 rows.",
+    dohc_list_file_chats: { cli: "fileChats" },
+    dohc_wait_for_messages: { cli: "watch" },
+    dohc_read_chat: { cli: "chat" },
+    dohc_list_groups: { cli: "groupsFull" },
+    dohc_create_group: "`{ ok: true, group: { id, name, slug, kind, purpose? } }`",
+    dohc_start_group_chat:
+      "`{ ok: true, group: { id, slug, kind }, threadId, messageId, title, warning? }`",
+    dohc_start_file_chat: { cli: "fileChatStart" },
+    dohc_reply_to_chat:
+      "`{ ok: true, threadId, messageId, parentMessageId?, resolvedMessageId?, warning? }`, or `{ ok: true, threadId, nothingToReport: true }`",
+    dohc_query_collection: { cli: "collectionQuery" },
+    dohc_read_record: { cli: "collectionRecord" },
+    dohc_set_record_fields: { cli: "collectionSetFields" },
+    dohc_create_record: { cli: "collectionCreateRecord" },
+    dohc_list_automations: { cli: "automationList" },
+    dohc_switch_automation: { cli: "automationSwitch" },
+    dohc_list_automation_runs: { cli: "automationRuns" },
+    dohc_read_automation_run: { cli: "automationRun" },
+    dohc_retry_automation_run: { cli: "automationRetry" },
+    dohc_retry_chat_run: { cli: "chatRetry" },
+    dohc_press_button: { cli: "automationPress" },
+    dohc_inspect_buttons: { cli: "automationButtons" },
+  } as const,
+);
 
 // One request per operation an app page can send over its app channel. The
 // fields are the example's keys, and reference.test.ts sends each example
 // through the real broker (packages/app-browser/src/broker.ts).
-export const APP_CHANNEL_REQUESTS: { example: Record<string, unknown>; does: string; returns: string }[] = [
+export const APP_CHANNEL_REQUESTS: {
+  example: Record<string, unknown>;
+  does: string;
+  returns: string;
+}[] = [
   {
     example: { op: "backend.invoke", operation: "listOrders", input: {}, idempotencyKey: "read-1" },
     does: "Calls one operation the app's publication exposes, by name. Reads use it too, with a new `idempotencyKey` for each call. Retry an uncertain write with the same `input` and `idempotencyKey`.",
-    returns: "`{ result, revision, replayed }`. A refusal from the operation arrives as status 409 with `error: { code, message }`.",
+    returns:
+      "`{ result, revision, replayed }`. A refusal from the operation arrives as status 409 with `error: { code, message }`.",
   },
   {
-    example: { op: "backend.upload", name: "receipt.pdf", contentType: "application/pdf", bytesBase64: "JVBERg==", idempotencyKey: "upload-1" },
+    example: {
+      op: "backend.upload",
+      name: "receipt.pdf",
+      contentType: "application/pdf",
+      bytesBase64: "JVBERg==",
+      idempotencyKey: "upload-1",
+    },
     does: "Uploads one file, at most 5 MiB, for a later operation to attach.",
     returns: "`{ file, replayed }`",
   },
   {
-    example: { op: "backend.file", fileId: "file_0123456789abcdef", operation: "readReceipt", input: {} },
+    example: {
+      op: "backend.file",
+      fileId: "file_0123456789abcdef",
+      operation: "readReceipt",
+      input: {},
+    },
     does: "Reads an uploaded file through an exposed read operation.",
     returns: "`{ file, bytesBase64 }`",
   },
   {
     example: { op: "backend.attempt", operation: "register", request: { action: "get" } },
-    does: "Saves, reads, or clears one unconfirmed submission for an operation, so the page can retry it after a reload. `request` is `{ action: \"get\" }`, `{ action: \"save\", idempotencyKey, input }`, or `{ action: \"clear\", token }`.",
+    does: 'Saves, reads, or clears one unconfirmed submission for an operation, so the page can retry it after a reload. `request` is `{ action: "get" }`, `{ action: "save", idempotencyKey, input }`, or `{ action: "clear", token }`.',
     returns: "`{ attempt: { token, idempotencyKey, input } | null }`",
   },
   {
@@ -296,7 +475,7 @@ export const APP_CHANNEL_REQUESTS: { example: Record<string, unknown>; does: str
   {
     example: { op: "collection.create", fields: { title: "Tokyo" }, idempotencyKey: "vote-1" },
     does: "Adds a record to that Collection. Only a published app opened from a share link can send it.",
-    returns: "`{ kind: \"accepted\", acceptanceId, acceptedAtMs, momentId, objectId, path }`",
+    returns: '`{ kind: "accepted", acceptanceId, acceptedAtMs, momentId, objectId, path }`',
   },
 ];
 
@@ -344,12 +523,19 @@ function typeText(schema: JsonSchema): string {
   }
 }
 
-function argumentList(schema: JsonSchema, omit: readonly string[] = [], alsoRequired: readonly string[] = []): string {
+function argumentList(
+  schema: JsonSchema,
+  omit: readonly string[] = [],
+  alsoRequired: readonly string[] = [],
+): string {
   const required = new Set([...(schema.required ?? []), ...alsoRequired]);
   const entries = Object.entries(schema.properties ?? {}).filter(([key]) => !omit.includes(key));
   if (entries.length === 0) return "No arguments.";
   return entries
-    .map(([key, value]) => `- \`${key}\`: \`${typeText(value)}\`${required.has(key) ? ". Required." : ""}`)
+    .map(
+      ([key, value]) =>
+        `- \`${key}\`: \`${typeText(value)}\`${required.has(key) ? ". Required." : ""}`,
+    )
     .join("\n");
 }
 
@@ -373,7 +559,8 @@ function shapeText(schema: JsonSchema, depth = 1): string {
   const required = new Set(schema.required ?? []);
   const discriminators = ["ok", "kind", "action"];
   const entries = Object.entries(schema.properties).sort(
-    ([left], [right]) => Number(discriminators.includes(right)) - Number(discriminators.includes(left)),
+    ([left], [right]) =>
+      Number(discriminators.includes(right)) - Number(discriminators.includes(left)),
   );
   const fields = entries.map(([key, value]) => {
     const name = `${key}${required.has(key) ? "" : "?"}`;
@@ -400,15 +587,25 @@ interface ListedTool {
   inputSchema: JsonSchema;
 }
 
-async function listTools(shareAccess?: ShareAccess): Promise<{ tools: ListedTool[]; version: string }> {
-  const server = createDohcMcpServer({ root: "/workspace", home: "/home", ...(shareAccess ? { shareAccess } : {}) });
+async function listTools(
+  shareAccess?: ShareAccess,
+): Promise<{ tools: ListedTool[]; version: string }> {
+  const server = createDohcMcpServer({
+    root: "/workspace",
+    home: "/home",
+    ...(shareAccess ? { shareAccess } : {}),
+  });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "dohc-reference", version: "0" });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const { tools } = await client.listTools();
     return {
-      tools: tools.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema as JsonSchema })),
+      tools: tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema as JsonSchema,
+      })),
       version: client.getServerVersion()?.version ?? "unknown",
     };
   } finally {
@@ -424,17 +621,27 @@ export async function mcpToolNames(shareAccess?: ShareAccess): Promise<string[]>
 // Why a shared view does not offer a tool that reads. Every other tool it
 // does not offer changes the workspace.
 const NOT_SHARED_READS: Record<string, string> = {
-  dohc_wait_for_messages: "The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.",
-  dohc_read_operation: "Operation reads require the owning workspace. Shared profiles do not offer this read.",
-  dohc_read_share_copy: "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
-  dohc_list_link_agents: "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
-  dohc_list_live_documents: "Live editing belongs to the owner's sharing. Shared profiles do not offer this read.",
-  dohc_list_automation_runs: "A shared view keeps no automation runs, so it does not offer this tool.",
-  dohc_read_automation_run: "A shared view keeps no automation runs, so it does not offer this tool.",
-  dohc_list_retained_copies: "A shared view keeps no old file copies, so it does not offer this tool.",
+  dohc_wait_for_messages:
+    "The agent inbox belongs to the owning workspace. Shared profiles do not offer this read.",
+  dohc_read_operation:
+    "Operation reads require the owning workspace. Shared profiles do not offer this read.",
+  dohc_read_share_copy:
+    "The code and invite link belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_link_agents:
+    "A link's agents belong to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_live_documents:
+    "Live editing belongs to the owner's sharing. Shared profiles do not offer this read.",
+  dohc_list_automation_runs:
+    "A shared view keeps no automation runs, so it does not offer this tool.",
+  dohc_read_automation_run:
+    "A shared view keeps no automation runs, so it does not offer this tool.",
+  dohc_list_retained_copies:
+    "A shared view keeps no old file copies, so it does not offer this tool.",
   dohc_list_versions: "A shared view keeps no versions of its own, so it does not offer this tool.",
-  dohc_compare_version: "A shared view keeps no versions of its own, so it does not offer this tool.",
-  dohc_list_version_conflicts: "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_compare_version:
+    "A shared view keeps no versions of its own, so it does not offer this tool.",
+  dohc_list_version_conflicts:
+    "A shared view keeps no versions of its own, so it does not offer this tool.",
   dohc_read_held_change: "A shared view holds no saves of its own, so it does not offer this tool.",
 };
 
@@ -445,27 +652,43 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
   const editableTools = (await listTools("edit")).tools;
   const owned = new Set(tools.map((tool) => tool.name));
   const shared = new Set(sharedTools.map((tool) => tool.name));
-  const allTools = new Map([...tools, ...sharedTools, ...commentTools, ...editableTools].map((tool) => [tool.name, tool]));
+  const allTools = new Map(
+    [...tools, ...sharedTools, ...commentTools, ...editableTools].map((tool) => [tool.name, tool]),
+  );
   const parts = [...allTools.values()].map((tool) => {
-    const shareLevels = ([["view", sharedTools], ["comment", commentTools], ["edit", editableTools]] as const)
+    const shareLevels = (
+      [
+        ["view", sharedTools],
+        ["comment", commentTools],
+        ["edit", editableTools],
+      ] as const
+    )
       .filter(([, registered]) => registered.some((entry) => entry.name === tool.name))
       .map(([access]) => access);
     const returns = MCP_RETURNS[tool.name];
     if (returns === undefined) throw new Error(`MCP_RETURNS has no entry for ${tool.name}.`);
-    const returnsText = typeof returns === "string"
-      ? `Returns ${returns.replace(/\.?$/, ".")}`
-      : returnsLine([shapeText(jsonSchema(cliResultSchemas[returns.cli], "output"))]);
-    const args = tool.name === "dohc_dataset"
-      ? "- `request`: the JSON object of one [`dohc dataset`](#dohc-dataset) verb, with the verb's name as `action`. Required."
-      : argumentList(tool.inputSchema);
+    const returnsText =
+      typeof returns === "string"
+        ? `Returns ${returns.replace(/\.?$/, ".")}`
+        : returnsLine([shapeText(jsonSchema(cliResultSchemas[returns.cli], "output"))]);
+    const args =
+      tool.name === "dohc_dataset"
+        ? "- `request`: the JSON object of one [`dohc dataset`](#dohc-dataset) verb, with the verb's name as `action`. Required."
+        : argumentList(tool.inputSchema);
     return [
       `### \`${tool.name}\``,
       tool.description ?? "",
-      !owned.has(tool.name) ? `Available only in a shared workspace with ${shareLevels.join(" or ")} access.`
-        : shared.has(tool.name) ? "" : NOT_SHARED_READS[tool.name] ?? "Changes the workspace, so a shared view does not offer it.",
+      !owned.has(tool.name)
+        ? `Available only in a shared workspace with ${shareLevels.join(" or ")} access.`
+        : shared.has(tool.name)
+          ? ""
+          : (NOT_SHARED_READS[tool.name] ??
+            "Changes the workspace, so a shared view does not offer it."),
       args,
       returnsText,
-    ].filter(Boolean).join("\n\n");
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   });
   return { text: parts.join("\n\n"), version };
 }
@@ -474,16 +697,24 @@ function resultShapes(results: JsonSchema, key: string, values: readonly string[
   return values.map((value) => shapeText(kindBranch(results, key, value)));
 }
 
-function checkCovered(command: string, verbs: readonly string[], documented: readonly string[]): void {
+function checkCovered(
+  command: string,
+  verbs: readonly string[],
+  documented: readonly string[],
+): void {
   const missing = verbs.filter((verb) => !documented.includes(verb));
   const extra = documented.filter((verb) => !verbs.includes(verb));
   if (missing.length > 0 || extra.length > 0) {
-    throw new Error(`dohc ${command}: no result for ${missing.join(", ") || "none"}; no verb for ${extra.join(", ") || "none"}.`);
+    throw new Error(
+      `dohc ${command}: no result for ${missing.join(", ") || "none"}; no verb for ${extra.join(", ") || "none"}.`,
+    );
   }
 }
 
 function flagList(flags: readonly CliFlag[]): string {
-  return flags.map((flag) => `- \`${flag.value ? `${flag.name} <${flag.value}>` : flag.name}\`: ${flag.text}`).join("\n");
+  return flags
+    .map((flag) => `- \`${flag.value ? `${flag.name} <${flag.value}>` : flag.name}\`: ${flag.text}`)
+    .join("\n");
 }
 
 function shellBlock(line: string): string {
@@ -492,7 +723,11 @@ function shellBlock(line: string): string {
 
 // The socket verb of each declared verb of one command, by the verb's name.
 function declaredSocketVerbs(command: string): Record<string, CliSocketVerb> {
-  return Object.fromEntries(Object.values(DECLARED_VERBS).filter(({ cli }) => cli.command[0] === command).map(({ cli }) => [cli.command[1], cli.verb]));
+  return Object.fromEntries(
+    Object.values(DECLARED_VERBS)
+      .filter(({ cli }) => cli.command[0] === command)
+      .map(({ cli }) => [cli.command[1], cli.verb]),
+  );
 }
 
 // The chat commands whose socket verb has another name.
@@ -506,84 +741,146 @@ export const CHAT_SOCKET_VERBS: Record<string, CliSocketVerb> = {
 // result; the JSON verbs of `dataset` and `app` return the result kinds
 // listed above.
 function verbReturns(command: string, name: string): string {
-  const socketVerb = command === "file" && name === "duplicate" ? "fileDuplicate" : command === "links"
-    ? declaredSocketVerbs("links")[name]
-    : command === "chat"
-    ? CHAT_SOCKET_VERBS[name] ?? name
-    : command === "history"
-      ? HISTORY_RESULTS[name]
-      : command === "document"
-        ? DOCUMENT_RESULTS[name]
-        : command === "automation" ? AUTOMATION_RESULTS[name]
-          : command === "access" ? ACCESS_RESULTS[name]
-            : command === "sync" ? SYNC_RESULTS[name] : command === "notices" ? NOTICES_RESULTS[name] : command === "share" ? SHARE_RESULTS[name]
-              : command === "version" ? VERSION_RESULTS[name]
-              : command === "account" ? ACCOUNT_RESULTS[name] : undefined;
+  const socketVerb =
+    command === "file" && name === "duplicate"
+      ? "fileDuplicate"
+      : command === "links"
+        ? declaredSocketVerbs("links")[name]
+        : command === "chat"
+          ? (CHAT_SOCKET_VERBS[name] ?? name)
+          : command === "history"
+            ? HISTORY_RESULTS[name]
+            : command === "document"
+              ? DOCUMENT_RESULTS[name]
+              : command === "automation"
+                ? AUTOMATION_RESULTS[name]
+                : command === "access"
+                  ? ACCESS_RESULTS[name]
+                  : command === "sync"
+                    ? SYNC_RESULTS[name]
+                    : command === "notices"
+                      ? NOTICES_RESULTS[name]
+                      : command === "share"
+                        ? SHARE_RESULTS[name]
+                        : command === "version"
+                          ? VERSION_RESULTS[name]
+                          : command === "account"
+                            ? ACCOUNT_RESULTS[name]
+                            : undefined;
   if (socketVerb !== undefined) {
-    if (!Object.hasOwn(cliResultSchemas, socketVerb)) throw new Error(`dohc ${command} ${name} has no result schema.`);
+    if (!Object.hasOwn(cliResultSchemas, socketVerb))
+      throw new Error(`dohc ${command} ${name} has no result schema.`);
     const result = jsonSchema(cliResultSchemas[socketVerb as CliSocketVerb], "output");
     // Refusals exit with their reason instead of printing JSON.
-    const printed = (branches(result) ?? [result])
-      .filter((branch) => !["file", "history", "version", "document", "automation", "sync", "account"].includes(command) || branch.properties?.ok?.const !== false);
+    const printed = (branches(result) ?? [result]).filter(
+      (branch) =>
+        !["file", "history", "version", "document", "automation", "sync", "account"].includes(
+          command,
+        ) || branch.properties?.ok?.const !== false,
+    );
     const shapes = printed.map((branch) => shapeText(branch).replace(/^\{ /, "{ schemaVersion, "));
     const socketNote = command === "access" ? ` Uses socket verb \`${socketVerb}\`.` : "";
     return `With \`--json\`, prints ${shapes.map((shape) => `\`${shape}\``).join(" or ")}.${socketNote}`;
   }
   if (command === "dataset") {
-    return returnsLine(resultShapes(jsonSchema(DatasetResult, "output"), "kind", DATASET_RESULTS[name as DatasetAction]));
+    return returnsLine(
+      resultShapes(
+        jsonSchema(DatasetResult, "output"),
+        "kind",
+        DATASET_RESULTS[name as DatasetAction],
+      ),
+    );
   }
   if (command === "app") {
     const responses = APP_RESPONSE_RESULTS[name];
-    if (responses) return returnsLine(resultShapes(jsonSchema(OwnerAppResponsesResult, "output"), "action", [responses]));
-    return returnsLine(resultShapes(jsonSchema(OwnerAppPublicationResult, "output"), "kind", APP_RESULTS[name as AppAction]));
+    if (responses)
+      return returnsLine(
+        resultShapes(jsonSchema(OwnerAppResponsesResult, "output"), "action", [responses]),
+      );
+    return returnsLine(
+      resultShapes(
+        jsonSchema(OwnerAppPublicationResult, "output"),
+        "kind",
+        APP_RESULTS[name as AppAction],
+      ),
+    );
   }
   throw new Error(`The reference has no results for dohc ${command}.`);
 }
 
 function verbSection(command: string, name: string, verb: CliVerbSpec): string {
   const details = [
-    ...(verb.take ?? []).map((source) => `Set \`${source.field}\` to \`${source.path}\` from \`${source.from}\`.`),
+    ...(verb.take ?? []).map(
+      (source) => `Set \`${source.field}\` to \`${source.path}\` from \`${source.from}\`.`,
+    ),
     ...(verb.notes ?? []),
     ...(verb.freeText ? [`Put ${DASH_RULE}.`] : []),
   ];
   return [
     `#### \`dohc ${command} ${name}\``,
-    verb.fields ? "" : shellBlock(["dohc", command, name, verb.operands, "[options]"].filter(Boolean).join(" ")),
+    verb.fields
+      ? ""
+      : shellBlock(["dohc", command, name, verb.operands, "[options]"].filter(Boolean).join(" ")),
     verb.summary,
     details.join(" "),
     verb.flags ? flagList(verb.flags) : "",
-    verb.fields ? argumentList(jsonSchema(z.object(verb.fields), "input"), ["action"], verb.required) : "",
+    verb.fields
+      ? argumentList(jsonSchema(z.object(verb.fields), "input"), ["action"], verb.required)
+      : "",
     verbReturns(command, name),
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function commandSection(name: string, command: CliCommandSpec): string {
   const verbs = Object.entries(command.verbs);
-  if (name === "dataset") checkCovered(name, Object.keys(command.verbs), Object.keys(DATASET_RESULTS));
-  if (name === "app") checkCovered(name, Object.keys(command.verbs), [...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)]);
-  if (name === "history") checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
-  if (name === "document") checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
-  if (name === "automation") checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
-  if (name === "version") checkCovered(name, Object.keys(command.verbs), Object.keys(VERSION_RESULTS));
+  if (name === "dataset")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(DATASET_RESULTS));
+  if (name === "app")
+    checkCovered(name, Object.keys(command.verbs), [
+      ...Object.keys(APP_RESULTS),
+      ...Object.keys(APP_RESPONSE_RESULTS),
+    ]);
+  if (name === "history")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(HISTORY_RESULTS));
+  if (name === "document")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(DOCUMENT_RESULTS));
+  if (name === "automation")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(AUTOMATION_RESULTS));
+  if (name === "version")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(VERSION_RESULTS));
   if (name === "sync") checkCovered(name, Object.keys(command.verbs), Object.keys(SYNC_RESULTS));
   if (name === "share") checkCovered(name, Object.keys(command.verbs), Object.keys(SHARE_RESULTS));
-  if (name === "access") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
-  if (name === "account") checkCovered(name, Object.keys(command.verbs), Object.keys(ACCOUNT_RESULTS));
-  const jsonOperands = [...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands))];
+  if (name === "access")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(ACCESS_RESULTS));
+  if (name === "account")
+    checkCovered(name, Object.keys(command.verbs), Object.keys(ACCOUNT_RESULTS));
+  const jsonOperands = [
+    ...new Set(verbs.filter(([, verb]) => verb.fields).map(([, verb]) => verb.operands)),
+  ];
   return [
     `### \`dohc ${name}\``,
     jsonOperands.length > 0 ? shellBlock(`dohc ${name} <verb> ${jsonOperands.join(" | ")}`) : "",
     command.summary,
     command.notes.join(" "),
     name === "access" ? ACCESS_NOTES : "",
-    name === "links" ? "`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields." : "",
-    name === "sync" ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority." : "",
+    name === "links"
+      ? "`indexBuilding` is true while the link index is being built: seed work, pending updates, or eligible files without an index row. It carries across cursor pages; start a fresh walk to observe completion. `unchecked` names sources that could not be checked, including oversized files. These can keep `complete` false after building stops. `complete` describes the local index; `mountsCovered` separately reports mounted-share coverage. IPC, CLI, and MCP return these same fields."
+      : "",
+    name === "sync"
+      ? "The pause result records who paused and when. A person author has kind person, personId, and self. Show you when self is true. Person pause labels do not use profile names. An agent author has kind agent, agentId, onBehalfOf, and depth. Agent names are provenance and grant no authority."
+      : "",
     ...verbs.map(([verbName, verb]) => verbSection(name, verbName, verb)),
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function cliSection(): string {
-  return Object.entries(CLI_COMMANDS).map(([name, command]) => commandSection(name, command)).join("\n\n");
+  return Object.entries(CLI_COMMANDS)
+    .map(([name, command]) => commandSection(name, command))
+    .join("\n\n");
 }
 
 function appChannelSection(): string {

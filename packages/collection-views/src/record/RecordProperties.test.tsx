@@ -3,7 +3,12 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
 import { CellStatusNote, RecordProperties, type RecordPropertiesProps } from "./RecordProperties";
-import type { CollectionCellChange, TableCellStatus, TableCellStatuses, TableHostCell } from "../table/TableView";
+import type {
+  CollectionCellChange,
+  TableCellStatus,
+  TableCellStatuses,
+  TableHostCell,
+} from "../table/TableView";
 import { indexedValue, makeRecord, makeSchema } from "../testSupport";
 
 afterEach(cleanup);
@@ -19,17 +24,18 @@ const schema = makeSchema([
   { name: "link", type: "url" },
   { name: "notes", type: "text" },
 ]);
-const record = (id = "rec-a", title = "Task a"): CollectionRecord => makeRecord(id, [
-  indexedValue("title", title),
-  indexedValue("estimate", 3),
-  indexedValue("done", false),
-  indexedValue("due", "2026-11-08"),
-  indexedValue("status", "todo"),
-  indexedValue("tags", ["alpha"]),
-  indexedValue("owner", "user-1"),
-  indexedValue("link", "https://example.com"),
-  indexedValue("notes", null),
-]);
+const record = (id = "rec-a", title = "Task a"): CollectionRecord =>
+  makeRecord(id, [
+    indexedValue("title", title),
+    indexedValue("estimate", 3),
+    indexedValue("done", false),
+    indexedValue("due", "2026-11-08"),
+    indexedValue("status", "todo"),
+    indexedValue("tags", ["alpha"]),
+    indexedValue("owner", "user-1"),
+    indexedValue("link", "https://example.com"),
+    indexedValue("notes", null),
+  ]);
 
 /** A host's unconfirmed cells, by `record:field`. */
 function statusStore(initial: Record<string, TableCellStatus> = {}) {
@@ -42,10 +48,11 @@ function statusStore(initial: Record<string, TableCellStatus> = {}) {
     },
     get: (recordId, field) => statuses.get(`${recordId}:${field}`),
   };
-  const set = (next: Record<string, TableCellStatus>) => act(() => {
-    statuses = new Map(Object.entries(next));
-    for (const listener of listeners) listener();
-  });
+  const set = (next: Record<string, TableCellStatus>) =>
+    act(() => {
+      statuses = new Map(Object.entries(next));
+      for (const listener of listeners) listener();
+    });
   return { store, set };
 }
 
@@ -54,7 +61,11 @@ function renderProperties(props: Partial<RecordPropertiesProps> = {}) {
   const onCellChange = (change: CollectionCellChange) => changes.push(change);
   const all: RecordPropertiesProps = { schema, record: record(), onCellChange, ...props };
   const view = render(<RecordProperties {...all} />);
-  return { changes, rerender: (next: Partial<RecordPropertiesProps>) => view.rerender(<RecordProperties {...all} {...next} />) };
+  return {
+    changes,
+    rerender: (next: Partial<RecordPropertiesProps>) =>
+      view.rerender(<RecordProperties {...all} {...next} />),
+  };
 }
 
 const row = (name: string) => screen.getByRole("group", { name });
@@ -68,8 +79,14 @@ const openEditor = (name: string) => {
 
 describe("a record's properties", () => {
   it("shows one row per field in the schema's order, named through fieldLabel, with each value as its cell draws it", () => {
-    renderProperties({ omitFields: ["title"], fieldLabel: (field) => (field === "due" ? "Due date" : field), personLabel: (id) => (id === "user-1" ? "Ada" : null) });
-    expect(screen.getAllByRole("group").map((group) => group.getAttribute("data-property"))).toEqual(["estimate", "done", "due", "status", "tags", "owner", "link", "notes"]);
+    renderProperties({
+      omitFields: ["title"],
+      fieldLabel: (field) => (field === "due" ? "Due date" : field),
+      personLabel: (id) => (id === "user-1" ? "Ada" : null),
+    });
+    expect(
+      screen.getAllByRole("group").map((group) => group.getAttribute("data-property")),
+    ).toEqual(["estimate", "done", "due", "status", "tags", "owner", "link", "notes"]);
     expect(screen.queryByRole("group", { name: "title" })).toBeNull();
     expect(row("Due date").textContent).toContain("Nov 8");
     expect(row("status").textContent).toContain("todo");
@@ -86,7 +103,9 @@ describe("a record's properties", () => {
     expect(input.value).toBe("Task a");
     fireEvent.change(input, { target: { value: "Renamed" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(changes).toEqual([{ recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "title", value: "Renamed" }]);
+    expect(changes).toEqual([
+      { recordId: "rec-a", recordPath: "tasks/rec-a.md", field: "title", value: "Renamed" },
+    ]);
     expect(editor("title")).toBeNull();
     expect(document.activeElement).toBe(value("title"));
 
@@ -109,7 +128,9 @@ describe("a record's properties", () => {
     const input = within(openEditor("estimate")).getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "many" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(within(editor("estimate")!).getByRole("alert").textContent).toBe("This value is not a number. Enter a number.");
+    expect(within(editor("estimate")!).getByRole("alert").textContent).toBe(
+      "This value is not a number. Enter a number.",
+    );
     expect(changes).toEqual([]);
     // The editor holds what it cannot save, so a press on another value comes back to it.
     fireEvent.click(value("title"));
@@ -121,7 +142,12 @@ describe("a record's properties", () => {
   });
 
   it("ticks a checkbox, and opens the pickers the table opens for a date, an option and a person", () => {
-    const { changes } = renderProperties({ people: [{ id: "user-1", name: "Ada" }, { id: "user-2", name: "Grace" }] });
+    const { changes } = renderProperties({
+      people: [
+        { id: "user-1", name: "Ada" },
+        { id: "user-2", name: "Grace" },
+      ],
+    });
     fireEvent.click(within(row("done")).getByRole("checkbox"));
     expect(changes.at(-1)).toMatchObject({ field: "done", value: true });
 
@@ -129,10 +155,18 @@ describe("a record's properties", () => {
     expect(changes.at(-1)).toMatchObject({ field: "due", value: "2026-11-09" });
     expect(editor("due")).toBeNull();
 
-    fireEvent.click(within(within(openEditor("status")).getByRole("listbox", { name: "status options" })).getByRole("option", { name: "doing" }));
+    fireEvent.click(
+      within(
+        within(openEditor("status")).getByRole("listbox", { name: "status options" }),
+      ).getByRole("option", { name: "doing" }),
+    );
     expect(changes.at(-1)).toMatchObject({ field: "status", value: "doing" });
 
-    fireEvent.click(within(within(openEditor("owner")).getByRole("listbox", { name: "People for owner" })).getByRole("option", { name: "Grace" }));
+    fireEvent.click(
+      within(
+        within(openEditor("owner")).getByRole("listbox", { name: "People for owner" }),
+      ).getByRole("option", { name: "Grace" }),
+    );
     expect(changes.at(-1)).toMatchObject({ field: "owner", value: "user-2" });
     expect(changes).toHaveLength(4);
   });
@@ -144,7 +178,9 @@ describe("a record's properties", () => {
     fireEvent.click(list.getByRole("option", { name: "gamma" }));
     expect(changes).toEqual([]);
     fireEvent.pointerDown(document.body);
-    expect(changes).toEqual([expect.objectContaining({ field: "tags", value: ["alpha", "beta", "gamma"] })]);
+    expect(changes).toEqual([
+      expect.objectContaining({ field: "tags", value: ["alpha", "beta", "gamma"] }),
+    ]);
     expect(editor("tags")).toBeNull();
   });
 
@@ -161,13 +197,16 @@ describe("a record's properties", () => {
     const input = within(editor("link")!).getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "https://dohc.example" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(changes).toEqual([expect.objectContaining({ field: "link", value: "https://dohc.example" })]);
+    expect(changes).toEqual([
+      expect.objectContaining({ field: "link", value: "https://dohc.example" }),
+    ]);
   });
 
   it("offers no editor and no toggle where canEditCell refuses, or with no onCellChange, and pauses with editingDisabled", () => {
     const view = renderProperties({ canEditCell: (_record, field) => field.name === "title" });
     expect(within(row("title")).getAllByRole("button")).toHaveLength(1);
-    for (const name of ["estimate", "due", "status", "tags", "owner", "notes"]) expect(within(row(name)).queryByRole("button")).toBeNull();
+    for (const name of ["estimate", "due", "status", "tags", "owner", "notes"])
+      expect(within(row(name)).queryByRole("button")).toBeNull();
     expect(within(row("done")).getByRole<HTMLInputElement>("checkbox").disabled).toBe(true);
     fireEvent.click(row("estimate").querySelector("[data-property-value]")!);
     expect(editor("estimate")).toBeNull();
@@ -175,7 +214,10 @@ describe("a record's properties", () => {
     // An open editor stays, with what it holds, while editing is paused.
     const input = within(openEditor("title")).getByRole<HTMLInputElement>("textbox");
     fireEvent.change(input, { target: { value: "Held" } });
-    view.rerender({ canEditCell: (_record, field) => field.name === "title", editingDisabled: true });
+    view.rerender({
+      canEditCell: (_record, field) => field.name === "title",
+      editingDisabled: true,
+    });
     expect(within(editor("title")!).getByRole<HTMLInputElement>("textbox").value).toBe("Held");
     expect(editor("title")!.matches(":disabled")).toBe(true);
     expect(view.changes).toEqual([]);
@@ -187,22 +229,44 @@ describe("a record's properties", () => {
   });
 
   it("shows a change the host has not confirmed in each state, with its actions", () => {
-    const retry = vi.fn(), discard = vi.fn(), dismiss = vi.fn();
+    const retry = vi.fn(),
+      discard = vi.fn(),
+      dismiss = vi.fn();
     const { store, set } = statusStore({ "rec-a:title": { state: "pending", value: "Sending" } });
     renderProperties({ cellStatuses: store });
     // The value the person gave shows in place of the stored one, and the editor opens on it.
     expect(value("title").textContent).toBe("Sending");
     expect(row("title").querySelector('[data-cell-status="pending"]')?.textContent).toBe("Saving");
-    expect(within(openEditor("title")).getByRole<HTMLInputElement>("textbox").value).toBe("Sending");
+    expect(within(openEditor("title")).getByRole<HTMLInputElement>("textbox").value).toBe(
+      "Sending",
+    );
     fireEvent.keyDown(within(editor("title")!).getByRole("textbox"), { key: "Escape" });
 
-    set({ "rec-a:title": { state: "waiting", value: "Sending", reason: "Waiting for an earlier change to this record." } });
-    expect(within(row("title")).getByRole("note").textContent).toBe("Waiting for an earlier change to this record.");
+    set({
+      "rec-a:title": {
+        state: "waiting",
+        value: "Sending",
+        reason: "Waiting for an earlier change to this record.",
+      },
+    });
+    expect(within(row("title")).getByRole("note").textContent).toBe(
+      "Waiting for an earlier change to this record.",
+    );
     expect(within(within(row("title")).getByRole("note")).queryByRole("button")).toBeNull();
 
-    set({ "rec-a:title": { state: "unconfirmed", value: "Sending", reason: "dohc could not confirm this change.", retry, discard } });
+    set({
+      "rec-a:title": {
+        state: "unconfirmed",
+        value: "Sending",
+        reason: "dohc could not confirm this change.",
+        retry,
+        discard,
+      },
+    });
     const note = within(within(row("title")).getByRole("note"));
-    expect(row("title").querySelector('[data-cell-status="unconfirmed"]')?.textContent).toContain("dohc could not confirm this change.");
+    expect(row("title").querySelector('[data-cell-status="unconfirmed"]')?.textContent).toContain(
+      "dohc could not confirm this change.",
+    );
     fireEvent.click(note.getByRole("button", { name: "Try again" }));
     expect(retry).toHaveBeenCalledOnce();
     // The note goes with the action, so focus moves to the value first.
@@ -210,7 +274,14 @@ describe("a record's properties", () => {
     fireEvent.click(note.getByRole("button", { name: "Discard" }));
     expect(discard).toHaveBeenCalledOnce();
 
-    set({ "rec-a:estimate": { state: "refused", value: "many", reason: "Enter a value estimate can take.", dismiss } });
+    set({
+      "rec-a:estimate": {
+        state: "refused",
+        value: "many",
+        reason: "Enter a value estimate can take.",
+        dismiss,
+      },
+    });
     expect(within(row("title")).queryByRole("note")).toBeNull();
     expect(value("title").textContent).toBe("Task a");
     const refused = within(within(row("estimate")).getByRole("note"));
@@ -222,11 +293,30 @@ describe("a record's properties", () => {
   it("draws a host's cell and editor, and never opens the shared text editor on one", () => {
     const close = vi.fn();
     const file: TableHostCell = {
-      cell: (shown, tabStop) => <button type="button" tabIndex={tabStop ? undefined : -1} className="dohc-row-open-target">File of {shown.id}</button>,
-      editor: (shown, done) => <button type="button" onClick={() => { close(shown.id); done(); }}>Choose a file</button>,
+      cell: (shown, tabStop) => (
+        <button type="button" tabIndex={tabStop ? undefined : -1} className="dohc-row-open-target">
+          File of {shown.id}
+        </button>
+      ),
+      editor: (shown, done) => (
+        <button
+          type="button"
+          onClick={() => {
+            close(shown.id);
+            done();
+          }}
+        >
+          Choose a file
+        </button>
+      ),
     };
     const readOnly: TableHostCell = { cell: () => <span>Related</span> };
-    renderProperties({ hostCells: new Map([["notes", file], ["owner", readOnly]]) });
+    renderProperties({
+      hostCells: new Map([
+        ["notes", file],
+        ["owner", readOnly],
+      ]),
+    });
     // The host's control is the row's Tab stop, and the row still says the value is empty.
     const control = within(row("notes")).getByRole("button", { name: "File of rec-a" });
     expect(control.tabIndex).toBe(0);
@@ -245,7 +335,10 @@ describe("a record's properties", () => {
   });
 
   it("is reached and worked by keyboard: each value is a Tab stop, a typed character starts an edit, and Tab saves and moves on", () => {
-    const { changes } = renderProperties({ canEditCell: (_record, field) => field.name !== "estimate", onOpenLink: () => undefined });
+    const { changes } = renderProperties({
+      canEditCell: (_record, field) => field.name !== "estimate",
+      onOpenLink: () => undefined,
+    });
     // Every control that edits is in the Tab order. A row that cannot change has none.
     expect(value("title").tabIndex).toBe(0);
     expect(within(row("done")).getByRole<HTMLInputElement>("checkbox").tabIndex).toBe(0);
@@ -277,7 +370,11 @@ describe("a record's properties", () => {
 
   it("keeps Escape in an open editor from reaching what holds the properties", () => {
     const onKeyDown = vi.fn();
-    render(<div onKeyDown={onKeyDown}><RecordProperties schema={schema} record={record()} onCellChange={() => 0} /></div>);
+    render(
+      <div onKeyDown={onKeyDown}>
+        <RecordProperties schema={schema} record={record()} onCellChange={() => 0} />
+      </div>,
+    );
     fireEvent.keyDown(within(openEditor("title")).getByRole("textbox"), { key: "Escape" });
     expect(editor("title")).toBeNull();
     fireEvent.keyDown(within(openEditor("status")).getByRole("combobox"), { key: "Escape" });
@@ -299,32 +396,75 @@ describe("a record's properties", () => {
     // Another record in the same place has no editor open, and the host keeps the text.
     view.rerender({ onDraftAbandoned, record: record("rec-b", "Task b") });
     expect(editor("title")).toBeNull();
-    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Half typed", value: "Half typed" });
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a",
+      field: "title",
+      text: "Half typed",
+      value: "Half typed",
+    });
     expect(view.changes).toEqual([]);
   });
 
   it("starts another record's tags from that record's own value, not from picks saved on the record before it", () => {
     // The host numbers its saves, and its index shows none of them yet.
     const view = renderProperties();
-    fireEvent.click(within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole("option", { name: "beta" }));
+    fireEvent.click(
+      within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole(
+        "option",
+        { name: "beta" },
+      ),
+    );
     fireEvent.pointerDown(document.body);
-    expect(view.changes).toEqual([expect.objectContaining({ recordId: "rec-a", field: "tags", value: ["alpha", "beta"] })]);
+    expect(view.changes).toEqual([
+      expect.objectContaining({ recordId: "rec-a", field: "tags", value: ["alpha", "beta"] }),
+    ]);
     // Another record takes the first one's place, with no remount.
     view.rerender({ record: record("rec-b", "Task b") });
-    fireEvent.click(within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole("option", { name: "gamma" }));
+    fireEvent.click(
+      within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole(
+        "option",
+        { name: "gamma" },
+      ),
+    );
     fireEvent.pointerDown(document.body);
-    expect(view.changes[1]).toMatchObject({ recordId: "rec-b", field: "tags", value: ["alpha", "gamma"] });
+    expect(view.changes[1]).toMatchObject({
+      recordId: "rec-b",
+      field: "tags",
+      value: ["alpha", "gamma"],
+    });
     // The first record still starts its next edit from what it saved.
     view.rerender({ record: record() });
-    fireEvent.click(within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole("option", { name: "gamma" }));
+    fireEvent.click(
+      within(within(openEditor("tags")).getByRole("listbox", { name: "tags options" })).getByRole(
+        "option",
+        { name: "gamma" },
+      ),
+    );
     fireEvent.pointerDown(document.body);
-    expect(view.changes[2]).toMatchObject({ recordId: "rec-a", field: "tags", value: ["alpha", "beta", "gamma"] });
+    expect(view.changes[2]).toMatchObject({
+      recordId: "rec-a",
+      field: "tags",
+      value: ["alpha", "beta", "gamma"],
+    });
   });
 
   it("draws a button field through renderButton", () => {
-    const fields = makeSchema([{ name: "title", type: "text" }, { name: "stamp", type: "button" }]);
-    render(<RecordProperties schema={fields} record={makeRecord("rec-a", [indexedValue("title", "Task a")])} onCellChange={() => 0}
-      renderButton={(field, shown) => <button type="button">Run {field.name} on {shown.id}</button>} />);
+    const fields = makeSchema([
+      { name: "title", type: "text" },
+      { name: "stamp", type: "button" },
+    ]);
+    render(
+      <RecordProperties
+        schema={fields}
+        record={makeRecord("rec-a", [indexedValue("title", "Task a")])}
+        onCellChange={() => 0}
+        renderButton={(field, shown) => (
+          <button type="button">
+            Run {field.name} on {shown.id}
+          </button>
+        )}
+      />,
+    );
     fireEvent.click(within(row("stamp")).getByRole("button", { name: "Run stamp on rec-a" }));
     expect(editor("stamp")).toBeNull();
   });
@@ -332,9 +472,12 @@ describe("a record's properties", () => {
 
 describe("one cell's unconfirmed change, outside the properties", () => {
   it("shows nothing, then the change's state and actions", () => {
-    const dismiss = vi.fn(), onAct = vi.fn();
+    const dismiss = vi.fn(),
+      onAct = vi.fn();
     const { store, set } = statusStore();
-    const { container } = render(<CellStatusNote statuses={store} recordId="rec-a" field="title" onAct={onAct} />);
+    const { container } = render(
+      <CellStatusNote statuses={store} recordId="rec-a" field="title" onAct={onAct} />,
+    );
     expect(container.textContent).toBe("");
     set({ "rec-a:title": { state: "pending", value: "x" } });
     expect(container.querySelector('[data-cell-status="pending"]')).toBeTruthy();

@@ -65,8 +65,16 @@ describe("ConfirmDialog intent", () => {
   // the button. The body says what is lost, so it must be read too.
   it("is described by its body", () => {
     render(
-      <ConfirmDialog icon={Trash2} title="Delete 12 files from Research?" confirmLabel="Delete files" onCancel={vi.fn()} onConfirm={vi.fn()}
-        testId="confirm" cancelTestId="confirm-cancel" confirmTestId="confirm-action">
+      <ConfirmDialog
+        icon={Trash2}
+        title="Delete 12 files from Research?"
+        confirmLabel="Delete files"
+        onCancel={vi.fn()}
+        onConfirm={vi.fn()}
+        testId="confirm"
+        cancelTestId="confirm-cancel"
+        confirmTestId="confirm-action"
+      >
         <p>They move to the system trash.</p>
       </ConfirmDialog>,
     );
@@ -100,7 +108,10 @@ describe("ConfirmDialog intent", () => {
         <p>They move to the system trash.</p>
       </ConfirmDialog>,
     );
-    const dialog = screen.getByRole("dialog", { name: "Delete 2 items?", description: "They move to the system trash." });
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete 2 items?",
+      description: "They move to the system trash.",
+    });
     expect(dialog.textContent).toContain("Research/b.md");
   });
 });
@@ -121,10 +132,21 @@ function dialog(overrides: Partial<{ confirmDisabled: boolean; choice: boolean }
       cancelTestId="confirm-cancel"
       confirmTestId="confirm-action"
     >
-      {overrides.choice ? <label><input type="checkbox" /> Keep a copy</label> : <p>It moves to the trash.</p>}
+      {overrides.choice ? (
+        <label>
+          <input type="checkbox" /> Keep a copy
+        </label>
+      ) : (
+        <p>It moves to the trash.</p>
+      )}
     </ConfirmDialog>,
   );
-  return { onCancel, onConfirm, cancel: screen.getByTestId("confirm-cancel"), confirm: screen.getByTestId("confirm-action") };
+  return {
+    onCancel,
+    onConfirm,
+    cancel: screen.getByTestId("confirm-cancel"),
+    confirm: screen.getByTestId("confirm-action"),
+  };
 }
 
 describe("ConfirmDialog keys", () => {
@@ -188,7 +210,16 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
 
   it.each([
     ["a text field", <textarea key="field" aria-label="Note" />],
-    ["editable text", <div key="field" aria-label="Note" role="textbox" contentEditable suppressContentEditableWarning />],
+    [
+      "editable text",
+      <div
+        key="field"
+        aria-label="Note"
+        role="textbox"
+        contentEditable
+        suppressContentEditableWarning
+      />,
+    ],
     // An app's frame may hold a text field the renderer can't see.
     // oxlint-disable-next-line react/iframe-missing-sandbox -- test stand-in with no src
     ["an app's frame", <iframe key="field" title="Note" />],
@@ -199,8 +230,17 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
       <>
         {field}
         {open ? (
-          <ConfirmDialog icon={Trash2} title="Delete 3 kept copies?" confirmLabel="Delete" intent="danger" onCancel={vi.fn()} onConfirm={onConfirm}
-            testId="confirm" cancelTestId="confirm-cancel" confirmTestId="confirm-action">
+          <ConfirmDialog
+            icon={Trash2}
+            title="Delete 3 kept copies?"
+            confirmLabel="Delete"
+            intent="danger"
+            onCancel={vi.fn()}
+            onConfirm={onConfirm}
+            testId="confirm"
+            cancelTestId="confirm-cancel"
+            confirmTestId="confirm-action"
+          >
             <p>They can't be restored.</p>
           </ConfirmDialog>
         ) : null}
@@ -214,7 +254,12 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
     const panel = screen.getByTestId("confirm").parentElement!;
     expect(document.activeElement).toBe(panel);
     // The panel it focuses is the dialog, so a screen reader reads its title.
-    expect(screen.getByRole("dialog", { name: "Delete 3 kept copies?", description: "They can't be restored." })).toBe(panel);
+    expect(
+      screen.getByRole("dialog", {
+        name: "Delete 3 kept copies?",
+        description: "They can't be restored.",
+      }),
+    ).toBe(panel);
     await user.keyboard("{Enter}");
     expect(onConfirm).not.toHaveBeenCalled();
     // From the panel, an arrow reaches the first or the last button.

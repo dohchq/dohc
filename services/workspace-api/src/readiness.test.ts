@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { CRASH_REPORT_TABLE, createReadinessProbe, REQUIRED_TABLES, type TableQuery } from "./readiness";
+import {
+  CRASH_REPORT_TABLE,
+  createReadinessProbe,
+  REQUIRED_TABLES,
+  type TableQuery,
+} from "./readiness";
 
 function answering(tables: readonly string[]): TableQuery {
   return {
@@ -17,15 +22,28 @@ describe("createReadinessProbe", () => {
   });
 
   it("is not ready until account email is configured", async () => {
-    const report = await createReadinessProbe(answering(REQUIRED_TABLES), { emailConfigured: false })();
-    expect(report).toMatchObject({ ok: false, database: "ok", detail: "Configure SMTP for account email." });
+    const report = await createReadinessProbe(answering(REQUIRED_TABLES), {
+      emailConfigured: false,
+    })();
+    expect(report).toMatchObject({
+      ok: false,
+      database: "ok",
+      detail: "Configure SMTP for account email.",
+    });
   });
 
   it("needs the crash report table only while crash reports are on", async () => {
     expect((await createReadinessProbe(answering(REQUIRED_TABLES))()).ok).toBe(true);
     const report = await createReadinessProbe(answering(REQUIRED_TABLES), { crashReports: true })();
-    expect(report).toMatchObject({ ok: false, schema: "incomplete", missingTables: [CRASH_REPORT_TABLE] });
-    const complete = await createReadinessProbe(answering([...REQUIRED_TABLES, CRASH_REPORT_TABLE]), { crashReports: true })();
+    expect(report).toMatchObject({
+      ok: false,
+      schema: "incomplete",
+      missingTables: [CRASH_REPORT_TABLE],
+    });
+    const complete = await createReadinessProbe(
+      answering([...REQUIRED_TABLES, CRASH_REPORT_TABLE]),
+      { crashReports: true },
+    )();
     expect(complete.ok).toBe(true);
   });
 
@@ -52,7 +70,10 @@ describe("createReadinessProbe", () => {
   });
 
   it("gives up on a database that never answers", async () => {
-    const report = await createReadinessProbe({ query: () => new Promise(() => {}) }, { timeoutMs: 5 })();
+    const report = await createReadinessProbe(
+      { query: () => new Promise(() => {}) },
+      { timeoutMs: 5 },
+    )();
     expect(report.database).toBe("unreachable");
     expect(report.detail).toBe("The account database is unavailable.");
   });
@@ -63,11 +84,16 @@ describe("createReadinessProbe", () => {
       const stalled = new Promise<{ rows: Array<Record<string, unknown>> }>((_resolve, fail) => {
         reject = fail;
       });
-      const query = vi.fn().mockReturnValueOnce(stalled).mockResolvedValue({ rows: REQUIRED_TABLES.map(name => ({ name })) });
+      const query = vi
+        .fn()
+        .mockReturnValueOnce(stalled)
+        .mockResolvedValue({ rows: REQUIRED_TABLES.map((name) => ({ name })) });
       const probe = createReadinessProbe({ query }, { timeoutMs: 5 });
       const first = Array.from({ length: 20 }, () => probe());
       await vi.advanceTimersByTimeAsync(5);
-      expect((await Promise.all(first)).every(report => report.database === "unreachable")).toBe(true);
+      expect((await Promise.all(first)).every((report) => report.database === "unreachable")).toBe(
+        true,
+      );
       const second = probe();
       await vi.advanceTimersByTimeAsync(5);
       expect((await second).database).toBe("unreachable");

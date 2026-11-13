@@ -28,12 +28,20 @@ export type UsageEvent =
 const USAGE_EVENTS: Readonly<Record<string, (result: unknown) => UsageEvent | null>> = {
   [CHANNELS.createLocalWorkspace]: () => ({ name: "workspace_created" }),
   [CHANNELS.openWorkspace]: () => ({ name: "workspace_opened" }),
-  [relayShareOperations.createRelayShare.channel]: () => ({ name: "share_created", method: "people" }),
-  [relayShareOperations.createRelayShareLink.channel]: () => ({ name: "share_created", method: "link" }),
+  [relayShareOperations.createRelayShare.channel]: () => ({
+    name: "share_created",
+    method: "people",
+  }),
+  [relayShareOperations.createRelayShareLink.channel]: () => ({
+    name: "share_created",
+    method: "link",
+  }),
   // Publishing asks first: only an approved publication counts.
   [CHANNELS.publishOwnerApp]: (result) => {
     const outcome = result as { kind?: unknown; local?: unknown } | null;
-    return outcome?.kind === "published" ? { name: "app_published", local: outcome.local === true } : null;
+    return outcome?.kind === "published"
+      ? { name: "app_published", local: outcome.local === true }
+      : null;
   },
   [chatOperations.sendChatMessage.channel]: () => ({ name: "chat_message_sent" }),
 };
@@ -66,15 +74,20 @@ export const REPORT_LIMITS = {
 
 // The kinds of report a notice on screen has named, each on its own. A file
 // main cannot read names none, so the notice shows again.
-const ReportingState = z.object({
-  usage: z.object({
-    // A random number for this installation, made when a notice first names
-    // usage reports. Usage reports carry it so a count of people is
-    // possible; nothing else does.
-    installId: z.string().uuid(),
-  }).strict().optional(),
-  errors: z.literal(true).optional(),
-}).strict();
+const ReportingState = z
+  .object({
+    usage: z
+      .object({
+        // A random number for this installation, made when a notice first names
+        // usage reports. Usage reports carry it so a count of people is
+        // possible; nothing else does.
+        installId: z.string().uuid(),
+      })
+      .strict()
+      .optional(),
+    errors: z.literal(true).optional(),
+  })
+  .strict();
 type ReportingState = z.infer<typeof ReportingState>;
 
 export interface Telemetry {
@@ -136,17 +149,21 @@ export function createTelemetry(deps: {
   let errorCount = 0;
   let errorsPrepared = 0;
   const errorKeys = new Set<string>();
-  const usage: Lane<{ event: string; properties: Record<string, unknown>; timestamp: string }> = lane();
+  const usage: Lane<{ event: string; properties: Record<string, unknown>; timestamp: string }> =
+    lane();
   const errors: Lane<ErrorReport> = lane();
   // PostHog's SDK, loaded when the first error report leaves.
   let errorSender: Promise<ErrorSender> | null = null;
 
   const usageOn = () => !ended && Boolean(reporting?.usage && named.usage && privacy?.usageReports);
-  const errorsOn = () => !ended && Boolean(reporting?.errors && named.errors && privacy?.errorReports);
+  const errorsOn = () =>
+    !ended && Boolean(reporting?.errors && named.errors && privacy?.errorReports);
   // Before the switches are known, reports wait; afterwards, a switch that
   // is off takes nothing in.
-  const usageMayQueue = () => !ended && Boolean(reporting?.usage) && (privacy === null || privacy.usageReports);
-  const errorsMayQueue = () => !ended && Boolean(reporting?.errors) && (privacy === null || privacy.errorReports);
+  const usageMayQueue = () =>
+    !ended && Boolean(reporting?.usage) && (privacy === null || privacy.usageReports);
+  const errorsMayQueue = () =>
+    !ended && Boolean(reporting?.errors) && (privacy === null || privacy.errorReports);
 
   function drop<Item>(target: Lane<Item>): void {
     target.queue.length = 0;
@@ -155,7 +172,12 @@ export function createTelemetry(deps: {
     target.timer = null;
   }
 
-  function schedule<Item>(target: Lane<Item>, on: () => boolean, delayMs: number, run: () => Promise<void>): void {
+  function schedule<Item>(
+    target: Lane<Item>,
+    on: () => boolean,
+    delayMs: number,
+    run: () => Promise<void>,
+  ): void {
     if (quitting || !on() || target.timer || target.queue.length === 0) return;
     target.timer = setTimeout(() => {
       target.timer = null;
@@ -167,7 +189,11 @@ export function createTelemetry(deps: {
   // One loop sends a lane's reports while it may, and a second caller joins
   // it. The loop clears itself in the step that ends it, so nobody joins a
   // loop that has stopped. A rate limit drops what waits.
-  function drain<Item>(target: Lane<Item>, on: () => boolean, sendNext: () => Promise<void>): Promise<void> {
+  function drain<Item>(
+    target: Lane<Item>,
+    on: () => boolean,
+    sendNext: () => Promise<void>,
+  ): Promise<void> {
     const ready = () => on() && target.queue.length > 0 && now() >= target.pausedUntilMs;
     const dropIfPaused = () => {
       if (now() < target.pausedUntilMs) target.queue.length = 0;
@@ -175,7 +201,8 @@ export function createTelemetry(deps: {
     if (!target.draining && ready()) {
       target.draining = (async () => {
         try {
-          do await sendNext(); while (ready());
+          do await sendNext();
+          while (ready());
         } finally {
           target.draining = null;
           dropIfPaused();
@@ -186,11 +213,16 @@ export function createTelemetry(deps: {
     return target.draining ?? Promise.resolve();
   }
 
-  async function post(target: Lane<unknown>, request: (signal: AbortSignal) => Promise<Response | undefined>): Promise<void> {
+  async function post(
+    target: Lane<unknown>,
+    request: (signal: AbortSignal) => Promise<Response | undefined>,
+  ): Promise<void> {
     const controller = new AbortController();
     target.sending = controller;
     try {
-      const response = await request(AbortSignal.any([controller.signal, AbortSignal.timeout(REPORT_LIMITS.requestTimeoutMs)]));
+      const response = await request(
+        AbortSignal.any([controller.signal, AbortSignal.timeout(REPORT_LIMITS.requestTimeoutMs)]),
+      );
       const pauseMs = response ? rateLimitMs(response) : 0;
       if (pauseMs > 0) target.pausedUntilMs = now() + pauseMs;
     } catch {
@@ -200,33 +232,40 @@ export function createTelemetry(deps: {
     }
   }
 
-  const sendUsage = () => drain(usage, usageOn, async () => {
-    const batch = usage.queue.splice(0, REPORT_LIMITS.usageBatch);
-    const service = reporting?.usage;
-    if (!service || !named.usage) return;
-    const distinctId = named.usage.installId;
-    await post(usage, (signal) => send(service.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        api_key: service.key,
-        batch: batch.map((item) => ({ ...item, distinct_id: distinctId })),
-      }),
-      redirect: "error",
-      signal,
-    }));
-  });
-
-  const sendErrors = () => drain(errors, errorsOn, async () => {
-    const service = reporting?.errors;
-    const report = errors.queue.shift();
-    if (!service || !report) return;
-    await post(errors, async (signal) => {
-      errorSender ??= import("./posthogErrors").then(({ createErrorSender }) =>
-        createErrorSender({ service, fetch: send, readCode: deps.readCode }));
-      return await (await errorSender)(report, signal);
+  const sendUsage = () =>
+    drain(usage, usageOn, async () => {
+      const batch = usage.queue.splice(0, REPORT_LIMITS.usageBatch);
+      const service = reporting?.usage;
+      if (!service || !named.usage) return;
+      const distinctId = named.usage.installId;
+      await post(usage, (signal) =>
+        send(service.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            api_key: service.key,
+            batch: batch.map((item) => ({ ...item, distinct_id: distinctId })),
+          }),
+          redirect: "error",
+          signal,
+        }),
+      );
     });
-  });
+
+  const sendErrors = () =>
+    drain(errors, errorsOn, async () => {
+      const service = reporting?.errors;
+      const report = errors.queue.shift();
+      if (!service || !report) return;
+      await post(errors, async (signal) => {
+        errorSender ??= import("./posthogErrors").then(({ createErrorSender }) =>
+          createErrorSender({ service, fetch: send, readCode: deps.readCode }),
+        );
+        return await (
+          await errorSender
+        )(report, signal);
+      });
+    });
 
   return {
     available: { usage: Boolean(reporting?.usage), errors: Boolean(reporting?.errors) },
@@ -259,7 +298,11 @@ export function createTelemetry(deps: {
     reportError(reported) {
       try {
         if (!reporting || !errorsMayQueue() || errorCount >= REPORT_LIMITS.errorsPerLaunch) return;
-        if (errors.queue.length >= REPORT_LIMITS.errorQueue || errorsPrepared >= REPORT_LIMITS.errorsPrepared) return;
+        if (
+          errors.queue.length >= REPORT_LIMITS.errorQueue ||
+          errorsPrepared >= REPORT_LIMITS.errorsPrepared
+        )
+          return;
         errorsPrepared += 1;
         const { report, key } = errorReport(reported, deps.facts(), reporting.dist, deps.locate);
         if (errorKeys.has(key)) return;
@@ -347,7 +390,9 @@ function readState(path: string): ReportingState {
 
 function writeState(path: string, state: ReportingState): void {
   mkdirSync(dirname(path), { recursive: true });
-  atomicReplaceFileSync(path, (temporary) => writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 }));
+  atomicReplaceFileSync(path, (temporary) =>
+    writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 }),
+  );
 }
 
 /**
@@ -357,7 +402,10 @@ function writeState(path: string, state: ReportingState): void {
 export function rateLimitMs(response: Pick<Response, "status" | "headers">): number {
   if (response.status !== 429) return 0;
   const retryAfter = Number(response.headers.get("retry-after"));
-  const seconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : REPORT_LIMITS.defaultPauseMs / 1000;
+  const seconds =
+    Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter
+      : REPORT_LIMITS.defaultPauseMs / 1000;
   return Math.min(seconds * 1000, REPORT_LIMITS.maxPauseMs);
 }
 

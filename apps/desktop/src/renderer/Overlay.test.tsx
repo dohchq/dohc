@@ -42,9 +42,7 @@ describe("Overlay", () => {
       </Overlay>,
     );
 
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Close dialog" }),
-    );
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close dialog" }));
   });
 
   it("closes on Escape", () => {
@@ -170,9 +168,16 @@ describe("Overlay", () => {
       const [open, setOpen] = useState(true);
       const [menuOpen, setMenuOpen] = useState(false);
       return open ? (
-        <Overlay onClose={() => setOpen(false)} panelProps={{ role: "dialog", "aria-label": "Actions" }}>
-          <Menu label="Row actions" open={menuOpen} onOpenChange={setMenuOpen}
-            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]} />
+        <Overlay
+          onClose={() => setOpen(false)}
+          panelProps={{ role: "dialog", "aria-label": "Actions" }}
+        >
+          <Menu
+            label="Row actions"
+            open={menuOpen}
+            onOpenChange={setMenuOpen}
+            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]}
+          />
         </Overlay>
       ) : null;
     }
@@ -198,8 +203,12 @@ describe("Overlay", () => {
       const [menuOpen, setMenuOpen] = useState(false);
       return (
         <Overlay onClose={onClose}>
-          <Menu label="Row actions" open={menuOpen} onOpenChange={setMenuOpen}
-            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]} />
+          <Menu
+            label="Row actions"
+            open={menuOpen}
+            onOpenChange={setMenuOpen}
+            items={[{ id: "rename", label: "Rename", onSelect: vi.fn() }]}
+          />
         </Overlay>
       );
     }
@@ -232,7 +241,11 @@ describe("Overlay", () => {
     return (
       <Overlay onClose={props.onCloseOuter}>
         <button type="button">Outer</button>
-        {props.inner ? <Overlay onClose={props.inner.onClose}><button type="button">Inner</button></Overlay> : null}
+        {props.inner ? (
+          <Overlay onClose={props.inner.onClose}>
+            <button type="button">Inner</button>
+          </Overlay>
+        ) : null}
       </Overlay>
     );
   }
@@ -442,14 +455,26 @@ describe("Overlay with toasts above it", () => {
 
 function FocusDialog({ removeOpener = false }: { removeOpener?: boolean }) {
   const [open, setOpen] = useState(false);
-  return <section data-focus-surface="test" tabIndex={-1} data-testid="surface">
-    {(!removeOpener || !open) && <button onClick={() => setOpen(true)}>Open dialog</button>}
-    {open && <Overlay onClose={() => setOpen(false)}><button autoFocus onClick={() => setOpen(false)}>Done</button></Overlay>}
-  </section>;
+  return (
+    <section data-focus-surface="test" tabIndex={-1} data-testid="surface">
+      {(!removeOpener || !open) && <button onClick={() => setOpen(true)}>Open dialog</button>}
+      {open && (
+        <Overlay onClose={() => setOpen(false)}>
+          <button autoFocus onClick={() => setOpen(false)}>
+            Done
+          </button>
+        </Overlay>
+      )}
+    </section>
+  );
 }
 
 it.each(["Escape", "Done", "backdrop"])("returns dialog focus after %s", async (action) => {
-  render(<StrictMode><FocusDialog /></StrictMode>);
+  render(
+    <StrictMode>
+      <FocusDialog />
+    </StrictMode>,
+  );
   const opener = screen.getByText("Open dialog");
   opener.focus();
   fireEvent.click(opener);
@@ -482,12 +507,21 @@ it("returns nested dialogs to their own opener, then the outer opener", async ()
   function Nested() {
     const [outer, setOuter] = useState(false);
     const [inner, setInner] = useState(false);
-    return <><button onClick={() => setOuter(true)}>Outer opener</button>
-      {outer && <Overlay onClose={() => setOuter(false)}>
-        <button onClick={() => setInner(true)}>Inner opener</button>
-        {inner && <Overlay onClose={() => setInner(false)}><button autoFocus>Inner content</button></Overlay>}
-      </Overlay>}
-    </>;
+    return (
+      <>
+        <button onClick={() => setOuter(true)}>Outer opener</button>
+        {outer && (
+          <Overlay onClose={() => setOuter(false)}>
+            <button onClick={() => setInner(true)}>Inner opener</button>
+            {inner && (
+              <Overlay onClose={() => setInner(false)}>
+                <button autoFocus>Inner content</button>
+              </Overlay>
+            )}
+          </Overlay>
+        )}
+      </>
+    );
   }
   render(<Nested />);
   const outer = screen.getByText("Outer opener");

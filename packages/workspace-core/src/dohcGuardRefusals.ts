@@ -57,20 +57,14 @@ function squatterNoun(stats: SquattedPathStats): string {
 }
 
 // Something that is not a real folder sits at a path dohc must own.
-export function notARealFolderRefusal(
-  guard: DohcPathGuard,
-  stats: SquattedPathStats,
-): string {
+export function notARealFolderRefusal(guard: DohcPathGuard, stats: SquattedPathStats): string {
   const noun = squatterNoun(stats);
   const article = noun === "item" ? "An" : "A";
   return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a real folder. Remove or rename that ${noun}. Then retry.`;
 }
 
 // Something that is not a plain file sits at a path dohc writes as a file.
-export function notAFileRefusal(
-  guard: DohcPathGuard,
-  stats: SquattedPathStats,
-): string {
+export function notAFileRefusal(guard: DohcPathGuard, stats: SquattedPathStats): string {
   const noun = squatterNoun(stats);
   const article = noun === "item" ? "An" : "A";
   return `${guard.lead} ${article} ${noun} is at ${guard.path}, which must be a file. Remove or rename that ${noun}. Then retry.`;

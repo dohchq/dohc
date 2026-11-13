@@ -26,9 +26,7 @@ import {
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import { INSECURE_LOOPBACK_RELAY_TEST_ENV } from "./cloudConfiguration";
-import {
-  refreshStandaloneShareThroughOwnerForTest,
-} from "../testing/shareViewFilesMountHarness";
+import { refreshStandaloneShareThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 
 // Every test in this file pulls with the selector its share record pins. The
 // damaged-record path has its own tests in sharedView.test.ts. This is a real
@@ -46,9 +44,7 @@ import { readLocalStateFrom } from "./workspaceLocalState";
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
 
-  constructor(
-    private readonly override?: (request: Request) => JsonValue | undefined,
-  ) {}
+  constructor(private readonly override?: (request: Request) => JsonValue | undefined) {}
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
@@ -70,8 +66,10 @@ class MockDaemon implements EngineDaemonClient {
           return { closed: true };
         case "sync.push":
           return {
-            status: "complete", refused: 0,
-            pushed: 3, ownerAdmissionPending: [],
+            status: "complete",
+            refused: 0,
+            pushed: 3,
+            ownerAdmissionPending: [],
             fetched: 0,
             applied: 0,
             skipped: 0,
@@ -80,14 +78,17 @@ class MockDaemon implements EngineDaemonClient {
             nextCursor: null,
             pendingCursor: null,
             changedPaths: [],
-            sharingDeclined: [], refusals: [],
+            sharingDeclined: [],
+            refusals: [],
           };
         case "sync.fetchPull":
           return { pageToken: "page-token" };
         case "sync.applyPull":
           return {
-            status: "complete", refused: 0,
-            pushed: 0, ownerAdmissionPending: [],
+            status: "complete",
+            refused: 0,
+            pushed: 0,
+            ownerAdmissionPending: [],
             fetched: 4,
             applied: 2,
             skipped: 2,
@@ -109,7 +110,8 @@ class MockDaemon implements EngineDaemonClient {
                 contentKind: "secret",
               },
             ],
-            sharingDeclined: [], refusals: [],
+            sharingDeclined: [],
+            refusals: [],
           };
         case "sync.commitCursor":
           return { committed: true, sharingDeclined: [] };
@@ -195,10 +197,7 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
   const routes = new RelayTransportRouteGuard();
-  const source = new RelayConfiguredDaemonClientSource(
-    { currentClient: () => daemon },
-    routes,
-  );
+  const source = new RelayConfiguredDaemonClientSource({ currentClient: () => daemon }, routes);
   const sessions = new EngineWorkspaceSessions(source, {
     transportRebindAttempts: 1,
   });
@@ -236,14 +235,25 @@ describe("EngineRelayClient", () => {
     let held = false;
     let pages = 0;
     const events: string[] = [];
-    const daemon = new MockDaemon(request => {
+    const daemon = new MockDaemon((request) => {
       if (request.method === "sync.applyPull") {
         expect(held).toBe(true);
         events.push("apply");
         pages += 1;
-        return {status: "complete", refused: 0, fetched: 1, applied: 1, skipped: 0,
-          conflictsOpened: 0, hasMore: pages === 1, nextCursor: pages,
-          pendingCursor: {kind: "relay", token: `cursor-${pages}`}, sharingDeclined: [], refusals: [], changedPaths: []};
+        return {
+          status: "complete",
+          refused: 0,
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          conflictsOpened: 0,
+          hasMore: pages === 1,
+          nextCursor: pages,
+          pendingCursor: { kind: "relay", token: `cursor-${pages}` },
+          sharingDeclined: [],
+          refusals: [],
+          changedPaths: [],
+        };
       }
       if (request.method === "sync.commitCursor") {
         expect(held).toBe(true);
@@ -252,7 +262,7 @@ describe("EngineRelayClient", () => {
       return undefined;
     });
     const send = daemon.sendRequest.bind(daemon);
-    vi.spyOn(daemon, "sendRequest").mockImplementation(async request => {
+    vi.spyOn(daemon, "sendRequest").mockImplementation(async (request) => {
       if (request.method === "sync.fetchPull") {
         expect(held).toBe(false);
         events.push("fetch");
@@ -261,19 +271,33 @@ describe("EngineRelayClient", () => {
       }
       return send(request);
     });
-    const {client, sessions} = await harness(daemon);
-    const pulling = client.pull(async apply => {
+    const { client, sessions } = await harness(daemon);
+    const pulling = client.pull(async (apply) => {
       held = true;
       try {
-        return await apply(async () => { expect(held).toBe(true); events.push("project"); });
-      } finally { held = false; }
+        return await apply(async () => {
+          expect(held).toBe(true);
+          events.push("project");
+        });
+      } finally {
+        held = false;
+      }
     });
     await entered.promise;
     expect(held).toBe(false);
     expect(events).toEqual(["fetch"]);
     release.resolve();
     await pulling;
-    expect(events).toEqual(["fetch", "apply", "project", "commit", "fetch", "apply", "project", "commit"]);
+    expect(events).toEqual([
+      "fetch",
+      "apply",
+      "project",
+      "commit",
+      "fetch",
+      "apply",
+      "project",
+      "commit",
+    ]);
     await sessions.closeAll();
   });
 
@@ -282,19 +306,23 @@ describe("EngineRelayClient", () => {
     let pending = true;
     const daemon = new MockDaemon((request) => {
       const params = request.params;
-      const accountId = params !== null && typeof params === "object" && !Array.isArray(params)
-        ? params.accountId : undefined;
+      const accountId =
+        params !== null && typeof params === "object" && !Array.isArray(params)
+          ? params.accountId
+          : undefined;
       if (request.method === "sync.resetClaimRefusal") {
         if (accountId !== refusalAccount) refusalAccount = null;
       }
       if (request.method === "sync.push" && refusalAccount !== null) {
         throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "relay-claim-refused", retry: "no" }, new Error("refused"),
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-claim-refused", retry: "no" },
+          new Error("refused"),
         );
       }
       if (request.method === "sync.push" && pending) {
         throw new DaemonRefusalError(
-          { code: "IDENTITY_REQUIRED", message: "relay-identity-required", retry: "no" }, new Error("pending"),
+          { code: "IDENTITY_REQUIRED", message: "relay-identity-required", retry: "no" },
+          new Error("pending"),
         );
       }
       if (request.method === "sync.claim") {
@@ -302,27 +330,40 @@ describe("EngineRelayClient", () => {
         else {
           refusalAccount = "account-a";
           throw new DaemonRefusalError(
-            { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" }, new Error("refused"),
+            { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" },
+            new Error("refused"),
           );
         }
       }
       return undefined;
     });
     const h = await harness(daemon);
-    const binding = { workspaceId: "workspace-a", rootPath: h.rootPath, relay: h.relay, accountId: "account-a" };
+    const binding = {
+      workspaceId: "workspace-a",
+      rootPath: h.rootPath,
+      relay: h.relay,
+      accountId: "account-a",
+    };
     const first = h.live.bind(binding);
     await expect(first.claim()).rejects.toBeInstanceOf(RelayClaimRefusedError);
     await h.live.closeWorkspace("workspace-a");
-    const sameAccount = h.live.bind({ ...binding, relay: { ...h.relay, token: "refreshed-token" } });
+    const sameAccount = h.live.bind({
+      ...binding,
+      relay: { ...h.relay, token: "refreshed-token" },
+    });
     await expect(sameAccount.push()).rejects.toBeInstanceOf(RelayClaimRefusedError);
     await h.live.closeWorkspace("workspace-a");
     await h.live.closeAll({ accountChanged: true });
     expect(refusalAccount).toBe("account-a");
-    const next = h.live.bind({ ...binding, accountId: "account-b", relay: { ...h.relay, token: "account-b-token" } });
+    const next = h.live.bind({
+      ...binding,
+      accountId: "account-b",
+      relay: { ...h.relay, token: "account-b-token" },
+    });
     await expect(next.push()).rejects.toBeInstanceOf(RelayIdentityMissingError);
     await next.claim();
     await expect(next.push()).resolves.toBeDefined();
-    expect(daemon.requests.filter(request => request.method === "sync.claim")).toHaveLength(2);
+    expect(daemon.requests.filter((request) => request.method === "sync.claim")).toHaveLength(2);
     await h.live.closeAll();
   });
 
@@ -333,8 +374,10 @@ describe("EngineRelayClient", () => {
       if (request.method === "sync.applyPull") {
         const page = committedPages + 1;
         return {
-          status: "complete", refused: 0,
-          pushed: 0, ownerAdmissionPending: [],
+          status: "complete",
+          refused: 0,
+          pushed: 0,
+          ownerAdmissionPending: [],
           fetched: 1,
           applied: 1,
           skipped: 0,
@@ -350,19 +393,18 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          sharingDeclined: [], refusals: [],
+          sharingDeclined: [],
+          refusals: [],
         };
       }
       if (request.method === "sync.commitCursor") {
         const cursor = (
           request.params as unknown as {
-          pendingCursor: { token?: string };
+            pendingCursor: { token?: string };
           }
         ).pendingCursor;
         expect(cursor.token).toBe(`cursor-${committedPages + 1}`);
-        expect(materializedPaths.at(-1)).toBe(
-          `notes/page-${committedPages + 1}.md`,
-        );
+        expect(materializedPaths.at(-1)).toBe(`notes/page-${committedPages + 1}.md`);
         committedPages += 1;
         return { committed: true, sharingDeclined: [] };
       }
@@ -370,16 +412,14 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
     let failSecondPage = true;
-    const materializePage = vi.fn(
-      async (paths: readonly { path: string }[]): Promise<void> => {
-        const path = paths[0]?.path;
-        if (path === "notes/page-2.md" && failSecondPage) {
-          failSecondPage = false;
-          throw new Error("disk unavailable");
-        }
-        if (path) materializedPaths.push(path);
-      },
-    );
+    const materializePage = vi.fn(async (paths: readonly { path: string }[]): Promise<void> => {
+      const path = paths[0]?.path;
+      if (path === "notes/page-2.md" && failSecondPage) {
+        failSecondPage = false;
+        throw new Error("disk unavailable");
+      }
+      if (path) materializedPaths.push(path);
+    });
 
     await expect(client.pull(async (apply) => apply(materializePage))).rejects.toThrow(
       "disk unavailable",
@@ -474,8 +514,7 @@ describe("EngineRelayClient", () => {
             originSeq: 4,
             opKind: "moment.append",
             code: "share-boundary-violation",
-            detail:
-              "the share granted version main, the relay offered version version-other",
+            detail: "the share granted version main, the relay offered version version-other",
           },
         ],
         hasMore: true,
@@ -500,9 +539,7 @@ describe("EngineRelayClient", () => {
     expect(
       recorded,
       "recording after the commit loses the reason while the cursor stays past the op",
-    ).toEqual([
-      "the share granted version main, the relay offered version version-other",
-    ]);
+    ).toEqual(["the share granted version main, the relay offered version version-other"]);
     await sessions.closeAll();
   });
 
@@ -557,8 +594,7 @@ describe("EngineRelayClient", () => {
       }
       return undefined;
     });
-    const { rootPath, attachmentId, sessions, client, relay } =
-      await harness(daemon);
+    const { rootPath, attachmentId, sessions, client, relay } = await harness(daemon);
     const store = createCaptureLiveStores(
       { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
@@ -593,12 +629,8 @@ describe("EngineRelayClient", () => {
       refusedDetail: null,
     });
 
-    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(
-      body,
-    );
-    expect(daemon.requests.map((request) => request.method)).toContain(
-      "versionedText.read",
-    );
+    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
+    expect(daemon.requests.map((request) => request.method)).toContain("versionedText.read");
     await sessions.closeAll();
   });
 
@@ -611,19 +643,13 @@ describe("EngineRelayClient", () => {
     const first = new MockDaemon((request) => {
       if (request.method === "sync.push") {
         current = second;
-        throw new EngineClientError(
-          "transport-error",
-          "injected daemon restart",
-        );
+        throw new EngineClientError("transport-error", "injected daemon restart");
       }
       return undefined;
     });
     current = first;
     const sessions = new EngineWorkspaceSessions(
-      new RelayConfiguredDaemonClientSource(
-        { currentClient: () => current },
-        routes,
-      ),
+      new RelayConfiguredDaemonClientSource({ currentClient: () => current }, routes),
       {
         transportRebindAttempts: 2,
         sleep: async () => undefined,
@@ -721,9 +747,7 @@ describe("EngineRelayClient", () => {
     });
     await refreshed.push();
 
-    const opens = daemon.requests.filter(
-      (request) => request.method === "workspace.open",
-    );
+    const opens = daemon.requests.filter((request) => request.method === "workspace.open");
     expect(opens).toHaveLength(2);
     expect(opens.map((request) => request.params)).toEqual([
       expect.objectContaining({
@@ -747,8 +771,10 @@ describe("EngineRelayClient", () => {
         workspacePulls += 1;
         const first = workspacePulls === 1;
         return {
-          status: "complete", refused: 0,
-          pushed: 0, ownerAdmissionPending: [],
+          status: "complete",
+          refused: 0,
+          pushed: 0,
+          ownerAdmissionPending: [],
           fetched: first ? 2 : 3,
           hasMore: first,
           applied: first ? 1 : 2,
@@ -767,7 +793,8 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          sharingDeclined: [], refusals: [],
+          sharingDeclined: [],
+          refusals: [],
         };
       }
       if (request.method === "share.channel.pull") {
@@ -821,14 +848,9 @@ describe("EngineRelayClient", () => {
         expect.objectContaining({ path: "second.md" }),
       ],
     });
+    expect(workspacePulls, "stopping after the first hasMore page strands remote data").toBe(2);
     expect(
-      workspacePulls,
-      "stopping after the first hasMore page strands remote data",
-    ).toBe(2);
-    expect(
-      daemon.requests.filter(
-        (request) => request.method === "sync.commitCursor",
-      ),
+      daemon.requests.filter((request) => request.method === "sync.commitCursor"),
     ).toHaveLength(2);
 
     await expect(
@@ -897,7 +919,6 @@ describe("EngineRelayClient", () => {
     });
     await live.closeWorkspace("workspace-switch");
   });
-
 });
 
 describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
@@ -919,7 +940,7 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
     const source = new RelayConfiguredDaemonClientSource(
       { currentClient: () => inner },
       new RelayTransportRouteGuard(),
-      workspaceId => workspaceId === "ws",
+      (workspaceId) => workspaceId === "ws",
     );
     expect(await openParams(source, inner)).toMatchObject({ abandonOrdinaryPull: true });
     const temporaryOpens: Record<string, JsonValue>[] = [
@@ -935,10 +956,22 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
   it("keeps one while ordinary sync is configured or the open carries a relay", async () => {
     const inner = new MockDaemon();
     const routes = new RelayTransportRouteGuard();
-    const synced = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => false);
+    const synced = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      routes,
+      () => false,
+    );
     expect(await openParams(synced, inner)).not.toHaveProperty("abandonOrdinaryPull");
-    routes.bind({ workspaceId: "ws", rootPath: "/no-such-root", relay: { baseUrl: "https://relay.test", token: "token" } });
-    const routed = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => true);
+    routes.bind({
+      workspaceId: "ws",
+      rootPath: "/no-such-root",
+      relay: { baseUrl: "https://relay.test", token: "token" },
+    });
+    const routed = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      routes,
+      () => true,
+    );
     const params = await openParams(routed, inner);
     expect(params).toHaveProperty("relay");
     expect(params).not.toHaveProperty("abandonOrdinaryPull");
@@ -953,35 +986,21 @@ describe("allowInsecureLoopbackRelayForTests", () => {
   });
 
   it("refuses non-loopback http hosts even with the flag set", () => {
-    expect(
-      allowInsecureLoopbackRelayForTests("http://relay.example.com", enabled),
-    ).toBe(false);
-    expect(
-      allowInsecureLoopbackRelayForTests(
-        "http://localhost.evil.test:8787",
-        enabled,
-      ),
-    ).toBe(false);
-    expect(
-      allowInsecureLoopbackRelayForTests("http://192.168.1.10:8787", enabled),
-    ).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("http://relay.example.com", enabled)).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("http://localhost.evil.test:8787", enabled)).toBe(
+      false,
+    );
+    expect(allowInsecureLoopbackRelayForTests("http://192.168.1.10:8787", enabled)).toBe(false);
   });
 
   it("stays off without the exact flag, for https, and for junk URLs", () => {
-    expect(
-      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {}),
-    ).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {})).toBe(false);
     expect(
       allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {
         [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "true",
       }),
     ).toBe(false);
-    expect(
-      allowInsecureLoopbackRelayForTests("https://relay.test", enabled),
-    ).toBe(false);
-    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(
-      false,
-    );
+    expect(allowInsecureLoopbackRelayForTests("https://relay.test", enabled)).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
   });
-
 });

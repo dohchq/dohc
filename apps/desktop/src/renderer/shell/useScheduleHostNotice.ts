@@ -6,13 +6,19 @@ import type { useShellError } from "./useShellError";
 type Shell = ReturnType<typeof useShellError>;
 
 /** The Notices row for where a workspace that never synced runs its schedules, or null for none. */
-export function scheduleHostNoticeText(state: ScheduleHostResult): { message: string; failed: boolean; cause?: string } | null {
-  if (state.kind === "no-computer") return { message: state.message, failed: true, ...(state.cause ? { cause: state.cause } : {}) };
+export function scheduleHostNoticeText(
+  state: ScheduleHostResult,
+): { message: string; failed: boolean; cause?: string } | null {
+  if (state.kind === "no-computer")
+    return { message: state.message, failed: true, ...(state.cause ? { cause: state.cause } : {}) };
   if (state.kind !== "another-computer" || !state.waits) return null;
   const where = state.sameName
     ? `This workspace's schedules and Group messages run on ${state.label}, which has this computer's name. It may be an earlier installation of dohc here.`
     : `This workspace's schedules and Group messages run on ${state.label}, not this computer.`;
-  return { message: `${where} If you take over while ${state.label} is on, a run can repeat.`, failed: false };
+  return {
+    message: `${where} If you take over while ${state.label} is on, a run can repeat.`,
+    failed: false,
+  };
 }
 
 /**
@@ -43,13 +49,28 @@ export function useScheduleHostNotice(input: {
     };
     const read = () => {
       const request = ++latest;
-      return bridge().readScheduleHost({ workspaceId, localOnly: true }).then((state) => answer(request, state), () => undefined);
+      return bridge()
+        .readScheduleHost({ workspaceId, localOnly: true })
+        .then(
+          (state) => answer(request, state),
+          () => undefined,
+        );
     };
     const takeOver = () => {
       const request = ++latest;
-      bridge().takeOverScheduleHost({ workspaceId, generation: 0 }).then((state) => answer(request, state), (cause: unknown) => {
-        if (isCurrent()) report({ message: "dohc could not take over this workspace's schedules.", cause, retry: takeOver });
-      });
+      bridge()
+        .takeOverScheduleHost({ workspaceId, generation: 0 })
+        .then(
+          (state) => answer(request, state),
+          (cause: unknown) => {
+            if (isCurrent())
+              report({
+                message: "dohc could not take over this workspace's schedules.",
+                cause,
+                retry: takeOver,
+              });
+          },
+        );
     };
     void read();
     const unsubscribe = bridge().onScheduleHostChanged((changed) => {

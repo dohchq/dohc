@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RelayAutomationPress, RelayButtonInspectionRequest } from "@dohc/workspace-contracts/relay";
+import type {
+  RelayAutomationPress,
+  RelayButtonInspectionRequest,
+} from "@dohc/workspace-contracts/relay";
 import type { CollectionAutomationPress } from "@dohc/automation-executor/collection-automations";
 import {
   createRelayedPressHost,
@@ -9,7 +12,12 @@ import {
   type RelayedPressHost,
 } from "@dohc/automation-executor/relayed-presses";
 import { automationPressRelay, relayPressTransport } from "./relayedPresses";
-import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_FAILED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
+import {
+  AutomationRunWait,
+  SHARED_BUTTON_DENIED,
+  SHARED_BUTTON_FAILED,
+  SHARED_BUTTON_UNCHECKED,
+} from "@dohc/automation-executor/button-presser";
 
 // The host's side of shared-view presses against a fake relay and a fake
 // host module: it runs only while the host module says so, accepts and presses
@@ -18,88 +26,204 @@ import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_FAILED, SHARED_B
 
 const WORKSPACE = "ws-1";
 const HASH = "0123456789abcdef";
-it.each(["pending", "accepted", "settled"])("starts Notices only for a settled relayed press receipt (%s)", async state => {
-  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "recipient-session",
-    fetch: async () => Response.json({ ok: true, pressId: "press", state, outcome: state === "settled" ? "failed" : null, createdAtMs: 1 }) });
-  const sync = vi.fn(async (_current: () => boolean) => {}); const isCurrent = () => true;
-  await routes.press("share", { pressId: "press", automationId: "finish", collectionPath: "Tasks", definitionHash: HASH, recordId: "task", confirmed: [] }, { sync, isCurrent });
-  expect(sync).toHaveBeenCalledTimes(state === "settled" ? 1 : 0);
-  if (state === "settled") expect(sync).toHaveBeenCalledWith(isCurrent);
-});
+it.each(["pending", "accepted", "settled"])(
+  "starts Notices only for a settled relayed press receipt (%s)",
+  async (state) => {
+    const routes = automationPressRelay({
+      baseUrl: "https://relay.test",
+      token: "recipient-session",
+      fetch: async () =>
+        Response.json({
+          ok: true,
+          pressId: "press",
+          state,
+          outcome: state === "settled" ? "failed" : null,
+          createdAtMs: 1,
+        }),
+    });
+    const sync = vi.fn(async (_current: () => boolean) => {});
+    const isCurrent = () => true;
+    await routes.press(
+      "share",
+      {
+        pressId: "press",
+        automationId: "finish",
+        collectionPath: "Tasks",
+        definitionHash: HASH,
+        recordId: "task",
+        confirmed: [],
+      },
+      { sync, isCurrent },
+    );
+    expect(sync).toHaveBeenCalledTimes(state === "settled" ? 1 : 0);
+    if (state === "settled") expect(sync).toHaveBeenCalledWith(isCurrent);
+  },
+);
 it("drops a late relayed press receipt after switching away", async () => {
-  let finish!: (response: Response) => void; let started!: () => void;
-  const ready = new Promise<void>(resolve => { started = resolve; });
-  const response = new Promise<Response>(resolve => { finish = resolve; });
-  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "recipient-session",
-    fetch: () => { started(); return response; } });
-  let current = true; const sync = vi.fn(async (_current: () => boolean) => {});
-  const pressing = routes.press("share", { pressId: "press", automationId: "finish", collectionPath: "Tasks", definitionHash: HASH, recordId: "task", confirmed: [] }, { sync, isCurrent: () => current });
-  await ready; current = false;
-  finish(Response.json({ ok: true, pressId: "press", state: "settled", outcome: "failed", createdAtMs: 1 }));
-  await pressing; expect(sync).not.toHaveBeenCalled();
+  let finish!: (response: Response) => void;
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const response = new Promise<Response>((resolve) => {
+    finish = resolve;
+  });
+  const routes = automationPressRelay({
+    baseUrl: "https://relay.test",
+    token: "recipient-session",
+    fetch: () => {
+      started();
+      return response;
+    },
+  });
+  let current = true;
+  const sync = vi.fn(async (_current: () => boolean) => {});
+  const pressing = routes.press(
+    "share",
+    {
+      pressId: "press",
+      automationId: "finish",
+      collectionPath: "Tasks",
+      definitionHash: HASH,
+      recordId: "task",
+      confirmed: [],
+    },
+    { sync, isCurrent: () => current },
+  );
+  await ready;
+  current = false;
+  finish(
+    Response.json({
+      ok: true,
+      pressId: "press",
+      state: "settled",
+      outcome: "failed",
+      createdAtMs: 1,
+    }),
+  );
+  await pressing;
+  expect(sync).not.toHaveBeenCalled();
 });
-it.each([404, 409, 503])("keeps host authority status %s truthful", async status => {
-  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "owner-session",
-    fetch: async () => Response.json({ code: status === 404 ? "not_found" : "conflict" }, { status }) });
+it.each([404, 409, 503])("keeps host authority status %s truthful", async (status) => {
+  const routes = automationPressRelay({
+    baseUrl: "https://relay.test",
+    token: "owner-session",
+    fetch: async () =>
+      Response.json({ code: status === 404 ? "not_found" : "conflict" }, { status }),
+  });
   const result = routes.authority(WORKSPACE, "host", 1, "stored-press");
   if (status === 404) await expect(result).rejects.toThrow(SHARED_BUTTON_DENIED);
   else await expect(result).rejects.toBeInstanceOf(AutomationRunWait);
 });
 it("keeps malformed relay inspection and authority responses unchecked", async () => {
-  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "owner-session",
-    fetch: async () => Response.json({ ok: true }) });
-  expect(await routes.inspect("share", [{ automationId: "collection:source#send", collectionPath: "Source", definitionHash: HASH }]))
-    .toEqual([{ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }]);
-  await expect(routes.authority(WORKSPACE, "host", 1, "stored-press")).rejects.toBeInstanceOf(AutomationRunWait);
+  const routes = automationPressRelay({
+    baseUrl: "https://relay.test",
+    token: "owner-session",
+    fetch: async () => Response.json({ ok: true }),
+  });
+  expect(
+    await routes.inspect("share", [
+      { automationId: "collection:source#send", collectionPath: "Source", definitionHash: HASH },
+    ]),
+  ).toEqual([{ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }]);
+  await expect(routes.authority(WORKSPACE, "host", 1, "stored-press")).rejects.toBeInstanceOf(
+    AutomationRunWait,
+  );
 });
 it("keeps the host's public denial reason on the recipient", async () => {
-  const inspection = { kind: "denied" as const, reason: "This Collection moved. Its files will update here soon." };
-  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "recipient-session",
-    fetch: async () => Response.json({ inspections: [inspection] }) });
-  expect(await routes.inspect("share", [{ automationId: "send", collectionPath: "Source", definitionHash: HASH }])).toEqual([inspection]);
+  const inspection = {
+    kind: "denied" as const,
+    reason: "This Collection moved. Its files will update here soon.",
+  };
+  const routes = automationPressRelay({
+    baseUrl: "https://relay.test",
+    token: "recipient-session",
+    fetch: async () => Response.json({ inspections: [inspection] }),
+  });
+  expect(
+    await routes.inspect("share", [
+      { automationId: "send", collectionPath: "Source", definitionHash: HASH },
+    ]),
+  ).toEqual([inspection]);
 });
 const press = (id: string, state: "pending" | "accepted" = "pending"): RelayAutomationPress => ({
-  hostPressId: id, definitionHash: HASH, state, automationId: "collection:Invoices#paid", collectionPath: "Invoices", recordId: "rec-12", pressedBy: "user-ana", createdAtMs: 1, confirmed: [],
+  hostPressId: id,
+  definitionHash: HASH,
+  state,
+  automationId: "collection:Invoices#paid",
+  collectionPath: "Invoices",
+  recordId: "rec-12",
+  pressedBy: "user-ana",
+  createdAtMs: 1,
+  confirmed: [],
 });
 
-function fakeRelay(options: { lists?: RelayAutomationPress[][]; accept?: (ids: string[]) => string[]; failSettles?: number; inspections?: RelayButtonInspectionRequest[] }) {
+function fakeRelay(options: {
+  lists?: RelayAutomationPress[][];
+  accept?: (ids: string[]) => string[];
+  failSettles?: number;
+  inspections?: RelayButtonInspectionRequest[];
+}) {
   const lists = [...(options.lists ?? [])];
   const calls: Array<{ path: string; body: unknown }> = [];
   let failSettles = options.failSettles ?? 0;
   const waiters = new Set<() => void>();
-  const changed = () => { for (const waiter of [...waiters]) waiter(); };
-  const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = new URL(String(input));
-    const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null;
-    calls.push({ path: url.pathname, body });
-    changed();
-    const ok = (value: Record<string, unknown>) => new Response(JSON.stringify({ ok: true, ...value }), { status: 200 });
-    if (url.pathname.endsWith("/automation-presses")) {
-      const next = lists.shift();
-      if (next) return ok({ presses: next, inspections: options.inspections ?? [] });
-      return await new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      });
-    }
-    if (url.pathname.endsWith("/accept")) {
-      const ids = body!.hostPressIds as string[];
-      return ok({ accepted: options.accept ? options.accept(ids) : ids });
-    }
-    if (url.pathname.endsWith("/settle")) {
-      if (failSettles > 0) {
-        failSettles -= 1;
-        return new Response("{}", { status: 503 });
+  const changed = () => {
+    for (const waiter of [...waiters]) waiter();
+  };
+  const fetchImpl = vi.fn(
+    async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = new URL(String(input));
+      const body =
+        typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+      calls.push({ path: url.pathname, body });
+      changed();
+      const ok = (value: Record<string, unknown>) =>
+        new Response(JSON.stringify({ ok: true, ...value }), { status: 200 });
+      if (url.pathname.endsWith("/automation-presses")) {
+        const next = lists.shift();
+        if (next) return ok({ presses: next, inspections: options.inspections ?? [] });
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
       }
-      return ok({ state: "settled" });
-    }
-    return new Response("{}", { status: 404 });
-  });
-  const until = (condition: () => boolean) => new Promise<void>((resolve) => {
-    const check = () => { if (condition()) { waiters.delete(check); resolve(); } };
-    waiters.add(check);
-    check();
-  });
-  return { connection: { baseUrl: "https://relay.test", token: "t", fetch: fetchImpl as unknown as typeof fetch }, calls, until, changed };
+      if (url.pathname.endsWith("/accept")) {
+        const ids = body!.hostPressIds as string[];
+        return ok({ accepted: options.accept ? options.accept(ids) : ids });
+      }
+      if (url.pathname.endsWith("/settle")) {
+        if (failSettles > 0) {
+          failSettles -= 1;
+          return new Response("{}", { status: 503 });
+        }
+        return ok({ state: "settled" });
+      }
+      return new Response("{}", { status: 404 });
+    },
+  );
+  const until = (condition: () => boolean) =>
+    new Promise<void>((resolve) => {
+      const check = () => {
+        if (condition()) {
+          waiters.delete(check);
+          resolve();
+        }
+      };
+      waiters.add(check);
+      check();
+    });
+  return {
+    connection: {
+      baseUrl: "https://relay.test",
+      token: "t",
+      fetch: fetchImpl as unknown as typeof fetch,
+    },
+    calls,
+    until,
+    changed,
+  };
 }
 
 // The host module as this loop sees it: whether this computer runs the
@@ -112,7 +236,7 @@ function fakeHost(options: { runs?: boolean; generation?: number } = {}) {
   const seam: PressHostSeam = {
     runsHere: async () => runs,
     stillRuns: () => runs,
-    generation: () => (runs ? options.generation ?? 1 : null),
+    generation: () => (runs ? (options.generation ?? 1) : null),
     hold: () => {
       if (!runs) return null;
       holds += 1;
@@ -125,20 +249,42 @@ function fakeHost(options: { runs?: boolean; generation?: number } = {}) {
     },
   };
   return {
-    seam, events, held: () => holds, handOver: () => { runs = false; },
-    notifying: (next: () => void) => { notify = next; },
+    seam,
+    events,
+    held: () => holds,
+    handOver: () => {
+      runs = false;
+    },
+    notifying: (next: () => void) => {
+      notify = next;
+    },
   };
 }
 
 const hosts: RelayedPressHost[] = [];
-afterEach(() => { for (const host of hosts.splice(0)) host.stop(); });
+afterEach(() => {
+  for (const host of hosts.splice(0)) host.stop();
+});
 
-type PressInput = { automationId: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string };
+type PressInput = {
+  automationId: string;
+  definitionHash: string;
+  recordId: string;
+  pressId: string;
+  pressedBy: string;
+};
 
-function hostWith(relay: ReturnType<typeof fakeRelay>, host = fakeHost(), options: {
-  press?: (input: PressInput, watch: (claimId: string) => void) => Promise<CollectionAutomationPress>;
-  heldClaim?: (press: RelayAutomationPress) => Promise<HeldClaim>;
-} = {}) {
+function hostWith(
+  relay: ReturnType<typeof fakeRelay>,
+  host = fakeHost(),
+  options: {
+    press?: (
+      input: PressInput,
+      watch: (claimId: string) => void,
+    ) => Promise<CollectionAutomationPress>;
+    heldClaim?: (press: RelayAutomationPress) => Promise<HeldClaim>;
+  } = {},
+) {
   const failures: RelayedPressFailure[] = [];
   const presses: PressInput[] = [];
   const loop = createRelayedPressHost({
@@ -149,15 +295,21 @@ function hostWith(relay: ReturnType<typeof fakeRelay>, host = fakeHost(), option
     press: async (input, watch) => {
       presses.push(input);
       host.events.push("press");
-      const pressed = await (options.press ?? (async (_input, register) => {
-        register(`claim-${input.pressId}`);
-        return { busy: false, claimId: `claim-${input.pressId}`, settled: null };
-      }))(input, watch);
+      const pressed = await (
+        options.press ??
+        (async (_input, register) => {
+          register(`claim-${input.pressId}`);
+          return { busy: false, claimId: `claim-${input.pressId}`, settled: null };
+        })
+      )(input, watch);
       relay.changed();
       return { pressed, field: "Mark paid" };
     },
-    inspect: async ids => ids.map(() => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED })),
-    notifyFailure: async (failure) => { failures.push(failure); relay.changed(); },
+    inspect: async (ids) => ids.map(() => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED })),
+    notifyFailure: async (failure) => {
+      failures.push(failure);
+      relay.changed();
+    },
     onError: () => undefined,
     delay: async () => undefined,
   });
@@ -165,21 +317,33 @@ function hostWith(relay: ReturnType<typeof fakeRelay>, host = fakeHost(), option
   return { loop, failures, presses };
 }
 
-const accepts = (relay: ReturnType<typeof fakeRelay>) => relay.calls.filter((call) => call.path.endsWith("/accept"));
-const settles = (relay: ReturnType<typeof fakeRelay>) => relay.calls.filter((call) => call.path.endsWith("/settle"));
+const accepts = (relay: ReturnType<typeof fakeRelay>) =>
+  relay.calls.filter((call) => call.path.endsWith("/accept"));
+const settles = (relay: ReturnType<typeof fakeRelay>) =>
+  relay.calls.filter((call) => call.path.endsWith("/settle"));
 
 describe("relayed press host", () => {
   it("continues past an expired inspection and a waiting press in the same batch", async () => {
-    const relay = fakeRelay({ lists: [[press("waiting"), press("ready")]], inspections: [{
-      inspectionId: "expired", automationId: "collection:Invoices#paid", collectionPath: "Invoices", definitionHash: HASH,
-    }] });
-    const { loop, presses, failures } = hostWith(relay, fakeHost(), { press: async input => {
-      if (input.pressId === "waiting") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
-      return { busy: false, claimId: "ready-claim", settled: { outcome: "done", error: null } };
-    } });
+    const relay = fakeRelay({
+      lists: [[press("waiting"), press("ready")]],
+      inspections: [
+        {
+          inspectionId: "expired",
+          automationId: "collection:Invoices#paid",
+          collectionPath: "Invoices",
+          definitionHash: HASH,
+        },
+      ],
+    });
+    const { loop, presses, failures } = hostWith(relay, fakeHost(), {
+      press: async (input) => {
+        if (input.pressId === "waiting") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+        return { busy: false, claimId: "ready-claim", settled: { outcome: "done", error: null } };
+      },
+    });
     loop.start();
     await vi.waitFor(() => expect(settles(relay)).toHaveLength(1));
-    expect(presses.map(input => input.pressId)).toEqual(["waiting", "ready"]);
+    expect(presses.map((input) => input.pressId)).toEqual(["waiting", "ready"]);
     expect(failures).toEqual([]);
     expect(settles(relay)[0]!.body).toMatchObject({ hostPressId: "ready", outcome: "done" });
   });
@@ -189,20 +353,45 @@ describe("relayed press host", () => {
     const { loop, presses, failures } = hostWith(relay, host);
     loop.start();
     await relay.until(() => presses.length === 1);
-    expect(presses).toEqual([{ automationId: "collection:Invoices#paid", collectionPath: "Invoices", definitionHash: HASH, recordId: "rec-12", pressId: "p1", pressedBy: "user-ana", confirmed: [] }]);
-    expect(accepts(relay)[0]!.body).toEqual({ installId: "laptop", generation: 7, hostPressIds: ["p1"] });
+    expect(presses).toEqual([
+      {
+        automationId: "collection:Invoices#paid",
+        collectionPath: "Invoices",
+        definitionHash: HASH,
+        recordId: "rec-12",
+        pressId: "p1",
+        pressedBy: "user-ana",
+        confirmed: [],
+      },
+    ]);
+    expect(accepts(relay)[0]!.body).toEqual({
+      installId: "laptop",
+      generation: 7,
+      hostPressIds: ["p1"],
+    });
     host.notifying(relay.changed);
     loop.runSettled({ claimId: "claim-p1", outcome: "done", error: null });
     await relay.until(() => settles(relay).length === 1);
     expect(host.events).toEqual(["hold", "press", "release"]);
-    expect(settles(relay)[0]!.body).toEqual({ installId: "laptop", hostPressId: "p1", outcome: "done", error: null });
+    expect(settles(relay)[0]!.body).toEqual({
+      installId: "laptop",
+      hostPressId: "p1",
+      outcome: "done",
+      error: null,
+    });
     expect(failures).toEqual([]);
   });
 
   it("admits nothing once a handover begins, even after the relay accepted", async () => {
     const host = fakeHost();
     // The handover begins while the accept is on its way.
-    const relay = fakeRelay({ lists: [[press("p1")]], accept: (ids) => { host.handOver(); return ids; } });
+    const relay = fakeRelay({
+      lists: [[press("p1")]],
+      accept: (ids) => {
+        host.handOver();
+        return ids;
+      },
+    });
     host.notifying(relay.changed);
     const { loop, presses } = hostWith(relay, host);
     loop.start();
@@ -222,9 +411,13 @@ describe("relayed press host", () => {
 
   it("after a restart, follows a press whose claim the engine holds without asking the relay again", async () => {
     const relay = fakeRelay({ lists: [[press("p1", "accepted")]] });
-    const { loop, presses } = hostWith(relay, fakeHost(), { heldClaim: async () => ({ claimId: "claim-held", settled: null }) });
+    const { loop, presses } = hostWith(relay, fakeHost(), {
+      heldClaim: async () => ({ claimId: "claim-held", settled: null }),
+    });
     loop.start();
-    await relay.until(() => relay.calls.filter((call) => call.path.endsWith("/automation-presses")).length === 2);
+    await relay.until(
+      () => relay.calls.filter((call) => call.path.endsWith("/automation-presses")).length === 2,
+    );
     expect(presses).toEqual([]);
     expect(accepts(relay)).toEqual([]);
     loop.runSettled({ claimId: "claim-held", outcome: "done", error: null });
@@ -248,7 +441,9 @@ describe("relayed press host", () => {
 
   it("answers a press whose held claim already ended at once", async () => {
     const relay = fakeRelay({ lists: [[press("p1", "accepted")]] });
-    const { loop } = hostWith(relay, fakeHost(), { heldClaim: async () => ({ claimId: "claim-p1", settled: { outcome: "ended", error: null } }) });
+    const { loop } = hostWith(relay, fakeHost(), {
+      heldClaim: async () => ({ claimId: "claim-p1", settled: { outcome: "ended", error: null } }),
+    });
     loop.start();
     await relay.until(() => settles(relay).length === 1);
     expect((settles(relay)[0]!.body as { outcome: string }).outcome).toBe("ended");
@@ -259,7 +454,8 @@ describe("relayed press host", () => {
     const { loop, failures, presses } = hostWith(relay, fakeHost(), {
       press: async (input, register) => {
         if (input.pressId === "p1") return { busy: true };
-        if (input.pressId === "p2") throw new Error("Mark paid changed after it was pressed. Press it again.");
+        if (input.pressId === "p2")
+          throw new Error("Mark paid changed after it was pressed. Press it again.");
         register("claim-p3");
         return { busy: false, claimId: "claim-p3", settled: null };
       },
@@ -276,7 +472,13 @@ describe("relayed press host", () => {
 
   it("sends a settle the relay did not take on the next pass", async () => {
     const relay = fakeRelay({ lists: [[press("p1")], []], failSettles: 1 });
-    const { loop, presses } = hostWith(relay, fakeHost(), { press: async () => ({ busy: false, claimId: "claim-p1", settled: { outcome: "done", error: null } }) });
+    const { loop, presses } = hostWith(relay, fakeHost(), {
+      press: async () => ({
+        busy: false,
+        claimId: "claim-p1",
+        settled: { outcome: "done", error: null },
+      }),
+    });
     loop.start();
     await relay.until(() => settles(relay).length === 2);
     expect(presses).toHaveLength(1);
@@ -297,9 +499,13 @@ describe("relayed press host", () => {
   it("follows a resumed claim with no hold of its own", async () => {
     const relay = fakeRelay({ lists: [[press("p1", "accepted")]] });
     const host = fakeHost();
-    const { loop } = hostWith(relay, host, { heldClaim: async () => ({ claimId: "claim-held", settled: null }) });
+    const { loop } = hostWith(relay, host, {
+      heldClaim: async () => ({ claimId: "claim-held", settled: null }),
+    });
     loop.start();
-    await relay.until(() => relay.calls.filter((call) => call.path.endsWith("/automation-presses")).length === 2);
+    await relay.until(
+      () => relay.calls.filter((call) => call.path.endsWith("/automation-presses")).length === 2,
+    );
     expect(host.events).toEqual([]);
     loop.runSettled({ claimId: "claim-held", outcome: "done", error: null });
     await relay.until(() => settles(relay).length === 1);
@@ -312,7 +518,8 @@ describe("relayed press host", () => {
     const { loop } = hostWith(relay, fakeHost(), {
       heldClaim: async () => {
         lookups += 1;
-        if (lookups > 1) return { claimId: "claim-held", settled: { outcome: "done", error: null } };
+        if (lookups > 1)
+          return { claimId: "claim-held", settled: { outcome: "done", error: null } };
         // The executor ran the claim and settled it while this lookup read it as running.
         settleEarly();
         return { claimId: "claim-held", settled: null };
@@ -321,7 +528,12 @@ describe("relayed press host", () => {
     settleEarly = () => loop.runSettled({ claimId: "claim-held", outcome: "done", error: null });
     loop.start();
     await relay.until(() => settles(relay).length === 1);
-    expect(settles(relay)[0]!.body).toEqual({ installId: "laptop", hostPressId: "p1", outcome: "done", error: null });
+    expect(settles(relay)[0]!.body).toEqual({
+      installId: "laptop",
+      hostPressId: "p1",
+      outcome: "done",
+      error: null,
+    });
   });
 
   it("takes a resumed press again when the second lookup fails after a missed settle", async () => {
@@ -343,7 +555,12 @@ describe("relayed press host", () => {
     loop.start();
     await relay.until(() => settles(relay).length === 1);
     expect(lookups).toBe(3);
-    expect(settles(relay)[0]!.body).toEqual({ installId: "laptop", hostPressId: "p1", outcome: "done", error: null });
+    expect(settles(relay)[0]!.body).toEqual({
+      installId: "laptop",
+      hostPressId: "p1",
+      outcome: "done",
+      error: null,
+    });
   });
 
   it("after a close, a reopened loop finds a writing run's press again through its engine claim", async () => {
@@ -356,9 +573,13 @@ describe("relayed press host", () => {
     first.loop.runSettled({ claimId: "claim-p1", outcome: "done", error: null });
 
     const reopened = fakeRelay({ lists: [[press("p1", "accepted")]] });
-    const second = hostWith(reopened, fakeHost(), { heldClaim: async () => ({ claimId: "claim-p1", settled: null }) });
+    const second = hostWith(reopened, fakeHost(), {
+      heldClaim: async () => ({ claimId: "claim-p1", settled: null }),
+    });
     second.loop.start();
-    await reopened.until(() => reopened.calls.filter((call) => call.path.endsWith("/automation-presses")).length === 2);
+    await reopened.until(
+      () => reopened.calls.filter((call) => call.path.endsWith("/automation-presses")).length === 2,
+    );
     second.loop.runSettled({ claimId: "claim-p1", outcome: "done", error: null });
     await reopened.until(() => settles(reopened).length === 1);
     expect(settles(relay)).toEqual([]);

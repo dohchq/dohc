@@ -1,7 +1,10 @@
 import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 import type { DatasetListRefusal } from "@dohc/cli/dataset";
-import { SYNCED_DELETION_REVIVAL_WORDS, SyncedDeletionRevivalError } from "../workspaces/syncedDeletionRefusal";
+import {
+  SYNCED_DELETION_REVIVAL_WORDS,
+  SyncedDeletionRevivalError,
+} from "../workspaces/syncedDeletionRefusal";
 import type { FailureCode, FailureFacts } from "../notices/failure";
 
 // Electron hands a rejected handler's error to the renderer as one string,
@@ -15,7 +18,8 @@ import type { FailureCode, FailureFacts } from "../notices/failure";
 // sentence stands alone. Copy details still carry the error as it arrived.
 type Words = string | null;
 
-export const APP_COMPILER_TIMEOUT_WORDS = "The app took too long to build. Remove files the app does not use, then try again.";
+export const APP_COMPILER_TIMEOUT_WORDS =
+  "The app took too long to build. Remove files the app does not use, then try again.";
 
 const UPDATING = "dohc is still reading this workspace's files. Try again when it finishes.";
 const NOT_READ = "dohc has not read this file yet. Try again when it has.";
@@ -25,7 +29,11 @@ const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
 const HELD_CHANGE_REFUSALS = new Set([
-  "held-change-shared-owner", "held-change-stale", "held-change-missing", "held-change-conflict", "held-change-undo-stale",
+  "held-change-shared-owner",
+  "held-change-stale",
+  "held-change-missing",
+  "held-change-conflict",
+  "held-change-undo-stale",
 ]);
 // Trying again cannot help with this one; updating dohc can.
 const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
@@ -75,9 +83,27 @@ const NOT_PRIVATE_WORDS = new Map<string, readonly [fact: string, fix: string]>(
   ["not-folder", ["is not a folder", "Rename or move it, then try again."]],
   ["not-file", ["is not a file", "Rename or move it, then try again."]],
   ["other-owner", ["belongs to another user", "Make it yours again, then try again."]],
-  ["unchecked-volume", ["is on a disk dohc can't check", "Move the workspace to a disk formatted as APFS, then try again."]],
-  ["not-changeable", ["has permissions dohc can't use", "Give your account full control of this folder and everything in it, then try again."]],
-  ["unchecked-system", ["is on a system where dohc can't check it", "Run dohc where it can read its own /proc/self/fd, then try again."]],
+  [
+    "unchecked-volume",
+    [
+      "is on a disk dohc can't check",
+      "Move the workspace to a disk formatted as APFS, then try again.",
+    ],
+  ],
+  [
+    "not-changeable",
+    [
+      "has permissions dohc can't use",
+      "Give your account full control of this folder and everything in it, then try again.",
+    ],
+  ],
+  [
+    "unchecked-system",
+    [
+      "is on a system where dohc can't check it",
+      "Run dohc where it can read its own /proc/self/fd, then try again.",
+    ],
+  ],
 ]);
 // What `sudo` makes in a folder is another user's too, so a folder's fix
 // covers everything in it.
@@ -87,14 +113,18 @@ const OTHER_OWNER_FOLDER_FIX = "Make it and everything in it yours again, then t
 // History, since the workspace's data key is one of them.
 const ITEM_FIXES = new Map([
   ["other-owner", "Ask an administrator to make it yours, then try again."],
-  ["not-changeable", "Ask an administrator to give your account full control of it, then try again."],
+  [
+    "not-changeable",
+    "Ask an administrator to give your account full control of it, then try again.",
+  ],
 ]);
 
 /** What keeps a workspace's History, or this computer's own data, from being private, and what to do. */
 function engineFolderNotPrivateWords(message: string): string | null {
   const [, reason = "", path = ""] = ENGINE_FOLDER_NOT_PRIVATE.exec(message) ?? [];
   const words = NOT_PRIVATE_WORDS.get(reason);
-  if (words === undefined || path.split("/").some((name) => name === "." || name === "..")) return null;
+  if (words === undefined || path.split("/").some((name) => name === "." || name === ".."))
+    return null;
   const [fact, fix] = words;
   let fixed = ITEM_FIXES.get(reason) ?? fix;
   if (PRIVATE_FOLDERS.has(path)) fixed = reason === "other-owner" ? OTHER_OWNER_FOLDER_FIX : fix;
@@ -143,7 +173,8 @@ const ENGINE_CODE_WORDS = {
   INVALID_CHANNEL: "This channel cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
-  RELAY_HTTPS_REQUIRED: "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
+  RELAY_HTTPS_REQUIRED:
+    "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 
@@ -160,8 +191,10 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
   DaemonRefusalError: {
     ...ENGINE_CODE_WORDS,
     ...CHAT_MENTION_PAGE_CHANGED_WORDS,
-    "held-change-shared-owner": "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing.",
-    "held-change-stale": "The note or its file changed. Choose Drop again to review the waiting edits.",
+    "held-change-shared-owner":
+      "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing.",
+    "held-change-stale":
+      "The note or its file changed. Choose Drop again to review the waiting edits.",
     "held-change-missing": "There is no held change to drop. Open the note again.",
     "held-change-conflict": "The note has a conflict. Resolve it before using Drop.",
     "held-change-undo-stale": "The note changed after Drop. Open History to find the waiting text.",
@@ -171,7 +204,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "file-locked": "Another program has this file open. Close it there, then try again.",
     "ydoc-session-busy": "This file is open for editing. Close its tabs, then try again.",
     "volume-shares-new-files": VOLUME_SHARES_NEW_FILES_WORDS,
-    "workspace-owned": "Another copy of dohc has this workspace open. Close it there, then try again.",
+    "workspace-owned":
+      "Another copy of dohc has this workspace open. Close it there, then try again.",
     "share-read-only": ENGINE_CODE_WORDS.SHARE_READ_ONLY,
     "relay-origin-diverged": ENGINE_CODE_WORDS.ORIGIN_DIVERGED,
     "*": null,
@@ -185,8 +219,12 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "*": "Try again in a moment.",
   },
   EngineRequestDeadlineError: { "*": ENGINE_CODE_WORDS.DEADLINE_EXCEEDED },
-  EngineWorkspaceRetryDeadlineError: { "*": "dohc could not reach this workspace in time. Try again." },
-  EngineWorkspaceRebuildingError: { "*": "dohc is rebuilding this workspace's data store. Try again in a moment." },
+  EngineWorkspaceRetryDeadlineError: {
+    "*": "dohc could not reach this workspace in time. Try again.",
+  },
+  EngineWorkspaceRebuildingError: {
+    "*": "dohc is rebuilding this workspace's data store. Try again in a moment.",
+  },
   EngineWorkspaceShuttingDownError: { "*": "dohc is quitting." },
   EngineWorkspaceFolderTimeoutError: { "*": "dohc could not reach this workspace's folder." },
   EngineWorkspaceRebindError: { "*": null },
@@ -227,7 +265,8 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     ".dohc/files.toml and .dohc/visibility.toml":
       "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
     ".dohc": "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
-    "path-not-admitted": "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
+    "path-not-admitted":
+      "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
     "*": null,
   },
   // A .dohc/manifest.json dohc will not adopt. Its message names the
@@ -278,7 +317,10 @@ const VERSIONS_READ_WORDS: Record<FailureFacts["versions-reads"]["read"], string
 const FAILURE_WORDS: FailureWords = {
   "versions-reads": ({ read }) => VERSIONS_READ_WORDS[read],
 };
-export function failureSentence<Code extends FailureCode>(failure: { code: Code; facts: FailureFacts[Code] }): string {
+export function failureSentence<Code extends FailureCode>(failure: {
+  code: Code;
+  facts: FailureFacts[Code];
+}): string {
   return FAILURE_WORDS[failure.code](failure.facts);
 }
 
@@ -289,10 +331,15 @@ const RAW_CODE = /^(?:\S*[-_]\S*|[A-Z0-9]{3,})$|^[A-Z][A-Z0-9_]+: /;
 function isDump(message: string): boolean {
   if (message.includes("\n")) return true;
   if (!/^[[{]/.test(message)) return false;
-  try { return typeof JSON.parse(message) === "object"; } catch { return false; }
+  try {
+    return typeof JSON.parse(message) === "object";
+  } catch {
+    return false;
+  }
 }
 const IPC_PREFIX = /^Error invoking remote method '[^']*': /;
-const CLASS_PREFIX = /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s=]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?(?: \[stopped=(read|call)\])?: /;
+const CLASS_PREFIX =
+  /^((?:[A-Z][A-Za-z0-9]*)?Error)(?: \[([^\]\s=]+)\])?(?: \[retryAfterMs=(\d{1,15})\])?(?: \[computer=([^\]\s]+)\])?(?: \[stopped=(read|call)\])?: /;
 
 // The engine client's `wireCode`, the dataset worker's `code`, the compiler's
 // `reason`.
@@ -318,14 +365,19 @@ function computerLabelOf(error: Error): string | null {
 
 // The class, the code, the wait, and the computer, as the wire carries them before the message.
 function wireName(error: Error, code: string): string {
-  const wait = retryAfterOf(error), computer = computerLabelOf(error);
+  const wait = retryAfterOf(error),
+    computer = computerLabelOf(error);
   return `${error.name} [${code}]${wait === null ? "" : ` [retryAfterMs=${wait}]`}${computer === null ? "" : ` [computer=${encodeURIComponent(computer)}]`}`;
 }
 
 // A name that does not decode names no computer.
 function decodedComputer(wire: string | undefined): string | null {
   if (wire === undefined) return null;
-  try { return decodeURIComponent(wire) || null; } catch { return null; }
+  try {
+    return decodeURIComponent(wire) || null;
+  } catch {
+    return null;
+  }
 }
 
 /** A call on the workspace its window has stopped: a read, which lost nothing, or any other call. */
@@ -341,10 +393,12 @@ export function ipcWireError(error: unknown, stopped?: StoppedWorkspaceCall): un
   const code = codeOf(error);
   // Electron sends only toString(). Keep safe compiler facts in Copy details,
   // while readError maps this name back to the unchanged sentence above.
-  const details: unknown = error.name === "AppCompilerTimeoutError"
-    ? Reflect.get(error, "details") : undefined;
+  const details: unknown =
+    error.name === "AppCompilerTimeoutError" ? Reflect.get(error, "details") : undefined;
   if (code === null && typeof details !== "string" && stopped === undefined) return error;
-  const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, { cause: error });
+  const wire = new Error(`${error.message}${typeof details === "string" ? `\n${details}` : ""}`, {
+    cause: error,
+  });
   wire.name = `${code === null ? error.name : wireName(error, code)}${stopped === undefined ? "" : ` [stopped=${stopped}]`}`;
   return wire;
 }
@@ -354,9 +408,10 @@ function parse(error: unknown) {
   if (typeof error === "string") text = error;
   else if (error instanceof Error) {
     const code = codeOf(error);
-    text = error.name === "Error" && code === null
-      ? error.message
-      : `${code === null ? error.name : wireName(error, code)}: ${error.message}`;
+    text =
+      error.name === "Error" && code === null
+        ? error.message
+        : `${code === null ? error.name : wireName(error, code)}: ${error.message}`;
   }
   text = text.replace(IPC_PREFIX, "").trim();
   const match = CLASS_PREFIX.exec(text);
@@ -393,12 +448,25 @@ const NOT_A_WORKSPACE = { canRetry: false, refusal: "not-a-workspace" } as const
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
-  if (name === "SyncedDeletionRevivalError" || name === "SyncedDeletionStaleError" || (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")) {
+  if (
+    name === "SyncedDeletionRevivalError" ||
+    name === "SyncedDeletionStaleError" ||
+    (name === "DaemonRefusalError" && message === "synced-deletion-revival-refused")
+  ) {
     const path = error instanceof SyncedDeletionRevivalError ? error.path : "this file";
     // dohc's own refusal carries an instruction or the Reason as its message,
     // so Copy details would repeat it, or give a second instruction.
-    return { ...SYNCED_DELETION_REVIVAL_WORDS(path, name === "SyncedDeletionStaleError", error instanceof SyncedDeletionRevivalError && error.restore), mapped: false, cause: name === "DaemonRefusalError" ? text : null, canRetry: false,
-      ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}) };
+    return {
+      ...SYNCED_DELETION_REVIVAL_WORDS(
+        path,
+        name === "SyncedDeletionStaleError",
+        error instanceof SyncedDeletionRevivalError && error.restore,
+      ),
+      mapped: false,
+      cause: name === "DaemonRefusalError" ? text : null,
+      canRetry: false,
+      ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}),
+    };
   }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };
@@ -415,30 +483,49 @@ export function readError(error: unknown): ReadError {
   }
   // The Explorer asks before changing these files. Anywhere else the
   // sentence says what happened; the file names follow it.
-  if (name === "NotVersionedError") return { words: message.split("\n")[0] ?? message, mapped: false, cause: null };
+  if (name === "NotVersionedError")
+    return { words: message.split("\n")[0] ?? message, mapped: false, cause: null };
   if (name === "ReservedWorkspaceIdError") {
-    return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
+    return {
+      title: RESERVED_WORKSPACE_ID_TITLE,
+      words: message,
+      mapped: false,
+      cause: text,
+      ...NOT_A_WORKSPACE,
+    };
   }
-  if (name === "WorkspaceFolderRefusalError") return { words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
+  if (name === "WorkspaceFolderRefusalError")
+    return { words: message, mapped: false, cause: text, ...NOT_A_WORKSPACE };
   // The merge dialog words a merge that stopped partway, since only it knows
   // the version. The message is the failure's own text, for Copy details.
   if (name === "MergeStoppedPartwayError") return { words: null, mapped: false, cause: message };
-  if (name === "DaemonRefusalError" && code === "INVALID_PARAMS" && [
-    "Each choice is one line of at most 200 characters.",
-    "Each choice appears once.",
-  ].includes(message)) {
+  if (
+    name === "DaemonRefusalError" &&
+    code === "INVALID_PARAMS" &&
+    ["Each choice is one line of at most 200 characters.", "Each choice appears once."].includes(
+      message,
+    )
+  ) {
     return { words: message, mapped: false, cause: text };
   }
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const lead = message.split(": ")[0];
-  const key = entry && [message, lead, code, "*"].find(
-    (candidate) => candidate !== undefined && Object.hasOwn(entry, candidate),
-  );
+  const key =
+    entry &&
+    [message, lead, code, "*"].find(
+      (candidate) => candidate !== undefined && Object.hasOwn(entry, candidate),
+    );
   if (entry && key !== undefined) {
     const words = entry[key] ?? null;
-    return { words, mapped: words !== null, cause: text,
-      ...(name === "DaemonRefusalError" && HELD_CHANGE_REFUSALS.has(key) ? {canRetry: false as const} : {}) };
+    return {
+      words,
+      mapped: words !== null,
+      cause: text,
+      ...(name === "DaemonRefusalError" && HELD_CHANGE_REFUSALS.has(key)
+        ? { canRetry: false as const }
+        : {}),
+    };
   }
   if (!message) return { words: null, mapped: false, cause: null };
   if (RAW_CODE.test(message) || isDump(message)) {
@@ -449,7 +536,10 @@ export function readError(error: unknown): ReadError {
 
 export function isConflictStaleTarget(error: unknown): boolean {
   const { name, message } = parse(error);
-  return (name === "DaemonRefusalError" || name === "VersionedTextStoreError") && message === "conflict-stale-target";
+  return (
+    (name === "DaemonRefusalError" || name === "VersionedTextStoreError") &&
+    message === "conflict-stale-target"
+  );
 }
 
 /**
@@ -460,7 +550,11 @@ export function isConflictStaleTarget(error: unknown): boolean {
  */
 export function isCollectionRulesReplaced(error: unknown): boolean {
   const { name, code, message } = parse(error);
-  return name === "DatasetHostError" && code === "conflict" && message === "The Collection's rules changed. Its owner must approve this access again.";
+  return (
+    name === "DatasetHostError" &&
+    code === "conflict" &&
+    message === "The Collection's rules changed. Its owner must approve this access again."
+  );
 }
 
 /** A caller's sentence, then the error's words when they add to it. */
@@ -496,8 +590,11 @@ export function isGroupNameTaken(error: unknown): boolean {
 /** A Collection that waits before it reopens, because reopening it kept failing: the supervisor's words and its wait. */
 export function readCollectionReopenWait(error: unknown): { words: string; waitMs: number } | null {
   const { name, code, retryAfterMs, message } = parse(error);
-  return name === "DatasetReopenWaitError" && code === "dataset_reopen_wait" && retryAfterMs !== undefined
-    ? { words: message, waitMs: retryAfterMs } : null;
+  return name === "DatasetReopenWaitError" &&
+    code === "dataset_reopen_wait" &&
+    retryAfterMs !== undefined
+    ? { words: message, waitMs: retryAfterMs }
+    : null;
 }
 
 /**
@@ -506,10 +603,20 @@ export function readCollectionReopenWait(error: unknown): { words: string; waitM
  * this computer keeps is not there or was replaced, or the record changed
  * while dohc wrote it.
  */
-export const COLLECTIONS_REFUSAL_KINDS = ["unclaimed", "elsewhere", "unreadable", "missing", "replaced", "changed"] as const;
+export const COLLECTIONS_REFUSAL_KINDS = [
+  "unclaimed",
+  "elsewhere",
+  "unreadable",
+  "missing",
+  "replaced",
+  "changed",
+] as const;
 /** Refusals that keeping the Collections here can answer, after the person confirms where needed. */
-export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = ["unclaimed", "elsewhere"];
-export type CollectionsRefusalKind = typeof COLLECTIONS_REFUSAL_KINDS[number];
+export const KEEPABLE_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = [
+  "unclaimed",
+  "elsewhere",
+];
+export type CollectionsRefusalKind = (typeof COLLECTIONS_REFUSAL_KINDS)[number];
 export const COLLECTIONS_REFUSAL_CODE = "collections-";
 /** The control that keeps a workspace's Collections on this computer. */
 export const USE_THIS_COMPUTER = "Use this computer";
@@ -518,8 +625,13 @@ export const USE_THIS_COMPUTER = "Use this computer";
  * Where another computer keeps a workspace's Collections, and the two ways
  * on. `others`: this computer lists some of them from its server.
  */
-export function collectionsElsewhereWords(computer: { label: string; sameName: boolean }, others = false): string {
-  const where = computer.sameName ? `${computer.label}, another installation of dohc with this computer's name` : computer.label;
+export function collectionsElsewhereWords(
+  computer: { label: string; sameName: boolean },
+  others = false,
+): string {
+  const where = computer.sameName
+    ? `${computer.label}, another installation of dohc with this computer's name`
+    : computer.label;
   return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
 }
 
@@ -528,7 +640,11 @@ export function collectionsElsewhereWords(computer: { label: string; sameName: b
  * it lists others, and the sentence that says so. `computer` is null when the
  * error that said so named none.
  */
-export interface CollectionsElsewhere { computer: string | null; others: boolean; words: string }
+export interface CollectionsElsewhere {
+  computer: string | null;
+  others: boolean;
+  words: string;
+}
 
 /**
  * main's refusal to use a workspace's Collections here, with its words.
@@ -552,7 +668,10 @@ export class CollectionMoveUnfinishedError extends Error {
   override name = "CollectionMoveUnfinishedError";
   readonly code: "waited" | undefined;
   constructor(host: string, options: { cause: unknown; waited?: boolean }) {
-    super(`This Collection didn't finish moving to ${host}. Its records are kept on this computer.`, { cause: options.cause });
+    super(
+      `This Collection didn't finish moving to ${host}. Its records are kept on this computer.`,
+      { cause: options.cause },
+    );
     this.code = options.waited ? "waited" : undefined;
   }
 }
@@ -569,7 +688,9 @@ export function waitedForCollectionMove(error: unknown): boolean {
  */
 export function namingCollectionMove(error: unknown, collection: string): unknown {
   const { name, text } = parse(error);
-  return name === "CollectionMoveUnfinishedError" ? text.replace(": This Collection ", () => `: "${collection.replace(/\s+/g, " ")}" `) : error;
+  return name === "CollectionMoveUnfinishedError"
+    ? text.replace(": This Collection ", () => `: "${collection.replace(/\s+/g, " ")}" `)
+    : error;
 }
 
 /** The words a Collection's page shows in place of its records when its server is out of reach and it has no saved copy. */
@@ -580,17 +701,26 @@ export function readCollectionServerUnreachable(error: unknown): string | null {
 
 export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead | null {
   const { name, code, computer, message } = parse(error);
-  if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message) return null;
-  const kind = COLLECTIONS_REFUSAL_KINDS.find((candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`);
+  if (name !== "CollectionsRefusalError" || !code?.startsWith(COLLECTIONS_REFUSAL_CODE) || !message)
+    return null;
+  const kind = COLLECTIONS_REFUSAL_KINDS.find(
+    (candidate) => code === `${COLLECTIONS_REFUSAL_CODE}${candidate}`,
+  );
   if (kind === "elsewhere") return { kind, words: message, computer };
   return kind === undefined ? null : { kind, words: message };
 }
 
 /** A list main refused, as the error a report reads it from. */
 export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
-  if (refusal.kind === "server-unavailable") return Object.assign(new Error(`${refusal.words}\n${refusal.failure}`), { name: "ServerCollectionsUnavailableError" });
-  return Object.assign(new Error(refusal.words), { name: "CollectionsRefusalError", code: `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`,
-    computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null });
+  if (refusal.kind === "server-unavailable")
+    return Object.assign(new Error(`${refusal.words}\n${refusal.failure}`), {
+      name: "ServerCollectionsUnavailableError",
+    });
+  return Object.assign(new Error(refusal.words), {
+    name: "CollectionsRefusalError",
+    code: `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`,
+    computerLabel: refusal.kind === "elsewhere" ? refusal.computer : null,
+  });
 }
 
 const LIVE_EDITING_STOPPED = "live-editing-stopped";
@@ -607,7 +737,11 @@ export class HistoryStillPausedError extends Error {
   override name = "HistoryStillPausedError";
   readonly code: typeof LIVE_EDITING_STOPPED | undefined;
   constructor(readonly paths: readonly string[]) {
-    super(paths.length === 0 ? "History is still paused." : `${LIVE_EDITING_STOPPED_LEAD}${JSON.stringify(paths)}`);
+    super(
+      paths.length === 0
+        ? "History is still paused."
+        : `${LIVE_EDITING_STOPPED_LEAD}${JSON.stringify(paths)}`,
+    );
     this.code = paths.length === 0 ? undefined : LIVE_EDITING_STOPPED;
   }
 }
@@ -615,11 +749,23 @@ export class HistoryStillPausedError extends Error {
 /** The pages whose live editing stopped, when that is what kept History paused after Try again; empty otherwise. */
 export function liveEditingStoppedPaths(error: unknown): readonly string[] {
   const { name, code, message } = parse(error);
-  if (name !== "HistoryStillPausedError" || code !== LIVE_EDITING_STOPPED || !message.startsWith(LIVE_EDITING_STOPPED_LEAD)) return [];
+  if (
+    name !== "HistoryStillPausedError" ||
+    code !== LIVE_EDITING_STOPPED ||
+    !message.startsWith(LIVE_EDITING_STOPPED_LEAD)
+  )
+    return [];
   let paths: unknown;
-  try { paths = JSON.parse(message.slice(LIVE_EDITING_STOPPED_LEAD.length)); } catch { return []; }
-  return Array.isArray(paths) && paths.length > 0 && paths.every((path): path is string => typeof path === "string" && path !== "")
-    ? paths : [];
+  try {
+    paths = JSON.parse(message.slice(LIVE_EDITING_STOPPED_LEAD.length));
+  } catch {
+    return [];
+  }
+  return Array.isArray(paths) &&
+    paths.length > 0 &&
+    paths.every((path): path is string => typeof path === "string" && path !== "")
+    ? paths
+    : [];
 }
 
 /**
@@ -637,14 +783,22 @@ export function isDatasetServerNotFound(error: unknown): boolean {
 /** Main's code for an owner's action on a Collection asked from a shared view, which only its owner can take. */
 export const DATASET_OWNER_ONLY = "dataset_owner_only";
 export function datasetOwnerOnlyError(): Error {
-  return Object.assign(new Error("Open the original workspace to manage this Collection."), { code: DATASET_OWNER_ONLY });
+  return Object.assign(new Error("Open the original workspace to manage this Collection."), {
+    code: DATASET_OWNER_ONLY,
+  });
 }
 export function isDatasetOwnerOnly(error: unknown): boolean {
   return parse(error).code === DATASET_OWNER_ONLY;
 }
 /** Gives a Collection route's 404 "not found" its code, so a change card can name the server. Its words stay. */
-export function markDatasetServerNotFound(failure: Error, status: number, body: { code?: unknown } | null | undefined): Error {
-  return status === 404 && body?.code === "not_found" ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND }) : failure;
+export function markDatasetServerNotFound(
+  failure: Error,
+  status: number,
+  body: { code?: unknown } | null | undefined,
+): Error {
+  return status === 404 && body?.code === "not_found"
+    ? Object.assign(failure, { code: DATASET_SERVER_NOT_FOUND })
+    : failure;
 }
 
 /** macOS refused dohc a folder: System Settings, not dohc, can fix it. */
@@ -680,8 +834,11 @@ export function isStoppedWorkspaceCall(error: unknown): boolean {
 /** The engine refuses reads this way while it reads a new workspace's files. */
 export function isWorkspaceUpdatingError(error: unknown): boolean {
   const { name, code, message } = parse(error);
-  return name === "DaemonRefusalError" && code === "OVERLOADED" &&
-    ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING;
+  return (
+    name === "DaemonRefusalError" &&
+    code === "OVERLOADED" &&
+    ERROR_WORDS.DaemonRefusalError?.[message] === UPDATING
+  );
 }
 
 /** Main refused to run an app's code because the workspace is in Restricted Mode. */
@@ -702,13 +859,20 @@ export function isMergeStoppedPartway(error: unknown): boolean {
 export function versionNameRefusal(error: unknown): "taken" | "invalid" | null {
   const { name, code } = parse(error);
   if (name !== "VersionedTextStoreError") return null;
-  return code === "version-name-conflict" ? "taken" : code === "invalid-version-name" ? "invalid" : null;
+  return code === "version-name-conflict"
+    ? "taken"
+    : code === "invalid-version-name"
+      ? "invalid"
+      : null;
 }
 
 /** A share's refusal of a write: the file is read-only inside dohc, not on disk. */
 export function isShareReadOnlyRefusal(error: unknown): boolean {
   const { name, code } = parse(error);
-  return name === "SharedFileReadOnlyError" || (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY");
+  return (
+    name === "SharedFileReadOnlyError" ||
+    (name === "DaemonRefusalError" && code === "SHARE_READ_ONLY")
+  );
 }
 
 /** History's current rules refused a restore. Its words say why and what to do next. */
@@ -749,7 +913,8 @@ export function livePageTitle(path: string, action: LivePageAction): string {
 }
 
 /** The body for an Undo, and for a move that would replace the page. */
-export const LIVE_PAGE_TRY_AGAIN_BODY = "In Live documents, stop live editing for this page, then try again.";
+export const LIVE_PAGE_TRY_AGAIN_BODY =
+  "In Live documents, stop live editing for this page, then try again.";
 
 export function livePageBody(action: LivePageAction): string {
   if (action === "replace") return LIVE_PAGE_TRY_AGAIN_BODY;
@@ -785,8 +950,10 @@ export function historyOffTitle(path: string, action: "move" | "rename" | "delet
   return `dohc can't ${action} "${path}" while History is off`;
 }
 
-export const HISTORY_OFF_PAGE_BODY = "Without History, dohc can't check whether this page has live editing on. Restart dohc to try again.";
-export const HISTORY_OFF_FOLDER_BODY = "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
+export const HISTORY_OFF_PAGE_BODY =
+  "Without History, dohc can't check whether this page has live editing on. Restart dohc to try again.";
+export const HISTORY_OFF_FOLDER_BODY =
+  "Without History, dohc can't check whether a page in it has live editing on. Restart dohc to try again.";
 
 /** The engine refuses to move, delete or restore a shared live file this way. */
 export function isSharedLiveFileRefusal(error: unknown): boolean {
@@ -794,7 +961,8 @@ export function isSharedLiveFileRefusal(error: unknown): boolean {
 }
 
 /** A restore History refuses for a shared live file: a title, then what to do. */
-export const sharedLiveRestoreTitle = (path: string): string => `dohc can't restore "${path}" because it has been shared live`;
+export const sharedLiveRestoreTitle = (path: string): string =>
+  `dohc can't restore "${path}" because it has been shared live`;
 export const SHARED_LIVE_RESTORE_BODY = "Copy the text you want from History into the file.";
 
 /** Stop and restore's two lines for that file, within its 500-character detail. A long path keeps its end. */
@@ -807,13 +975,20 @@ export function sharedLiveRestoreDetail(path: string): string {
 /** A chat page cursor lost its access or version binding. Restart the walk once. */
 export function isChatMentionPageChanged(error: unknown): boolean {
   const { name, code, message } = parse(error);
-  return ((name === "DaemonRefusalError" && code === "CONFLICT") || (name === "Error" && code === undefined)) &&
-    Object.hasOwn(CHAT_MENTION_PAGE_CHANGED_WORDS, message);
+  return (
+    ((name === "DaemonRefusalError" && code === "CONFLICT") ||
+      (name === "Error" && code === undefined)) &&
+    Object.hasOwn(CHAT_MENTION_PAGE_CHANGED_WORDS, message)
+  );
 }
 
 export function isCaptureFileHeldRefusal(error: unknown): boolean {
   const { name, code, message } = parse(error);
-  return name === "DaemonRefusalError" && code === "CONFLICT" && message.startsWith("capture-file-held: ");
+  return (
+    name === "DaemonRefusalError" &&
+    code === "CONFLICT" &&
+    message.startsWith("capture-file-held: ")
+  );
 }
 
 // A note changed outside dohc closed, but capture has not recorded the new
@@ -824,7 +999,8 @@ export function outsideVersionWaitingMessage(path: string): string {
 
 // Capture holds every refused outside edit with one reason, so these words
 // name each form it refuses. Restoring the file's earlier bytes lets capture record it again.
-export const CAPTURE_HELD_WORDS = "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
+export const CAPTURE_HELD_WORDS =
+  "dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.";
 
 export function captureHeldLiveMessage(path: string): string {
   return `dohc cannot open "${path}" for live editing. ${CAPTURE_HELD_WORDS}`;
@@ -833,10 +1009,35 @@ export function captureHeldLiveMessage(path: string): string {
 /** Access and connection failures can hide a changed grant behind an IPC error. */
 export function shouldRecheckShareAccess(error: unknown): boolean {
   const { name, code, message } = parse(error);
-  if (["RelayUnauthorizedError", "RelayClaimRefusedError", "RelayWorkspaceUnavailableError",
-    "RelayUnreachableError", "SharedFileReadOnlyError", "ShareUnavailableError", "TimeoutError", "NetworkError"].includes(name)) return true;
-  if (name === "DaemonRefusalError" && code !== undefined &&
-    ["AUTH_FAILED", "FORBIDDEN", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED",
-      "SESSION_EXPIRED", "WORKSPACE_UNAVAILABLE", "IDENTITY_NOT_RECOGNIZED"].includes(code)) return true;
-  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|shared file session changed|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(message);
+  if (
+    [
+      "RelayUnauthorizedError",
+      "RelayClaimRefusedError",
+      "RelayWorkspaceUnavailableError",
+      "RelayUnreachableError",
+      "SharedFileReadOnlyError",
+      "ShareUnavailableError",
+      "TimeoutError",
+      "NetworkError",
+    ].includes(name)
+  )
+    return true;
+  if (
+    name === "DaemonRefusalError" &&
+    code !== undefined &&
+    [
+      "AUTH_FAILED",
+      "FORBIDDEN",
+      "SHARE_UNAVAILABLE",
+      "SHARE_READ_ONLY",
+      "SHARE_OPERATION_REJECTED",
+      "SESSION_EXPIRED",
+      "WORKSPACE_UNAVAILABLE",
+      "IDENTITY_NOT_RECOGNIZED",
+    ].includes(code)
+  )
+    return true;
+  return /\b(?:unauthorized|forbidden|authorization failed|does not have Edit access|access to this share (?:ended|changed)|shared file session changed|share is no longer available|network (?:error|request failed|failure)|fetch failed|failed to fetch|ECONN\w*|ENOTFOUND|ETIMEDOUT)\b|Share request failed \((?:401|403|404)\)/i.test(
+    message,
+  );
 }

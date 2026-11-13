@@ -21,25 +21,20 @@ describe("workspace headings", () => {
       "tail",
     ].join("\n");
     const headings = extractWorkspaceHeadings(markdown);
-    expect(headings.map(({ text, level, anchor, occurrence }) => ({ text, level, anchor, occurrence }))).toEqual([
+    expect(
+      headings.map(({ text, level, anchor, occurrence }) => ({ text, level, anchor, occurrence })),
+    ).toEqual([
       { text: "Launch Plan", level: 1, anchor: "launch-plan", occurrence: 0 },
       { text: "Pricing & Regions", level: 2, anchor: "pricing-regions", occurrence: 0 },
       { text: "Pricing & Regions", level: 2, anchor: "pricing-regions-1", occurrence: 1 },
       { text: "Appendix", level: 1, anchor: "appendix", occurrence: 0 },
     ]);
     const { startOffset, endOffset } = headings[1]!;
-    expect(markdown.slice(startOffset, endOffset).trimEnd()).toBe(
-      "## Pricing & Regions\nfirst",
-    );
+    expect(markdown.slice(startOffset, endOffset).trimEnd()).toBe("## Pricing & Regions\nfirst");
   });
 
   it("keeps anchors unique when a literal heading occupies a duplicate suffix", () => {
-    const headings = extractWorkspaceHeadings([
-      "# Foo",
-      "# Foo-1",
-      "# Foo",
-      "# Foo",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(["# Foo", "# Foo-1", "# Foo", "# Foo"].join("\n"));
 
     expect(headings.map(({ anchor, occurrence }) => ({ anchor, occurrence }))).toEqual([
       { anchor: "foo", occurrence: 0 },
@@ -48,12 +43,9 @@ describe("workspace headings", () => {
       { anchor: "foo-3", occurrence: 2 },
     ]);
     expect(new Set(headings.map((heading) => heading.anchor)).size).toBe(headings.length);
-    expect(findWorkspaceHeading(headings, { anchor: "foo-2", occurrence: 1 }))
-      .toBe(headings[2]);
-    expect(findWorkspaceHeading(headings, { anchor: "foo", occurrence: 1 }))
-      .toBe(headings[2]);
-    expect(findWorkspaceHeading(headings, { anchor: "foo-1", occurrence: 1 }))
-      .toBe(headings[2]);
+    expect(findWorkspaceHeading(headings, { anchor: "foo-2", occurrence: 1 })).toBe(headings[2]);
+    expect(findWorkspaceHeading(headings, { anchor: "foo", occurrence: 1 })).toBe(headings[2]);
+    expect(findWorkspaceHeading(headings, { anchor: "foo-1", occurrence: 1 })).toBe(headings[2]);
   });
 
   it("uniquifies a literal suffixed base that follows an existing duplicate", () => {
@@ -67,77 +59,70 @@ describe("workspace headings", () => {
   });
 
   it("prefers a genuine suffixed-base occurrence over the allocated-suffix match", () => {
-    const headings = extractWorkspaceHeadings([
-      "# Foo",
-      "# Foo-1",
-      "# Foo",
-      "# Foo-1",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(["# Foo", "# Foo-1", "# Foo", "# Foo-1"].join("\n"));
 
-    expect(findWorkspaceHeading(headings, { anchor: "foo-1", occurrence: 1 }))
-      .toBe(headings[3]);
+    expect(findWorkspaceHeading(headings, { anchor: "foo-1", occurrence: 1 })).toBe(headings[3]);
   });
 
   it("ignores headings in fenced and indented code", () => {
-    const headings = extractWorkspaceHeadings([
-      "```md",
-      "# hidden",
-      "```not-a-close",
-      "## still hidden",
-      "```",
-      "    ## also hidden",
-      "## Visible",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(
+      [
+        "```md",
+        "# hidden",
+        "```not-a-close",
+        "## still hidden",
+        "```",
+        "    ## also hidden",
+        "## Visible",
+      ].join("\n"),
+    );
     expect(headings.map((heading) => heading.text)).toEqual(["Visible"]);
   });
 
   it("does not treat a mixed backtick-and-tilde run as a code fence", () => {
-    const headings = extractWorkspaceHeadings([
-      "``~",
-      "# Still visible",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(["``~", "# Still visible"].join("\n"));
 
     expect(headings.map((heading) => heading.text)).toEqual(["Still visible"]);
   });
 
   it("allows the opposite fence marker in a valid info string", () => {
-    const headings = extractWorkspaceHeadings([
-      "```~",
-      "# Hidden by backticks",
-      "```",
-      "~~~`js",
-      "## Hidden by tildes",
-      "~~~",
-      "## Visible",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(
+      [
+        "```~",
+        "# Hidden by backticks",
+        "```",
+        "~~~`js",
+        "## Hidden by tildes",
+        "~~~",
+        "## Visible",
+      ].join("\n"),
+    );
 
     expect(headings.map((heading) => heading.text)).toEqual(["Visible"]);
   });
 
   it("does not open a backtick fence whose info string contains a backtick", () => {
-    const headings = extractWorkspaceHeadings([
-      "```lang`invalid",
-      "# Visible after invalid opener",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(
+      ["```lang`invalid", "# Visible after invalid opener"].join("\n"),
+    );
 
-    expect(headings.map((heading) => heading.text)).toEqual([
-      "Visible after invalid opener",
-    ]);
+    expect(headings.map((heading) => heading.text)).toEqual(["Visible after invalid opener"]);
   });
 
   it("keeps the heading picker usable when an ordinary heading exceeds IPC limits", () => {
-    const headings = extractWorkspaceHeadings([
-      `# ${"a".repeat(500)}`,
-      "## Still available",
-    ].join("\n"));
+    const headings = extractWorkspaceHeadings(
+      [`# ${"a".repeat(500)}`, "## Still available"].join("\n"),
+    );
 
-    expect(workspaceHeadingRecords(headings)).toEqual([{
-      text: "Still available",
-      level: 2,
-      anchor: "still-available",
-      occurrence: 0,
-      line: 2,
-    }]);
+    expect(workspaceHeadingRecords(headings)).toEqual([
+      {
+        text: "Still available",
+        level: 2,
+        anchor: "still-available",
+        occurrence: 0,
+        line: 2,
+      },
+    ]);
   });
 
   it("resolves encoded anchors and falls back to text occurrence", () => {
@@ -169,31 +154,26 @@ describe("workspace headings", () => {
       },
     ];
 
-    expect(
-      resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "a%20b" }),
-    ).toBe(headings[0]);
-    expect(
-      resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "a%2520b" }),
-    ).toBe(headings[1]);
+    expect(resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "a%20b" })).toBe(headings[0]);
+    expect(resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "a%2520b" })).toBe(headings[1]);
     expect(
       resolveWorkspaceHeadingAnchorTarget(headings, {
         anchor: "bad%E0%A4%A",
       }),
     ).toBe(headings[2]);
-    expect(
-      resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "" }),
-    ).toBeNull();
+    expect(resolveWorkspaceHeadingAnchorTarget(headings, { anchor: "" })).toBeNull();
   });
 
   it("normalizes formatting without discarding unicode", () => {
-    expect(headingAnchorBase("**Über** `Plan`!" )).toBe("über-plan");
+    expect(headingAnchorBase("**Über** `Plan`!")).toBe("über-plan");
   });
 
   it("preserves hashes in heading text unless closing hashes are whitespace-delimited", () => {
     expect(
-      extractWorkspaceHeadings("## C#\n## Release notes ###\n").map(
-        ({ text, anchor }) => ({ text, anchor }),
-      ),
+      extractWorkspaceHeadings("## C#\n## Release notes ###\n").map(({ text, anchor }) => ({
+        text,
+        anchor,
+      })),
     ).toEqual([
       { text: "C#", anchor: "c" },
       { text: "Release notes", anchor: "release-notes" },
@@ -212,9 +192,9 @@ describe("workspace headings", () => {
       "---",
     ].join("\n");
 
-    expect(
-      extractWorkspaceHeadings(markdown).map(({ text, level }) => ({ text, level })),
-    ).toEqual([{ text: "C#", level: 2 }]);
+    expect(extractWorkspaceHeadings(markdown).map(({ text, level }) => ({ text, level }))).toEqual([
+      { text: "C#", level: 2 },
+    ]);
   });
 
   it("gives symbol-only headings stable non-empty anchors and preserves duplicates", () => {

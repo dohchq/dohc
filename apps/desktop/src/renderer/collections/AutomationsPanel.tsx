@@ -1,5 +1,17 @@
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, ArrowLeft, CalendarClock, CheckCircle2, CircleDashed, Clock, FileCode2, Plus, Save, Server, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CalendarClock,
+  CheckCircle2,
+  CircleDashed,
+  Clock,
+  FileCode2,
+  Plus,
+  Save,
+  Server,
+  X,
+} from "lucide-react";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { nextDue } from "@dohc/workspace-contracts/automation-schedule";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
@@ -75,7 +87,9 @@ export function resetKeptAutomationDraftsForTests(): void {
 }
 
 /** What the panel can save over: the file's hash and its automations, or null when editing is off. */
-function editableOf(file: AutomationsFile | null): { contentHash: string | null; automations: Automation[] } | null {
+function editableOf(
+  file: AutomationsFile | null,
+): { contentHash: string | null; automations: Automation[] } | null {
   if (file?.status === "missing") return { contentHash: null, automations: [] };
   if (file?.status !== "read" || file.automations.some((entry) => !entry.valid)) return null;
   return {
@@ -92,16 +106,30 @@ function editableOf(file: AutomationsFile | null): { contentHash: string | null;
  * lacks, as after a rename, shows in every table with why it does not run.
  * A document Collection's panel, with no table, shows every automation.
  */
-export function shownInTable(entry: AutomationSummary, table: AutomationTable | undefined): boolean {
+export function shownInTable(
+  entry: AutomationSummary,
+  table: AutomationTable | undefined,
+): boolean {
   if (table === undefined || !entry.valid) return true;
   const trigger = entry.automation.when;
-  return !("table" in trigger) || trigger.table === null || trigger.table === table.name || !table.tables.has(trigger.table);
+  return (
+    !("table" in trigger) ||
+    trigger.table === null ||
+    trigger.table === table.name ||
+    !table.tables.has(trigger.table)
+  );
 }
 
 /** How many automations a Collection's ⚡ button counts: those its panel lists. */
-export function automationCount(file: ListCollectionAutomationsResult | null, table?: AutomationTable): number {
-  if (file?.status === "shared") return file.definitions.file.status === "read" ? file.definitions.file.entries.length : 0;
-  return file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)).length : 0;
+export function automationCount(
+  file: ListCollectionAutomationsResult | null,
+  table?: AutomationTable,
+): number {
+  if (file?.status === "shared")
+    return file.definitions.file.status === "read" ? file.definitions.file.entries.length : 0;
+  return file?.status === "read"
+    ? file.automations.filter((entry) => shownInTable(entry, table)).length
+    : 0;
 }
 
 /** False once dohc knows a Collection's automations.yaml does not exist yet. */
@@ -124,11 +152,17 @@ export function AutomationsNote(props: { children?: ReactNode; onClose: () => vo
     >
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
         <span className="flex-1" />
-        <IconButton aria-label="Close automations" title="Close automations" onClick={props.onClose}>
+        <IconButton
+          aria-label="Close automations"
+          title="Close automations"
+          onClick={props.onClose}
+        >
           <X size={14} aria-hidden />
         </IconButton>
       </div>
-      {props.children === undefined ? null : <div className="px-3 py-4 text-[12px] text-muted">{props.children}</div>}
+      {props.children === undefined ? null : (
+        <div className="px-3 py-4 text-[12px] text-muted">{props.children}</div>
+      )}
     </aside>
   );
 }
@@ -142,7 +176,9 @@ function copyId(id: string, taken: ReadonlySet<string>): string {
   }
 }
 
-function writeProblem(result: Exclude<WriteCollectionAutomationsResult, { status: "written" | "reformats" }>): string {
+function writeProblem(
+  result: Exclude<WriteCollectionAutomationsResult, { status: "written" | "reformats" }>,
+): string {
   switch (result.status) {
     case "conflict":
       return `${AUTOMATIONS_FILE} changed while you were editing.`;
@@ -172,17 +208,27 @@ async function restoreAutomation(
     const current = await bridge().listCollectionAutomations(target);
     const editable = current.status === "unavailable" ? null : editableOf(current);
     if (editable === null) {
-      onError(`dohc cannot read every automation in ${AUTOMATIONS_FILE}, so it did not put "${automation.name}" back.`, null, again);
+      onError(
+        `dohc cannot read every automation in ${AUTOMATIONS_FILE}, so it did not put "${automation.name}" back.`,
+        null,
+        again,
+      );
       return;
     }
     if (editable.automations.some((entry) => entry.id === automation.id)) return;
     const automations = [...editable.automations];
     automations.splice(Math.min(index, automations.length), 0, automation);
     const result = await bridge().writeCollectionAutomations({
-      ...target, expectedContentHash: editable.contentHash, automations, reformat: false,
+      ...target,
+      expectedContentHash: editable.contentHash,
+      automations,
+      reformat: false,
     });
     if (result.status === "reformats") {
-      onError(`${AUTOMATIONS_FILE} changed by hand since the delete, so dohc did not put "${automation.name}" back.`, null);
+      onError(
+        `${AUTOMATIONS_FILE} changed by hand since the delete, so dohc did not put "${automation.name}" back.`,
+        null,
+      );
     } else if (result.status !== "written") {
       onError(writeProblem(result), null, result.status === "conflict" ? again : null);
     }
@@ -198,7 +244,11 @@ function ReachStatus(props: {
 }) {
   const { summary } = props;
   if (summary.cannotRun !== null) {
-    return <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">{summary.cannotRun}</StatusLine>;
+    return (
+      <StatusLine tone="warning" icon={AlertTriangle} label="Does not run">
+        {summary.cannotRun}
+      </StatusLine>
+    );
   }
   if (summary.reach.kind === "waiting") {
     return (
@@ -208,11 +258,17 @@ function ReachStatus(props: {
       </StatusLine>
     );
   }
-  const stopped = [...new Set(summary.reach.steps.flatMap((step) => (step.verdict === "stopped" ? [step.reason] : [])))];
+  const stopped = [
+    ...new Set(
+      summary.reach.steps.flatMap((step) => (step.verdict === "stopped" ? [step.reason] : [])),
+    ),
+  ];
   return (
     <>
       {stopped.length > 0 ? (
-        <StatusLine tone="danger" icon={AlertTriangle} label="Stopped">{stopped.join(" ")}</StatusLine>
+        <StatusLine tone="danger" icon={AlertTriangle} label="Stopped">
+          {stopped.join(" ")}
+        </StatusLine>
       ) : null}
       {summary.reach.steps.map((step, index) =>
         step.verdict === "held" ? (
@@ -224,7 +280,11 @@ function ReachStatus(props: {
                   ? `A step can ${automationReachCopy(step)}. dohc cannot read the automations file in one version of the workspace. New steps here wait for you.`
                   : `A step can now ${automationReachCopy(step)}. It could not before.`}
             </p>
-            <SecondaryButton size="compact" className="mt-1" onClick={() => props.onAllow(step.step, step.seq)}>
+            <SecondaryButton
+              size="compact"
+              className="mt-1"
+              onClick={() => props.onAllow(step.step, step.seq)}
+            >
               Allow
             </SecondaryButton>
           </StatusLine>
@@ -258,7 +318,8 @@ const LONGEST_TIMEOUT_MS = 2 ** 31 - 1;
 /** When a switched-on schedule that can run is next due after `nowMs`, or null. */
 function nextRunOf(summary: ValidAutomationSummary, nowMs: number): number | null {
   const { automation } = summary;
-  if (!automation.enabled || automation.when.kind !== "schedule" || summary.cannotRun !== null) return null;
+  if (!automation.enabled || automation.when.kind !== "schedule" || summary.cannotRun !== null)
+    return null;
   try {
     return nextDue(automation.when, nowMs);
   } catch {
@@ -293,7 +354,10 @@ function useNextRuns(file: ListCollectionAutomationsResult | null): ReadonlyMap<
   useEffect(() => {
     if (soonestMs === null) return;
     const again = () => setTick((value) => value + 1);
-    const timer = window.setTimeout(again, Math.min(Math.max(soonestMs - Date.now(), 0), LONGEST_TIMEOUT_MS));
+    const timer = window.setTimeout(
+      again,
+      Math.min(Math.max(soonestMs - Date.now(), 0), LONGEST_TIMEOUT_MS),
+    );
     window.addEventListener("focus", again);
     return () => {
       window.clearTimeout(timer);
@@ -327,12 +391,21 @@ function useScheduleHost(workspaceId: string, wanted: boolean, onError: ErrorRep
       if (!request.isCurrent(token)) return;
       // A note keeps the host the relay named last, now unchecked.
       setHost((current) => ({
-        relay: result.kind === "relay" ? result : result.kind === "note" ? current?.relay ?? null : null,
+        relay:
+          result.kind === "relay"
+            ? result
+            : result.kind === "note"
+              ? (current?.relay ?? null)
+              : null,
         note: result.kind === "note" ? result.message : null,
       }));
     } catch (error) {
       if (request.isCurrent(token)) {
-        reportError.current("dohc could not read which computer runs schedules.", error, () => void read());
+        reportError.current(
+          "dohc could not read which computer runs schedules.",
+          error,
+          () => void read(),
+        );
       }
     }
   }, [workspaceId]);
@@ -371,7 +444,8 @@ function NextRun(props: { at: string | undefined; runsOn: string | null }) {
   if (props.at === undefined) return null;
   return (
     <StatusLine tone="muted" icon={CalendarClock} label="Schedule">
-      Next run {props.at}{props.runsOn === null ? null : ` on ${props.runsOn}`}
+      Next run {props.at}
+      {props.runsOn === null ? null : ` on ${props.runsOn}`}
     </StatusLine>
   );
 }
@@ -382,29 +456,50 @@ function NextRun(props: { at: string | undefined; runsOn: string | null }) {
  * run automations, a handover waits, or dohc could not check. Each offers
  * its way forward.
  */
-function ScheduleHostNote(props: { host: ScheduleHostView | null; onCheckAgain: () => void; onChooseComputer: () => void }) {
+function ScheduleHostNote(props: {
+  host: ScheduleHostView | null;
+  onCheckAgain: () => void;
+  onChooseComputer: () => void;
+}) {
   const relay = props.host?.relay ?? null;
   const note = props.host?.note ?? null;
   const shown = relay === null ? null : shownScheduleHost(relay);
   const from = relay?.computers.find((computer) => computer.installId === shown?.handoverFrom);
   const choose = (
-    <SecondaryButton size="compact" className="mt-1.5" onClick={props.onChooseComputer}>Choose a computer</SecondaryButton>
+    <SecondaryButton size="compact" className="mt-1.5" onClick={props.onChooseComputer}>
+      Choose a computer
+    </SecondaryButton>
   );
   return (
     <>
       {note === null ? null : (
-        <div data-testid="schedule-host-unchecked" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+        <div
+          data-testid="schedule-host-unchecked"
+          className="border-b border-line px-3 py-2 text-[12px] text-muted"
+        >
           <p className="m-0">{note}</p>
-          <SecondaryButton size="compact" className="mt-1.5" onClick={props.onCheckAgain}>Check again</SecondaryButton>
+          <SecondaryButton size="compact" className="mt-1.5" onClick={props.onCheckAgain}>
+            Check again
+          </SecondaryButton>
         </div>
       )}
       {shown?.hostInstallId === null ? (
-        <div data-testid="schedule-host-missing" className="border-b border-line px-3 py-2 text-[12px] text-muted">
-          <p className="m-0">{shown.serverOff ? AUTOMATION_SERVER_OFF : "No computer runs this workspace's schedules."}</p>
+        <div
+          data-testid="schedule-host-missing"
+          className="border-b border-line px-3 py-2 text-[12px] text-muted"
+        >
+          <p className="m-0">
+            {shown.serverOff
+              ? AUTOMATION_SERVER_OFF
+              : "No computer runs this workspace's schedules."}
+          </p>
           {choose}
         </div>
       ) : from ? (
-        <div data-testid="schedule-host-handover" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+        <div
+          data-testid="schedule-host-handover"
+          className="border-b border-line px-3 py-2 text-[12px] text-muted"
+        >
           <p className="m-0">Schedules wait for {computerInSentence(from)} to hand over.</p>
           {choose}
         </div>
@@ -419,9 +514,19 @@ function ScheduleHostNote(props: { host: ScheduleHostView | null; onCheckAgain: 
  * as runs) know to read again. Latest wins: a slow answer never replaces a
  * newer one.
  */
-export function useCollectionAutomations(workspaceId: string, collectionPath: string | null, onError: ErrorReport) {
-  const [state, setState] = useState<{ file: ListCollectionAutomationsResult | null; holdsUnreadable: boolean; version: number }>({
-    file: null, holdsUnreadable: false, version: 0,
+export function useCollectionAutomations(
+  workspaceId: string,
+  collectionPath: string | null,
+  onError: ErrorReport,
+) {
+  const [state, setState] = useState<{
+    file: ListCollectionAutomationsResult | null;
+    holdsUnreadable: boolean;
+    version: number;
+  }>({
+    file: null,
+    holdsUnreadable: false,
+    version: 0,
   });
   const request = useRequestSequence([workspaceId, collectionPath]);
   const reload = useCallback(async () => {
@@ -436,19 +541,28 @@ export function useCollectionAutomations(workspaceId: string, collectionPath: st
         bridge().listAutomationHolds({ workspaceId }),
       ]);
       if (request.isCurrent(token)) {
-        setState((current) => ({ file: result, holdsUnreadable: holds.unreadable, version: current.version + 1 }));
+        setState((current) => ({
+          file: result,
+          holdsUnreadable: holds.unreadable,
+          version: current.version + 1,
+        }));
       }
     } catch (error) {
-      if (request.isCurrent(token)) onError("dohc could not read this Collection's automations.", error, () => void reload());
+      if (request.isCurrent(token))
+        onError("dohc could not read this Collection's automations.", error, () => void reload());
     }
   }, [workspaceId, collectionPath, onError]);
   useEffect(() => {
     void reload();
   }, [reload]);
   // Main says when the file changes, or a shared file's change reaches the relay.
-  useEffect(() => bridge().onCollectionAutomationsChanged((event) => {
-    if (event.workspaceId === workspaceId) void reload();
-  }), [workspaceId, reload]);
+  useEffect(
+    () =>
+      bridge().onCollectionAutomationsChanged((event) => {
+        if (event.workspaceId === workspaceId) void reload();
+      }),
+    [workspaceId, reload],
+  );
   return { ...state, reload };
 }
 
@@ -467,7 +581,9 @@ export interface AutomationFocus {
 }
 
 /** A Collection reached through a share lists what its file says; any other lists what this computer runs. */
-export function AutomationsPanel(props: Parameters<typeof OwnerAutomationsPanel>[0] & { readOnly?: boolean }) {
+export function AutomationsPanel(
+  props: Parameters<typeof OwnerAutomationsPanel>[0] & { readOnly?: boolean },
+) {
   const file = props.automations.file;
   return file?.status === "shared" ? (
     <SharedAutomationsPanel
@@ -524,7 +640,11 @@ function OwnerAutomationsPanel(props: {
   const nextRuns = useNextRuns(file);
   const fileRef = useRef(file);
   fileRef.current = file;
-  const [runsOf, setRunsOf] = useState<{ automationId: string; name: string; run?: string | null } | null>(null);
+  const [runsOf, setRunsOf] = useState<{
+    automationId: string;
+    name: string;
+    run?: string | null;
+  } | null>(null);
   // Runs replaces the list, so focus moves to Back, and Back returns it to
   // the actions of the row that opened Runs.
   const backButton = useRef<HTMLButtonElement | null>(null);
@@ -540,13 +660,18 @@ function OwnerAutomationsPanel(props: {
   // A Collection on the server: the server runs its automations, and says itself which it runs.
   const onServer = file?.status === "read" ? file.onServer : undefined;
   // The builder shows it under a schedule it edits.
-  const scheduleHost = useScheduleHost(workspaceId, onServer === undefined && (nextRuns.size > 0 || editing !== null), onError);
+  const scheduleHost = useScheduleHost(
+    workspaceId,
+    onServer === undefined && (nextRuns.size > 0 || editing !== null),
+    onError,
+  );
   const relayHost = scheduleHost.host?.relay ?? null;
   // Without a computer to run them, schedules have no next run to show.
   const noHost = relayHost !== null && shownScheduleHost(relayHost).hostInstallId === null;
   const runsOn = onServer ? "your server" : otherHostName(relayHost);
   // A next run shows where it will run: on the server only once the server says it runs them.
-  const nextRunOf = (automationId: string) => (onServer ? onServer.runs === true : !noHost) ? nextRuns.get(automationId) : undefined;
+  const nextRunOf = (automationId: string) =>
+    (onServer ? onServer.runs === true : !noHost) ? nextRuns.get(automationId) : undefined;
   const scheduleHostNote = onServer ? null : (
     <ScheduleHostNote
       host={scheduleHost.host}
@@ -561,7 +686,8 @@ function OwnerAutomationsPanel(props: {
     keptDrafts.delete(draftKey);
     return () => {
       const open = editingRef.current;
-      if (open && latestDraft.current?.dirty) keptDrafts.set(draftKey, { ...open, start: latestDraft.current.automation });
+      if (open && latestDraft.current?.dirty)
+        keptDrafts.set(draftKey, { ...open, start: latestDraft.current.automation });
     };
   }, [draftKey]);
   // Back, Close, Cancel, and a notice leave the builder through here, so a
@@ -579,12 +705,13 @@ function OwnerAutomationsPanel(props: {
   // A switched-off automation's notice, and Try again on its run, go to its
   // switch in the list, which takes focus once its row shows.
   const [switchOf, setSwitchOf] = useState<{ automationId: string } | null>(null);
-  const showControls = (automationId: string) => leave(() => {
-    setEditing(null);
-    setRunsOf(null);
-    returnFocusTo.current = null;
-    setSwitchOf({ automationId });
-  });
+  const showControls = (automationId: string) =>
+    leave(() => {
+      setEditing(null);
+      setRunsOf(null);
+      returnFocusTo.current = null;
+      setSwitchOf({ automationId });
+    });
   const [saving, setSaving] = useState(false);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
   // Rises when the workspace or Collection changes, or the panel closes: a
@@ -613,18 +740,30 @@ function OwnerAutomationsPanel(props: {
     leave(() => {
       setRunsOf(null);
       // Steps the page filled in are a change, so leaving asks before it drops them.
-      setEditing({ session: nextSession(), start: ask.automation, baseline: { ...ask.automation, do: [] }, original: null, cannotRun: null, reach: null });
+      setEditing({
+        session: nextSession(),
+        start: ask.automation,
+        baseline: { ...ask.automation, do: [] },
+        original: null,
+        cannotRun: null,
+        reach: null,
+      });
     });
     // Only a new ask opens the builder; a reload does not.
   }, [props.start?.seq, file === null]);
 
   useEffect(() => {
     if (!props.focus) return;
-    const summary = file?.status === "read"
-      ? file.automations.find((entry) => entry.valid && entry.automationId === props.focus?.automationId)
-      : undefined;
+    const summary =
+      file?.status === "read"
+        ? file.automations.find(
+            (entry) => entry.valid && entry.automationId === props.focus?.automationId,
+          )
+        : undefined;
     // Before the file is read, or once the automation is gone, the name the asker gave, else the id's last part.
-    const name = summary?.valid ? summary.automation.name : (props.focus.name ?? props.focus.automationId.split("#").at(-1) ?? "");
+    const name = summary?.valid
+      ? summary.automation.name
+      : (props.focus.name ?? props.focus.automationId.split("#").at(-1) ?? "");
     const { automationId, run } = props.focus;
     if (props.focus.controls) {
       showControls(automationId);
@@ -677,7 +816,8 @@ function OwnerAutomationsPanel(props: {
       agreeAndSave?: () => void,
     ) => {
       const current = fileRef.current;
-      const editable = current === null || current.status === "unavailable" ? null : editableOf(current);
+      const editable =
+        current === null || current.status === "unavailable" ? null : editableOf(current);
       if (editable === null) return;
       const again = retry ?? (() => save(change, onSaved, agreed, onNotSaved));
       const epoch = scope.current();
@@ -702,7 +842,8 @@ function OwnerAutomationsPanel(props: {
             return;
           }
           onNotSaved();
-          if (result.status !== "reformats") onError(writeProblem(result), null, result.status === "conflict" ? again : null);
+          if (result.status !== "reformats")
+            onError(writeProblem(result), null, result.status === "conflict" ? again : null);
         })
         .catch((error: unknown) => {
           if (!scope.isCurrent(epoch)) return;
@@ -729,21 +870,32 @@ function OwnerAutomationsPanel(props: {
     }
     const automationId = returnFocusTo.current;
     returnFocusTo.current = null;
-    const row = automationId === null ? undefined : rowElements.current.get(automationId.split("#").at(-1) ?? "");
+    const row =
+      automationId === null
+        ? undefined
+        : rowElements.current.get(automationId.split("#").at(-1) ?? "");
     row?.querySelector<HTMLElement>('[aria-haspopup="menu"]')?.focus();
   }, [runsOf]);
   useEffect(() => {
     if (switchOf === null || runsOf !== null || editing !== null || file === null) return;
     setSwitchOf(null);
-    const entry = file.status === "read"
-      ? file.automations.find((summary) => summary.valid && summary.automationId === switchOf.automationId)
-      : undefined;
+    const entry =
+      file.status === "read"
+        ? file.automations.find(
+            (summary) => summary.valid && summary.automationId === switchOf.automationId,
+          )
+        : undefined;
     const row = entry?.valid ? rowElements.current.get(entry.automation.id) : undefined;
     // A switch this person cannot change still shows; focus stays on its row.
-    (row?.querySelector<HTMLElement>('[role="switch"]:enabled') ?? row?.querySelector<HTMLElement>('[aria-haspopup="menu"]') ??
-      closeButton.current)?.focus();
+    (
+      row?.querySelector<HTMLElement>('[role="switch"]:enabled') ??
+      row?.querySelector<HTMLElement>('[aria-haspopup="menu"]') ??
+      closeButton.current
+    )?.focus();
   }, [switchOf, runsOf, editing, file]);
-  const [focusAfterDelete, setFocusAfterDelete] = useState<{ neighbor: string | null } | null>(null);
+  const [focusAfterDelete, setFocusAfterDelete] = useState<{ neighbor: string | null } | null>(
+    null,
+  );
   useEffect(() => {
     if (focusAfterDelete === null || saving) return;
     const { neighbor } = focusAfterDelete;
@@ -761,7 +913,11 @@ function OwnerAutomationsPanel(props: {
       .then((result) => {
         if (!scope.isCurrent(epoch)) return;
         if (result.status === "roster-unknown") {
-          onError("Couldn't reset automation holds.", new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."), resetHolds);
+          onError(
+            "Couldn't reset automation holds.",
+            new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."),
+            resetHolds,
+          );
         } else {
           void load();
         }
@@ -782,7 +938,14 @@ function OwnerAutomationsPanel(props: {
   const allow = (automationId: string, definitionHash: string, step: string, seq: number) => {
     const epoch = scope.current();
     void bridge()
-      .confirmCollectionAutomationStep({ workspaceId, automationId, definitionHash, step, seq, onServer: false })
+      .confirmCollectionAutomationStep({
+        workspaceId,
+        automationId,
+        definitionHash,
+        step,
+        seq,
+        onServer: false,
+      })
       .then(() => {
         if (scope.isCurrent(epoch)) void load();
       })
@@ -794,7 +957,8 @@ function OwnerAutomationsPanel(props: {
   const editable = file === null || file.status === "unavailable" ? null : editableOf(file);
   // The file's cap counts every automation in it, a dataset's other tables' too.
   const count = editable?.automations.length ?? 0;
-  const shown = file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)) : [];
+  const shown =
+    file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)) : [];
   const filePath = `${collectionPath}/${AUTOMATIONS_FILE}`;
 
   const duplicate = (automation: Automation) =>
@@ -820,8 +984,10 @@ function OwnerAutomationsPanel(props: {
       (automations) => automations.filter((entry) => entry.id !== automation.id),
       () => {
         setFocusAfterDelete({ neighbor: neighbor?.id ?? null });
-        onNotice(`Deleted "${automation.name}"`, () =>
-          void restoreAutomation({ workspaceId, collectionPath }, automation, index, onError));
+        onNotice(
+          `Deleted "${automation.name}"`,
+          () => void restoreAutomation({ workspaceId, collectionPath }, automation, index, onError),
+        );
       },
     );
   };
@@ -841,7 +1007,10 @@ function OwnerAutomationsPanel(props: {
     submittedDraft = latestDraft.current?.automation,
   ) => {
     const current = fileRef.current;
-    const listed = current === null || current.status === "unavailable" ? undefined : editableOf(current)?.automations;
+    const listed =
+      current === null || current.status === "unavailable"
+        ? undefined
+        : editableOf(current)?.automations;
     if (!open || !listed) return;
     const stillOpen = editingRef.current?.session === open.session;
     const { original } = open;
@@ -852,21 +1021,30 @@ function OwnerAutomationsPanel(props: {
     if (original !== null && now === undefined) {
       stopLeaving();
       if (stillOpen) setEditing({ ...open, original: null });
-      onError(`"${original.name}" was deleted from ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to add it back.`, null);
+      onError(
+        `"${original.name}" was deleted from ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to add it back.`,
+        null,
+      );
       return;
     }
-    if ((original !== null && JSON.stringify(now) !== JSON.stringify(original)) ||
-      (original === null && listed.some((entry) => entry.id === automation.id))) {
+    if (
+      (original !== null && JSON.stringify(now) !== JSON.stringify(original)) ||
+      (original === null && listed.some((entry) => entry.id === automation.id))
+    ) {
       stopLeaving();
       const theirs = now ?? listed.find((entry) => entry.id === automation.id) ?? null;
       if (stillOpen) setEditing({ ...open, original: theirs, baseline: theirs ?? open.baseline });
-      onError(`"${automation.name}" changed in ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to replace it with yours.`, null);
+      onError(
+        `"${automation.name}" changed in ${AUTOMATIONS_FILE} while you were editing, so dohc did not save. Save again to replace it with yours.`,
+        null,
+      );
       return;
     }
     save(
-      (automations) => original === null
-        ? [...automations, automation]
-        : automations.map((entry) => (entry.id === original.id ? automation : entry)),
+      (automations) =>
+        original === null
+          ? [...automations, automation]
+          : automations.map((entry) => (entry.id === original.id ? automation : entry)),
       () => {
         const current = editingRef.current;
         if (current?.session !== open.session) return;
@@ -903,48 +1081,68 @@ function OwnerAutomationsPanel(props: {
   leavingRef.current = leaving;
   const startNew = () => {
     const start = newAutomation(props.fields, table?.name ?? null);
-    setEditing({ session: nextSession(), start, baseline: start, original: null, cannotRun: null, reach: null });
+    setEditing({
+      session: nextSession(),
+      start,
+      baseline: start,
+      original: null,
+      cannotRun: null,
+      reach: null,
+    });
   };
-  const edit = (entry: ValidAutomationSummary) => setEditing({
-    session: nextSession(),
-    start: entry.automation,
-    baseline: entry.automation,
-    original: entry.automation,
-    cannotRun: entry.cannotRun,
-    reach: entry.reach,
-  });
+  const edit = (entry: ValidAutomationSummary) =>
+    setEditing({
+      session: nextSession(),
+      start: entry.automation,
+      baseline: entry.automation,
+      original: entry.automation,
+      cannotRun: entry.cannotRun,
+      reach: entry.reach,
+    });
 
   // A run opened before the file was read, as from a record's History, takes the automation's name once it is.
-  const listed = runsOf === null || file?.status !== "read" ? undefined
-    : file.automations.find((entry) => entry.valid && entry.automationId === runsOf.automationId);
-  const title = editing ? (editing.start.id === "" ? "New automation" : editing.start.name)
-    : runsOf === null ? null : listed?.valid ? listed.automation.name : runsOf.name;
-  const header = title !== null ? (
-    <>
-      <IconButton
-        ref={backButton}
-        aria-label="Back to automations"
-        title="Back to automations"
-        onClick={() => leave(() => {
-          setEditing(null);
-          setRunsOf(null);
-        })}
-      >
-        <ArrowLeft size={14} aria-hidden />
-      </IconButton>
-      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{title}</span>
-    </>
-  ) : (
-    <>
-      <span className="flex-1" />
-      {/* An empty list offers New automation in its own place. */}
-      {editable !== null && shown.length > 0 && count < MAX_AUTOMATIONS ? (
-        <IconButton aria-label="New automation" title="New automation" onClick={startNew}>
-          <Plus size={14} aria-hidden />
+  const listed =
+    runsOf === null || file?.status !== "read"
+      ? undefined
+      : file.automations.find((entry) => entry.valid && entry.automationId === runsOf.automationId);
+  const title = editing
+    ? editing.start.id === ""
+      ? "New automation"
+      : editing.start.name
+    : runsOf === null
+      ? null
+      : listed?.valid
+        ? listed.automation.name
+        : runsOf.name;
+  const header =
+    title !== null ? (
+      <>
+        <IconButton
+          ref={backButton}
+          aria-label="Back to automations"
+          title="Back to automations"
+          onClick={() =>
+            leave(() => {
+              setEditing(null);
+              setRunsOf(null);
+            })
+          }
+        >
+          <ArrowLeft size={14} aria-hidden />
         </IconButton>
-      ) : null}
-    </>
-  );
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{title}</span>
+      </>
+    ) : (
+      <>
+        <span className="flex-1" />
+        {/* An empty list offers New automation in its own place. */}
+        {editable !== null && shown.length > 0 && count < MAX_AUTOMATIONS ? (
+          <IconButton aria-label="New automation" title="New automation" onClick={startNew}>
+            <Plus size={14} aria-hidden />
+          </IconButton>
+        ) : null}
+      </>
+    );
 
   return (
     <aside
@@ -955,11 +1153,20 @@ function OwnerAutomationsPanel(props: {
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
         {header}
         {file?.status === "read" || file?.status === "unreadable" ? (
-          <IconButton aria-label={`Open ${AUTOMATIONS_FILE}`} title={`Open ${AUTOMATIONS_FILE}`} onClick={() => props.onOpenFile(filePath)}>
+          <IconButton
+            aria-label={`Open ${AUTOMATIONS_FILE}`}
+            title={`Open ${AUTOMATIONS_FILE}`}
+            onClick={() => props.onOpenFile(filePath)}
+          >
             <FileCode2 size={14} aria-hidden />
           </IconButton>
         ) : null}
-        <IconButton ref={closeButton} aria-label="Close automations" title="Close automations" onClick={() => leave(props.onClose)}>
+        <IconButton
+          ref={closeButton}
+          aria-label="Close automations"
+          title="Close automations"
+          onClick={() => leave(props.onClose)}
+        >
           <X size={14} aria-hidden />
         </IconButton>
       </div>
@@ -979,7 +1186,9 @@ function OwnerAutomationsPanel(props: {
             takenIds={new Set(editable?.automations.map((automation) => automation.id) ?? [])}
             saving={saving}
             readOnly={editable === null}
-            you={(file?.status === "read" || file?.status === "missing" ? file.you : undefined) ?? null}
+            you={
+              (file?.status === "read" || file?.status === "missing" ? file.you : undefined) ?? null
+            }
             leaveRequested={leaving !== null}
             onLeave={() => {
               forgetDraft();
@@ -1012,22 +1221,40 @@ function OwnerAutomationsPanel(props: {
             onUndone={props.onRunUndone}
           />
         ) : file === null ? null : file.status === "unavailable" ? (
-          <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>
+          <p className="m-0 px-3 py-4 text-[12px] text-muted">
+            This Collection's automations run on its owner's computer.
+          </p>
         ) : file.status === "unreadable" ? (
           <div className="px-3 pb-3 pt-2">
             <StatusLine tone="danger" icon={AlertTriangle} label="Cannot read">
-              <p className="m-0">dohc cannot read {AUTOMATIONS_FILE}. Fix the file to edit automations here.</p>
-              <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
-                {file.diagnostic.code}{file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
+              <p className="m-0">
+                dohc cannot read {AUTOMATIONS_FILE}. Fix the file to edit automations here.
               </p>
-              <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+              <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
+                {file.diagnostic.code}
+                {file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
+              </p>
+              <SecondaryButton
+                size="compact"
+                className="mt-2"
+                onClick={() => props.onOpenFile(filePath)}
+              >
+                Open file
+              </SecondaryButton>
             </StatusLine>
           </div>
         ) : file.status === "missing" || shown.length === 0 ? (
           <div className="flex h-full py-4">
-            <EmptyState picture={EMPTY_ART.automations} title="No automations in this Collection yet.">
+            <EmptyState
+              picture={EMPTY_ART.automations}
+              title="No automations in this Collection yet."
+            >
               {count < MAX_AUTOMATIONS ? (
-                <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" onClick={startNew}>
+                <SecondaryButton
+                  size="compact"
+                  className="inline-flex items-center gap-1.5"
+                  onClick={startNew}
+                >
                   <Plus size={12} aria-hidden />
                   New automation
                 </SecondaryButton>
@@ -1037,22 +1264,38 @@ function OwnerAutomationsPanel(props: {
         ) : (
           <>
             {holdsUnreadable ? (
-              <div data-testid="automation-holds-unreadable" className="border-b border-line px-3 py-2 text-[12px] text-muted">
+              <div
+                data-testid="automation-holds-unreadable"
+                className="border-b border-line px-3 py-2 text-[12px] text-muted"
+              >
                 <p className="m-0">{AUTOMATION_HOLDS_UNREADABLE}</p>
                 <div className="mt-1.5 flex gap-1.5">
-                  <SecondaryButton size="compact" onClick={resetHolds}>Reset holds</SecondaryButton>
-                  <SecondaryButton size="compact" onClick={revealHolds}>Open folder</SecondaryButton>
+                  <SecondaryButton size="compact" onClick={resetHolds}>
+                    Reset holds
+                  </SecondaryButton>
+                  <SecondaryButton size="compact" onClick={revealHolds}>
+                    Open folder
+                  </SecondaryButton>
                 </div>
               </div>
             ) : null}
             {editable === null ? (
               <div className="border-b border-line px-3 py-2 text-[12px] text-muted">
                 <p className="m-0">Fix the automations dohc cannot read to edit them here.</p>
-                <SecondaryButton size="compact" className="mt-1.5" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+                <SecondaryButton
+                  size="compact"
+                  className="mt-1.5"
+                  onClick={() => props.onOpenFile(filePath)}
+                >
+                  Open file
+                </SecondaryButton>
               </div>
             ) : null}
             {onServer?.runs ? (
-              <div data-testid="automations-on-server" className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-[12px] text-muted">
+              <div
+                data-testid="automations-on-server"
+                className="flex items-center gap-1.5 border-b border-line px-3 py-2 text-[12px] text-muted"
+              >
                 <Server size={13} aria-hidden className="shrink-0 text-subtle" />
                 <p className="m-0">Your server runs these automations.</p>
               </div>
@@ -1076,8 +1319,14 @@ function OwnerAutomationsPanel(props: {
                         checked={entry.automation.enabled}
                         disabled={editable === null || saving}
                         onChange={(enabled) =>
-                          save((automations) => automations.map((automation) =>
-                            automation.id === entry.automation.id ? { ...automation, enabled } : automation))}
+                          save((automations) =>
+                            automations.map((automation) =>
+                              automation.id === entry.automation.id
+                                ? { ...automation, enabled }
+                                : automation,
+                            ),
+                          )
+                        }
                       />
                     </div>
                     <div className="min-w-0 flex-1">
@@ -1089,13 +1338,18 @@ function OwnerAutomationsPanel(props: {
                       >
                         {entry.automation.name}
                       </button>
-                      <p className="m-0 mt-0.5 break-words text-[12px] leading-snug text-muted" title={sentenceText(automationSentence(entry.automation))}>
+                      <p
+                        className="m-0 mt-0.5 break-words text-[12px] leading-snug text-muted"
+                        title={sentenceText(automationSentence(entry.automation))}
+                      >
                         <Sentence parts={automationSentence(entry.automation)} />
                       </p>
                       <ReachStatus
                         summary={entry}
                         collectionPath={collectionPath}
-                        onAllow={(step, seq) => allow(entry.automationId, entry.definitionHash, step, seq)}
+                        onAllow={(step, seq) =>
+                          allow(entry.automationId, entry.definitionHash, step, seq)
+                        }
                       />
                       <NextRun at={nextRunOf(entry.automationId)} runsOn={runsOn} />
                     </div>
@@ -1107,15 +1361,28 @@ function OwnerAutomationsPanel(props: {
                       label={`${entry.automation.name} actions`}
                       items={[
                         { label: "Edit", onSelect: () => edit(entry), disabled: editable === null },
-                        { label: "Runs", onSelect: () => openRuns(entry.automationId, entry.automation.name) },
-                        { label: "Duplicate", onSelect: () => duplicate(entry.automation), disabled: editable === null || saving || count >= MAX_AUTOMATIONS },
-                        { label: "Delete", onSelect: () => remove(entry.automation), disabled: editable === null || saving },
+                        {
+                          label: "Runs",
+                          onSelect: () => openRuns(entry.automationId, entry.automation.name),
+                        },
+                        {
+                          label: "Duplicate",
+                          onSelect: () => duplicate(entry.automation),
+                          disabled: editable === null || saving || count >= MAX_AUTOMATIONS,
+                        },
+                        {
+                          label: "Delete",
+                          onSelect: () => remove(entry.automation),
+                          disabled: editable === null || saving,
+                        },
                       ]}
                     />
                   </li>
                 ) : (
                   <li key={`invalid-${index}`} className="border-b border-line px-3 py-2.5">
-                    <p className="m-0 truncate text-[13px] font-medium text-ink">{entry.name ?? entry.id ?? `Automation ${index + 1}`}</p>
+                    <p className="m-0 truncate text-[13px] font-medium text-ink">
+                      {entry.name ?? entry.id ?? `Automation ${index + 1}`}
+                    </p>
                     <StatusLine tone="danger" icon={AlertTriangle} label="Cannot read">
                       <p className="m-0">dohc cannot read this automation, so it does not run.</p>
                       {entry.diagnostics[0] ? (
@@ -1148,7 +1415,8 @@ function OwnerAutomationsPanel(props: {
           }}
         >
           <p>
-            dohc rewrites the whole file when it saves, so you lose its comments and hand formatting.
+            dohc rewrites the whole file when it saves, so you lose its comments and hand
+            formatting.
           </p>
         </ConfirmDialog>
       ) : null}

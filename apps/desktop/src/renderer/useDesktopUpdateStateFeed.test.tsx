@@ -2,10 +2,7 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UpdateStateEvent } from "../ipc/bridgeContract";
-import {
-  followDesktopUpdateState,
-  useDesktopUpdateStateFeed,
-} from "./useDesktopUpdateStateFeed";
+import { followDesktopUpdateState, useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { deferred } from "../testing/deferred";
 
 const IDLE_UPDATE: UpdateStateEvent = {

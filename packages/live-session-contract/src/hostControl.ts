@@ -54,13 +54,8 @@ export function nextHostEpoch(epoch: HostEpoch): HostEpoch {
   return nextPositiveSafeInteger(epoch, "host epoch") as HostEpoch;
 }
 
-export function parseHostTransitionGeneration(
-  value: unknown,
-): HostTransitionGeneration {
-  return parsePositiveSafeInteger(
-    value,
-    "host transition generation",
-  ) as HostTransitionGeneration;
+export function parseHostTransitionGeneration(value: unknown): HostTransitionGeneration {
+  return parsePositiveSafeInteger(value, "host transition generation") as HostTransitionGeneration;
 }
 
 export function nextHostTransitionGeneration(
@@ -96,9 +91,7 @@ export function parseHostControlIdentifier(
       throw new TypeError(`${name} must contain well-formed UTF-16`);
     }
   }
-  if (
-    new TextEncoder().encode(value).byteLength > HOST_CONTROL_IDENTIFIER_MAX_BYTES
-  ) {
+  if (new TextEncoder().encode(value).byteLength > HOST_CONTROL_IDENTIFIER_MAX_BYTES) {
     throw new RangeError(`${name} must be at most 1024 UTF-8 bytes`);
   }
   return value;

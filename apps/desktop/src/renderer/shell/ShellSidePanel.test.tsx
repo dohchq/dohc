@@ -7,17 +7,13 @@ vi.hoisted(() => {
     observe() {}
     unobserve() {}
     disconnect() {}
-    takeRecords(): never[] { return []; }
+    takeRecords(): never[] {
+      return [];
+    }
   }
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
@@ -30,7 +26,6 @@ import {
 } from "../DesktopWorkspaceShell.testHarness";
 
 describe("apps pinned to the sidebar", () => {
-
   it("opens a pinned app in the side panel inside the preview's sandbox, and unpins it from its menu", async () => {
     const user = userEvent.setup();
     const site: SitePackageInfo = {
@@ -65,7 +60,10 @@ describe("apps pinned to the sidebar", () => {
       stopSitePreview: vi.fn(async () => undefined),
       onSitePreviewReplaced: vi.fn(() => () => undefined),
       getSitePreviewLogs: vi.fn(async () => ({ logs: [], exited: false })),
-      setAppPinned: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "stored" as const })),
+      setAppPinned: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "stored" as const,
+      })),
     });
     bridge.showWorkbenchMenu.mockResolvedValue("unpin-app");
     const settings = {

@@ -2,19 +2,47 @@
 import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ResolveWorkLinkPayload, WorkLinkPlace, WorkspaceActivatedMessage } from "../ipc/bridgeContract";
+import type {
+  ResolveWorkLinkPayload,
+  WorkLinkPlace,
+  WorkspaceActivatedMessage,
+} from "../ipc/bridgeContract";
 import { deferred, type Deferred } from "../testing/deferred";
 import { CollectionFieldWriteHost } from "./collections/recordFieldWrites";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, renderShell, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
-import { CHAT_NOT_FOUND_NOTE, RUN_THREAD_LOOKUP_FAILED_NOTE, type NoticeTarget } from "../notices/noticeTarget";
+import {
+  DesktopWorkspaceShell,
+  OTHER_WORKSPACE,
+  WORKSPACE,
+  makeBridge,
+  renderShell,
+  shellBootstrapProps,
+} from "./DesktopWorkspaceShell.testHarness";
+import {
+  CHAT_NOT_FOUND_NOTE,
+  RUN_THREAD_LOOKUP_FAILED_NOTE,
+  type NoticeTarget,
+} from "../notices/noticeTarget";
 import { openWorkLinkInDohc } from "./workLinkOpener";
 
 const LINK = `https://dohc.example/l/${"a".repeat(43)}`;
-const THIRD: Workspace = { ...WORKSPACE, workspaceId: "ws-shell-third", rootPath: "/home/sam/dohc/third" };
-const placeIn = (workspace: Workspace): WorkLinkPlace =>
-  ({ workspaceId: workspace.workspaceId, channelId: "group-1", threadId: "thread-1", messageId: "message-1" });
-const AT_MESSAGE: NoticeTarget = { to: "chat", thread: "thread-1", channel: "group-1", message: "message-1" };
+const THIRD: Workspace = {
+  ...WORKSPACE,
+  workspaceId: "ws-shell-third",
+  rootPath: "/home/sam/dohc/third",
+};
+const placeIn = (workspace: Workspace): WorkLinkPlace => ({
+  workspaceId: workspace.workspaceId,
+  channelId: "group-1",
+  threadId: "thread-1",
+  messageId: "message-1",
+});
+const AT_MESSAGE: NoticeTarget = {
+  to: "chat",
+  thread: "thread-1",
+  channel: "group-1",
+  message: "message-1",
+};
 
 // Main's answers wait until the test settles them, in the order they were asked.
 function renderShells() {
@@ -43,14 +71,24 @@ function renderShells() {
     </>
   );
   const view = render(shown(WORKSPACE));
-  return { bridge, answers, onSwitchWorkspace, show: (workspace: Workspace) => view.rerender(shown(workspace)) };
+  return {
+    bridge,
+    answers,
+    onSwitchWorkspace,
+    show: (workspace: Workspace) => view.rerender(shown(workspace)),
+  };
 }
 
 describe("a work link clicked in dohc", () => {
   it("opens nothing when main answers after the window switched workspaces", async () => {
     const { bridge, answers, onSwitchWorkspace, show } = renderShells();
     const stale = openWorkLinkInDohc(LINK);
-    await waitFor(() => expect(bridge.resolveWorkLink).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId, url: LINK }));
+    await waitFor(() =>
+      expect(bridge.resolveWorkLink).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: WORKSPACE.workspaceId,
+        url: LINK,
+      }),
+    );
 
     show(THIRD);
     await act(async () => answers[0]!.resolve(placeIn(OTHER_WORKSPACE)));
@@ -59,7 +97,12 @@ describe("a work link clicked in dohc", () => {
 
     // The remounted shell asks for its own workspace and opens its own answer.
     const fresh = openWorkLinkInDohc(LINK);
-    await waitFor(() => expect(bridge.resolveWorkLink).toHaveBeenLastCalledWith({ workspaceId: THIRD.workspaceId, url: LINK }));
+    await waitFor(() =>
+      expect(bridge.resolveWorkLink).toHaveBeenLastCalledWith({
+        workspaceId: THIRD.workspaceId,
+        url: LINK,
+      }),
+    );
     await act(async () => answers[1]!.resolve(placeIn(OTHER_WORKSPACE)));
     await expect(fresh).resolves.toBe(true);
     expect(onSwitchWorkspace).toHaveBeenCalledExactlyOnceWith(OTHER_WORKSPACE, AT_MESSAGE);
@@ -86,9 +129,19 @@ describe("a work link clicked in dohc", () => {
       .mockImplementation(async () => ({ channels: [], fileThreads: [] }));
     renderShell(bridge);
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    const activated = bridge.onWorkspaceActivated.mock.calls.at(-1)![0] as
-      (workspace: Workspace, file?: string, message?: WorkspaceActivatedMessage) => void;
-    const open = (thread: string) => act(() => activated(WORKSPACE, undefined, { channelId: null, threadId: thread, messageId: `${thread}-m` }));
+    const activated = bridge.onWorkspaceActivated.mock.calls.at(-1)![0] as (
+      workspace: Workspace,
+      file?: string,
+      message?: WorkspaceActivatedMessage,
+    ) => void;
+    const open = (thread: string) =>
+      act(() =>
+        activated(WORKSPACE, undefined, {
+          channelId: null,
+          threadId: thread,
+          messageId: `${thread}-m`,
+        }),
+      );
 
     await open("thread-a");
     await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalledTimes(1));

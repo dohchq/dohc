@@ -1,6 +1,15 @@
 // @vitest-environment jsdom
 import { desktopPins, settingsSectionPin } from "../../testPins";
-import { act, cleanup, fireEvent, render as renderUi, screen, waitFor, within, type RenderOptions } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderUi,
+  screen,
+  waitFor,
+  within,
+  type RenderOptions,
+} from "@testing-library/react";
 import { useState, type ReactElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -33,7 +42,12 @@ import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellEr
 
 // The workspace shell provides the session in production.
 const render = (ui: ReactElement, options?: RenderOptions) =>
-  renderUi(ui, { wrapper: ({ children }) => <WorkspaceSessionProvider workspaceId="fixture">{children}</WorkspaceSessionProvider>, ...options });
+  renderUi(ui, {
+    wrapper: ({ children }) => (
+      <WorkspaceSessionProvider workspaceId="fixture">{children}</WorkspaceSessionProvider>
+    ),
+    ...options,
+  });
 
 const config = {
   command: "dohc-mcp",
@@ -100,38 +114,100 @@ async function resetWorkspaceSettings(): Promise<WorkspaceSettingsResult> {
 
 // The Sharing view's lists, as Settings search reads them.
 function sharingAnswer(lane: "granted" | "received"): AccessAnswer {
-  const row: AccessShareRow = lane === "granted"
-    ? { kind: "share", shareId: "share-plan", grantId: "grant-1", via: "named", granterUserId: "me", granterEmail: null,
-        recipientUserId: "sam", recipientEmail: "sam@example.com", subjectName: null, sharerName: null,
-        selector: { paths: ["notes/product-plan.md"], versionId: null }, access: "edit", status: "active", generation: 1 }
-    : { kind: "share", shareId: "share-funnel", grantId: "grant-2", via: "received", granterUserId: "sam", granterEmail: "sam@example.com",
-        recipientUserId: "me", recipientEmail: null, subjectName: "funnel.csv", sharerName: "Sam",
-        selector: { paths: ["data/funnel.csv"], versionId: null }, access: "view", status: "active", generation: 1 };
+  const row: AccessShareRow =
+    lane === "granted"
+      ? {
+          kind: "share",
+          shareId: "share-plan",
+          grantId: "grant-1",
+          via: "named",
+          granterUserId: "me",
+          granterEmail: null,
+          recipientUserId: "sam",
+          recipientEmail: "sam@example.com",
+          subjectName: null,
+          sharerName: null,
+          selector: { paths: ["notes/product-plan.md"], versionId: null },
+          access: "edit",
+          status: "active",
+          generation: 1,
+        }
+      : {
+          kind: "share",
+          shareId: "share-funnel",
+          grantId: "grant-2",
+          via: "received",
+          granterUserId: "sam",
+          granterEmail: "sam@example.com",
+          recipientUserId: "me",
+          recipientEmail: null,
+          subjectName: "funnel.csv",
+          sharerName: "Sam",
+          selector: { paths: ["data/funnel.csv"], versionId: null },
+          access: "view",
+          status: "active",
+          generation: 1,
+        };
   return {
-    ref: null, rows: [row], visibility: "visible",
-    unknownReason: null, coverage: { kind: lane === "granted" ? "granted" : "received-account", complete: true, observation: "interval" },
-    checkedAtMs: 1, freshness: "fresh", nextCursor: null,
+    ref: null,
+    rows: [row],
+    visibility: "visible",
+    unknownReason: null,
+    coverage: {
+      kind: lane === "granted" ? "granted" : "received-account",
+      complete: true,
+      observation: "interval",
+    },
+    checkedAtMs: 1,
+    freshness: "fresh",
+    nextCursor: null,
   };
 }
 
 const bridge = {
   onWorkspaceActivity: vi.fn(() => () => {}),
   listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
-  readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics", available: { usage: false, errors: false } })),
-  readUsageRecord: vi.fn(async () => ({ status: "readable", enabled: true, file: "/state/dohc-usage.json", since: null, incompleteDays: 0, rows: [] })),
+  readDiagnostics: vi.fn(async () => ({
+    text: "dohc diagnostics",
+    available: { usage: false, errors: false },
+  })),
+  readUsageRecord: vi.fn(async () => ({
+    status: "readable",
+    enabled: true,
+    file: "/state/dohc-usage.json",
+    since: null,
+    incompleteDays: 0,
+    rows: [],
+  })),
   requestAccessRefresh: vi.fn(async () => undefined),
-  listSharingAccess: vi.fn(async ({ lane }: { workspaceId: string; lane: "granted" | "received" }) => sharingAnswer(lane)),
+  listSharingAccess: vi.fn(
+    async ({ lane }: { workspaceId: string; lane: "granted" | "received" }) => sharingAnswer(lane),
+  ),
   getWorkspaceRegistry: vi.fn(async () => ({ workspaces: [] })),
   listSites: vi.fn(async (_payload: { workspaceId: string }) => ({ sites: [] as unknown[] })),
   detectAgentTools: vi.fn(async () => ({ workingDirectory: "/workspace", tools: [] })),
   getMcpConfig: vi.fn(getDefaultMcpConfig),
   getAgentRunStatus: vi.fn(async () => ({
-    activeRun: runActive ?{ id: "run-1", startedAt: 1, agentId: "terminal", onBehalfOf: "local", status: "running" as const } : null,
+    activeRun: runActive
+      ? {
+          id: "run-1",
+          startedAt: 1,
+          agentId: "terminal",
+          onBehalfOf: "local",
+          status: "running" as const,
+        }
+      : null,
     lastRun: null,
   })),
   startAgentRun: vi.fn(async () => {
     runActive = true;
-    return { id: "run-1", startedAt: 1, agentId: "terminal", onBehalfOf: "local", status: "running" as const };
+    return {
+      id: "run-1",
+      startedAt: 1,
+      agentId: "terminal",
+      onBehalfOf: "local",
+      status: "running" as const,
+    };
   }),
   endAgentRun: vi.fn(async () => {
     runActive = false;
@@ -145,23 +221,29 @@ const bridge = {
   readPersonalAgents: vi.fn(async () => ({ accounts: [] })),
   onPersonalAgents: vi.fn(() => () => undefined),
   changePersonalAgent: vi.fn(async () => ({ ok: true, personalAgents: { accounts: [] } })),
-  getUpdateState: vi.fn(async (): Promise<SettingsUpdateState> => (updateReady ? readyUpdateState : idleUpdateState)),
-  checkForUpdates: vi.fn(async (): Promise<{
-    checked: boolean;
-    state: SettingsUpdateState;
-  }> => ({ checked: true, state: availableUpdateState })),
+  getUpdateState: vi.fn(async (): Promise<SettingsUpdateState> =>
+    updateReady ? readyUpdateState : idleUpdateState,
+  ),
+  checkForUpdates: vi.fn(
+    async (): Promise<{
+      checked: boolean;
+      state: SettingsUpdateState;
+    }> => ({ checked: true, state: availableUpdateState }),
+  ),
   downloadUpdate: vi.fn(async (): Promise<{ accepted: boolean; state: SettingsUpdateState }> => {
     updateReady = true;
     return { accepted: true, state: readyUpdateState };
   }),
-  installUpdate: vi.fn(async (): Promise<{
-    accepted: boolean;
-    reason?: string;
-    state: SettingsUpdateState;
-  }> => ({
-    accepted: updateReady,
-    state: updateReady ? readyUpdateState : idleUpdateState,
-  })),
+  installUpdate: vi.fn(
+    async (): Promise<{
+      accepted: boolean;
+      reason?: string;
+      state: SettingsUpdateState;
+    }> => ({
+      accepted: updateReady,
+      state: updateReady ? readyUpdateState : idleUpdateState,
+    }),
+  ),
   onUpdateState: vi.fn(() => () => {}),
   getUserSettings: vi.fn(async (): Promise<DesktopUserSettingsResult> => ({
     settings: DEFAULT_USER_SETTINGS,
@@ -184,8 +266,14 @@ const bridge = {
   openUserSettingsFile: vi.fn(async () => undefined),
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
-  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: workspaceTrusted })),
-  requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({ workspaceId, trusted: workspaceTrusted })),
+  readWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+    workspaceId,
+    trusted: workspaceTrusted,
+  })),
+  requestWorkspaceTrust: vi.fn(async ({ workspaceId }: { workspaceId: string }) => ({
+    workspaceId,
+    trusted: workspaceTrusted,
+  })),
   restrictWorkspace: vi.fn(async ({ workspaceId }: { workspaceId: string }) => {
     workspaceTrusted = false;
     return { workspaceId, trusted: false };
@@ -211,13 +299,27 @@ const bridge = {
 const writeText = vi.fn(async (_text: string) => {});
 
 // Copy MCP config and the run sit on the page of an agent you run, so a test of either lists one.
-const listAgentYouRun = () => bridge.getUserSettings.mockImplementation(async () => ({
-  settings: { ...DEFAULT_USER_SETTINGS, agents: { terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 30 } } },
-  source: "stored",
-}));
+const listAgentYouRun = () =>
+  bridge.getUserSettings.mockImplementation(async () => ({
+    settings: {
+      ...DEFAULT_USER_SETTINGS,
+      agents: {
+        terminal: {
+          name: "Terminal",
+          hue: "rose",
+          changesFiles: true,
+          enabled: false,
+          timeoutMinutes: 30,
+        },
+      },
+    },
+    source: "stored",
+  }));
 // A row opens its agent's page, where its controls are.
-const openAgent = async (name: string) => fireEvent.click(await screen.findByRole("button", { name }));
-const copyMcpConfig = () => screen.getByRole<HTMLButtonElement>("button", { name: "Copy MCP config" });
+const openAgent = async (name: string) =>
+  fireEvent.click(await screen.findByRole("button", { name }));
+const copyMcpConfig = () =>
+  screen.getByRole<HTMLButtonElement>("button", { name: "Copy MCP config" });
 // The config has loaded once its copy is on.
 const mcpConfigLoaded = () => waitFor(() => expect(copyMcpConfig().disabled).toBe(false));
 
@@ -242,7 +344,10 @@ beforeEach(() => {
   bridge.getWorkspaceSettings.mockImplementation(readWorkspaceSettings);
   bridge.setWorkspaceSettings.mockImplementation(writeWorkspaceSettings);
   bridge.resetWorkspaceSettings.mockImplementation(resetWorkspaceSettings);
-  bridge.getUserSettings.mockImplementation(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" }));
+  bridge.getUserSettings.mockImplementation(async () => ({
+    settings: DEFAULT_USER_SETTINGS,
+    source: "default",
+  }));
   document.documentElement.dataset.theme = "";
   vi.stubGlobal("dohcDesktop", bridge);
 });
@@ -255,7 +360,15 @@ afterEach(() => {
 
 describe("SettingsDialog", () => {
   it("shows this workspace's trust in Privacy, asks main to trust it, and restricts it again", async () => {
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="privacy" onClose={() => {}} />);
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="privacy"
+        onClose={() => {}}
+      />,
+    );
     const control = await screen.findByTestId("workspace-trust-control");
     const restricted = within(control).getByRole("radio", { name: "Restricted Mode" });
     await waitFor(() => expect(restricted.getAttribute("aria-checked")).toBe("true"));
@@ -268,7 +381,11 @@ describe("SettingsDialog", () => {
     // The person chose Trust workspace.
     workspaceTrusted = true;
     await userEvent.click(within(control).getByRole("radio", { name: "Trusted" }));
-    await waitFor(() => expect(within(control).getByRole("radio", { name: "Trusted" }).getAttribute("aria-checked")).toBe("true"));
+    await waitFor(() =>
+      expect(
+        within(control).getByRole("radio", { name: "Trusted" }).getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
 
     await userEvent.click(restricted);
     expect(bridge.restrictWorkspace).toHaveBeenCalledWith({ workspaceId: "ws-1" });
@@ -276,17 +393,34 @@ describe("SettingsDialog", () => {
   });
 
   it("has no trust row in a shared view", async () => {
-    render(<SettingsDialog workspaceIsReady sharedView workspaceId="ws-1" workspacePath="/x" initialSection="privacy" onClose={() => {}} />);
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        sharedView
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="privacy"
+        onClose={() => {}}
+      />,
+    );
     await screen.findByTestId(settingsSectionPin("privacy"));
     expect(screen.queryByTestId("settings-row-workspace-trust")).toBeNull();
     expect(bridge.readWorkspaceTrust).not.toHaveBeenCalled();
   });
 
   it("shows a failed-open state instead of loading workspace settings", async () => {
-    const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection: "agents" as const,
-      workspaceIsReady: false, workspaceOpenFailed: true, onClose: vi.fn() };
+    const props = {
+      workspaceId: "ws-1",
+      workspacePath: "/x",
+      initialSection: "agents" as const,
+      workspaceIsReady: false,
+      workspaceOpenFailed: true,
+      onClose: vi.fn(),
+    };
     render(<SettingsDialog {...props} />);
-    expect(screen.getByText("Couldn’t open this workspace. Close Settings to try again.")).toBeTruthy();
+    expect(
+      screen.getByText("Couldn’t open this workspace. Close Settings to try again."),
+    ).toBeTruthy();
     expect(screen.queryByText("Loading settings...")).toBeNull();
     await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
     expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
@@ -294,30 +428,45 @@ describe("SettingsDialog", () => {
     expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
   });
 
-  it.each(["agents"] as const)("holds the %s section and workspace search until admission", async initialSection => {
-    const onError = vi.fn();
-    const props = { workspaceId: "ws-1", workspacePath: "/x", initialSection, onClose: vi.fn(), onError, onOpenSharing: vi.fn() };
-    const view = render(<SettingsDialog {...props} workspaceIsReady={false} />);
-    await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
-    expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
-    expect(bridge.getMcpConfig).not.toHaveBeenCalled();
-    expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
-    expect(bridge.readScheduleHost).not.toHaveBeenCalled();
-    expect(bridge.listSites).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: initialSection } });
-    expect(bridge.requestAccessRefresh).not.toHaveBeenCalled();
-    expect(bridge.listSharingAccess).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
-    expect(screen.getByText("Loading settings...")).toBeTruthy();
-    view.rerender(<SettingsDialog {...props} workspaceIsReady />);
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledOnce());
-    if (initialSection === "agents") await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledOnce());
-    expect(onError).not.toHaveBeenCalled();
-  });
+  it.each(["agents"] as const)(
+    "holds the %s section and workspace search until admission",
+    async (initialSection) => {
+      const onError = vi.fn();
+      const props = {
+        workspaceId: "ws-1",
+        workspacePath: "/x",
+        initialSection,
+        onClose: vi.fn(),
+        onError,
+        onOpenSharing: vi.fn(),
+      };
+      const view = render(<SettingsDialog {...props} workspaceIsReady={false} />);
+      await waitFor(() => expect(bridge.getUserSettings).toHaveBeenCalled());
+      expect(bridge.getWorkspaceSettings).not.toHaveBeenCalled();
+      expect(bridge.getMcpConfig).not.toHaveBeenCalled();
+      expect(bridge.getAgentRunStatus).not.toHaveBeenCalled();
+      expect(bridge.readScheduleHost).not.toHaveBeenCalled();
+      expect(bridge.listSites).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByLabelText("Search settings"), {
+        target: { value: initialSection },
+      });
+      expect(bridge.requestAccessRefresh).not.toHaveBeenCalled();
+      expect(bridge.listSharingAccess).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(screen.getByText("Loading settings...")).toBeTruthy();
+      view.rerender(<SettingsDialog {...props} workspaceIsReady />);
+      await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledOnce());
+      if (initialSection === "agents")
+        await waitFor(() => expect(bridge.getMcpConfig).toHaveBeenCalledOnce());
+      expect(onError).not.toHaveBeenCalled();
+    },
+  );
 
   it("renders the settings shell, searches sections, and shows an empty search state", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />,
+    );
 
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     expect(screen.getByTestId("settings-section-general")).toBeTruthy();
@@ -333,10 +482,19 @@ describe("SettingsDialog", () => {
 
   describe("an edit in place", () => {
     const renderAgents = (onClose: () => void) => {
-      bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+      bridge.getUserSettings.mockResolvedValueOnce({
+        settings: settingsWithAgent({ name: "Nova" }),
+        source: "stored",
+      });
       render(
         <Overlay onClose={onClose}>
-          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={onClose} />
+          <SettingsDialog
+            workspaceIsReady
+            workspaceId="ws-1"
+            workspacePath="/x"
+            initialSection="agents"
+            onClose={onClose}
+          />
         </Overlay>,
       );
     };
@@ -371,7 +529,6 @@ describe("SettingsDialog", () => {
       expect(onClose).not.toHaveBeenCalled();
       expect(screen.getByRole("textbox", { name: "Command that starts Nova" })).toBe(command);
     });
-
   });
 
   describe("a press outside Settings", () => {
@@ -379,7 +536,13 @@ describe("SettingsDialog", () => {
     const renderInOverlay = (onClose: () => void, initialSection: "general" | "agents") =>
       render(
         <Overlay onClose={onClose}>
-          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onClose={onClose} />
+          <SettingsDialog
+            workspaceIsReady
+            workspaceId="ws-1"
+            workspacePath="/x"
+            initialSection={initialSection}
+            onClose={onClose}
+          />
         </Overlay>,
       );
 
@@ -394,13 +557,18 @@ describe("SettingsDialog", () => {
       await user.click(backdrop());
       expect(onClose).not.toHaveBeenCalled();
       expect(document.activeElement).toBe(field);
-      expect(screen.getByRole("alert").textContent).toBe("Names cannot contain control characters.");
+      expect(screen.getByRole("alert").textContent).toBe(
+        "Names cannot contain control characters.",
+      );
       expect(bridge.setUserSettings).not.toHaveBeenCalled();
     });
 
     // Applies a look with this accent, and answers the accent the window shows.
     const look = (accentColor: string) => {
-      applyLookSettings({ ...DEFAULT_USER_SETTINGS, appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor } });
+      applyLookSettings({
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, accentColor },
+      });
       return document.documentElement.style.getPropertyValue("--dohc-accent");
     };
     // Settings that unmounts once it closes, as the shell's does, beside the
@@ -417,11 +585,23 @@ describe("SettingsDialog", () => {
         const close = () => setOpen(false);
         return open ? (
           <Overlay onClose={close}>
-            <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection={initialSection} onError={onError} onClose={close} />
+            <SettingsDialog
+              workspaceIsReady
+              workspaceId="ws-1"
+              workspacePath="/x"
+              initialSection={initialSection}
+              onError={onError}
+              onClose={close}
+            />
           </Overlay>
         ) : null;
       }
-      render(<><Notices /><Closable /></>);
+      render(
+        <>
+          <Notices />
+          <Closable />
+        </>,
+      );
       return { onError, report };
     };
 
@@ -455,7 +635,6 @@ describe("SettingsDialog", () => {
       expect(document.documentElement.style.getPropertyValue("--dohc-accent")).toBe(newer);
       applyLookSettings(DEFAULT_USER_SETTINGS);
     });
-
   });
 
   it("leaves Tab and Escape to a higher overlay", async () => {
@@ -466,7 +645,12 @@ describe("SettingsDialog", () => {
           Go back
         </button>
         <Overlay onClose={onClose}>
-          <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+          <SettingsDialog
+            workspaceIsReady
+            workspaceId="ws-1"
+            workspacePath="/x"
+            onClose={onClose}
+          />
         </Overlay>
       </>,
     );
@@ -496,7 +680,8 @@ describe("SettingsDialog", () => {
   it("persists appearance changes and applies them immediately", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -518,7 +703,8 @@ describe("SettingsDialog", () => {
   it("marks a modified setting with a bar and resets it from a labeled button", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -540,7 +726,9 @@ describe("SettingsDialog", () => {
     expect(bridge.setUserSettings).toHaveBeenLastCalledWith({
       base: expect.any(Object),
       settings: expect.objectContaining({
-        appearance: expect.objectContaining({ themeMode: DEFAULT_USER_SETTINGS.appearance.themeMode }),
+        appearance: expect.objectContaining({
+          themeMode: DEFAULT_USER_SETTINGS.appearance.themeMode,
+        }),
       }),
     });
     await waitFor(() => expect(within(row).queryByTitle("Modified")).toBeNull());
@@ -559,7 +747,8 @@ describe("SettingsDialog", () => {
     const load = deferred<Awaited<ReturnType<typeof bridge.getUserSettings>>>();
     bridge.getUserSettings.mockImplementationOnce(() => load.promise);
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -603,7 +792,8 @@ describe("SettingsDialog", () => {
     const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
     bridge.setUserSettings.mockImplementationOnce(() => save.promise);
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -645,7 +835,8 @@ describe("SettingsDialog", () => {
     // DesktopRoot has already applied the settings the dialog opens with.
     applyLookSettings(DEFAULT_USER_SETTINGS);
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -657,9 +848,7 @@ describe("SettingsDialog", () => {
     const initialTheme = document.documentElement.dataset.theme;
     await user.click(screen.getByRole("radio", { name: "Dark" }));
     await waitFor(() =>
-      expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe(
-        "error",
-      ),
+      expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error"),
     );
     // The chip must not borrow the document's "your edits are still here",
     // and it owes a next step.
@@ -667,20 +856,24 @@ describe("SettingsDialog", () => {
       "dohc could not save this setting. Try changing it again.",
     );
     expect(document.documentElement.dataset.theme).toBe(initialTheme);
-    expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe(
-      "true",
-    );
+    expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("goes back to the saved settings when a save behind a failed one also fails", async () => {
     const user = userEvent.setup();
     let failFirst: (cause: Error) => void = () => {};
     bridge.setUserSettings
-      .mockImplementationOnce(() => new Promise<never>((_, reject) => { failFirst = reject; }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<never>((_, reject) => {
+            failFirst = reject;
+          }),
+      )
       .mockRejectedValueOnce(new Error("Disk full"));
     applyLookSettings(DEFAULT_USER_SETTINGS);
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -694,44 +887,88 @@ describe("SettingsDialog", () => {
     await user.click(screen.getByRole("radio", { name: "Light" }));
     failFirst(new Error("Disk full"));
     await waitFor(() =>
-      expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe("true"),
+      expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe(
+        "true",
+      ),
     );
     expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
   });
 
   it("doesn't replace an agent that came back before Undo", async () => {
     const user = userEvent.setup();
-    let file: DesktopUserSettings = { ...DEFAULT_USER_SETTINGS, agents: { codex: testAgent({ name: "Codex" }), default: testAgent({ name: "Nova" }) } };
-    const read = async (): Promise<DesktopUserSettingsResult> => ({ settings: file, source: "stored" });
+    let file: DesktopUserSettings = {
+      ...DEFAULT_USER_SETTINGS,
+      agents: { codex: testAgent({ name: "Codex" }), default: testAgent({ name: "Nova" }) },
+    };
+    const read = async (): Promise<DesktopUserSettingsResult> => ({
+      settings: file,
+      source: "stored",
+    });
     const orderAgents = vi.fn(async (_payload: { order: string[] }) => read());
     vi.stubGlobal("dohcDesktop", {
       ...bridge,
       getUserSettings: read,
-      setUserSettings: async ({ settings, base }: { settings: DesktopUserSettings; base: DesktopUserSettings }) => {
+      setUserSettings: async ({
+        settings,
+        base,
+      }: {
+        settings: DesktopUserSettings;
+        base: DesktopUserSettings;
+      }) => {
         file = overlaySettings({ ...file }, base, settings) as DesktopUserSettings;
         return read();
       },
       orderAgents,
       detectAgentTools: async () => ({
         workingDirectory: "/workspace",
-        tools: [{ tool: "codex", executable: "/bin/codex", version: "0.98", auth: "signed-in", probe: "detected" }],
+        tools: [
+          {
+            tool: "codex",
+            executable: "/bin/codex",
+            version: "0.98",
+            auth: "signed-in",
+            probe: "detected",
+          },
+        ],
       }),
     });
     const onError = vi.fn();
     const onNotice = vi.fn<(message: string, undo?: () => void) => void>();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onNotice={onNotice} onClose={() => {}} />);
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onError={onError}
+        onNotice={onNotice}
+        onClose={() => {}}
+      />,
+    );
     await openAgent("Codex");
     await user.click(screen.getByRole("button", { name: "Remove Codex…" }));
-    await user.click(within(screen.getByTestId("remove-agent-dialog")).getByRole("button", { name: "Remove agent" }));
-    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)));
+    await user.click(
+      within(screen.getByTestId("remove-agent-dialog")).getByRole("button", {
+        name: "Remove agent",
+      }),
+    );
+    await waitFor(() =>
+      expect(onNotice).toHaveBeenCalledWith("Removed Codex.", expect.any(Function)),
+    );
     await user.click(await screen.findByTestId("agent-add"));
     await user.click(screen.getByTestId("agent-runs-with-codex"));
     await user.click(screen.getByTestId("agent-add-confirm"));
-    await waitFor(() => expect(file.agents.codex?.launch).toEqual({ tool: "codex", executable: "/bin/codex" }));
+    await waitFor(() =>
+      expect(file.agents.codex?.launch).toEqual({ tool: "codex", executable: "/bin/codex" }),
+    );
     const added = file.agents.codex;
 
     await act(async () => onNotice.mock.calls[0]![1]!());
-    await waitFor(() => expect(onError).toHaveBeenCalledWith("Undo didn't replace the new Codex, so the one you removed stays removed."));
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        "Undo didn't replace the new Codex, so the one you removed stays removed.",
+      ),
+    );
     expect(file.agents.codex).toEqual(added);
     expect(Object.keys(file.agents)).toEqual(["default", "codex"]);
     expect(orderAgents).not.toHaveBeenCalled();
@@ -742,9 +979,13 @@ describe("SettingsDialog", () => {
   // already knows it has no chat to test, so Check must not wait on it.
   it("turns Check off in a shared view before the recorder status resolves", async () => {
     const user = userEvent.setup();
-    bridge.getUserSettings.mockResolvedValueOnce({ settings: settingsWithAgent({ name: "Nova" }), source: "stored" });
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: settingsWithAgent({ name: "Nova" }),
+      source: "stored",
+    });
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -763,7 +1004,8 @@ describe("SettingsDialog", () => {
   it("offers no Shared by me result in a shared view", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         sharedView
@@ -774,8 +1016,14 @@ describe("SettingsDialog", () => {
 
     await user.type(await screen.findByTestId(desktopPins.settingsSearch), "shared");
     const results = await screen.findByTestId("settings-sharing-results");
-    expect(within(results).getAllByTestId("settings-sharing-result").map((result) => result.dataset.lane)).toEqual(["received"]);
-    expect(bridge.listSharingAccess).not.toHaveBeenCalledWith(expect.objectContaining({ lane: "granted" }));
+    expect(
+      within(results)
+        .getAllByTestId("settings-sharing-result")
+        .map((result) => result.dataset.lane),
+    ).toEqual(["received"]);
+    expect(bridge.listSharingAccess).not.toHaveBeenCalledWith(
+      expect.objectContaining({ lane: "granted" }),
+    );
   });
 
   it("keeps a stopped run's retry bound to its ID when another run starts", async () => {
@@ -784,18 +1032,42 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     bridge.endAgentRun.mockImplementationOnce(async () => {
       runActive = false;
-      throw new Error("Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
+      throw new Error(
+        "Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.",
+      );
     });
     listAgentYouRun();
-    const view = render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    const view = render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onError={onError}
+        onClose={() => {}}
+      />,
+    );
     await openAgent("Terminal");
-    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"),
+    );
     await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("stopped"),
+    );
     bridge.getAgentRunStatus.mockResolvedValueOnce({
-      activeRun: { id: "run-new", startedAt: 2, agentId: "terminal", onBehalfOf: "local", status: "running" }, lastRun: null,
+      activeRun: {
+        id: "run-new",
+        startedAt: 2,
+        agentId: "terminal",
+        onBehalfOf: "local",
+        status: "running",
+      },
+      lastRun: null,
     });
-    await act(async () => { await onError.mock.calls[0]?.[2](); });
+    await act(async () => {
+      await onError.mock.calls[0]?.[2]();
+    });
     expect(bridge.endAgentRun).toHaveBeenNthCalledWith(2, { workspaceId: "ws-1", runId: "run-1" });
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
     view.unmount();
@@ -805,17 +1077,34 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     const onError = vi.fn();
     listAgentYouRun();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" initialSection="agents" onError={onError} onClose={() => {}} />);
+    render(
+      <SettingsDialog
+        workspaceIsReady
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onError={onError}
+        onClose={() => {}}
+      />,
+    );
     await openAgent("Terminal");
     await mcpConfigLoaded();
     bridge.startAgentRun.mockImplementationOnce(async () => {
       runActive = true;
       bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
-      return { id: "run-1", startedAt: 1, agentId: "terminal", onBehalfOf: "local", status: "running" as const };
+      return {
+        id: "run-1",
+        startedAt: 1,
+        agentId: "terminal",
+        onBehalfOf: "local",
+        status: "running" as const,
+      };
     });
     await user.click(screen.getByTestId("mcp-enable-toggle"));
     await waitFor(() => expect(onError).toHaveBeenCalledOnce());
-    await act(async () => { await onError.mock.calls[0]?.[2](); });
+    await act(async () => {
+      await onError.mock.calls[0]?.[2]();
+    });
     expect(bridge.startAgentRun).toHaveBeenCalledTimes(1);
     expect(bridge.endAgentRun).not.toHaveBeenCalled();
     expect(screen.queryByTestId("mcp-load-error")).toBeNull();
@@ -825,10 +1114,13 @@ describe("SettingsDialog", () => {
     runActive = true;
     const user = userEvent.setup();
     const onError = vi.fn();
-    const cause = new Error("This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.");
+    const cause = new Error(
+      "This workspace's agent run history contains invalid JSON. Repair .dohc/agent-runs/0123456789abcdef0123456789abcdef.json, then try again.",
+    );
     listAgentYouRun();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -844,12 +1136,20 @@ describe("SettingsDialog", () => {
     bridge.endAgentRun.mockRejectedValueOnce(cause);
     bridge.getAgentRunStatus
       .mockImplementationOnce(async () => ({
-        activeRun: { id: "run-1", startedAt: 1, agentId: "terminal", onBehalfOf: "local", status: "running" as const },
+        activeRun: {
+          id: "run-1",
+          startedAt: 1,
+          agentId: "terminal",
+          onBehalfOf: "local",
+          status: "running" as const,
+        },
         lastRun: null,
       }))
       .mockImplementationOnce(() => recovery.promise);
     await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function)));
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledExactlyOnceWith(cause.message, cause, expect.any(Function)),
+    );
     const retry = screen.getByRole("button", { name: "Retry" });
     expect(retry.hasAttribute("disabled")).toBe(true);
     // A newer read lands while the recovery is still pending.
@@ -860,12 +1160,20 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
     await act(async () => {
       recovery.resolve({
-        activeRun: { id: "run-1", startedAt: 1, agentId: "terminal", onBehalfOf: "local", status: "running" },
+        activeRun: {
+          id: "run-1",
+          startedAt: 1,
+          agentId: "terminal",
+          onBehalfOf: "local",
+          status: "running",
+        },
         lastRun: null,
       });
       await recovery.promise;
     });
-    await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false),
+    );
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
     expect(screen.getByTestId("mcp-load-error").textContent).toBe("Retry");
     await user.click(screen.getByRole("button", { name: "Retry" }));
@@ -888,11 +1196,18 @@ describe("SettingsDialog", () => {
     bridge.getAgentRunStatus.mockImplementationOnce(() => oldRetryRead.promise);
     await user.click(screen.getByRole("button", { name: "Retry" }));
     view.rerender(<SettingsDialog workspaceIsReady workspaceId="ws-2" {...props} />);
-    await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false),
+    );
     const starting = deferred<Awaited<ReturnType<typeof bridge.startAgentRun>>>();
     bridge.startAgentRun.mockImplementationOnce(() => starting.promise);
     await user.click(screen.getByTestId("mcp-enable-toggle"));
-    await waitFor(() => expect(bridge.startAgentRun).toHaveBeenCalledWith({ workspaceId: "ws-2", agentId: "terminal" }));
+    await waitFor(() =>
+      expect(bridge.startAgentRun).toHaveBeenCalledWith({
+        workspaceId: "ws-2",
+        agentId: "terminal",
+      }),
+    );
     await act(async () => {
       oldRetryRead.resolve({ activeRun: null, lastRun: null });
       await oldRetryRead.promise;
@@ -900,10 +1215,18 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(true);
     await act(async () => {
       runActive = true;
-      starting.resolve({ id: "run-1", startedAt: 1, agentId: "terminal", onBehalfOf: "local", status: "running" });
+      starting.resolve({
+        id: "run-1",
+        startedAt: 1,
+        agentId: "terminal",
+        onBehalfOf: "local",
+        status: "running",
+      });
       await starting.promise;
     });
-    await waitFor(() => expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false));
+    await waitFor(() =>
+      expect(screen.getByTestId("mcp-enable-toggle").hasAttribute("disabled")).toBe(false),
+    );
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
   });
 
@@ -933,7 +1256,8 @@ describe("SettingsDialog", () => {
         });
       });
       const view = render(
-        <SettingsDialog workspaceIsReady
+        <SettingsDialog
+          workspaceIsReady
           workspaceId="ws-old"
           workspacePath="/old"
           initialSection="agents"
@@ -946,7 +1270,8 @@ describe("SettingsDialog", () => {
       );
 
       view.rerender(
-        <SettingsDialog workspaceIsReady
+        <SettingsDialog
+          workspaceIsReady
           workspaceId="ws-new"
           workspacePath="/new"
           initialSection="agents"
@@ -971,7 +1296,8 @@ describe("SettingsDialog", () => {
     const user = userEvent.setup();
     listAgentYouRun();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -997,14 +1323,18 @@ describe("SettingsDialog", () => {
 
   it("checks for updates, downloads only when asked, then restarts", async () => {
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />,
+    );
     await screen.findByTestId("desktop-updates-status");
     const step = () => screen.getByTestId("desktop-updates-step");
     expect(step().textContent).toBe("Check for updates");
 
     await user.click(step());
     await waitFor(() => expect(step().textContent).toBe("Update"));
-    expect(screen.getByTestId("desktop-updates-status").textContent).toBe("dohc 1.2.4 is available.");
+    expect(screen.getByTestId("desktop-updates-status").textContent).toBe(
+      "dohc 1.2.4 is available.",
+    );
     expect(bridge.downloadUpdate).not.toHaveBeenCalled();
 
     await user.click(step());
@@ -1029,7 +1359,9 @@ describe("SettingsDialog", () => {
       },
     });
     const user = userEvent.setup();
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />,
+    );
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("desktop-updates-step"));
@@ -1050,36 +1382,40 @@ describe("SettingsDialog", () => {
     bridge.getUpdateState.mockImplementationOnce(() => pending.promise);
     const onUpdateStateMock = bridge.onUpdateState as unknown as {
       mockImplementationOnce(
-        implementation: (
-          listener: (state: typeof readyUpdateState) => void,
-        ) => () => void,
+        implementation: (listener: (state: typeof readyUpdateState) => void) => () => void,
       ): void;
     };
     onUpdateStateMock.mockImplementationOnce((listener) => {
       pushUpdate = listener;
       return () => undefined;
     });
-    render(<SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(
+      <SettingsDialog workspaceIsReady workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />,
+    );
 
     if (!pushUpdate) throw new Error("Update subscription was not registered.");
     pushUpdate(readyUpdateState);
     pending.resolve(idleUpdateState);
 
     await waitFor(() =>
-      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
-        "ready",
-      ),
+      expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe("ready"),
     );
   });
 
   it("shows why a Linux .deb did not install, and the command that installs it beside its copy", async () => {
     updateReady = true;
     const reason = "dohc did not get permission. Run this command in a terminal to install it.";
-    const installCommand = "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
+    const installCommand =
+      "sudo apt install '/home/sam/.cache/dohc-updater/pending/dohc-1.2.4-linux-amd64.deb'";
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,
       reason,
-      state: { ...readyUpdateState, message: reason, installCommand, failure: { step: "install", id: 1 } },
+      state: {
+        ...readyUpdateState,
+        message: reason,
+        installCommand,
+        failure: { step: "install", id: 1 },
+      },
     });
     const report = vi.fn<ReportShellFailure>();
     const user = userEvent.setup();
@@ -1101,7 +1437,9 @@ describe("SettingsDialog", () => {
       ),
     );
     expect(screen.getByTestId("desktop-updates-install-command").textContent).toBe(installCommand);
-    expect(screen.getByTestId("desktop-updates-install-command-copy").getAttribute("aria-label")).toBe("Copy install command");
+    expect(
+      screen.getByTestId("desktop-updates-install-command-copy").getAttribute("aria-label"),
+    ).toBe("Copy install command");
     expect(screen.getByTestId("desktop-updates-step").textContent).toBe("Restart to update");
     // Main reported it in the state; the shell's notices show it from there.
     expect(report).not.toHaveBeenCalled();
@@ -1116,7 +1454,8 @@ describe("SettingsDialog", () => {
   it("persists the attachment location and shows where each choice saves", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1149,15 +1488,16 @@ describe("SettingsDialog", () => {
     });
     const input = screen.getByTestId("attachment-folder-input") as HTMLInputElement;
     await waitFor(() => expect(input.disabled).toBe(true));
-    expect(
-      document.getElementById(input.getAttribute("aria-describedby")!)?.textContent,
-    ).toBe("Not used when images go beside the document.");
+    expect(document.getElementById(input.getAttribute("aria-describedby")!)?.textContent).toBe(
+      "Not used when images go beside the document.",
+    );
   });
 
   it("saves and resets the default app preview mode, and says what each mode does", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="apps"
@@ -1166,8 +1506,11 @@ describe("SettingsDialog", () => {
     );
 
     const control = await screen.findByTestId("site-preview-mode-control");
-    expect(within(control).getAllByRole("radio").map((radio) => radio.textContent))
-      .toEqual(["Auto", "Dev", "Build", "Static"]);
+    expect(
+      within(control)
+        .getAllByRole("radio")
+        .map((radio) => radio.textContent),
+    ).toEqual(["Auto", "Dev", "Build", "Static"]);
     const row = screen.getByTestId("settings-row-site-preview-mode");
     expect(row.textContent).toContain("Dev when an app has a dev script.");
 
@@ -1176,7 +1519,9 @@ describe("SettingsDialog", () => {
       workspaceId: "ws-1",
       patch: { sites: { defaultPreviewMode: "static" } },
     });
-    await waitFor(() => expect(row.textContent).toContain("Shows each app's files without running commands."));
+    await waitFor(() =>
+      expect(row.textContent).toContain("Shows each app's files without running commands."),
+    );
     await waitFor(() => expect(row.textContent).toContain("Modified"));
     await user.click(within(row).getByRole("button", { name: "Reset" }));
     expect(bridge.setWorkspaceSettings).toHaveBeenLastCalledWith({
@@ -1204,7 +1549,8 @@ describe("SettingsDialog", () => {
 
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1215,16 +1561,12 @@ describe("SettingsDialog", () => {
     await user.click(await screen.findByTestId("attachment-location-global-folder"));
 
     await waitFor(() =>
-      expect(
-        screen.getAllByTestId("settings-warning").map((node) => node.textContent),
-      ).toContain(refusal),
+      expect(screen.getAllByTestId("settings-warning").map((node) => node.textContent)).toContain(
+        refusal,
+      ),
     );
-    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe(
-      "error",
-    );
-    expect(screen.getByTestId("settings-save-state").textContent).not.toContain(
-      "Saved",
-    );
+    expect(screen.getByTestId("settings-save-state").getAttribute("data-state")).toBe("error");
+    expect(screen.getByTestId("settings-save-state").textContent).not.toContain("Saved");
     // The control snaps back to what is really on disk instead of showing an
     // edit that never landed.
     await waitFor(() =>
@@ -1240,7 +1582,8 @@ describe("SettingsDialog", () => {
   it("keeps an earlier edit when the next control is saved", async () => {
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1253,9 +1596,7 @@ describe("SettingsDialog", () => {
     await user.clear(input);
     await user.type(input, "media");
 
-    await waitFor(() =>
-      expect((input as HTMLInputElement).value).toBe("media"),
-    );
+    await waitFor(() => expect((input as HTMLInputElement).value).toBe("media"));
     expect(
       screen.getByTestId("attachment-location-global-folder").getAttribute("aria-checked"),
     ).toBe("true");
@@ -1263,7 +1604,8 @@ describe("SettingsDialog", () => {
 
   it("marks and focuses the part a Customize… command opened Settings for", async () => {
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection={CUSTOMIZE_TARGETS.sidebar.section}
@@ -1292,7 +1634,8 @@ describe("SettingsDialog", () => {
     const onError = vi.fn();
     const user = userEvent.setup();
     render(
-      <SettingsDialog workspaceIsReady
+      <SettingsDialog
+        workspaceIsReady
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1323,5 +1666,4 @@ describe("SettingsDialog", () => {
       patch: { files: { attachmentLocation: "global-folder" } },
     });
   });
-
 });

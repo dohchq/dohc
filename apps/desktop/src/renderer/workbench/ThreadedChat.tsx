@@ -1,13 +1,39 @@
 import { ArrowDown, MessageSquareText, MoreHorizontal, SquareTerminal } from "lucide-react";
-import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import type { ChatMessageRecord, ChatRunRecord, WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import type {
+  ChatMessageRecord,
+  ChatRunRecord,
+  WorkspaceHeadingRecord,
+} from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { CopyButton } from "../ui/CopyButton";
 import { Menu } from "../ui/Menu";
 import { CopyMessageLink } from "./messageLinks";
-import { ChatMessageList, STREAM_COLUMN, TOOLBAR_BUTTON, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import {
+  ChatMessageList,
+  STREAM_COLUMN,
+  TOOLBAR_BUTTON,
+  type ChatMessageListHandle,
+  type ChatReactionControls,
+} from "./chatMessages";
 import { EMPTY_ART } from "./EmptyArt";
-import { ChatThreadPanel, splitThreads, ThreadSummary, WorkingLine, WorkingRow, type ChatWorking } from "./ChatThreadPanel";
+import {
+  ChatThreadPanel,
+  splitThreads,
+  ThreadSummary,
+  WorkingLine,
+  WorkingRow,
+  type ChatWorking,
+} from "./ChatThreadPanel";
 import { MentionComposer, type FileMentionCandidate } from "./MentionComposer";
 import { RunDetails } from "./ChatPosts";
 import { showChat } from "./chatsOnScreen";
@@ -56,7 +82,11 @@ export function ThreadedChat(props: {
   // More under a message, such as its poll. `answer` opens the message's
   // thread with the reply box focused, and makes that reply its answer.
   // `place` says whether the message is in the stream or the thread panel.
-  renderMessageFooter?: (message: ChatMessageRecord, answer: () => void, place: "stream" | "thread") => ReactNode;
+  renderMessageFooter?: (
+    message: ChatMessageRecord,
+    answer: () => void,
+    place: "stream" | "thread",
+  ) => ReactNode;
   // The run behind each agent reply, by message, for its Run details.
   runs?: Readonly<Record<string, ChatRunRecord>>;
   // An agent at work, and the message it answers.
@@ -96,7 +126,12 @@ export function ThreadedChat(props: {
   const streamListRef = useRef<ChatMessageListHandle | null>(null);
   const threadListRef = useRef<ChatMessageListHandle | null>(null);
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
 
   // Beside a narrow conversation there's no room for a thread, so it
   // takes the conversation's place.
@@ -127,7 +162,8 @@ export function ThreadedChat(props: {
   useEffect(() => {
     const node = hasList && streamShown ? streamListRef.current?.getScrollableNode() : null;
     if (!node) return;
-    const reachesEnd = () => node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_THRESHOLD_PX;
+    const reachesEnd = () =>
+      node.scrollHeight - node.scrollTop - node.clientHeight <= FOLLOW_THRESHOLD_PX;
     const onScroll = () => setAtEnd(reachesEnd());
     // A pane or its messages can change size with no scroll, such as a window
     // that grows until every message fits. A resize can bring the reader to
@@ -152,26 +188,38 @@ export function ThreadedChat(props: {
   const newCount = atEnd ? 0 : Math.max(0, stream.length - seenCount.current);
 
   // A jump to a reply opens its thread and scrolls there once the thread's list is up.
-  const rootOfReply = useMemo(() => new Map([...threads.replies].flatMap(([rootId, replies]) =>
-    replies.map((reply) => [reply.id, rootId] as const))), [threads]);
+  const rootOfReply = useMemo(
+    () =>
+      new Map(
+        [...threads.replies].flatMap(([rootId, replies]) =>
+          replies.map((reply) => [reply.id, rootId] as const),
+        ),
+      ),
+    [threads],
+  );
   const pendingJump = useRef<string | null>(null);
   // Shows a thread, or none. A question's Answer holds only while its thread stays open.
   const showThread = useCallback((rootId: string | null) => {
     setOpenRootId(rootId);
     setAnswering((current) => (current?.rootId === rootId ? current : null));
   }, []);
-  useImperativeHandle(listRef, () => ({
-    scrollToEnd: () => streamListRef.current?.scrollToEnd(),
-    getScrollableNode: () => streamListRef.current?.getScrollableNode() ?? null,
-    scrollToMessage: (messageId) => {
-      const rootId = rootOfReply.get(messageId);
-      if (rootId === undefined) return streamListRef.current?.scrollToMessage(messageId) ?? false;
-      if (rootId === openRootId) return threadListRef.current?.scrollToMessage(messageId) ?? false;
-      pendingJump.current = messageId;
-      showThread(rootId);
-      return true;
-    },
-  }), [openRootId, rootOfReply, showThread]);
+  useImperativeHandle(
+    listRef,
+    () => ({
+      scrollToEnd: () => streamListRef.current?.scrollToEnd(),
+      getScrollableNode: () => streamListRef.current?.getScrollableNode() ?? null,
+      scrollToMessage: (messageId) => {
+        const rootId = rootOfReply.get(messageId);
+        if (rootId === undefined) return streamListRef.current?.scrollToMessage(messageId) ?? false;
+        if (rootId === openRootId)
+          return threadListRef.current?.scrollToMessage(messageId) ?? false;
+        pendingJump.current = messageId;
+        showThread(rootId);
+        return true;
+      },
+    }),
+    [openRootId, rootOfReply, showThread],
+  );
   useEffect(() => {
     const messageId = pendingJump.current;
     if (messageId && threadListRef.current?.scrollToMessage(messageId)) pendingJump.current = null;
@@ -186,29 +234,36 @@ export function ThreadedChat(props: {
   // sending locks the box, so the cursor goes there when the send ends,
   // unless the person has put it somewhere else since pressing Answer.
   const answerFocus = useRef<{ from: Element | null } | null>(null);
-  const answer = useCallback((messageId: string) => {
-    const rootId = rootOfReply.get(messageId) ?? messageId;
-    answerFocus.current = { from: document.activeElement };
-    setAnswering({ rootId, messageId });
-    setOpenRootId(rootId);
-  }, [rootOfReply]);
+  const answer = useCallback(
+    (messageId: string) => {
+      const rootId = rootOfReply.get(messageId) ?? messageId;
+      answerFocus.current = { from: document.activeElement };
+      setAnswering({ rootId, messageId });
+      setOpenRootId(rootId);
+    },
+    [rootOfReply],
+  );
   useEffect(() => {
     const request = answerFocus.current;
-    if (request === null || answering === null || answering.rootId !== openRootId || replying) return;
+    if (request === null || answering === null || answering.rootId !== openRootId || replying)
+      return;
     answerFocus.current = null;
     const active = document.activeElement;
     if (active !== request.from && active !== null && active !== document.body) return;
     rootRef.current?.querySelector<HTMLTextAreaElement>("[data-thread-composer] textarea")?.focus();
   }, [answering, openRootId, replying]);
-  const replyDraft = openRootId ? replyDrafts.get(openRootId) ?? "" : "";
-  const setReplyDraft = useCallback((value: string) => {
-    if (!openRootId) return;
-    setReplyDrafts((drafts) => new Map(drafts).set(openRootId, value));
-  }, [openRootId]);
+  const replyDraft = openRootId ? (replyDrafts.get(openRootId) ?? "") : "";
+  const setReplyDraft = useCallback(
+    (value: string) => {
+      if (!openRootId) return;
+      setReplyDrafts((drafts) => new Map(drafts).set(openRootId, value));
+    },
+    [openRootId],
+  );
   const { onSendReply } = props;
   const sendReply = useCallback(async () => {
     const rootId = openRootId;
-    const body = (rootId ? replyDrafts.get(rootId) ?? "" : "").trim();
+    const body = (rootId ? (replyDrafts.get(rootId) ?? "") : "").trim();
     if (!rootId || body.length === 0 || replying) return;
     const answers = answering?.rootId === rootId ? answering.messageId : undefined;
     setReplying(true);
@@ -238,71 +293,124 @@ export function ThreadedChat(props: {
   const working = props.working ?? null;
 
   const { renderMessageFooter, mentionCandidates, runs } = props;
-  const runDetails = useCallback((message: ChatMessageRecord) => {
-    const run = detailsId === message.id ? runs?.[message.id] : undefined;
-    return run ? (
-      <div
-        role="group"
-        aria-label="Run details"
-        data-testid={`${prefix}-run-details`}
-        className="mt-1.5 grid max-w-sm gap-2 rounded-lg border border-line bg-panel p-3"
-      >
-        <RunDetails run={run} reported={message.authorReported} />
-      </div>
-    ) : null;
-  }, [detailsId, prefix, runs]);
-  const moreAction = useCallback((message: ChatMessageRecord, testId: string) => runs?.[message.id] ? (
-    <MessageMore
-      testId={testId}
-      detailsShown={detailsId === message.id}
-      onToggleDetails={() => setDetailsId((shown) => (shown === message.id ? null : message.id))}
-    />
-  ) : null, [detailsId, runs]);
-  const renderThreadFooter = useCallback((message: ChatMessageRecord) => (
-    <>
-      {renderMessageFooter?.(message, () => answer(message.id), "thread")}
-      {runDetails(message)}
-    </>
-  ), [answer, renderMessageFooter, runDetails]);
-  // Under a stream message: its poll, its thread, and the agent answering in it.
-  const renderStreamFooter = useCallback((message: ChatMessageRecord) => {
-    const replies = threads.replies.get(message.id);
-    return (
+  const runDetails = useCallback(
+    (message: ChatMessageRecord) => {
+      const run = detailsId === message.id ? runs?.[message.id] : undefined;
+      return run ? (
+        <div
+          role="group"
+          aria-label="Run details"
+          data-testid={`${prefix}-run-details`}
+          className="mt-1.5 grid max-w-sm gap-2 rounded-lg border border-line bg-panel p-3"
+        >
+          <RunDetails run={run} reported={message.authorReported} />
+        </div>
+      ) : null;
+    },
+    [detailsId, prefix, runs],
+  );
+  const moreAction = useCallback(
+    (message: ChatMessageRecord, testId: string) =>
+      runs?.[message.id] ? (
+        <MessageMore
+          testId={testId}
+          detailsShown={detailsId === message.id}
+          onToggleDetails={() =>
+            setDetailsId((shown) => (shown === message.id ? null : message.id))
+          }
+        />
+      ) : null,
+    [detailsId, runs],
+  );
+  const renderThreadFooter = useCallback(
+    (message: ChatMessageRecord) => (
       <>
-        {renderMessageFooter?.(message, () => answer(message.id), "stream")}
+        {renderMessageFooter?.(message, () => answer(message.id), "thread")}
         {runDetails(message)}
-        {replies ? <ThreadSummary testIdPrefix={prefix} replies={replies} mentionCandidates={mentionCandidates} onOpen={() => openThread(message.id)} /> : null}
-        {working && workingRootId === message.id && openRootId !== message.id ? <WorkingLine testIdPrefix={prefix} working={working} /> : null}
       </>
-    );
-  }, [answer, mentionCandidates, openRootId, openThread, prefix, renderMessageFooter, runDetails, threads.replies, working, workingRootId]);
-  const streamActions = useCallback((message: ChatMessageRecord) => (
-    <>
-      <button
-        type="button"
-        data-testid={`${prefix}-reply-in-thread`}
-        aria-label="Reply in thread"
-        title="Reply in thread"
-        onClick={() => openThread(message.id)}
-        className={TOOLBAR_BUTTON}
-      >
-        <MessageSquareText size={15} strokeWidth={1.9} aria-hidden />
-      </button>
-      <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-copy-text`} />
-      <CopyMessageLink messageId={message.id} testId={`${prefix}-copy-link`} />
-      {moreAction(message, `${prefix}-more`)}
-    </>
-  ), [moreAction, openThread, prefix]);
-  const threadActions = useCallback((message: ChatMessageRecord) => (
-    <>
-      <CopyButton iconOnly label="Copy text" getText={() => message.body} testId={`${prefix}-thread-copy-text`} />
-      <CopyMessageLink messageId={message.id} testId={`${prefix}-thread-copy-link`} />
-      {moreAction(message, `${prefix}-thread-more`)}
-    </>
-  ), [moreAction, prefix]);
+    ),
+    [answer, renderMessageFooter, runDetails],
+  );
+  // Under a stream message: its poll, its thread, and the agent answering in it.
+  const renderStreamFooter = useCallback(
+    (message: ChatMessageRecord) => {
+      const replies = threads.replies.get(message.id);
+      return (
+        <>
+          {renderMessageFooter?.(message, () => answer(message.id), "stream")}
+          {runDetails(message)}
+          {replies ? (
+            <ThreadSummary
+              testIdPrefix={prefix}
+              replies={replies}
+              mentionCandidates={mentionCandidates}
+              onOpen={() => openThread(message.id)}
+            />
+          ) : null}
+          {working && workingRootId === message.id && openRootId !== message.id ? (
+            <WorkingLine testIdPrefix={prefix} working={working} />
+          ) : null}
+        </>
+      );
+    },
+    [
+      answer,
+      mentionCandidates,
+      openRootId,
+      openThread,
+      prefix,
+      renderMessageFooter,
+      runDetails,
+      threads.replies,
+      working,
+      workingRootId,
+    ],
+  );
+  const streamActions = useCallback(
+    (message: ChatMessageRecord) => (
+      <>
+        <button
+          type="button"
+          data-testid={`${prefix}-reply-in-thread`}
+          aria-label="Reply in thread"
+          title="Reply in thread"
+          onClick={() => openThread(message.id)}
+          className={TOOLBAR_BUTTON}
+        >
+          <MessageSquareText size={15} strokeWidth={1.9} aria-hidden />
+        </button>
+        <CopyButton
+          iconOnly
+          label="Copy text"
+          getText={() => message.body}
+          testId={`${prefix}-copy-text`}
+        />
+        <CopyMessageLink messageId={message.id} testId={`${prefix}-copy-link`} />
+        {moreAction(message, `${prefix}-more`)}
+      </>
+    ),
+    [moreAction, openThread, prefix],
+  );
+  const threadActions = useCallback(
+    (message: ChatMessageRecord) => (
+      <>
+        <CopyButton
+          iconOnly
+          label="Copy text"
+          getText={() => message.body}
+          testId={`${prefix}-thread-copy-text`}
+        />
+        <CopyMessageLink messageId={message.id} testId={`${prefix}-thread-copy-link`} />
+        {moreAction(message, `${prefix}-thread-more`)}
+      </>
+    ),
+    [moreAction, prefix],
+  );
 
-  const openRoot = openRootId ? stream.find((message) => message.id === openRootId) ?? null : null;
-  const openReplies = openRootId ? threads.replies.get(openRootId) ?? [] : [];
+  const openRoot = openRootId
+    ? (stream.find((message) => message.id === openRootId) ?? null)
+    : null;
+  const openReplies = openRootId ? (threads.replies.get(openRootId) ?? []) : [];
   // A thread whose message is gone closes.
   useEffect(() => {
     if (openRootId && !props.loading && !openRoot) setOpenRootId(null);
@@ -328,11 +436,17 @@ export function ThreadedChat(props: {
             rowActions={streamActions}
             openMessageId={openRootId}
             firstUnreadMessageId={props.firstUnreadMessageId}
-            footer={working && workingRootId === null ? (
-              <div className={narrow ? undefined : STREAM_COLUMN}>
-                <WorkingRow testIdPrefix={prefix} working={working} density={narrow ? "narrow" : "stream"} />
-              </div>
-            ) : null}
+            footer={
+              working && workingRootId === null ? (
+                <div className={narrow ? undefined : STREAM_COLUMN}>
+                  <WorkingRow
+                    testIdPrefix={prefix}
+                    working={working}
+                    density={narrow ? "narrow" : "stream"}
+                  />
+                </div>
+              ) : null
+            }
             density={narrow ? "narrow" : "stream"}
             column={!narrow}
           />
@@ -353,8 +467,15 @@ export function ThreadedChat(props: {
               </button>
             </div>
           ) : null}
-          <div ref={watchGutter} aria-hidden className="h-0 shrink-0 overflow-y-scroll [scrollbar-gutter:stable]" />
-          <div className="flex shrink-0 flex-col" style={narrow ? undefined : { paddingRight: gutter }}>
+          <div
+            ref={watchGutter}
+            aria-hidden
+            className="h-0 shrink-0 overflow-y-scroll [scrollbar-gutter:stable]"
+          />
+          <div
+            className="flex shrink-0 flex-col"
+            style={narrow ? undefined : { paddingRight: gutter }}
+          >
             <div className={`flex flex-col ${narrow ? "" : STREAM_COLUMN}`}>
               {props.belowList}
               {props.notice}
@@ -380,24 +501,26 @@ export function ThreadedChat(props: {
           listRef={threadListRef}
           flashMessageId={props.flashMessageId}
           working={working && workingRootId === openRootId ? working : null}
-          composer={props.replyNotice ?? (
-            <MentionComposer
-              pinned
-              testIdPrefix={`${prefix}-thread`}
-              composerId={`${prefix}-thread-composer`}
-              value={replyDraft}
-              sending={replying}
-              disabled={props.replyDisabled === true || props.loading}
-              placeholder="Reply…"
-              sendLabel="Send reply"
-              candidates={mentionCandidates}
-              fileCandidates={props.fileCandidates}
-              loadFileHeadings={props.loadFileHeadings}
-              onChange={setReplyDraft}
-              onSend={() => void sendReply()}
-              inset={narrow ? "narrow" : "thread"}
-            />
-          )}
+          composer={
+            props.replyNotice ?? (
+              <MentionComposer
+                pinned
+                testIdPrefix={`${prefix}-thread`}
+                composerId={`${prefix}-thread-composer`}
+                value={replyDraft}
+                sending={replying}
+                disabled={props.replyDisabled === true || props.loading}
+                placeholder="Reply…"
+                sendLabel="Send reply"
+                candidates={mentionCandidates}
+                fileCandidates={props.fileCandidates}
+                loadFileHeadings={props.loadFileHeadings}
+                onChange={setReplyDraft}
+                onSend={() => void sendReply()}
+                inset={narrow ? "narrow" : "thread"}
+              />
+            )
+          }
         />
       ) : null}
     </div>
@@ -405,7 +528,11 @@ export function ThreadedChat(props: {
 }
 
 // A message's other actions, after its reactions, reply, and copy.
-function MessageMore(props: { testId: string; detailsShown: boolean; onToggleDetails: () => void }) {
+function MessageMore(props: {
+  testId: string;
+  detailsShown: boolean;
+  onToggleDetails: () => void;
+}) {
   const [open, setOpen] = useState(false);
   return (
     <Menu
@@ -415,15 +542,24 @@ function MessageMore(props: { testId: string; detailsShown: boolean; onToggleDet
       width={176}
       menuTestId={`${props.testId}-menu`}
       topLayer
-      items={[{
-        id: "run-details",
-        label: props.detailsShown ? "Hide run details" : "Run details",
-        icon: <SquareTerminal size={14} aria-hidden />,
-        onSelect: props.onToggleDetails,
-        testId: `${props.testId}-run-details`,
-      }]}
+      items={[
+        {
+          id: "run-details",
+          label: props.detailsShown ? "Hide run details" : "Run details",
+          icon: <SquareTerminal size={14} aria-hidden />,
+          onSelect: props.onToggleDetails,
+          testId: `${props.testId}-run-details`,
+        },
+      ]}
       trigger={(trigger) => (
-        <button {...trigger} type="button" data-testid={props.testId} aria-label="More" title="More" className={TOOLBAR_BUTTON}>
+        <button
+          {...trigger}
+          type="button"
+          data-testid={props.testId}
+          aria-label="More"
+          title="More"
+          className={TOOLBAR_BUTTON}
+        >
           <MoreHorizontal size={15} strokeWidth={1.9} aria-hidden />
         </button>
       )}

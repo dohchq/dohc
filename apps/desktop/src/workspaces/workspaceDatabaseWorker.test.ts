@@ -7,11 +7,12 @@ import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import { prepareWorkspaceFileRead } from "./workspaceAssets";
 import { readPreparedDatabaseSnapshot } from "./workspaceDatabase";
-import { DATABASE_MAX_CELL_CHARS, editDatabaseAtPath, readDatabaseSnapshotAtPath } from "./workspaceDatabaseCore";
-import type {
-  DatabaseEdit,
-  DatabaseOperationInput,
-} from "./workspaceDatabaseTypes";
+import {
+  DATABASE_MAX_CELL_CHARS,
+  editDatabaseAtPath,
+  readDatabaseSnapshotAtPath,
+} from "./workspaceDatabaseCore";
+import type { DatabaseEdit, DatabaseOperationInput } from "./workspaceDatabaseTypes";
 import {
   createWorkspaceDatabaseWorkerOwner,
   type WorkspaceDatabaseWorkerOwner,
@@ -70,20 +71,11 @@ function seedDatabase(path: string): void {
     `);
     db.prepare(
       "INSERT INTO items (id, value, amount, optional, payload) VALUES (?, ?, ?, ?, ?)",
-    ).run(
-      1,
-      "start",
-      12.5,
-      null,
-      new Uint8Array([1, 2, 3, 4]),
-    );
+    ).run(1, "start", 12.5, null, new Uint8Array([1, 2, 3, 4]));
     db.prepare(
       "INSERT INTO items (id, value, amount, optional, payload) VALUES (?, ?, ?, ?, ?)",
     ).run(2, "x".repeat(DATABASE_MAX_CELL_CHARS + 20), 7, "present", null);
-    db.prepare("INSERT INTO labels (id, value) VALUES (?, ?)").run(
-      "label-1",
-      "without rowid",
-    );
+    db.prepare("INSERT INTO labels (id, value) VALUES (?, ?)").run("label-1", "without rowid");
   } finally {
     db.close();
   }
@@ -121,10 +113,7 @@ async function copyWideDatabaseSeed(path: string): Promise<void> {
   await copyFile(wideDatabaseSeed, path);
 }
 
-function operation(
-  operationId: string,
-  edit: DatabaseEdit = UPDATE,
-): DatabaseOperationInput {
+function operation(operationId: string, edit: DatabaseEdit = UPDATE): DatabaseOperationInput {
   return {
     operationId,
     databasePath: "data.sqlite",
@@ -141,7 +130,13 @@ function operation(
 function editPaths(root: string) {
   const logPath = join(root, databaseOpLogPath("data.sqlite"));
   mkdirSync(dirname(logPath), { recursive: true });
-  const counterFolder = join(root, ".dohc", "local", "databases", databaseFolderName("data.sqlite"));
+  const counterFolder = join(
+    root,
+    ".dohc",
+    "local",
+    "databases",
+    databaseFolderName("data.sqlite"),
+  );
   mkdirSync(counterFolder, { recursive: true });
   return {
     logPath,
@@ -183,9 +178,7 @@ describe("workspace database worker", () => {
       payload: "<blob 4 bytes>",
       optional: null,
     });
-    expect(String(actual.tables[0]?.rows[1]?.value)).toHaveLength(
-      DATABASE_MAX_CELL_CHARS + 1,
-    );
+    expect(String(actual.tables[0]?.rows[1]?.value)).toHaveLength(DATABASE_MAX_CELL_CHARS + 1);
     expect(actual.tables[1]?.rows[0]).not.toHaveProperty("__dohc_rowid");
 
     const directRoot = join(root, "direct-state");
@@ -238,20 +231,13 @@ describe("workspace database worker", () => {
       }),
     );
 
-    expect(results.map((result) => result.version)).toEqual(
-      values.map((_, index) => index + 1),
-    );
+    expect(results.map((result) => result.version)).toEqual(values.map((_, index) => index + 1));
     const logged = await logOperations(paths.logPath);
-    expect(logged.map((entry) => entry.version)).toEqual(
-      values.map((_, index) => index + 1),
+    expect(logged.map((entry) => entry.version)).toEqual(values.map((_, index) => index + 1));
+    expect(logged.map((entry) => entry.payload)).toEqual(values.map((value) => ({ value })));
+    expect(readDatabaseSnapshotAtPath(databasePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe(
+      values.at(-1),
     );
-    expect(logged.map((entry) => entry.payload)).toEqual(
-      values.map((value) => ({ value })),
-    );
-    expect(
-      readDatabaseSnapshotAtPath(databasePath, "data.sqlite").tables[0]?.rows[0]
-        ?.value,
-    ).toBe(values.at(-1));
   });
 
   it("surfaces a crash for the active request and lazily restarts on the next request", async () => {
@@ -263,14 +249,18 @@ describe("workspace database worker", () => {
     const databaseWorker = owner({
       workerFactory(url) {
         // The crash fixture starts the request but cannot finish before termination.
-        const worker = workers.length === 0
-          ? new Worker(`
+        const worker =
+          workers.length === 0
+            ? new Worker(
+                `
               const { parentPort } = require("node:worker_threads");
               parentPort.on("message", ({ id }) => {
                 parentPort.postMessage({ id, kind: "started" });
               });
-            `, { eval: true })
-          : new Worker(url);
+            `,
+                { eval: true },
+              )
+            : new Worker(url);
         workers.push(worker);
         return worker;
       },
@@ -348,11 +338,7 @@ describe("workspace database worker", () => {
     });
     expect(third.version).toBe(102);
     expect((await logOperations(paths.logPath)).map((entry) => entry.version)).toEqual([
-      40,
-      99,
-      100,
-      101,
-      102,
+      40, 99, 100, 101, 102,
     ]);
   });
 
@@ -368,15 +354,22 @@ describe("workspace database worker", () => {
     await writeFile(paths.logPath, `${kept}{"version":9007199254740992}\n`);
     const before = await readFile(databasePath);
     const databaseWorker = owner();
-    const edit = () => databaseWorker.editPath({
-      absolutePath: databasePath, path: "data.sqlite", ...paths, edit: UPDATE, operation: operation("op-uncountable"),
-    });
+    const edit = () =>
+      databaseWorker.editPath({
+        absolutePath: databasePath,
+        path: "data.sqlite",
+        ...paths,
+        edit: UPDATE,
+        operation: operation("op-uncountable"),
+      });
 
     await expect(edit()).rejects.toMatchObject({ code: "uncountable-log-version" });
     const counter = new DatabaseSync(paths.statePath);
     try {
       counter.exec("INSERT INTO database_operation_state VALUES ('last_version', 5);");
-    } finally { counter.close(); }
+    } finally {
+      counter.close();
+    }
     await expect(edit()).rejects.toMatchObject({ code: "uncountable-log-version" });
     expect(await readFile(databasePath)).toEqual(before);
     expect(await readFile(paths.logPath, "utf8")).toBe(`${kept}{"version":9007199254740992}\n`);
@@ -411,10 +404,9 @@ describe("workspace database worker", () => {
 
     await expect(cancelled).rejects.toThrow("Database edit was cancelled.");
     await activeRead;
-    expect(
-      readDatabaseSnapshotAtPath(editPath, "data.sqlite").tables[0]?.rows[0]
-        ?.value,
-    ).toBe("start");
+    expect(readDatabaseSnapshotAtPath(editPath, "data.sqlite").tables[0]?.rows[0]?.value).toBe(
+      "start",
+    );
     await expect(readFile(paths.logPath, "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -442,11 +434,9 @@ describe("workspace database worker", () => {
       absolutePath: largePath,
       path: "large.sqlite",
     });
-    const preparedRead = readPreparedDatabaseSnapshot(
-      "data.sqlite",
-      prepared,
-      { worker: observedWorker },
-    );
+    const preparedRead = readPreparedDatabaseSnapshot("data.sqlite", prepared, {
+      worker: observedWorker,
+    });
     const outcome = preparedRead.then(
       () => null,
       (error: unknown) => error,
@@ -485,10 +475,9 @@ describe("workspace database worker", () => {
       }),
     ).rejects.toThrow("Database edit was cancelled.");
 
-    expect(
-      readDatabaseSnapshotAtPath(databasePath, "data.sqlite").tables[0]?.rows[0]
-        ?.value,
-    ).toBe("changed");
+    expect(readDatabaseSnapshotAtPath(databasePath, "data.sqlite").tables[0]?.rows[0]?.value).toBe(
+      "changed",
+    );
     expect(await logOperations(paths.logPath)).toHaveLength(1);
   });
 });

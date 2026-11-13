@@ -5,7 +5,10 @@ import type { OperationHandlers } from "./operationTable";
 
 // One window takes a handoff: the one a link lands in. A card in every
 // window would act in every window at once, so the others show none.
-export function shareHandoffStatusFor(takesHandoff: boolean, status: ShareHandoffStatus): ShareHandoffStatus {
+export function shareHandoffStatusFor(
+  takesHandoff: boolean,
+  status: ShareHandoffStatus,
+): ShareHandoffStatus {
   return takesHandoff ? status : { status: "idle" };
 }
 
@@ -32,8 +35,14 @@ export function createShareHandoffIpcHandlers<Event>(dependencies: {
   return {
     getShareHandoffStatus: (_input, { event }) =>
       shareHandoffStatusFor(takesHandoff(event), shareHandoffRedemption.status()),
-    acceptShareHandoff: (input) => { shareHandoffRedemption.accept(input.statusId); },
-    retryShareHandoff: () => { shareHandoffRedemption.retry(); },
-    dismissShareHandoff: (input) => { shareHandoffRedemption.dismiss(input.statusId); },
+    acceptShareHandoff: (input) => {
+      shareHandoffRedemption.accept(input.statusId);
+    },
+    retryShareHandoff: () => {
+      shareHandoffRedemption.retry();
+    },
+    dismissShareHandoff: (input) => {
+      shareHandoffRedemption.dismiss(input.statusId);
+    },
   };
 }

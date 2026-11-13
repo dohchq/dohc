@@ -1,5 +1,5 @@
 import { jsonResponse } from "@dohc/service-http";
-import {decodeWorkReferenceMapping} from "@dohc/workspace-engine-client/daemon";
+import { decodeWorkReferenceMapping } from "@dohc/workspace-engine-client/daemon";
 import {
   DiscussionActivityCapacityError,
   ownerLogWaitGroup,
@@ -8,11 +8,32 @@ import {
 import { badRequest, notFound, relayError } from "./errors";
 import { cacheLogAuthorNames } from "./logAuthorNameCache";
 import type { ReplicaWatches } from "./replicaWatches";
-import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
-import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
-import type { EnforceWorkspaceIdentityResult, SyncRelayLogInput, SyncRelayLogRow, SyncRelayStorage } from "./storage";
+import {
+  assertChatAuthorship,
+  assertClientLogProvenance,
+  parseAuthenticatedLogOps,
+  type LogAuthorNameLookup,
+} from "./relayLogInputs";
+import {
+  parseCursor,
+  parseLimit,
+  parseString,
+  parseWorkspaceId,
+  readJsonObject,
+} from "./requestInputs";
+import type {
+  EnforceWorkspaceIdentityResult,
+  SyncRelayLogInput,
+  SyncRelayLogRow,
+  SyncRelayStorage,
+} from "./storage";
 import { readRefusal } from "./storage/relayAdmission";
-import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_HELD_READ_KNOWN_ROWS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
+import {
+  MAX_DISCUSSION_ACTIVITY_HOLD_MS,
+  MAX_HELD_READ_KNOWN_ROWS,
+  MAX_OPS_PER_REQUEST,
+  MAX_ORIGIN_ID_CHARS,
+} from "./wireLimits";
 
 export type WorkspaceReplicationRoute =
   | { route: "bootstrap"; workspaceId: string }
@@ -37,7 +58,8 @@ export interface HostedAdmission {
 const MAX_IDENTITY_BYTES = 512;
 
 export function createWorkspaceReplicationRoutes(
-  storage: Pick<SyncRelayStorage,
+  storage: Pick<
+    SyncRelayStorage,
     | "claimWorkspace"
     | "claimWorkspaceIdentity"
     | "getWorkspaceBootstrap"
@@ -78,9 +100,7 @@ export function createWorkspaceReplicationRoutes(
       });
       if (result === "not-owner") throw notFound();
       if (identity !== null) {
-        assertWorkspaceIdentityResult(
-          storage.claimWorkspaceIdentity({ workspaceId, ...identity }),
-        );
+        assertWorkspaceIdentityResult(storage.claimWorkspaceIdentity({ workspaceId, ...identity }));
       }
       return jsonResponse({ ok: true, workspaceId, created: result === "created" });
     }
@@ -116,10 +136,7 @@ export function createWorkspaceReplicationRoutes(
         input.replicationEpoch,
         "replicationEpoch",
       );
-      const streamIdentity = parseWorkspaceIdentityValue(
-        input.streamIdentity,
-        "streamIdentity",
-      );
+      const streamIdentity = parseWorkspaceIdentityValue(input.streamIdentity, "streamIdentity");
       const result = storage.rotateWorkspaceIdentity({
         workspaceId: route.workspaceId,
         ownerUserId: actor.userId,
@@ -150,43 +167,64 @@ export function createWorkspaceReplicationRoutes(
       // parseLogOp and appendLogBatch, so the relay rejects the full batch
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
-      assertClientLogProvenance(originId, input.ops, {deferMomentRefusal: true, serviceHost: route.serviceHost !== undefined});
+      assertClientLogProvenance(originId, input.ops, {
+        deferMomentRefusal: true,
+        serviceHost: route.serviceHost !== undefined,
+      });
       const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, accountNames);
       const workReferences = input.workReferences === undefined ? [] : input.workReferences;
-      if (!Array.isArray(workReferences) || workReferences.length > 128 || route.serviceHost && workReferences.length) throw notFound();
-      if (workReferences.length && !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
+      if (
+        !Array.isArray(workReferences) ||
+        workReferences.length > 128 ||
+        (route.serviceHost && workReferences.length)
+      )
+        throw notFound();
+      if (workReferences.length && !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId))
+        throw notFound();
       let references;
-      try { references = workReferences.map(row => decodeWorkReferenceMapping(row)); } catch { throw notFound(); }
+      try {
+        references = workReferences.map((row) => decodeWorkReferenceMapping(row));
+      } catch {
+        throw notFound();
+      }
       await route.serviceHost?.screen(originId, ops);
-      await storage.prepareLogAppend({workspaceId:route.workspaceId,originId,ops},request.signal);
-      const datasetAccess = route.serviceHost ? undefined : await storage.prepareWorkReferenceRegistration({
-        workspaceId: route.workspaceId, userId: actor.userId, references,
-      });
+      await storage.prepareLogAppend(
+        { workspaceId: route.workspaceId, originId, ops },
+        request.signal,
+      );
+      const datasetAccess = route.serviceHost
+        ? undefined
+        : await storage.prepareWorkReferenceRegistration({
+            workspaceId: route.workspaceId,
+            userId: actor.userId,
+            references,
+          });
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
         ops,
-        ...(route.serviceHost ? {} : {workReferences: {userId: actor.userId, references, datasetAccess}}),
-        ...(route.serviceHost ? {admit: route.serviceHost.admit, confirm: route.serviceHost.confirm} : {classifyRedundantRecoveries: true}),
+        ...(route.serviceHost
+          ? {}
+          : { workReferences: { userId: actor.userId, references, datasetAccess } }),
+        ...(route.serviceHost
+          ? { admit: route.serviceHost.admit, confirm: route.serviceHost.confirm }
+          : { classifyRedundantRecoveries: true }),
         // Identity claim/verification rides the append's BEGIN IMMEDIATE
         // transaction. A gap/conflict/quota/blob failure later in append
         // rolls back a first-adopt claim together with the batch.
         guard: ({ enforceWorkspaceIdentity: enforceInAppend }) => {
           guard();
-          enforceWorkspaceIdentity(
-            storage,
-            route.workspaceId,
-            identity,
-            enforceInAppend,
-          );
+          enforceWorkspaceIdentity(storage, route.workspaceId, identity, enforceInAppend);
         },
       });
       if (result.inserted > 0) {
         discussionActivity.wakeLog(route.workspaceId);
       }
-      const refusals = ops.flatMap(op => {
+      const refusals = ops.flatMap((op) => {
         const refusal = readRefusal(op);
-        return refusal ? [{originId, originSeq: op.originSeq, opKind: refusal.opKind, reason: refusal.reason}] : [];
+        return refusal
+          ? [{ originId, originSeq: op.originSeq, opKind: refusal.opKind, reason: refusal.reason }]
+          : [];
       });
       return jsonResponse({
         ok: true,
@@ -194,21 +232,19 @@ export function createWorkspaceReplicationRoutes(
         inserted: result.inserted,
         skipped: result.skipped,
         currentMaxOriginSeq: result.currentMaxOriginSeq,
-        ...(input.workReferences === undefined ? {} : {registeredReferences: result.registeredReferences ?? []}),
-        ...(result.settlementRefusals ? {settlementRefusals:result.settlementRefusals} : {}),
-        ...(result.redundantRecoveries ? {redundantRecoveries: result.redundantRecoveries} : {}),
-        ...(refusals.length ? {refusals} : {}),
+        ...(input.workReferences === undefined
+          ? {}
+          : { registeredReferences: result.registeredReferences ?? [] }),
+        ...(result.settlementRefusals ? { settlementRefusals: result.settlementRefusals } : {}),
+        ...(result.redundantRecoveries ? { redundantRecoveries: result.redundantRecoveries } : {}),
+        ...(refusals.length ? { refusals } : {}),
       });
     }
 
     if (route.route === "log" && request.method === "GET") {
       const url = new URL(request.url);
       const identity = parseOptionalWorkspaceIdentityQuery(url.searchParams);
-      const epochLogFloor = enforceWorkspaceIdentity(
-        storage,
-        route.workspaceId,
-        identity,
-      );
+      const epochLogFloor = enforceWorkspaceIdentity(storage, route.workspaceId, identity);
       const requestedSince = parseCursor(url.searchParams.get("since"));
       const since = Math.max(requestedSince, epochLogFloor);
       const hold = url.searchParams.get("hold");
@@ -237,12 +273,24 @@ export function createWorkspaceReplicationRoutes(
         sinceRelaySeq: since,
         limit,
       });
-      const mappings = url.searchParams.get("includeReferences") === "false" ? {references: [], nextAfter: null, hasMore: false} : await storage.listWorkReferences({workspaceId: route.workspaceId, reader: {kind: "user", userId: actor.userId},
-        after: url.searchParams.get("referenceAfter") || undefined});
+      const mappings =
+        url.searchParams.get("includeReferences") === "false"
+          ? { references: [], nextAfter: null, hasMore: false }
+          : await storage.listWorkReferences({
+              workspaceId: route.workspaceId,
+              reader: { kind: "user", userId: actor.userId },
+              after: url.searchParams.get("referenceAfter") || undefined,
+            });
       guard();
       const response = jsonResponse({
         ok: true,
-        ...(mappings.references.length || mappings.nextAfter ? {workReferences: mappings.references, nextReferenceAfter: mappings.nextAfter, referenceHasMore: mappings.hasMore} : {}),
+        ...(mappings.references.length || mappings.nextAfter
+          ? {
+              workReferences: mappings.references,
+              nextReferenceAfter: mappings.nextAfter,
+              referenceHasMore: mappings.hasMore,
+            }
+          : {}),
         ops: page.rows.map(servedLogOp),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
@@ -258,11 +306,7 @@ export function createWorkspaceReplicationRoutes(
     if (route.route === "log-coordinate" && request.method === "GET") {
       const url = new URL(request.url);
       const identity = parseOptionalWorkspaceIdentityQuery(url.searchParams);
-      const epochLogFloor = enforceWorkspaceIdentity(
-        storage,
-        route.workspaceId,
-        identity,
-      );
+      const epochLogFloor = enforceWorkspaceIdentity(storage, route.workspaceId, identity);
       const row = storage.fetchLogCoordinate({
         workspaceId: route.workspaceId,
         originId: route.originId,
@@ -292,11 +336,16 @@ export function createWorkspaceReplicationRoutes(
     },
   ): Promise<Response> {
     let since = input.since;
-    const known = () => input.known === undefined || input.known > MAX_HELD_READ_KNOWN_ROWS ? undefined
-      : since === input.requestedSince ? input.known : 0;
+    const known = () =>
+      input.known === undefined || input.known > MAX_HELD_READ_KNOWN_ROWS
+        ? undefined
+        : since === input.requestedSince
+          ? input.known
+          : 0;
     const hasMore = () =>
       storage.logHasMoreThan({ workspaceId, sinceRelaySeq: since, count: known() ?? 0 });
-    const changed = () => hasMore() || replicaWatches.watched(workspaceId) !== input.reportedWatched;
+    const changed = () =>
+      hasMore() || replicaWatches.watched(workspaceId) !== input.reportedWatched;
     const deadlineAtMs = Date.now() + input.holdMs;
     // A wake can leave nothing past `since`, for example a retried link
     // submission that appended nothing. The read then parks again until its
@@ -348,8 +397,12 @@ export function servedLogOp(row: SyncRelayLogRow) {
     opKind: row.opKind,
     payload: JSON.parse(row.payloadJson) as unknown,
     recordedAtMs: row.recordedAtMs,
-    ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
-    ...(row.settlementAdmission === undefined ? {} : {settlementAdmission: row.settlementAdmission}),
+    ...(row.admittedAuthorSnapshot === undefined
+      ? {}
+      : { admittedAuthorSnapshot: row.admittedAuthorSnapshot }),
+    ...(row.settlementAdmission === undefined
+      ? {}
+      : { settlementAdmission: row.settlementAdmission }),
   };
 }
 
@@ -398,19 +451,14 @@ interface OptionalWorkspaceIdentity {
 function parseOptionalWorkspaceIdentity(
   input: Record<string, unknown>,
 ): OptionalWorkspaceIdentity | null {
-  return parseOptionalWorkspaceIdentityValues(
-    input.replicationEpoch,
-    input.streamIdentity,
-  );
+  return parseOptionalWorkspaceIdentityValues(input.replicationEpoch, input.streamIdentity);
 }
 
 export function parseOptionalWorkspaceIdentityQuery(
   searchParams: URLSearchParams,
 ): OptionalWorkspaceIdentity | null {
   return parseOptionalWorkspaceIdentityValues(
-    searchParams.has("replicationEpoch")
-      ? searchParams.get("replicationEpoch")
-      : undefined,
+    searchParams.has("replicationEpoch") ? searchParams.get("replicationEpoch") : undefined,
     searchParams.has("streamIdentity") ? searchParams.get("streamIdentity") : undefined,
   );
 }
@@ -426,24 +474,19 @@ function parseOptionalWorkspaceIdentityValues(
     throw badRequest("replicationEpoch and streamIdentity must be supplied together");
   }
   return {
-    replicationEpoch: parseWorkspaceIdentityValue(
-      replicationEpochValue,
-      "replicationEpoch",
-    ),
-    streamIdentity: parseWorkspaceIdentityValue(
-      streamIdentityValue,
-      "streamIdentity",
-    ),
+    replicationEpoch: parseWorkspaceIdentityValue(replicationEpochValue, "replicationEpoch"),
+    streamIdentity: parseWorkspaceIdentityValue(streamIdentityValue, "streamIdentity"),
   };
 }
 
 export function enforceWorkspaceIdentity(
-  storage: Pick<SyncRelayStorage, "getWorkspaceIdentity" | "verifyWorkspaceIdentity" | "getEpochLogFloor">,
+  storage: Pick<
+    SyncRelayStorage,
+    "getWorkspaceIdentity" | "verifyWorkspaceIdentity" | "getEpochLogFloor"
+  >,
   workspaceId: string,
   identity: OptionalWorkspaceIdentity | null,
-  claimInAppend?: (
-    identity: OptionalWorkspaceIdentity | null,
-  ) => EnforceWorkspaceIdentityResult,
+  claimInAppend?: (identity: OptionalWorkspaceIdentity | null) => EnforceWorkspaceIdentityResult,
 ): number {
   if (claimInAppend) {
     assertWorkspaceIdentityResult(claimInAppend(identity));
@@ -458,15 +501,11 @@ export function enforceWorkspaceIdentity(
   // GET is strictly read-only. An unset workspace cannot first-adopt identity
   // through a pull; there is no coordinate to verify, so it is reported as
   // unrecognized without writing.
-  assertWorkspaceIdentityResult(
-    storage.verifyWorkspaceIdentity({ workspaceId, ...identity }),
-  );
+  assertWorkspaceIdentityResult(storage.verifyWorkspaceIdentity({ workspaceId, ...identity }));
   return storage.getEpochLogFloor(workspaceId);
 }
 
-function assertWorkspaceIdentityResult(
-  result: EnforceWorkspaceIdentityResult,
-): void {
+function assertWorkspaceIdentityResult(result: EnforceWorkspaceIdentityResult): void {
   if (result === "epoch-superseded") throw relayError("epoch_superseded");
   if (result === "epoch-unknown") throw relayError("identity_not_recognized");
   if (result === "stream-mismatch") throw relayError("stream_identity_mismatch");

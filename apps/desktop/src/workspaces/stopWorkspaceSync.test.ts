@@ -1,13 +1,25 @@
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DaemonRefusalError, VersionedLiveAdapter, type Request, type Response } from "@dohc/workspace-engine-client";
-import { EngineWorkspaceSessions, type EngineDaemonClient } from "@dohc/workspace-engine-client/daemon";
+import {
+  DaemonRefusalError,
+  VersionedLiveAdapter,
+  type Request,
+  type Response,
+} from "@dohc/workspace-engine-client";
+import {
+  EngineWorkspaceSessions,
+  type EngineDaemonClient,
+} from "@dohc/workspace-engine-client/daemon";
 import { RelayConfiguredDaemonClientSource, RelayTransportRouteGuard } from "./engineRelayClient";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { createRegistryStore } from "./registryStore";
 import { workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
 import { createWorkspaceSyncStop, reopenWithoutSync } from "./stopWorkspaceSync";
-import { createWorkspaceActivity, WorkspaceActivityState, type ActivityWorkspace } from "./workspaceActivity";
+import {
+  createWorkspaceActivity,
+  WorkspaceActivityState,
+  type ActivityWorkspace,
+} from "./workspaceActivity";
 import { idleObservation } from "./workspaceActivity.testSupport";
 import { createTestScratch } from "./testTemp";
 import { deferred } from "../testing/deferred";
@@ -17,7 +29,13 @@ import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import type { WorkspaceObservationCallbacks } from "./workspaceFileObservation";
 
 const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
-const credentials: CloudCredentials = { ...remote, userId: remote.ownerUserId, token: "token", email: "owner@test", relayUrl: "https://relay.test" };
+const credentials: CloudCredentials = {
+  ...remote,
+  userId: remote.ownerUserId,
+  token: "token",
+  email: "owner@test",
+  relayUrl: "https://relay.test",
+};
 
 // The engine's side of an unfinished pull: its token stays until an owner
 // open that abandons it succeeds.
@@ -29,7 +47,10 @@ class PullDaemon implements EngineDaemonClient {
     switch (request.method) {
       case "workspace.open":
         if (this.openFails) {
-          throw new DaemonRefusalError({ code: "WORKSPACE_UNAVAILABLE", message: "workspace-open-failed", retry: "no" }, new Error("open"));
+          throw new DaemonRefusalError(
+            { code: "WORKSPACE_UNAVAILABLE", message: "workspace-open-failed", retry: "no" },
+            new Error("open"),
+          );
         }
         if (params.abandonOrdinaryPull === true) this.pullUnfinished = false;
         return { id: request.id, result: { workspace: "handle" } };
@@ -49,34 +70,53 @@ async function fixture(synced = true, collectionsWaiting = false) {
   const registryPath = join(rootPath, "registry.json");
   const store = createRegistryStore(registryPath);
   const workspace: ActivityWorkspace = {
-    workspaceId: "workspace", rootPath, kind: "personal", mode: "local-first", attachmentId: Symbol("workspace"),
+    workspaceId: "workspace",
+    rootPath,
+    kind: "personal",
+    mode: "local-first",
+    attachmentId: Symbol("workspace"),
   };
   store.register({ ...workspace, ...(synced ? { remote } : {}) });
   const steps: string[] = [];
   const resumeAdmission = vi.fn();
-  const settle = vi.fn<() => Promise<() => void>>(async () => { steps.push("settle"); return resumeAdmission; });
-  const engineStop = vi.fn(async () => { steps.push("engine-stop"); });
-  const engineStart = vi.fn(async () => { steps.push("engine-start"); });
-  const watcherStop = vi.fn(async () => { steps.push("watcher-stop"); });
+  const settle = vi.fn<() => Promise<() => void>>(async () => {
+    steps.push("settle");
+    return resumeAdmission;
+  });
+  const engineStop = vi.fn(async () => {
+    steps.push("engine-stop");
+  });
+  const engineStart = vi.fn(async () => {
+    steps.push("engine-start");
+  });
+  const watcherStop = vi.fn(async () => {
+    steps.push("watcher-stop");
+  });
   const runStates: AgentRunStateEvent[] = [];
   const captureRuns: ReturnType<typeof vi.fn<(run: ActiveAgentRun | null) => Promise<void>>>[] = [];
   const capturedWrites: (ActiveAgentRun | null)[] = [];
   let observation!: WorkspaceObservationCallbacks;
   const daemon = new PullDaemon(collectionsWaiting);
   const sessions = new EngineWorkspaceSessions(
-    new RelayConfiguredDaemonClientSource({ currentClient: () => daemon }, new RelayTransportRouteGuard(),
-      id => !store.find(id)?.remote),
+    new RelayConfiguredDaemonClientSource(
+      { currentClient: () => daemon },
+      new RelayTransportRouteGuard(),
+      (id) => !store.find(id)?.remote,
+    ),
     { transportRebindAttempts: 1 },
   );
   const reads: Promise<boolean>[] = [];
   const service = createWorkspaceActivity(vi.fn(), {
-    collectionsWaitingFor: engineWorkspace => {
+    collectionsWaitingFor: (engineWorkspace) => {
       const read = sessions.run(engineWorkspace, ({ client, workspace: handle }) =>
-        new VersionedLiveAdapter(client, handle, { workspaceId: engineWorkspace.workspaceId }).collectionsWaiting());
+        new VersionedLiveAdapter(client, handle, {
+          workspaceId: engineWorkspace.workspaceId,
+        }).collectionsWaiting(),
+      );
       reads.push(read);
       return read;
     },
-    onAgentRunState: event => runStates.push(event),
+    onAgentRunState: (event) => runStates.push(event),
     observationFor: (_workspace, callbacks) => {
       observation = callbacks;
       return { ...idleObservation(workspace, callbacks), stop: watcherStop };
@@ -84,22 +124,41 @@ async function fixture(synced = true, collectionsWaiting = false) {
     cloudStateFor: () => {
       const entry = store.find(workspace.workspaceId)!;
       return {
-        syncPause: entry.syncPause ? workspaceSyncPauseStatus(entry.syncPause, "local-person") : undefined };
+        syncPause: entry.syncPause
+          ? workspaceSyncPauseStatus(entry.syncPause, "local-person")
+          : undefined,
+      };
     },
-    engineFor: () => store.find(workspace.workspaceId)?.remote ? ({
-      start: engineStart, stop: engineStop, queueSync: vi.fn(), snapshot: () => ({}),
-    } as never) : null,
+    engineFor: () =>
+      store.find(workspace.workspaceId)?.remote
+        ? ({
+            start: engineStart,
+            stop: engineStop,
+            queueSync: vi.fn(),
+            snapshot: () => ({}),
+          } as never)
+        : null,
     captureFor: () => {
       let activeRun: ActiveAgentRun | null = null;
-      const setActiveAgentRun = vi.fn(async (run: ActiveAgentRun | null) => { activeRun = run; });
+      const setActiveAgentRun = vi.fn(async (run: ActiveAgentRun | null) => {
+        activeRun = run;
+      });
       captureRuns.push(setActiveAgentRun);
-      return { shareView: false, capture: {
-        setActiveAgentRun,
-        observeFileEvents: () => { capturedWrites.push(activeRun); },
-        start: () => {}, stop: async () => { steps.push("capture-stop"); },
-        settleAndCloseLiveSessionsForSyncPause: settle,
-        settleAndCloseAllLiveSessions: settle,
-      } as never };
+      return {
+        shareView: false,
+        capture: {
+          setActiveAgentRun,
+          observeFileEvents: () => {
+            capturedWrites.push(activeRun);
+          },
+          start: () => {},
+          stop: async () => {
+            steps.push("capture-stop");
+          },
+          settleAndCloseLiveSessionsForSyncPause: settle,
+          settleAndCloseAllLiveSessions: settle,
+        } as never,
+      };
     },
   });
   const state = new WorkspaceActivityState();
@@ -109,43 +168,102 @@ async function fixture(synced = true, collectionsWaiting = false) {
   steps.length = 0;
   let current = true;
   // As in the app, closing the relay closes the workspace's engine sessions.
-  const closeRelay = vi.fn(async () => { steps.push("relay-close"); await sessions.closeWorkspace(workspace); });
-  const pauseRemote = vi.fn((id: string, pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => { steps.push("pause"); store.pauseRemote(id, pause); });
+  const closeRelay = vi.fn(async () => {
+    steps.push("relay-close");
+    await sessions.closeWorkspace(workspace);
+  });
+  const pauseRemote = vi.fn(
+    (id: string, pause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause) => {
+      steps.push("pause");
+      store.pauseRemote(id, pause);
+    },
+  );
   const cleanupFailed = vi.fn();
   const person = vi.fn(async () => ({ kind: "person" as const, personId: "local-person" }));
   const openActivity = vi.fn(() => service.open(workspace, state));
   const reopen = {
-    closeActivity: () => service.close(workspace, state, { notify: false, preserveAgentRun: true }), closeRelay,
-    openActivity, collectionsWaiting: () => service.readCollectionsWaiting(workspace, state),
-    notify: () => { steps.push("notify"); },
+    closeActivity: () => service.close(workspace, state, { notify: false, preserveAgentRun: true }),
+    closeRelay,
+    openActivity,
+    collectionsWaiting: () => service.readCollectionsWaiting(workspace, state),
+    notify: () => {
+      steps.push("notify");
+    },
   };
   const stop = createWorkspaceSyncStop({
-    ...reopen, person, cleanupFailed, nowMs: () => 42,
-    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local-person"),
-    withOwnerHostPaused: async work => { steps.push("host-pause"); try { return await work(); } finally { steps.push("host-resume"); } },
-    prepare: () => service.prepareSyncPause(workspace, state), resume: () => service.enableCloud(workspace, state), pauseRemote,
+    ...reopen,
+    person,
+    cleanupFailed,
+    nowMs: () => 42,
+    pauseStatus: (pause) => workspaceSyncPauseStatus(pause, "local-person"),
+    withOwnerHostPaused: async (work) => {
+      steps.push("host-pause");
+      try {
+        return await work();
+      } finally {
+        steps.push("host-resume");
+      }
+    },
+    prepare: () => service.prepareSyncPause(workspace, state),
+    resume: () => service.enableCloud(workspace, state),
+    pauseRemote,
     status: () => service.getStatus(workspace, state),
     reopenFailed: () => service.recordSyncPauseReopenFailed(workspace, state),
   });
   const operation = () => ({
-    get workspace() { return { ...store.find(workspace.workspaceId)!, attachmentId: workspace.attachmentId }; },
-    assertCurrent() { if (!current) throw new Error("workspace changed"); },
+    get workspace() {
+      return { ...store.find(workspace.workspaceId)!, attachmentId: workspace.attachmentId };
+    },
+    assertCurrent() {
+      if (!current) throw new Error("workspace changed");
+    },
   });
-  return { workspace, store, registryPath, steps, settle, engineStart, engineStop, watcherStop, closeRelay,
-    pauseRemote, resumeAdmission, service, state, stop, operation, cleanupFailed, person, runStates, captureRuns, capturedWrites,
-    openActivity, reopen, daemon,
-    write: () => observation.facts([{ path: "note.md", kind: "changed" }]), retire: () => { current = false; } };
+  return {
+    workspace,
+    store,
+    registryPath,
+    steps,
+    settle,
+    engineStart,
+    engineStop,
+    watcherStop,
+    closeRelay,
+    pauseRemote,
+    resumeAdmission,
+    service,
+    state,
+    stop,
+    operation,
+    cleanupFailed,
+    person,
+    runStates,
+    captureRuns,
+    capturedWrites,
+    openActivity,
+    reopen,
+    daemon,
+    write: () => observation.facts([{ path: "note.md", kind: "changed" }]),
+    retire: () => {
+      current = false;
+    },
+  };
 }
 
 describe("stop one workspace's sync", () => {
   it("keeps a dispatched run active and claiming writes across the capture restart", async () => {
     const h = await fixture();
-    const run = { agentId: "default", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
+    const run = {
+      agentId: "default",
+      onBehalfOf: "local-person",
+      agentRunId: "run",
+      depth: 2,
+      dispatch: "run" as const,
+    };
     await h.service.claimAgentRun(h.workspace, h.state, run);
     try {
       await h.stop(h.operation());
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(true);
-      expect(h.runStates.map(event => event.active)).toEqual([true]);
+      expect(h.runStates.map((event) => event.active)).toEqual([true]);
       expect(h.service.dispatchedAgent(h.state)).toBe("default");
       expect(h.service.agentRunDepth(h.state)).toBe(2);
       const collectionRun = h.service.agentRun(h.state);
@@ -154,7 +272,13 @@ describe("stop one workspace's sync", () => {
       expect(h.captureRuns[1]).toHaveBeenCalledExactlyOnceWith(run);
       h.write();
       expect(h.capturedWrites).toEqual([run]);
-      expect(await h.service.claimAgentRun(h.workspace, h.state, { ...run, agentId: "other", agentRunId: "other" })).toBe(false);
+      expect(
+        await h.service.claimAgentRun(h.workspace, h.state, {
+          ...run,
+          agentId: "other",
+          agentRunId: "other",
+        }),
+      ).toBe(false);
       await h.service.clearAgentRun(h.state, run.agentRunId);
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
       expect(h.service.dispatchedAgent(h.state)).toBeNull();
@@ -166,7 +290,13 @@ describe("stop one workspace's sync", () => {
 
   it("does not revive a run that ends while sync is stopping", async () => {
     const h = await fixture();
-    const run = { agentId: "default", onBehalfOf: "local-person", agentRunId: "run", depth: 2, dispatch: "run" as const };
+    const run = {
+      agentId: "default",
+      onBehalfOf: "local-person",
+      agentRunId: "run",
+      depth: 2,
+      dispatch: "run" as const,
+    };
     await h.service.claimAgentRun(h.workspace, h.state, run);
     h.closeRelay.mockImplementationOnce(async () => {
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(true);
@@ -178,7 +308,7 @@ describe("stop one workspace's sync", () => {
       expect(h.cleanupFailed).not.toHaveBeenCalled();
       expect(h.service.agentRunState(h.workspace, h.state).active).toBe(false);
       expect(h.service.dispatchedAgent(h.state)).toBeNull();
-      expect(h.runStates.map(event => event.active)).toEqual([true, false]);
+      expect(h.runStates.map((event) => event.active)).toEqual([true, false]);
       expect(h.captureRuns[1]).not.toHaveBeenCalled();
       h.write();
       expect(h.capturedWrites).toEqual([null]);
@@ -196,41 +326,65 @@ describe("stop one workspace's sync", () => {
     await h.service.close(h.workspace, h.state);
   });
 
-  it.each([false, true])("refuses an unfinished join before any stop work (remote %s)", async synced => {
-    const h = await fixture(synced);
-    const operation = { ...h.operation(), workspace: { ...h.operation().workspace, joinBootstrapPending: true as const } };
-    await expect(h.stop(operation)).rejects.toThrow("This workspace is still joining. Wait for it to finish, then stop sync.");
-    expect(h.steps).toEqual([]);
-    expect(h.pauseRemote).not.toHaveBeenCalled();
-    expect(h.service.isOpen(h.state)).toBe(true);
-    await h.service.close(h.workspace, h.state);
-  });
+  it.each([false, true])(
+    "refuses an unfinished join before any stop work (remote %s)",
+    async (synced) => {
+      const h = await fixture(synced);
+      const operation = {
+        ...h.operation(),
+        workspace: { ...h.operation().workspace, joinBootstrapPending: true as const },
+      };
+      await expect(h.stop(operation)).rejects.toThrow(
+        "This workspace is still joining. Wait for it to finish, then stop sync.",
+      );
+      expect(h.steps).toEqual([]);
+      expect(h.pauseRemote).not.toHaveBeenCalled();
+      expect(h.service.isOpen(h.state)).toBe(true);
+      await h.service.close(h.workspace, h.state);
+    },
+  );
 
   it("settles before saving a durable pause and reopens local capture", async () => {
     const h = await fixture();
     const result = await h.stop(h.operation());
-    expect(result).toMatchObject({ workspaceId: "workspace", workspaceSynced: false,
+    expect(result).toMatchObject({
+      workspaceId: "workspace",
+      workspaceSynced: false,
       syncPause: { atMs: 42, author: { kind: "person", personId: "local-person", self: true } },
-      status: { state: "synced", pendingChangeCount: 0 } });
+      status: { state: "synced", pendingChangeCount: 0 },
+    });
     expect(h.steps.indexOf("settle")).toBeLessThan(h.steps.indexOf("engine-stop"));
     expect(h.steps.indexOf("settle")).toBeLessThan(h.steps.indexOf("pause"));
     expect(h.steps.indexOf("pause")).toBeLessThan(h.steps.indexOf("relay-close"));
     expect(h.service.isOpen(h.state)).toBe(true);
     const persisted = createRegistryStore(h.registryPath).find("workspace");
-    expect(persisted).toMatchObject({ pausedRemote: remote, syncPause: { atMs: 42, author: { kind: "person", personId: "local-person" } } });
+    expect(persisted).toMatchObject({
+      pausedRemote: remote,
+      syncPause: { atMs: 42, author: { kind: "person", personId: "local-person" } },
+    });
     expect(persisted?.syncPause?.author).not.toHaveProperty("displayName");
     expect(persisted?.syncPause?.author).not.toHaveProperty("self");
     expect(persisted?.remote).toBeUndefined();
     await h.service.close(h.workspace, h.state);
   });
 
-  it.each([null, {
-    shareId: "received", granterEmail: null, genericChatWritable: false,
-    grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" as const },
-  }])("refuses a received share before touching sessions or sync (%j)", async shareView => {
+  it.each([
+    null,
+    {
+      shareId: "received",
+      granterEmail: null,
+      genericChatWritable: false,
+      grantedSelector: { paths: ["note.md"], versionId: null, access: "edit" as const },
+    },
+  ])("refuses a received share before touching sessions or sync (%j)", async (shareView) => {
     const h = await fixture();
-    const operation = { ...h.operation(), workspace: { ...h.operation().workspace,
-      shareView: shareView as import("./registryStore").RegistryEntry["shareView"] } };
+    const operation = {
+      ...h.operation(),
+      workspace: {
+        ...h.operation().workspace,
+        shareView: shareView as import("./registryStore").RegistryEntry["shareView"],
+      },
+    };
     await expect(h.stop(operation)).rejects.toThrow("received share");
     expect(h.steps).toEqual([]);
     expect(h.pauseRemote).not.toHaveBeenCalled();
@@ -240,7 +394,12 @@ describe("stop one workspace's sync", () => {
 
   it("records agent provenance once and leaves already-paused sessions alone", async () => {
     const h = await fixture();
-    const author = { kind: "agent" as const, agentId: "claude-code", onBehalfOf: "local-person", depth: 2 };
+    const author = {
+      kind: "agent" as const,
+      agentId: "claude-code",
+      onBehalfOf: "local-person",
+      depth: 2,
+    };
     const first = await h.stop(h.operation(), author);
     h.steps.length = 0;
     const second = await h.stop(h.operation());
@@ -253,8 +412,12 @@ describe("stop one workspace's sync", () => {
 
   it("waits for settlement and keeps the local capture alive on refusal", async () => {
     const h = await fixture();
-    const entered = deferred(), held = deferred<() => void>();
-    h.settle.mockImplementationOnce(() => { entered.resolve(); return held.promise; });
+    const entered = deferred(),
+      held = deferred<() => void>();
+    h.settle.mockImplementationOnce(() => {
+      entered.resolve();
+      return held.promise;
+    });
     const pending = h.stop(h.operation());
     await entered.promise;
     expect(h.pauseRemote).not.toHaveBeenCalled();
@@ -271,8 +434,12 @@ describe("stop one workspace's sync", () => {
 
   it("refuses an attachment change during settlement before recording the pause", async () => {
     const h = await fixture();
-    const entered = deferred(), held = deferred<() => void>();
-    h.settle.mockImplementationOnce(() => { entered.resolve(); return held.promise; });
+    const entered = deferred(),
+      held = deferred<() => void>();
+    h.settle.mockImplementationOnce(() => {
+      entered.resolve();
+      return held.promise;
+    });
     const pending = h.stop(h.operation());
     await entered.promise;
     h.retire();
@@ -285,7 +452,9 @@ describe("stop one workspace's sync", () => {
 
   it("restores sync when recording the pause fails", async () => {
     const h = await fixture();
-    h.pauseRemote.mockImplementationOnce(() => { throw new Error("registry write failed"); });
+    h.pauseRemote.mockImplementationOnce(() => {
+      throw new Error("registry write failed");
+    });
     await expect(h.stop(h.operation())).rejects.toThrow("registry write failed");
     expect(h.store.find("workspace")?.remote).toEqual(remote);
     expect(h.engineStart).toHaveBeenCalledTimes(2);
@@ -298,7 +467,10 @@ describe("stop one workspace's sync", () => {
     const h = await fixture();
     h.closeRelay.mockRejectedValueOnce(new Error("relay close failed"));
     await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false });
-    expect(h.cleanupFailed).toHaveBeenCalledWith("workspace", expect.objectContaining({ message: "relay close failed" }));
+    expect(h.cleanupFailed).toHaveBeenCalledWith(
+      "workspace",
+      expect.objectContaining({ message: "relay close failed" }),
+    );
     expect(h.service.isOpen(h.state)).toBe(true);
     await h.stop(h.operation());
     expect(h.closeRelay).toHaveBeenCalledOnce();
@@ -308,7 +480,10 @@ describe("stop one workspace's sync", () => {
   it("reports success when the attachment retires after the pause is saved", async () => {
     const h = await fixture();
     h.closeRelay.mockImplementationOnce(async () => h.retire());
-    await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false, syncPause: { atMs: 42 } });
+    await expect(h.stop(h.operation())).resolves.toMatchObject({
+      workspaceSynced: false,
+      syncPause: { atMs: 42 },
+    });
     await h.service.close(h.workspace, h.state);
   });
 
@@ -324,10 +499,15 @@ describe("stop one workspace's sync", () => {
     const h = await fixture(true, true);
     h.openActivity.mockRejectedValueOnce(new Error("open failed"));
     await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false });
-    expect(h.cleanupFailed).toHaveBeenCalledWith("workspace", expect.objectContaining({ message: "open failed" }));
+    expect(h.cleanupFailed).toHaveBeenCalledWith(
+      "workspace",
+      expect.objectContaining({ message: "open failed" }),
+    );
     expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("reopen");
     // After a pause there is no sync to retry: the retry reopens.
-    await expect(reopenWithoutSync(h.reopen, h.operation().workspace)).resolves.toEqual({ reopened: true });
+    await expect(reopenWithoutSync(h.reopen, h.operation().workspace)).resolves.toEqual({
+      reopened: true,
+    });
     expect(h.service.isOpen(h.state)).toBe(true);
     expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBeUndefined();
     await h.service.close(h.workspace, h.state);
@@ -341,16 +521,24 @@ describe("stop one workspace's sync", () => {
       // The activity still opens, but the open that abandons the pull did not.
       await expect(h.stop(h.operation())).resolves.toMatchObject({ workspaceSynced: false });
       expect(h.openActivity).toHaveBeenCalledOnce();
-      expect(h.cleanupFailed).toHaveBeenCalledWith("workspace", expect.objectContaining({ message: "workspace-open-failed" }));
+      expect(h.cleanupFailed).toHaveBeenCalledWith(
+        "workspace",
+        expect.objectContaining({ message: "workspace-open-failed" }),
+      );
       expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("reopen");
       expect(h.daemon.pullUnfinished).toBe(true);
       // Try again repeats the reopen, and stays while the engine refuses it.
       const again = await reopenWithoutSync(h.reopen, h.operation().workspace);
-      expect(again).toMatchObject({ reopened: false, failure: { error: expect.objectContaining({ message: "workspace-open-failed" }) } });
+      expect(again).toMatchObject({
+        reopened: false,
+        failure: { error: expect.objectContaining({ message: "workspace-open-failed" }) },
+      });
       expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBe("reopen");
       expect(h.daemon.pullUnfinished).toBe(true);
       h.daemon.openFails = false;
-      await expect(reopenWithoutSync(h.reopen, h.operation().workspace)).resolves.toEqual({ reopened: true });
+      await expect(reopenWithoutSync(h.reopen, h.operation().workspace)).resolves.toEqual({
+        reopened: true,
+      });
       expect(h.daemon.pullUnfinished).toBe(false);
       expect(h.service.getStatus(h.workspace, h.state).collectionsWaitingForSync).toBeUndefined();
       await h.service.close(h.workspace, h.state);
@@ -371,7 +559,12 @@ describe("stop one workspace's sync", () => {
   it("keeps a paused workspace pinned to its owner on resume", async () => {
     const h = await fixture();
     await h.stop(h.operation());
-    expect(() => assertSyncEnrollmentCredentials(h.store.find("workspace")!, { ...credentials, userId: "other" })).toThrow("account that synced");
+    expect(() =>
+      assertSyncEnrollmentCredentials(h.store.find("workspace")!, {
+        ...credentials,
+        userId: "other",
+      }),
+    ).toThrow("account that synced");
     await h.service.close(h.workspace, h.state);
   });
 });

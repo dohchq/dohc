@@ -1,11 +1,23 @@
 import { fetch } from "expo/fetch";
-import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { AppState, View } from "react-native";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
 import { createOpenWorkspace, type OpenWorkspaceState } from "../server/openWorkspace";
 import { createReadCache, type WorkspaceData } from "../server/workspaceData";
-import { createWorkspaceList, type WorkspaceList, type WorkspaceListStore } from "../server/workspaceList";
+import {
+  createWorkspaceList,
+  type WorkspaceList,
+  type WorkspaceListStore,
+} from "../server/workspaceList";
 import { useTheme } from "../theme";
 import { Connect } from "./Connect";
 import { secureSignInStore } from "./secureSignInStore";
@@ -49,18 +61,27 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   useEffect(() => cache.follow(account), [account, cache]);
 
   // The saved list shows until the server's answers, so a relaunch opens the last workspace from the cache.
-  const list = useMemo<WorkspaceListStore | null>(() => signIn && createWorkspaceList(signIn, cache.savedList(signIn)), [signIn, cache]);
+  const list = useMemo<WorkspaceListStore | null>(
+    () => signIn && createWorkspaceList(signIn, cache.savedList(signIn)),
+    [signIn, cache],
+  );
   const workspaces = useSyncExternalStore((list ?? noList).subscribe, (list ?? noList).state);
   useEffect(() => list?.reload(), [list]);
   // Made during render, so the first frame for a new workspace already reads from its own store. Making one starts
   // nothing: subscribing follows the list, and the effect runs the feed and stops it all once another replaces it.
-  const open = useMemo(() => signIn && list ? createOpenWorkspace({ signIn, list, cache }) : null, [signIn, list, cache]);
-  const { currentWorkspaceId, data } = useSyncExternalStore((open ?? noOpen).subscribe, (open ?? noOpen).state);
+  const open = useMemo(
+    () => (signIn && list ? createOpenWorkspace({ signIn, list, cache }) : null),
+    [signIn, list, cache],
+  );
+  const { currentWorkspaceId, data } = useSyncExternalStore(
+    (open ?? noOpen).subscribe,
+    (open ?? noOpen).state,
+  );
   useEffect(() => {
     if (!open) return;
     // In the background, iOS would end a held request anyway. A launch can report "unknown" before "active".
     if (AppState.currentState !== "background") open.resume();
-    const subscription = AppState.addEventListener("change", next => {
+    const subscription = AppState.addEventListener("change", (next) => {
       if (next !== "background") return open.resume();
       open.pause();
       cache.flush();
@@ -71,12 +92,19 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     };
   }, [open, cache]);
 
-  const value = useMemo<AccountValue>(() => ({
-    account, state, workspaces, currentWorkspaceId, data,
-    chooseWorkspace: workspaceId => open?.choose(workspaceId),
-    reloadWorkspaces: () => list?.reload(),
-    setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
-  }), [account, state, workspaces, currentWorkspaceId, data, list, open]);
+  const value = useMemo<AccountValue>(
+    () => ({
+      account,
+      state,
+      workspaces,
+      currentWorkspaceId,
+      data,
+      chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
+      reloadWorkspaces: () => list?.reload(),
+      setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
+    }),
+    [account, state, workspaces, currentWorkspaceId, data, list, open],
+  );
   return <Context value={value}>{children}</Context>;
 }
 

@@ -6,10 +6,7 @@ import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  GetSitePreviewLogsResult,
-  StartSitePreviewResult,
-} from "../ipc/bridgeContract";
+import { GetSitePreviewLogsResult, StartSitePreviewResult } from "../ipc/bridgeContract";
 import { createTestScratch } from "./testTemp";
 import { buildOutputSiteRoot } from "./sitePackage";
 import {
@@ -32,11 +29,20 @@ import {
 // What each pid a still-running answer holds is now, for a failure message
 // (#3455): the app, a late exit ("gone"), or another program.
 async function describePids(pids: readonly number[]): Promise<string> {
-  const read = (pid: number) => process.platform === "win32"
-    ? promisify(execFile)("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true })
-    : promisify(execFile)("ps", ["-o", "pid=,ppid=,comm=", "-p", String(pid)]);
-  const rows = await Promise.all(pids.map(pid =>
-    read(pid).then(({ stdout }) => stdout.trim().includes(String(pid)) ? stdout.trim() : `${pid} gone`, () => `${pid} gone`)));
+  const read = (pid: number) =>
+    process.platform === "win32"
+      ? promisify(execFile)("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+          windowsHide: true,
+        })
+      : promisify(execFile)("ps", ["-o", "pid=,ppid=,comm=", "-p", String(pid)]);
+  const rows = await Promise.all(
+    pids.map((pid) =>
+      read(pid).then(
+        ({ stdout }) => (stdout.trim().includes(String(pid)) ? stdout.trim() : `${pid} gone`),
+        () => `${pid} gone`,
+      ),
+    ),
+  );
   return rows.join("; ");
 }
 
@@ -96,8 +102,9 @@ describe("startStaticSitePreview", () => {
       authority: { kind: "share", mountRoot },
     });
     try {
-      await expect(fetch(preview.url).then((response) => response.text()))
-        .resolves.toContain("Alex portal");
+      await expect(fetch(preview.url).then((response) => response.text())).resolves.toContain(
+        "Alex portal",
+      );
     } finally {
       await preview.stop();
     }
@@ -112,15 +119,9 @@ describe("startStaticSitePreview", () => {
   it("refuses a configured build output inside shared-with-me", async () => {
     const configuredBuildOutput = "shared-with-me/alex/site";
     await mkdir(join(root, configuredBuildOutput), { recursive: true });
-    await writeFile(
-      join(root, configuredBuildOutput, "index.html"),
-      "<h1>Mounted build</h1>",
-    );
+    await writeFile(join(root, configuredBuildOutput, "index.html"), "<h1>Mounted build</h1>");
     const site = { root: ".", configuredBuildOutput };
-    const servedRoot = buildOutputSiteRoot(
-      site,
-      configuredBuildOutput,
-    );
+    const servedRoot = buildOutputSiteRoot(site, configuredBuildOutput);
     const outcome = await startStaticSitePreview(root, servedRoot, {
       authority: workspaceAuthority,
     }).then(
@@ -138,22 +139,17 @@ describe("startStaticSitePreview", () => {
   it("serves a normal configured build output", async () => {
     const configuredBuildOutput = "release/site";
     await mkdir(join(root, configuredBuildOutput), { recursive: true });
-    await writeFile(
-      join(root, configuredBuildOutput, "index.html"),
-      "<h1>Owned build</h1>",
-    );
+    await writeFile(join(root, configuredBuildOutput, "index.html"), "<h1>Owned build</h1>");
     const site = { root: ".", configuredBuildOutput };
-    const servedRoot = buildOutputSiteRoot(
-      site,
-      configuredBuildOutput,
-    );
+    const servedRoot = buildOutputSiteRoot(site, configuredBuildOutput);
 
     const preview = await startStaticSitePreview(root, servedRoot, {
       authority: workspaceAuthority,
     });
     try {
-      await expect(fetch(preview.url).then((response) => response.text()))
-        .resolves.toContain("Owned build");
+      await expect(fetch(preview.url).then((response) => response.text())).resolves.toContain(
+        "Owned build",
+      );
     } finally {
       await preview.stop();
     }
@@ -161,7 +157,10 @@ describe("startStaticSitePreview", () => {
 
   it("serves a normal static website from a contained workspace folder", async () => {
     await mkdir(join(root, "report"), { recursive: true });
-    await writeFile(join(root, "report", "index.html"), '<link rel="stylesheet" href="./style.css"><h1>Report</h1>');
+    await writeFile(
+      join(root, "report", "index.html"),
+      '<link rel="stylesheet" href="./style.css"><h1>Report</h1>',
+    );
     await writeFile(join(root, "report", "style.css"), "body { color: rgb(1, 2, 3); }");
 
     const preview = await startStaticSitePreview(root, "report", {
@@ -193,24 +192,17 @@ describe("startStaticSitePreview", () => {
   it("does not serve a shared-with-me mount from a root-level site", async () => {
     await mkdir(join(root, "shared-with-me", "Alex"), { recursive: true });
     await writeFile(join(root, "index.html"), "<h1>Root Site</h1>");
-    await writeFile(
-      join(root, "shared-with-me", "Alex", "private.txt"),
-      "shared private file",
-    );
+    await writeFile(join(root, "shared-with-me", "Alex", "private.txt"), "shared private file");
     await writeFile(join(root, "shared-with-me-notes.txt"), "owned sibling file");
 
     const preview = await startStaticSitePreview(root, ".", {
       authority: workspaceAuthority,
     });
     try {
-      const shared = await fetch(
-        new URL("/shared-with-me/Alex/private.txt", preview.url),
-      );
+      const shared = await fetch(new URL("/shared-with-me/Alex/private.txt", preview.url));
       expect(shared.status).toBe(403);
 
-      const sibling = await fetch(
-        new URL("/shared-with-me-notes.txt", preview.url),
-      );
+      const sibling = await fetch(new URL("/shared-with-me-notes.txt", preview.url));
       expect(sibling.status).toBe(200);
       await expect(sibling.text()).resolves.toBe("owned sibling file");
     } finally {
@@ -228,12 +220,12 @@ describe("startStaticSitePreview", () => {
     ).rejects.toThrow();
     await mkdir(join(root, "site"), { recursive: true });
     await writeFile(join(root, "site", "index.html"), "ok");
-    await expect(startStaticSitePreview(root, "site", {
-      authority: workspaceAuthority,
-      entry: "../index.html",
-    })).rejects.toThrow(
-      /Invalid app entry/,
-    );
+    await expect(
+      startStaticSitePreview(root, "site", {
+        authority: workspaceAuthority,
+        entry: "../index.html",
+      }),
+    ).rejects.toThrow(/Invalid app entry/);
   });
 
   it("never serves nested dohc metadata from a static site root", async () => {
@@ -265,7 +257,10 @@ describe("startStaticSitePreview", () => {
 describe("package manager helpers", () => {
   it("produces script commands", () => {
     expect(packageManagerCommand("pnpm", "dev")).toEqual({ command: "pnpm", args: ["dev"] });
-    expect(packageManagerCommand("npm", "build")).toEqual({ command: "npm", args: ["run", "build"] });
+    expect(packageManagerCommand("npm", "build")).toEqual({
+      command: "npm",
+      args: ["run", "build"],
+    });
   });
 
   it("validates the visible body of package-backed dev scripts", () => {
@@ -282,69 +277,39 @@ describe("package manager helpers", () => {
     "validates implicit %s lifecycle hooks around a safe dev script",
     (manager) => {
       expect(() =>
-        packageManagerValidatedScriptCommand(
-          manager,
-          "dev",
-          "vite --host 127.0.0.1",
-          { pre: "vite --host 0.0.0.0" },
-        ),
+        packageManagerValidatedScriptCommand(manager, "dev", "vite --host 127.0.0.1", {
+          pre: "vite --host 0.0.0.0",
+        }),
       ).toThrow(/loopback/);
     },
   );
 
   it("recursively validates a shell-wrapped implicit lifecycle hook", () => {
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "npm",
-        "dev",
-        "vite --host 127.0.0.1",
-        { post: "bash -lc 'vite --host 0.0.0.0'" },
-      ),
+      packageManagerValidatedScriptCommand("npm", "dev", "vite --host 127.0.0.1", {
+        post: "bash -lc 'vite --host 0.0.0.0'",
+      }),
     ).toThrow(/loopback/);
   });
 
   it("validates host flags inside visible shell-wrapped package scripts", () => {
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "sh -c 'vite --host 0.0.0.0'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "sh -c 'vite --host 0.0.0.0'"),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "sh -c 'vite --host 127.0.0.1'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "sh -c 'vite --host 127.0.0.1'"),
     ).not.toThrow();
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "BASH -c 'vite --hostname 192.168.1.1'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "BASH -c 'vite --hostname 192.168.1.1'"),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "bash -lc 'vite --host 0.0.0.0'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "bash -lc 'vite --host 0.0.0.0'"),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "bash -lc 'vite --host 127.0.0.1'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "bash -lc 'vite --host 127.0.0.1'"),
     ).not.toThrow();
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "cmd /c 'vite --host 0.0.0.0'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "cmd /c 'vite --host 0.0.0.0'"),
     ).toThrow(/loopback/);
     expect(() =>
       packageManagerValidatedScriptCommand(
@@ -383,18 +348,9 @@ describe("package manager helpers", () => {
   });
 
   it.each([
-    [
-      "Server ready (http://localhost:5173)",
-      "http://localhost:5173",
-    ],
-    [
-      'Local: "http://localhost:3000"',
-      "http://localhost:3000",
-    ],
-    [
-      "ready on http://localhost:5173/app.",
-      "http://localhost:5173/app",
-    ],
+    ["Server ready (http://localhost:5173)", "http://localhost:5173"],
+    ['Local: "http://localhost:3000"', "http://localhost:3000"],
+    ["ready on http://localhost:5173/app.", "http://localhost:5173/app"],
   ])("removes delimiters from a detected dev URL in %s", (output, expected) => {
     expect(detectDevUrl(output)).toBe(expected);
   });
@@ -463,22 +419,14 @@ describe("package manager helpers", () => {
       "true",
       "HOST=0.0.0.0 vite",
     ]);
-    expect(splitShellStatements("vite || curl http://evil")).toEqual([
-      "vite",
-      "curl http://evil",
-    ]);
-    expect(splitShellStatements("sleep 500 & echo done")).toEqual([
-      "sleep 500",
-      "echo done",
-    ]);
+    expect(splitShellStatements("vite || curl http://evil")).toEqual(["vite", "curl http://evil"]);
+    expect(splitShellStatements("sleep 500 & echo done")).toEqual(["sleep 500", "echo done"]);
     expect(splitShellStatements("vite | tee log")).toEqual(["vite", "tee log"]);
     expect(splitShellStatements("vite\nrm -rf /")).toEqual(["vite", "rm -rf /"]);
     // The same character, quoted, is an ordinary literal argument byte, not
     // a statement separator — over-splitting it would break a legitimate
     // single-statement command.
-    expect(splitShellStatements('vite --define "X=1;2"')).toEqual([
-      'vite --define "X=1;2"',
-    ]);
+    expect(splitShellStatements('vite --define "X=1;2"')).toEqual(['vite --define "X=1;2"']);
   });
 
   it("validates every statement a package script's shell body actually runs, not just its first token", () => {
@@ -516,18 +464,10 @@ describe("package manager helpers", () => {
     // operator character, no "export" keyword) helps catch it; only
     // actually splitting the nested body into its own statements does.
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "sh -c 'true && HOST=0.0.0.0 vite'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "sh -c 'true && HOST=0.0.0.0 vite'"),
     ).toThrow(/loopback/);
     expect(() =>
-      packageManagerValidatedScriptCommand(
-        "pnpm",
-        "dev",
-        "sh -c 'export HOST=0.0.0.0; vite'",
-      ),
+      packageManagerValidatedScriptCommand("pnpm", "dev", "sh -c 'export HOST=0.0.0.0; vite'"),
     ).toThrow(/loopback/);
     expect(() =>
       packageManagerValidatedScriptCommand(
@@ -539,59 +479,41 @@ describe("package manager helpers", () => {
   });
 
   it("rejects dev server commands that explicitly bind outside loopback", () => {
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host", "127.0.0.1"]),
-    ).not.toThrow();
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host=localhost"]),
-    ).not.toThrow();
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--hostname", "::1"]),
-    ).not.toThrow();
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host", "0.0.0.0"]),
-    ).toThrow(/loopback/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host=192.168.1.1"]),
-    ).toThrow(/loopback/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("next", ["-H", "mysite.local"]),
-    ).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host", "127.0.0.1"])).not.toThrow();
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host=localhost"])).not.toThrow();
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--hostname", "::1"])).not.toThrow();
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host", "0.0.0.0"])).toThrow(
+      /loopback/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host=192.168.1.1"])).toThrow(
+      /loopback/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("next", ["-H", "mysite.local"])).toThrow(
+      /loopback/,
+    );
     // A bare "--host" (no value at all — the last token, or immediately
     // followed by another flag) is unverifiable, not a known bind to "all
     // interfaces" — that claim asserted something this scanner never
     // actually observed. The message must name the flag instead.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host"]),
-    ).toThrow(/"--host" without a value/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("next", ["-h"]),
-    ).toThrow(/"-h" without a value/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host", "--port", "3000"]),
-    ).toThrow(/"--host" without a value/);
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host"])).toThrow(
+      /"--host" without a value/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("next", ["-h"])).toThrow(
+      /"-h" without a value/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host", "--port", "3000"])).toThrow(
+      /"--host" without a value/,
+    );
     // A genuinely empty INLINE value ("--host=") is different — the author
     // explicitly wrote an empty string, which a real tool commonly treats
     // as binding all interfaces, so "all interfaces" is still the accurate
     // claim there, unlike the unverifiable "no value at all" case above.
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--host="])).toThrow(/all interfaces/);
     expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--host="]),
-    ).toThrow(/all interfaces/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", [
-        "--host",
-        "127.0.0.1",
-        "--host",
-        "0.0.0.0",
-      ]),
+      assertLoopbackOnlyDevServerCommand("vite", ["--host", "127.0.0.1", "--host", "0.0.0.0"]),
     ).toThrow(/loopback/);
     expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", [
-        "--host",
-        "127.0.0.1",
-        "--host",
-        "127.0.0.1",
-      ]),
+      assertLoopbackOnlyDevServerCommand("vite", ["--host", "127.0.0.1", "--host", "127.0.0.1"]),
     ).not.toThrow();
   });
 
@@ -603,18 +525,14 @@ describe("package manager helpers", () => {
     // nothing to the actual tool), but refusing it anyway is the safe
     // direction: over-refusing a spelling that turns out to be inert costs
     // nothing, unlike trusting it silently.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "0.0.0.0"]),
-    ).toThrow(/loopback/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--HOSTNAME", "0.0.0.0"]),
-    ).toThrow(/loopback/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("next", ["-h", "0.0.0.0"]),
-    ).toThrow(/loopback/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "127.0.0.1"]),
-    ).not.toThrow();
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "0.0.0.0"])).toThrow(
+      /loopback/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--HOSTNAME", "0.0.0.0"])).toThrow(
+      /loopback/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("next", ["-h", "0.0.0.0"])).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyDevServerCommand("vite", ["--HOST", "127.0.0.1"])).not.toThrow();
   });
 
   it("rejects a leading HOST/HOSTNAME environment assignment that binds outside loopback", () => {
@@ -700,12 +618,12 @@ describe("package manager helpers", () => {
     // env itself is not an assignment, so the direct-assignment scan alone
     // (which reads command+args as one leading run) never reaches "HOST="
     // here without recognizing "env" as a wrapper first.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("env", ["HOST=0.0.0.0", "vite"]),
-    ).toThrow(/loopback/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("env", ["HOSTNAME=0.0.0.0", "vite"]),
-    ).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyDevServerCommand("env", ["HOST=0.0.0.0", "vite"])).toThrow(
+      /loopback/,
+    );
+    expect(() => assertLoopbackOnlyDevServerCommand("env", ["HOSTNAME=0.0.0.0", "vite"])).toThrow(
+      /loopback/,
+    );
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["HOST=127.0.0.1", "vite"]),
     ).not.toThrow();
@@ -719,9 +637,9 @@ describe("package manager helpers", () => {
     // [COMMAND [arg]...]` — its OPTIONs (-i, -u NAME,...) can precede the
     // assignments, and the scan must recognize and skip them to still reach
     // a HOST= that follows.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("env", ["-i", "HOST=0.0.0.0", "vite"]),
-    ).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyDevServerCommand("env", ["-i", "HOST=0.0.0.0", "vite"])).toThrow(
+      /loopback/,
+    );
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["--ignore-environment", "HOST=0.0.0.0", "vite"]),
     ).toThrow(/loopback/);
@@ -775,9 +693,9 @@ describe("package manager helpers", () => {
     // env(1) has — it was never in nestedShellCommand's or
     // assertDirectHostBinds's env-only checks, so a HOST rebind through it
     // passed validation entirely.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("cross-env", ["HOST=0.0.0.0", "vite"]),
-    ).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyDevServerCommand("cross-env", ["HOST=0.0.0.0", "vite"])).toThrow(
+      /loopback/,
+    );
     // A non-host assignment must still be accepted — cross-env's own
     // recursion doesn't turn into a blanket refusal.
     expect(() =>
@@ -820,12 +738,8 @@ describe("package manager helpers", () => {
     // this validator never reads — there is no command-line token to scan
     // a HOST/HOSTNAME assignment out of, so both are refused outright
     // regardless of what (if anything) their own args contain.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("env-cmd", ["vite"]),
-    ).toThrow(/env-cmd/);
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("dotenv", ["--", "vite"]),
-    ).toThrow(/dotenv/);
+    expect(() => assertLoopbackOnlyDevServerCommand("env-cmd", ["vite"])).toThrow(/env-cmd/);
+    expect(() => assertLoopbackOnlyDevServerCommand("dotenv", ["--", "vite"])).toThrow(/dotenv/);
   });
 
   it("refuses env -S/--split-string instead of silently skipping its embedded assignment", () => {
@@ -834,9 +748,9 @@ describe("package manager helpers", () => {
     // splitting rules (not shell quoting) — `env -S 'HOST=0.0.0.0 vite'`
     // hides a real HOST assignment from a scanner that treats -S as an
     // opaque value-carrying option the way -u/-C are.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("env", ["-S", "HOST=0.0.0.0 vite"]),
-    ).toThrow(/env/);
+    expect(() => assertLoopbackOnlyDevServerCommand("env", ["-S", "HOST=0.0.0.0 vite"])).toThrow(
+      /env/,
+    );
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["--split-string=HOST=0.0.0.0 vite"]),
     ).toThrow(/env/);
@@ -851,9 +765,9 @@ describe("package manager helpers", () => {
     // (distinct from a bare "-", which resets the environment); a safe
     // `env -- HOST=127.0.0.1 vite` must not be rejected as an unrecognized
     // option, or a legitimate dev command is refused outright.
-    expect(() =>
-      assertLoopbackOnlyDevServerCommand("env", ["--", "HOST=0.0.0.0", "vite"]),
-    ).toThrow(/loopback/);
+    expect(() => assertLoopbackOnlyDevServerCommand("env", ["--", "HOST=0.0.0.0", "vite"])).toThrow(
+      /loopback/,
+    );
     expect(() =>
       assertLoopbackOnlyDevServerCommand("env", ["--", "HOST=127.0.0.1", "vite"]),
     ).not.toThrow();
@@ -891,7 +805,12 @@ describe("siteCommandEnvironment", () => {
         { HOST: "0.0.0.0", PATH: "/usr/bin" },
         { HOST: "127.0.0.1", HOSTNAME: "localhost", DOHC_TEST_PID_FILE: "/tmp/pid" },
       ),
-    ).toEqual({ PATH: "/usr/bin", HOST: "127.0.0.1", HOSTNAME: "localhost", DOHC_TEST_PID_FILE: "/tmp/pid" });
+    ).toEqual({
+      PATH: "/usr/bin",
+      HOST: "127.0.0.1",
+      HOSTNAME: "localhost",
+      DOHC_TEST_PID_FILE: "/tmp/pid",
+    });
   });
 
   it.each([
@@ -942,7 +861,10 @@ describe("startSiteDevServer", () => {
         workspaceRoot: root,
         siteRoot: "site",
         command: process.execPath,
-        args: ["-e", `${REPORT_SITE_ENVIRONMENT}console.log('Local: http://127.0.0.1:43298');setInterval(()=>{},1000);`],
+        args: [
+          "-e",
+          `${REPORT_SITE_ENVIRONMENT}console.log('Local: http://127.0.0.1:43298');setInterval(()=>{},1000);`,
+        ],
         env: { DOHC_SITE_TEST_TRUSTED: "1" },
         readyTimeoutMs: 20_000,
       });
@@ -1146,10 +1068,7 @@ describe("startSiteDevServer", () => {
       workspaceRoot: root,
       siteRoot: "site",
       command: process.execPath,
-      args: [
-        "-e",
-        "console.log('Local: http://127.0.0.1:43210'); process.exit(0)",
-      ],
+      args: ["-e", "console.log('Local: http://127.0.0.1:43210'); process.exit(0)"],
       readyTimeoutMs: 20_000,
     });
 
@@ -1166,10 +1085,7 @@ describe("startSiteDevServer", () => {
       workspaceRoot: root,
       siteRoot: "site",
       command: process.execPath,
-      args: [
-        "-e",
-        "console.log('Local: http://127.0.0.1:43210'); setInterval(() => {}, 1000)",
-      ],
+      args: ["-e", "console.log('Local: http://127.0.0.1:43210'); setInterval(() => {}, 1000)"],
       readyTimeoutMs: 20_000,
     });
     try {
@@ -1249,24 +1165,29 @@ describe("startSiteDevServer", () => {
     await mkdir(join(root, "site"), { recursive: true });
     let beginStop!: (pid: number) => void;
     let releaseStop!: () => void;
-    const stopping = new Promise<number>((resolve) => { beginStop = resolve; });
-    const stopAllowed = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const stopping = new Promise<number>((resolve) => {
+      beginStop = resolve;
+    });
+    const stopAllowed = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
     let childPid = 0;
     const realWindowsStop = windowsSpawn.killChildTreeWin32;
     const realPosixStop = posixSpawn.killProcessTreePosix;
-    const stopSpy = process.platform === "win32"
-      ? vi.spyOn(windowsSpawn, "killChildTreeWin32").mockImplementation(async (child) => {
-          childPid = child.pid!;
-          beginStop(child.pid!);
-          await stopAllowed;
-          return realWindowsStop(child);
-        })
-      : vi.spyOn(posixSpawn, "killProcessTreePosix").mockImplementation(async (...args) => {
-          childPid = args[0];
-          beginStop(args[0]);
-          await stopAllowed;
-          return realPosixStop(...args);
-        });
+    const stopSpy =
+      process.platform === "win32"
+        ? vi.spyOn(windowsSpawn, "killChildTreeWin32").mockImplementation(async (child) => {
+            childPid = child.pid!;
+            beginStop(child.pid!);
+            await stopAllowed;
+            return realWindowsStop(child);
+          })
+        : vi.spyOn(posixSpawn, "killProcessTreePosix").mockImplementation(async (...args) => {
+            childPid = args[0];
+            beginStop(args[0]);
+            await stopAllowed;
+            return realPosixStop(...args);
+          });
     let settled = false;
     const starting = startSiteDevServer({
       workspaceRoot: root,
@@ -1275,7 +1196,14 @@ describe("startSiteDevServer", () => {
       args: ["-e", "setInterval(() => {}, 1000);"],
       readyTimeoutMs: 150,
     });
-    void starting.then(() => { settled = true; }, () => { settled = true; });
+    void starting.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     try {
       const pid = await stopping;
       expect(pid).toBeGreaterThan(0);
@@ -1328,9 +1256,14 @@ describe("startSiteDevServer", () => {
     });
     setTimeout(() => controller.abort(), 50);
 
-    const error = await starting.then(() => undefined, (cause: unknown) => cause);
+    const error = await starting.then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
     if (error instanceof AppCommandStillRunningError) {
-      expect.fail(`The cancel answered that the app is still running: ${await describePids(error.pids)}`);
+      expect.fail(
+        `The cancel answered that the app is still running: ${await describePids(error.pids)}`,
+      );
     }
     expect(error instanceof Error ? error.message : error).toMatch(/cancelled/);
     expect(Date.now() - startedAt).toBeLessThan(10_000);
@@ -1350,7 +1283,9 @@ describe("withoutReusedParents", () => {
       "400 300 11/10/2026 12:00:40",
       "500 400 11/10/2026 12:00:33",
     ].join("\n");
-    const descendants = await posixSpawn.processDescendants(100, async () => withoutReusedParents(table, 100, spawnedAt));
+    const descendants = await posixSpawn.processDescendants(100, async () =>
+      withoutReusedParents(table, 100, spawnedAt),
+    );
     expect(descendants.sort()).toEqual([300, 400]);
   });
   it("keeps a child started in the hour that repeats when clocks go back", async () => {
@@ -1361,7 +1296,8 @@ describe("withoutReusedParents", () => {
       // The second 01:10 that morning, after clocks went back.
       const spawnedAt = Date.parse("2026-11-01T01:10:00.600-08:00");
       const descendants = await posixSpawn.processDescendants(100, async () =>
-        withoutReusedParents("300 100 11/01/2026 01:10:01", 100, spawnedAt));
+        withoutReusedParents("300 100 11/01/2026 01:10:01", 100, spawnedAt),
+      );
       expect(descendants).toEqual([300]);
     } finally {
       process.env.TZ = zone;
@@ -1378,42 +1314,50 @@ const BUILD_TEST_TIMEOUT_MS = 60_000;
 describe("buildSite", () => {
   registerSiteScratch();
 
-  it("runs the build without dohc's host bindings or its own variables", async () => {
-    await mkdir(join(root, "site"), { recursive: true });
-    stubDohcParentEnvironment();
-    try {
+  it(
+    "runs the build without dohc's host bindings or its own variables",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+      stubDohcParentEnvironment();
+      try {
+        const result = await buildSite({
+          workspaceRoot: root,
+          siteRoot: "site",
+          command: process.execPath,
+          args: ["-e", REPORT_SITE_ENVIRONMENT],
+          env: { DOHC_SITE_TEST_TRUSTED: "1" },
+          timeoutMs: BUILD_TIMEOUT_MS,
+        });
+        expect(result.exitCode).toBe(0);
+        expect(reportedSiteEnvironment(result.logs)).toEqual(EXPECTED_SITE_ENVIRONMENT);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "runs a build command and detects the output directory",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
       const result = await buildSite({
         workspaceRoot: root,
         siteRoot: "site",
         command: process.execPath,
-        args: ["-e", REPORT_SITE_ENVIRONMENT],
-        env: { DOHC_SITE_TEST_TRUSTED: "1" },
+        args: [
+          "-e",
+          "const fs=require('fs'); fs.mkdirSync('dist',{recursive:true}); fs.writeFileSync('dist/index.html','built'); console.log('built ok')",
+        ],
         timeoutMs: BUILD_TIMEOUT_MS,
       });
-      expect(result.exitCode).toBe(0);
-      expect(reportedSiteEnvironment(result.logs)).toEqual(EXPECTED_SITE_ENVIRONMENT);
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  }, BUILD_TEST_TIMEOUT_MS);
-
-  it("runs a build command and detects the output directory", async () => {
-    await mkdir(join(root, "site"), { recursive: true });
-    const result = await buildSite({
-      workspaceRoot: root,
-      siteRoot: "site",
-      command: process.execPath,
-      args: [
-        "-e",
-        "const fs=require('fs'); fs.mkdirSync('dist',{recursive:true}); fs.writeFileSync('dist/index.html','built'); console.log('built ok')",
-      ],
-      timeoutMs: BUILD_TIMEOUT_MS,
-    });
-    expect(result.ok).toBe(true);
-    expect(result.outputPath).toBe(join(root, "site", "dist"));
-    expect(result.logs.some((entry) => entry.text.includes("built ok"))).toBe(true);
-    expect(await readFile(join(root, "site", "dist", "index.html"), "utf8")).toBe("built");
-  }, BUILD_TEST_TIMEOUT_MS);
+      expect(result.ok).toBe(true);
+      expect(result.outputPath).toBe(join(root, "site", "dist"));
+      expect(result.logs.some((entry) => entry.text.includes("built ok"))).toBe(true);
+      expect(await readFile(join(root, "site", "dist", "index.html"), "utf8")).toBe("built");
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
 
   it.runIf(process.platform !== "win32")(
     "stops a descendant a successful build wrapper backgrounds and leaves behind",
@@ -1425,12 +1369,14 @@ describe("buildSite", () => {
       // exits successfully, but only after a real process snapshot has found
       // the helper. A fixed wrapper lifetime raced that snapshot: on a loaded
       // host the helper was orphaned to init before the walk saw it.
-      const script = "sleep 500 & " + [
-        'echo "$!" > "$DOHC_TEST_DESCENDANT_PID_FILE"',
-        'echo "CHILD:$!"',
-        "mkdir -p dist && echo built > dist/index.html",
-        'while [ ! -f "$DOHC_TEST_DESCENDANT_CAPTURED_FILE" ]; do sleep 0.02; done',
-      ].join("; ");
+      const script =
+        "sleep 500 & " +
+        [
+          'echo "$!" > "$DOHC_TEST_DESCENDANT_PID_FILE"',
+          'echo "CHILD:$!"',
+          "mkdir -p dist && echo built > dist/index.html",
+          'while [ ! -f "$DOHC_TEST_DESCENDANT_CAPTURED_FILE" ]; do sleep 0.02; done',
+        ].join("; ");
       const controller = new AbortController();
       let descendantPid = 0;
       let captureError: unknown;
@@ -1439,12 +1385,18 @@ describe("buildSite", () => {
       // until that real snapshot has found the helper.
       const captureDescendants = async (pid: number): Promise<number[]> => {
         try {
-          descendantPid = await vi.waitFor(async () => {
-            const value = Number(await readFile(pidFile, "utf8"));
-            expect(Number.isSafeInteger(value) && value > 0).toBe(true);
-            return value;
-          }, { timeout: BUILD_TIMEOUT_MS });
-          const descendants = await posixSpawn.processDescendants(pid, posixSpawn.readProcessTableWithPs);
+          descendantPid = await vi.waitFor(
+            async () => {
+              const value = Number(await readFile(pidFile, "utf8"));
+              expect(Number.isSafeInteger(value) && value > 0).toBe(true);
+              return value;
+            },
+            { timeout: BUILD_TIMEOUT_MS },
+          );
+          const descendants = await posixSpawn.processDescendants(
+            pid,
+            posixSpawn.readProcessTableWithPs,
+          );
           expect(descendants).toContain(descendantPid);
           await writeFile(capturedFile, "captured");
           return descendants;
@@ -1460,7 +1412,7 @@ describe("buildSite", () => {
           siteRoot: "site",
           command: "sh",
           args: ["-c", script],
-          descendantsReader: (pid) => capture ??= captureDescendants(pid),
+          descendantsReader: (pid) => (capture ??= captureDescendants(pid)),
           env: {
             DOHC_TEST_DESCENDANT_PID_FILE: pidFile,
             DOHC_TEST_DESCENDANT_CAPTURED_FILE: capturedFile,
@@ -1475,7 +1427,8 @@ describe("buildSite", () => {
         expect(await waitForProcessDeath(descendantPid, PROCESS_DEATH_TIMEOUT_MS)).toBe(true);
       } finally {
         controller.abort();
-        const cleanupPid = descendantPid || Number(await readFile(pidFile, "utf8").catch(() => "0"));
+        const cleanupPid =
+          descendantPid || Number(await readFile(pidFile, "utf8").catch(() => "0"));
         if (Number.isSafeInteger(cleanupPid) && cleanupPid > 0) {
           try {
             process.kill(cleanupPid, "SIGKILL");
@@ -1517,11 +1470,14 @@ describe("buildSite", () => {
       const realProcessDescendants = posixSpawn.processDescendants;
       const captureDescendants: typeof realProcessDescendants = async (pid, reader) => {
         try {
-          descendantPid = await vi.waitFor(async () => {
-            const value = Number(await readFile(pidFile, "utf8"));
-            expect(Number.isSafeInteger(value) && value > 0).toBe(true);
-            return value;
-          }, { timeout: BUILD_TIMEOUT_MS });
+          descendantPid = await vi.waitFor(
+            async () => {
+              const value = Number(await readFile(pidFile, "utf8"));
+              expect(Number.isSafeInteger(value) && value > 0).toBe(true);
+              return value;
+            },
+            { timeout: BUILD_TIMEOUT_MS },
+          );
           const descendants = await realProcessDescendants(pid, reader);
           expect(descendants).toContain(descendantPid);
           await writeFile(capturedFile, "captured");
@@ -1534,8 +1490,9 @@ describe("buildSite", () => {
       };
       // Keep the production reader selection and tree walk. One real snapshot
       // proves this topology even if startup spans the default polling interval.
-      const descendantsSpy = vi.spyOn(posixSpawn, "processDescendants")
-        .mockImplementation((pid, reader) => capture ??= captureDescendants(pid, reader));
+      const descendantsSpy = vi
+        .spyOn(posixSpawn, "processDescendants")
+        .mockImplementation((pid, reader) => (capture ??= captureDescendants(pid, reader)));
       try {
         const result = await buildSite({
           workspaceRoot: root,
@@ -1556,7 +1513,8 @@ describe("buildSite", () => {
       } finally {
         controller.abort();
         descendantsSpy.mockRestore();
-        const cleanupPid = descendantPid || Number(await readFile(pidFile, "utf8").catch(() => "0"));
+        const cleanupPid =
+          descendantPid || Number(await readFile(pidFile, "utf8").catch(() => "0"));
         if (Number.isSafeInteger(cleanupPid) && cleanupPid > 0) {
           try {
             process.kill(cleanupPid, "SIGKILL");
@@ -1569,20 +1527,24 @@ describe("buildSite", () => {
     WIN32_DESCENDANT_TEST_TIMEOUT_MS,
   );
 
-  it("reports failed builds without stale output", async () => {
-    await mkdir(join(root, "site"), { recursive: true });
-    const result = await buildSite({
-      workspaceRoot: root,
-      siteRoot: "site",
-      command: process.execPath,
-      args: ["-e", "console.error('broken build'); process.exit(3)"],
-      timeoutMs: BUILD_TIMEOUT_MS,
-    });
-    expect(result.ok).toBe(false);
-    expect(result.outputPath).toBeNull();
-    expect(result.exitCode).toBe(3);
-    expect(result.logs.some((entry) => entry.text.includes("broken build"))).toBe(true);
-  }, BUILD_TEST_TIMEOUT_MS);
+  it(
+    "reports failed builds without stale output",
+    async () => {
+      await mkdir(join(root, "site"), { recursive: true });
+      const result = await buildSite({
+        workspaceRoot: root,
+        siteRoot: "site",
+        command: process.execPath,
+        args: ["-e", "console.error('broken build'); process.exit(3)"],
+        timeoutMs: BUILD_TIMEOUT_MS,
+      });
+      expect(result.ok).toBe(false);
+      expect(result.outputPath).toBeNull();
+      expect(result.exitCode).toBe(3);
+      expect(result.logs.some((entry) => entry.text.includes("broken build"))).toBe(true);
+    },
+    BUILD_TEST_TIMEOUT_MS,
+  );
 
   it("cancels an in-flight build instead of waiting for its timeout", async () => {
     await mkdir(join(root, "site"), { recursive: true });
@@ -1604,9 +1566,7 @@ describe("buildSite", () => {
 
     const result = await building;
     expect(result.ok).toBe(false);
-    expect(result.logs.some((entry) => entry.text.includes("Build cancelled"))).toBe(
-      true,
-    );
+    expect(result.logs.some((entry) => entry.text.includes("Build cancelled"))).toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
 
@@ -1630,12 +1590,15 @@ describe("buildSite", () => {
   it("detects configured and conventional build outputs", async () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
     await writeFile(join(root, "site", "custom", "index.html"), "<h1>Custom</h1>");
-    expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));
+    expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(
+      join(root, "site", "custom"),
+    );
     await mkdir(join(root, "site", "..cache"), { recursive: true });
     await writeFile(join(root, "site", "..cache", "index.html"), "<h1>Cache-built</h1>");
-    expect(await detectBuildOutput(join(root, "site"), "..cache"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe(
-      join(root, "site", "..cache"),
-    );
+    expect(
+      await detectBuildOutput(join(root, "site"), "..cache"),
+      "..-segment: a bare '..-prefix' isInside refuses this real contained name.",
+    ).toBe(join(root, "site", "..cache"));
     await mkdir(join(root, "outside"), { recursive: true });
     expect(await detectBuildOutput(join(root, "site"), "../outside")).toBeNull();
     expect(await detectBuildOutput(join(root, "site"))).toBeNull();

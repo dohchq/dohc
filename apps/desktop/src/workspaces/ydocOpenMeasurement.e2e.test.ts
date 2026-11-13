@@ -84,9 +84,7 @@ class TimingTransport implements EngineTransport {
     return this.inner.onEvent(handler);
   }
 
-  onBlob(
-    handler: Parameters<NonNullable<EngineTransport["onBlob"]>>[0],
-  ): () => void {
+  onBlob(handler: Parameters<NonNullable<EngineTransport["onBlob"]>>[0]): () => void {
     if (this.inner.onBlob === undefined) {
       throw new Error("The measured transport does not expose blob delivery.");
     }
@@ -112,9 +110,10 @@ function bodyText(doc: Y.Doc): Y.XmlText {
 }
 
 it("keeps the bound clear of the recorded healthy range", () => {
-  expect(YDOC_OPEN_DEADLINE_MS, "tighten YDOC_OPEN_DEADLINE_MS below RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR and this fails by name. It runs without a daemon on purpose: the measurement suite below skips where none is built, and a bound nobody checks is how a limit drifts back into the range it rejects.").toBeGreaterThanOrEqual(
-    RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR,
-  );
+  expect(
+    YDOC_OPEN_DEADLINE_MS,
+    "tighten YDOC_OPEN_DEADLINE_MS below RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR and this fails by name. It runs without a daemon on purpose: the measurement suite below skips where none is built, and a bound nobody checks is how a limit drifts back into the range it rejects.",
+  ).toBeGreaterThanOrEqual(RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR);
 });
 
 it.skipIf(engine.missing)(
@@ -143,9 +142,7 @@ it.skipIf(engine.missing)(
       // so this is the largest seed a first open carries in its answer. A
       // larger one is read as a blob after the open.
       const paragraph = `${"lorem ipsum dolor sit amet ".repeat(38)}\n\n`;
-      const big = `# big\n\n${paragraph.repeat(
-        Math.floor((47 * 1024) / paragraph.length) - 1,
-      )}`;
+      const big = `# big\n\n${paragraph.repeat(Math.floor((47 * 1024) / paragraph.length) - 1)}`;
       await writeFile(join(root, "big.md"), big, "utf8");
       await writeFile(join(root, "draft.md"), "draft\n\nseed paragraph\n", "utf8");
       capture.observeFileEvents([
@@ -158,27 +155,22 @@ it.skipIf(engine.missing)(
       const measure = async (
         label: string,
         path: string,
-        inspect?: (
-          session: Awaited<ReturnType<YdocLiveAdapter["openSession"]>>,
-        ) => Promise<void>,
+        inspect?: (session: Awaited<ReturnType<YdocLiveAdapter["openSession"]>>) => Promise<void>,
       ): Promise<void> => {
-        await sessions.run(
-          workspace,
-          async (binding) => {
-            const timing = new TimingTransport(binding.client as EngineTransport);
-            const adapter = new YdocLiveAdapter(timing);
-            const session = await adapter.openSession({
-              workspace: binding.workspace,
-              versionId,
-              path,
-              contentKind: "richdoc",
-            });
-            measured.push({ case: label, ms: timing.requireOpenMs() });
-            await inspect?.(session);
-            await session.close({ settle: true });
-            adapter.dispose();
-          },
-        );
+        await sessions.run(workspace, async (binding) => {
+          const timing = new TimingTransport(binding.client as EngineTransport);
+          const adapter = new YdocLiveAdapter(timing);
+          const session = await adapter.openSession({
+            workspace: binding.workspace,
+            versionId,
+            path,
+            contentKind: "richdoc",
+          });
+          measured.push({ case: label, ms: timing.requireOpenMs() });
+          await inspect?.(session);
+          await session.close({ settle: true });
+          adapter.dispose();
+        });
       };
 
       await measure("cold store, 47 KiB document", "big.md");
@@ -202,25 +194,22 @@ it.skipIf(engine.missing)(
       // snapshot — the resurrection an open pays for, and the widest healthy
       // case this bound has to clear.
       const appends = 800;
-      await sessions.run(
-        workspace,
-        async (binding) => {
-          const adapter = new YdocLiveAdapter(binding.client as EngineTransport);
-          const session = await adapter.openSession({
-            workspace: binding.workspace,
-            versionId,
-            path: "draft.md",
-            contentKind: "richdoc",
+      await sessions.run(workspace, async (binding) => {
+        const adapter = new YdocLiveAdapter(binding.client as EngineTransport);
+        const session = await adapter.openSession({
+          workspace: binding.workspace,
+          versionId,
+          path: "draft.md",
+          contentKind: "richdoc",
+        });
+        for (let index = 0; index < appends; index += 1) {
+          await session.applyLocalEdit((doc) => {
+            const text = bodyText(doc);
+            text.insert(text.length, `w${index} `);
           });
-          for (let index = 0; index < appends; index += 1) {
-            await session.applyLocalEdit((doc) => {
-              const text = bodyText(doc);
-              text.insert(text.length, `w${index} `);
-            });
-          }
-          adapter.dispose();
-        },
-      );
+        }
+        adapter.dispose();
+      });
       await lifecycle.stop();
       lifecycle = createRealDaemonLifecycle({
         command: engine.require(),
@@ -250,9 +239,7 @@ it.skipIf(engine.missing)(
     } finally {
       console.log(
         `[measure] ydoc.open, bound ${YDOC_OPEN_DEADLINE_MS}ms:\n` +
-          measured
-            .map((entry) => `  ${entry.case}: ${entry.ms.toFixed(1)}ms`)
-            .join("\n"),
+          measured.map((entry) => `  ${entry.case}: ${entry.ms.toFixed(1)}ms`).join("\n"),
       );
       await capture.stop().catch(() => undefined);
       await sessions.closeAll().catch(() => undefined);

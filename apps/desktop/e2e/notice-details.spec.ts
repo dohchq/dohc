@@ -19,10 +19,15 @@ async function shoot(page: Page, part: Locator, name: string) {
   if (!box) throw new Error("the notice-details part must be on the page");
   const x = box.x - BLEED;
   const y = box.y - BLEED;
-  await page.screenshot({ scale: "css", clip: { x, y, width: box.width + 2 * BLEED, height: Math.ceil(box.height + 2 * BLEED) }, path: join(SHOT_DIR, `${name}.png`) });
+  await page.screenshot({
+    scale: "css",
+    clip: { x, y, width: box.width + 2 * BLEED, height: Math.ceil(box.height + 2 * BLEED) },
+    path: join(SHOT_DIR, `${name}.png`),
+  });
 }
 
-const focused = (page: Page) => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null);
+const focused = (page: Page) =>
+  page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? null);
 
 // Keyboard focus on Details, then Enter opens it in place and Tab reaches Copy details.
 async function openFromKeyboard(page: Page, details: Locator, testId: string) {
@@ -53,14 +58,20 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.evaluate(() => {
       const style = document.createElement("style");
-      style.textContent = "html { scrollbar-width: none; } *, ::before, ::after { animation: none !important; transition: none !important; }";
+      style.textContent =
+        "html { scrollbar-width: none; } *, ::before, ::after { animation: none !important; transition: none !important; }";
       document.head.append(style);
     });
     await expect(page.getByTestId("first-run-open-share")).toBeVisible();
-    await page.evaluate(() => { window.location.hash = "#/dev/states"; });
+    await page.evaluate(() => {
+      window.location.hash = "#/dev/states";
+    });
     await expect(page.getByTestId("states-page")).toBeVisible();
     await page.evaluate(() => document.fonts.ready);
-    await page.setViewportSize({ width: 1440, height: await page.evaluate(() => document.documentElement.scrollHeight) });
+    await page.setViewportSize({
+      width: 1440,
+      height: await page.evaluate(() => document.documentElement.scrollHeight),
+    });
 
     for (const theme of ["light", "dark"] as const) {
       const part = page.getByTestId(`states-${theme}`).locator('[data-part="notice-details"]');
@@ -70,7 +81,9 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
       await page.mouse.move(2, 2);
 
       // Closed: Details and no Copy icon. Open: the report under the message.
-      await expect(toasts.nth(0).getByTestId("workspace-shell-error-details")).toHaveText("Details");
+      await expect(toasts.nth(0).getByTestId("workspace-shell-error-details")).toHaveText(
+        "Details",
+      );
       await expect(toasts.nth(0).getByTestId("workspace-shell-error-copy")).toHaveCount(0);
       await expect(toasts.nth(0).getByTestId("workspace-shell-error-details-text")).toHaveCount(0);
       await expect(toasts.nth(1).getByTestId("workspace-shell-error-details-text")).toBeVisible();
@@ -79,25 +92,45 @@ test("a notice's Details opens its report in place, scrolls a long one, and keep
       await shoot(page, part, `notice-details-${theme}-rest`);
 
       // A long report scrolls inside its block, which stops at 240px.
-      for (const block of [toasts.nth(2).getByTestId("workspace-shell-error-details-text"), part.getByTestId("notice-details-long-details-text")]) {
+      for (const block of [
+        toasts.nth(2).getByTestId("workspace-shell-error-details-text"),
+        part.getByTestId("notice-details-long-details-text"),
+      ]) {
         const report = block.locator("pre");
-        const size = await report.evaluate((node) => ({ client: node.clientHeight, scroll: node.scrollHeight, overflow: getComputedStyle(node).overflowY }));
+        const size = await report.evaluate((node) => ({
+          client: node.clientHeight,
+          scroll: node.scrollHeight,
+          overflow: getComputedStyle(node).overflowY,
+        }));
         expect(size.client).toBeLessThanOrEqual(240);
         expect(size.scroll).toBeGreaterThan(size.client);
         expect(size.overflow).toBe("auto");
-        const scrolled = await report.evaluate((node) => { node.scrollTop = node.scrollHeight; return node.scrollTop; });
+        const scrolled = await report.evaluate((node) => {
+          node.scrollTop = node.scrollHeight;
+          return node.scrollTop;
+        });
         expect(scrolled, "the report scrolls inside its block").toBeGreaterThan(0);
       }
       await shoot(page, part, `notice-details-${theme}-scrolled`);
 
-      const openToast = await openFromKeyboard(page, toasts.nth(0).getByTestId("workspace-shell-error-details"), "workspace-shell-error");
-      const toastFocus = await page.evaluate(() => document.activeElement!.matches(":focus-visible"));
+      const openToast = await openFromKeyboard(
+        page,
+        toasts.nth(0).getByTestId("workspace-shell-error-details"),
+        "workspace-shell-error",
+      );
+      const toastFocus = await page.evaluate(() =>
+        document.activeElement!.matches(":focus-visible"),
+      );
       expect(toastFocus, "Details shows its focus ring").toBe(true);
       await shoot(page, part, `notice-details-${theme}-toast-details-focus`);
       await openToast();
       await shoot(page, part, `notice-details-${theme}-toast-copy-focus`);
 
-      const openRow = await openFromKeyboard(page, closedRow.getByTestId("notice-details-false-details"), "notice-details-false");
+      const openRow = await openFromKeyboard(
+        page,
+        closedRow.getByTestId("notice-details-false-details"),
+        "notice-details-false",
+      );
       await shoot(page, part, `notice-details-${theme}-row-details-focus`);
       await openRow();
       await shoot(page, part, `notice-details-${theme}-row-copy-focus`);

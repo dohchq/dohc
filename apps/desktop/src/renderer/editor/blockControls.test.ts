@@ -1,13 +1,6 @@
 // @vitest-environment jsdom
 import { createElement } from "react";
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -53,10 +46,7 @@ function makeEditor(markdown: string): Editor {
   });
 }
 
-function makeEditorWithControls(
-  content: Record<string, unknown>,
-  plugins: Plugin[] = [],
-): Editor {
+function makeEditorWithControls(content: Record<string, unknown>, plugins: Plugin[] = []): Editor {
   const controls = Extension.create({
     name: "testBlockControls",
     addProseMirrorPlugins() {
@@ -154,33 +144,30 @@ afterEach(() => {
 });
 
 describe("blockControls menu keyboard deletion", () => {
-  it.each(["Backspace", "Delete"])(
-    "routes %s to the selected block's delete action",
-    (key) => {
-      const onSelect = vi.fn();
-      render(
-        createElement(BlockMenu, {
-          state: {
-            open: true,
-            pos: 0,
-            x: 20,
-            y: 20,
-            maxHeight: 400,
-            placement: "below",
-          },
-          onSelect,
-          onClose: vi.fn(),
-        }),
-      );
+  it.each(["Backspace", "Delete"])("routes %s to the selected block's delete action", (key) => {
+    const onSelect = vi.fn();
+    render(
+      createElement(BlockMenu, {
+        state: {
+          open: true,
+          pos: 0,
+          x: 20,
+          y: 20,
+          maxHeight: 400,
+          placement: "below",
+        },
+        onSelect,
+        onClose: vi.fn(),
+      }),
+    );
 
-      fireEvent.keyDown(screen.getByRole("menu", { name: "block actions" }), {
-        key,
-      });
-      expect(onSelect).toHaveBeenCalledWith(
-        expect.objectContaining({ kind: "action", id: "delete" }),
-      );
-    },
-  );
+    fireEvent.keyDown(screen.getByRole("menu", { name: "block actions" }), {
+      key,
+    });
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "action", id: "delete" }),
+    );
+  });
 });
 
 describe("BlockMenu on the Menu part's recipe and rule", () => {
@@ -193,7 +180,15 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     handle.focus();
     render(
       createElement(BlockMenu, {
-        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle },
+        state: {
+          open: true,
+          pos: 0,
+          x: 20,
+          y: 20,
+          maxHeight: 400,
+          placement: "below",
+          trigger: handle,
+        },
         onSelect,
         onClose,
       }),
@@ -228,9 +223,11 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
 
   it("returns focus to the handle before the pick runs, so an action that edits can take it", () => {
     let focusedAtPick: Element | null = null;
-    const { handle, menu, rows } = openMenu(vi.fn(() => {
-      focusedAtPick = document.activeElement;
-    }));
+    const { handle, menu, rows } = openMenu(
+      vi.fn(() => {
+        focusedAtPick = document.activeElement;
+      }),
+    );
     fireEvent.keyDown(menu, { key: "ArrowDown" });
     fireEvent.keyDown(menu, { key: " " });
     expect(focusedAtPick).toBe(handle);
@@ -260,13 +257,25 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     const handle = document.createElement("button");
     document.body.append(handle);
     handle.focus();
-    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const open = {
+      open: true,
+      pos: 0,
+      x: 20,
+      y: 20,
+      maxHeight: 400,
+      placement: "below",
+      trigger: handle,
+    } as const;
     const onClose = vi.fn();
-    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    const { rerender } = render(
+      createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }),
+    );
     fireEvent.pointerDown(document.body);
     expect(onClose).toHaveBeenCalledOnce();
     // The owner closes it; the browser's press puts focus on the page.
-    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    rerender(
+      createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }),
+    );
     handle.blur();
     fireEvent.pointerUp(document.body);
     expect(document.activeElement).toBe(handle);
@@ -275,7 +284,9 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
   // The list is taller than its cap. jsdom has no layout: a 320px list over
   // 28px rows, with the Actions label 22px tall before the ninth row.
   it("keeps the active row inside the list's view as the keys move it past either end", () => {
-    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
       const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
       if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
       if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
@@ -285,7 +296,8 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
     const { menu, rows } = openMenu();
     const inView = (row: HTMLElement) =>
-      row.offsetTop >= menu.scrollTop && row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
+      row.offsetTop >= menu.scrollTop &&
+      row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
     const remove = rows.at(-1)!;
     expect(inView(remove)).toBe(false);
 
@@ -302,7 +314,9 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
   // The site's demo mounts the editor in a shadow root, where a document
   // lookup by id finds nothing.
   it("keeps the active row in view inside an embedded editor's shadow root", () => {
-    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
       const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
       if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
       if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
@@ -327,20 +341,34 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     fireEvent.keyDown(menu, { key: "End" });
     expect(menu.getAttribute("aria-activedescendant")).toBe(remove.id);
     expect(remove.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
-    expect(remove.offsetTop + remove.offsetHeight).toBeLessThanOrEqual(menu.scrollTop + menu.clientHeight);
+    expect(remove.offsetTop + remove.offsetHeight).toBeLessThanOrEqual(
+      menu.scrollTop + menu.clientHeight,
+    );
   });
 
   it("returns focus to the handle when the window loses focus", async () => {
     const handle = document.createElement("button");
     document.body.append(handle);
     handle.focus();
-    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const open = {
+      open: true,
+      pos: 0,
+      x: 20,
+      y: 20,
+      maxHeight: 400,
+      placement: "below",
+      trigger: handle,
+    } as const;
     const onClose = vi.fn();
-    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    const { rerender } = render(
+      createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }),
+    );
     expect(document.activeElement).toBe(screen.getByRole("menu"));
     fireEvent.blur(window);
     expect(onClose).toHaveBeenCalledOnce();
-    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    rerender(
+      createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }),
+    );
     await waitFor(() => expect(document.activeElement).toBe(handle));
   });
 
@@ -378,10 +406,7 @@ describe("blockControls duplicate", () => {
     const [list] = topLevelBlocks(editor);
     expect(list.type).toBe("bulletList");
     duplicateBlock(editor, list.pos);
-    expect(topLevelBlocks(editor).map((b) => b.type)).toEqual([
-      "bulletList",
-      "bulletList",
-    ]);
+    expect(topLevelBlocks(editor).map((b) => b.type)).toEqual(["bulletList", "bulletList"]);
   });
 });
 
@@ -442,10 +467,7 @@ describe("blockControls delete", () => {
     const event = new KeyboardEvent("keydown", { key, bubbles: true });
     editor.view.dom.dispatchEvent(event);
 
-    expect(topLevelBlocks(editor).map((block) => block.type)).toEqual([
-      "paragraph",
-      "paragraph",
-    ]);
+    expect(topLevelBlocks(editor).map((block) => block.type)).toEqual(["paragraph", "paragraph"]);
     expect(editor.state.doc.textContent).toBe("BeforeAfter");
   });
 
@@ -453,9 +475,7 @@ describe("blockControls delete", () => {
     const editor = track(
       makeEditorWithControls({
         type: "doc",
-        content: [
-          { type: "codeBlock", content: [{ type: "text", text: "code" }] },
-        ],
+        content: [{ type: "codeBlock", content: [{ type: "text", text: "code" }] }],
       }),
     );
     editor.commands.setTextSelection(2);
@@ -480,9 +500,7 @@ describe("blockControls delete", () => {
         ],
       }),
     );
-    editor.view.dispatch(
-      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 1)),
-    );
+    editor.view.dispatch(editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 1)));
 
     expect(deleteSelectedTopLevelBlock(editor.view)).toBe(false);
     expect(editor.state.doc.child(0).type.name).toBe("paragraph");
@@ -504,9 +522,7 @@ describe("blockControls gutter coverage", () => {
             content: [
               {
                 type: "tableRow",
-                content: [
-                  { type: "tableCell", content: [{ type: "paragraph" }] },
-                ],
+                content: [{ type: "tableCell", content: [{ type: "paragraph" }] }],
               },
             ],
           },
@@ -516,13 +532,15 @@ describe("blockControls gutter coverage", () => {
               {
                 type: "taskItem",
                 attrs: { checked: false },
-                content: [
-                  { type: "paragraph", content: [{ type: "text", text: "Task" }] },
-                ],
+                content: [{ type: "paragraph", content: [{ type: "text", text: "Task" }] }],
               },
             ],
           },
-          { type: "callout", attrs: { calloutType: "note", title: "", fold: "" }, content: [{ type: "paragraph" }] },
+          {
+            type: "callout",
+            attrs: { calloutType: "note", title: "", fold: "" },
+            content: [{ type: "paragraph" }],
+          },
           { type: "mathBlock", attrs: { tex: "x" } },
         ],
       }),
@@ -539,9 +557,7 @@ describe("blockControls gutter coverage", () => {
     });
     expect(hover(editor, controls[2]!)).toEqual([controls[2]]);
 
-    editor.view.dom.dispatchEvent(
-      new MouseEvent("mouseleave", { bubbles: true }),
-    );
+    editor.view.dom.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
     expect(visibleControls(editor)).toEqual([]);
   });
 
@@ -570,7 +586,9 @@ describe("blockControls gutter coverage", () => {
             content: [
               {
                 type: "tableRow",
-                content: [{ type: "tableCell", content: [{ type: "paragraph", content: text("Cell") }] }],
+                content: [
+                  { type: "tableCell", content: [{ type: "paragraph", content: text("Cell") }] },
+                ],
               },
             ],
           },
@@ -582,16 +600,31 @@ describe("blockControls gutter coverage", () => {
       Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"));
     // A task list's checkbox starts on the text edge, so it hangs nothing.
     expect(gutters().map((gutter) => gutter.dataset.hang)).toEqual([
-      undefined, "bullet", "number", "number", "number", undefined, "bar", "frame", "frame", "table", undefined,
+      undefined,
+      "bullet",
+      "number",
+      "number",
+      "number",
+      undefined,
+      "bar",
+      "frame",
+      "frame",
+      "table",
+      undefined,
     ]);
     const digits = () =>
-      gutters().slice(2, 5).map((gutter) => gutter.style.getPropertyValue("--dohc-block-digits"));
+      gutters()
+        .slice(2, 5)
+        .map((gutter) => gutter.style.getPropertyValue("--dohc-block-digits"));
     expect(digits()).toEqual(["1", "1", "2"]);
 
     // A rebuild keeps the gutter of a block that keeps its kind and digits. A
     // block that changes either gets a new one.
     const [paragraph, list, , nine] = gutters();
-    editor.commands.insertContentAt(editor.state.doc.content.size, { type: "paragraph", content: text("Last") });
+    editor.commands.insertContentAt(editor.state.doc.content.size, {
+      type: "paragraph",
+      content: text("Last"),
+    });
     expect(gutters()[1]).toBe(list);
     let ninePos = 0;
     editor.state.doc.forEach((node, offset) => {
@@ -625,7 +658,9 @@ describe("blockControls gutter coverage", () => {
             content: [
               {
                 type: "tableRow",
-                content: [{ type: "tableCell", content: [{ type: "paragraph", content: text("Cell") }] }],
+                content: [
+                  { type: "tableCell", content: [{ type: "paragraph", content: text("Cell") }] },
+                ],
               },
             ],
           },
@@ -672,7 +707,11 @@ describe("blockControls gutter coverage", () => {
         {
           type: "doc",
           content: [
-            { type: "codeBlock", attrs: { language: "mermaid" }, content: [{ type: "text", text: "graph TD; A-->B" }] },
+            {
+              type: "codeBlock",
+              attrs: { language: "mermaid" },
+              content: [{ type: "text", text: "graph TD; A-->B" }],
+            },
             { type: "paragraph", content: [{ type: "text", text: "After" }] },
           ],
         },
@@ -697,12 +736,18 @@ describe("blockControls gutter coverage", () => {
         decorations: (state) => {
           const widgets: Decoration[] = [];
           state.doc.forEach((_node, pos) => {
-            widgets.push(Decoration.widget(pos, () => {
-              const span = document.createElement("span");
-              span.className = "test-widget";
-              span.textContent = "widget";
-              return span;
-            }, { side: 0, key: "test-widget" }));
+            widgets.push(
+              Decoration.widget(
+                pos,
+                () => {
+                  const span = document.createElement("span");
+                  span.className = "test-widget";
+                  span.textContent = "widget";
+                  return span;
+                },
+                { side: 0, key: "test-widget" },
+              ),
+            );
           });
           return DecorationSet.create(state.doc, widgets);
         },
@@ -781,15 +826,16 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const shadow = host.attachShadow({ mode: "open" });
-    const view = render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }), {
-      container: shadow as unknown as HTMLElement,
-    });
+    const view = render(
+      createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }),
+      {
+        container: shadow as unknown as HTMLElement,
+      },
+    );
 
     fireEvent.click(view.getByTitle("Turn into"));
     const heading = view.getByRole("option", { name: /Heading 1/ });
-    heading.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, composed: true }),
-    );
+    heading.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, composed: true }));
     heading.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
 
     expect(editor.getJSON().content?.[0]?.type).toBe("heading");
@@ -862,19 +908,13 @@ describe("blockControls turn-into dropdown (bubble menu) command path", () => {
 describe("resolveTurnIntoDropdown", () => {
   it("opens below the trigger when the viewport has room", () => {
     expect(
-      resolveTurnIntoDropdown(
-        { left: 100, top: 100, bottom: 126 },
-        { width: 1024, height: 768 },
-      ),
+      resolveTurnIntoDropdown({ left: 100, top: 100, bottom: 126 }, { width: 1024, height: 768 }),
     ).toEqual({ placement: "below", maxHeight: 320 });
   });
 
   it("flips above with a fitted max height near the viewport bottom", () => {
     expect(
-      resolveTurnIntoDropdown(
-        { left: 100, top: 300, bottom: 326 },
-        { width: 1024, height: 400 },
-      ),
+      resolveTurnIntoDropdown({ left: 100, top: 300, bottom: 326 }, { width: 1024, height: 400 }),
     ).toEqual({ placement: "above", maxHeight: 282 });
   });
 });
@@ -887,7 +927,9 @@ describe("TurnIntoMenu dropdown rendering", () => {
   it("opens a listbox with every turn-into option and the resolved placement/max height", () => {
     const editor = track(makeEditor("Hello world"));
     editor.commands.setTextSelection(3);
-    render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+    render(
+      createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }),
+    );
 
     fireEvent.click(screen.getByTitle("Turn into"));
     const listbox = screen.getByRole("listbox", { name: "turn into" });
@@ -903,7 +945,9 @@ describe("TurnIntoMenu dropdown rendering", () => {
   it("converts the selection's block when an option is clicked", () => {
     const editor = track(makeEditor("Some text"));
     editor.commands.setTextSelection(3);
-    render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+    render(
+      createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }),
+    );
 
     fireEvent.click(screen.getByTitle("Turn into"));
     const listbox = screen.getByRole("listbox", { name: "turn into" });
@@ -918,7 +962,9 @@ describe("TurnIntoMenu dropdown rendering", () => {
   it("closes on Escape", async () => {
     const editor = track(makeEditor("Hello"));
     editor.commands.setTextSelection(3);
-    const { container } = render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+    const { container } = render(
+      createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }),
+    );
     container.append(editor.view.dom);
     // jsdom has no Range geometry for TipTap's post-focus scrolling.
     editor.view.setProps({ handleScrollToSelection: () => true });
@@ -938,7 +984,12 @@ describe("TurnIntoMenu on the Menu part's recipe", () => {
     const editor = track(makeEditor("Hello world"));
     editor.commands.setTextSelection(3);
     try {
-      render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+      render(
+        createElement(TurnIntoMenu, {
+          editor,
+          activeId: turnIntoIdAt(editor.state.selection.$from),
+        }),
+      );
       fireEvent.click(screen.getByTitle("Turn into"));
       const listbox = screen.getByRole("listbox", { name: "turn into" });
       const options = within(listbox).getAllByRole("option");
@@ -1056,9 +1107,7 @@ describe("blockControls drag payload", () => {
 
 describe("blockControls drag ghost", () => {
   function parkedGhosts(): HTMLElement[] {
-    return Array.from(
-      document.body.querySelectorAll<HTMLElement>(".dohc-block-drag-ghost"),
-    );
+    return Array.from(document.body.querySelectorAll<HTMLElement>(".dohc-block-drag-ghost"));
   }
 
   function twoBlockEditor(): Editor {
@@ -1075,9 +1124,7 @@ describe("blockControls drag ghost", () => {
   }
 
   function blockHandles(editor: Editor): HTMLElement[] {
-    const handles = Array.from(
-      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle"),
-    );
+    const handles = Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle"));
     if (handles.length < 2) throw new Error("block handles missing");
     return handles;
   }

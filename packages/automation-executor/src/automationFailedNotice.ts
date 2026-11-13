@@ -24,8 +24,10 @@ const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
 // The copy for everyone but this computer's person. It leaves out the
 // computer's name and the step's error, which can name what only this
 // person can see.
-export const FAILED_ELSEWHERE_BODY = "It ran on another person's computer, so only they can try it again.";
-const NEVER_STARTED_ELSEWHERE_BODY = "It could not start on another person's computer, so no one can try it again.";
+export const FAILED_ELSEWHERE_BODY =
+  "It ran on another person's computer, so only they can try it again.";
+const NEVER_STARTED_ELSEWHERE_BODY =
+  "It could not start on another person's computer, so no one can try it again.";
 
 /** An automation's newest failed claim, from the engine or the dataset ledger. */
 export interface AutomationFailure {
@@ -51,8 +53,15 @@ export interface AutomationCircuitBreaker {
   collectionPath: string;
 }
 
-export function automationControlsTarget(automationId: string, collectionPath: string): AutomationControlsTarget {
-  return { recovery: "automation-controls", automation: automationId, path: `${collectionPath}/automations.yaml` };
+export function automationControlsTarget(
+  automationId: string,
+  collectionPath: string,
+): AutomationControlsTarget {
+  return {
+    recovery: "automation-controls",
+    automation: automationId,
+    path: `${collectionPath}/automations.yaml`,
+  };
 }
 
 export const AUTOMATION_SWITCHED_OFF_BODY =
@@ -63,7 +72,10 @@ export const AUTOMATION_SWITCHED_OFF_VIEW_BODY =
 
 /** Whether a body says dohc switched the automation off, which the relay words for each recipient. */
 export function isSwitchedOffBody(body: string): boolean {
-  return body.startsWith(AUTOMATION_SWITCHED_OFF_BODY) || body.startsWith(AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+  return (
+    body.startsWith(AUTOMATION_SWITCHED_OFF_BODY) ||
+    body.startsWith(AUTOMATION_SWITCHED_OFF_VIEW_BODY)
+  );
 }
 
 /**
@@ -72,11 +84,18 @@ export function isSwitchedOffBody(body: string): boolean {
  * sender words a switch-off as the view body when no share can switch the
  * automation, and then only its owner gets Open.
  */
-export function automationFailureBodyForPermission(body: string, canEdit: boolean, isOwner: boolean): string {
+export function automationFailureBodyForPermission(
+  body: string,
+  canEdit: boolean,
+  isOwner: boolean,
+): string {
   const ownerOnly = body.startsWith(AUTOMATION_SWITCHED_OFF_VIEW_BODY);
   if (!ownerOnly && !body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)) return body;
   const sent = ownerOnly ? AUTOMATION_SWITCHED_OFF_VIEW_BODY : AUTOMATION_SWITCHED_OFF_BODY;
-  const next = isOwner || (canEdit && !ownerOnly) ? AUTOMATION_SWITCHED_OFF_BODY : AUTOMATION_SWITCHED_OFF_VIEW_BODY;
+  const next =
+    isOwner || (canEdit && !ownerOnly)
+      ? AUTOMATION_SWITCHED_OFF_BODY
+      : AUTOMATION_SWITCHED_OFF_VIEW_BODY;
   return cutText(next + body.slice(sent.length), NOTICE_BODY_MAX_CHARS);
 }
 
@@ -99,12 +118,19 @@ export interface AutomationFailedNotice {
  * The key a computer records its reported failures under: the automation,
  * and for a dataset automation the dataset instance its count belongs to.
  */
-export function automationFailureKey(failure: Pick<AutomationFailure, "automationId" | "datasetInstance">): string {
-  return failure.datasetInstance === null ? failure.automationId : `${failure.automationId}@${failure.datasetInstance}`;
+export function automationFailureKey(
+  failure: Pick<AutomationFailure, "automationId" | "datasetInstance">,
+): string {
+  return failure.datasetInstance === null
+    ? failure.automationId
+    : `${failure.automationId}@${failure.datasetInstance}`;
 }
 
 /** The failure a notice reports: the run it names, and the count when it failed. */
-export type ReportedRun = Pick<AutomationFailure, "automationId" | "datasetInstance" | "claimId" | "generation">;
+export type ReportedRun = Pick<
+  AutomationFailure,
+  "automationId" | "datasetInstance" | "claimId" | "generation"
+>;
 
 /**
  * Different for each computer, run, and failure count, because each
@@ -117,7 +143,15 @@ export function automationFailedNoticeId(input: {
 }): string {
   const { workspaceId, installId, failure } = input;
   const digest = createHash("sha256")
-    .update(JSON.stringify([workspaceId, installId, automationFailureKey(failure), failure.claimId, failure.generation]))
+    .update(
+      JSON.stringify([
+        workspaceId,
+        installId,
+        automationFailureKey(failure),
+        failure.claimId,
+        failure.generation,
+      ]),
+    )
     .digest("hex");
   return `automation-failed:${digest.slice(0, 40)}`;
 }
@@ -135,24 +169,33 @@ function sentence(text: string): string {
 }
 
 // Open goes to its Collection's automations.yaml, where the Collection is now.
-function automationTarget(automationId: string, collectionPath: string | null, claimId: string | null): AutomationFailedNotice["target"] {
+function automationTarget(
+  automationId: string,
+  collectionPath: string | null,
+  claimId: string | null,
+): AutomationFailedNotice["target"] {
   const path = collectionPath === null ? undefined : `${collectionPath}/automations.yaml`;
   const target = {
     automation: automationId,
     ...{ path },
     ...(claimId !== null ? { run: claimId } : {}),
   };
-  return isNoticeTarget(target) ? target : { automation: automationId, ...(claimId !== null ? { run: claimId } : {}) };
+  return isNoticeTarget(target)
+    ? target
+    : { automation: automationId, ...(claimId !== null ? { run: claimId } : {}) };
 }
 
 // The automation as a notice names it, in quotes, within `room` characters.
 function quotedName(failure: AutomationFailure, name: string | null, room: number): string {
-  const shown = plain(name ?? /#([^#]+)$/u.exec(failure.automationId)?.[1] ?? failure.automationId).trim() || "An automation";
+  const shown =
+    plain(name ?? /#([^#]+)$/u.exec(failure.automationId)?.[1] ?? failure.automationId).trim() ||
+    "An automation";
   return `"${cutText(shown, Math.max(1, room - 2))}"`;
 }
 
 // Why a chain stop ran nothing, and what to check. It names nothing private.
-const CHAIN_STOPPED_WHY = `dohc stops a chain after automations and agents start each other ${AUTOMATION_CHAIN_DEPTH_CAP} times in a row. ` +
+const CHAIN_STOPPED_WHY =
+  `dohc stops a chain after automations and agents start each other ${AUTOMATION_CHAIN_DEPTH_CAP} times in a row. ` +
   "Check which automations start each other.";
 /** Why a press at the chain depth cap ran nothing, as the pressing window shows it. */
 export const CHAIN_STOPPED_PRESS = `This press did not run. ${CHAIN_STOPPED_WHY}`;
@@ -186,9 +229,13 @@ export function automationFailedNotice(input: {
   if (failure.switchedOff !== undefined) {
     title = `Automation ${quoted(NOTICE_TITLE_MAX_CHARS - "Automation  switched off".length)} switched off`;
     const detail = failure.error.startsWith(AUTOMATION_SWITCHED_OFF_BODY)
-      ? failure.error.slice(AUTOMATION_SWITCHED_OFF_BODY.length).trim() : failure.error;
+      ? failure.error.slice(AUTOMATION_SWITCHED_OFF_BODY.length).trim()
+      : failure.error;
     what = `${AUTOMATION_SWITCHED_OFF_BODY}${detail ? ` ${sentence(detail)}` : ""}`;
-  } else if (failure.chainStopped && (failure.datasetInstance === null || failure.error === AUTOMATION_CHAIN_STOPPED)) {
+  } else if (
+    failure.chainStopped &&
+    (failure.datasetInstance === null || failure.error === AUTOMATION_CHAIN_STOPPED)
+  ) {
     title = "An automation chain stopped";
     what = chainStopped(failure, input.name);
   } else if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
@@ -196,26 +243,44 @@ export function automationFailedNotice(input: {
     what = "dohc stopped retrying a run that did not finish.";
   } else {
     title = `Automation ${quoted(NOTICE_TITLE_MAX_CHARS - "Automation  failed".length)} failed`;
-    const reason = failure.datasetInstance !== null && failure.chainStopped
-      ? failure.error === "claim-limit" ? "This change triggered too many automation runs. Make a smaller change."
-        : failure.error === "record-id-too-long" ? "This record's ID is too long for an automation run. Use a shorter ID."
-          : `The automation could not read this change. ${failure.error || "Check the Collection's records."}`
-      : failure.error;
+    const reason =
+      failure.datasetInstance !== null && failure.chainStopped
+        ? failure.error === "claim-limit"
+          ? "This change triggered too many automation runs. Make a smaller change."
+          : failure.error === "record-id-too-long"
+            ? "This record's ID is too long for an automation run. Use a shorter ID."
+            : `The automation could not read this change. ${failure.error || "Check the Collection's records."}`
+        : failure.error;
     what = sentence(reason);
   }
   const room = NOTICE_BODY_MAX_CHARS - [...count].length - [...where].length;
-  const controls = failure.switchedOff === undefined ? null : {
-    ...automationControlsTarget(failure.automationId, input.collectionPath ?? failure.switchedOff.collectionPath), run: failure.claimId,
-  };
+  const controls =
+    failure.switchedOff === undefined
+      ? null
+      : {
+          ...automationControlsTarget(
+            failure.automationId,
+            input.collectionPath ?? failure.switchedOff.collectionPath,
+          ),
+          run: failure.claimId,
+        };
   return {
     workspaceId,
     noticeId: automationFailedNoticeId({ workspaceId, installId: computer.installId, failure }),
     kind: "automation-failed",
     title,
-    body: failure.switchedOff === undefined ? `${count}${cutText(what, room)}${where}` :
-      `${cutText(what, NOTICE_BODY_MAX_CHARS - [...where].length)}${where}`,
-    target: controls !== null && isNoticeTarget(controls) ? controls
-      : automationTarget(failure.automationId, controls === null ? input.collectionPath : null, failure.neverStarted ? null : failure.claimId),
+    body:
+      failure.switchedOff === undefined
+        ? `${count}${cutText(what, room)}${where}`
+        : `${cutText(what, NOTICE_BODY_MAX_CHARS - [...where].length)}${where}`,
+    target:
+      controls !== null && isNoticeTarget(controls)
+        ? controls
+        : automationTarget(
+            failure.automationId,
+            controls === null ? input.collectionPath : null,
+            failure.neverStarted ? null : failure.claimId,
+          ),
   };
 }
 
@@ -224,8 +289,13 @@ export function automationFailedNotice(input: {
  * the computer's name. It promises a retry only when one can run, and a
  * switch only when a share can switch the automation.
  */
-export function automationFailedElsewhereBody(failure: AutomationFailure, name: string | null, ownerSwitchesOnly = false): string {
-  if (failure.switchedOff !== undefined) return ownerSwitchesOnly ? AUTOMATION_SWITCHED_OFF_VIEW_BODY : AUTOMATION_SWITCHED_OFF_BODY;
+export function automationFailedElsewhereBody(
+  failure: AutomationFailure,
+  name: string | null,
+  ownerSwitchesOnly = false,
+): string {
+  if (failure.switchedOff !== undefined)
+    return ownerSwitchesOnly ? AUTOMATION_SWITCHED_OFF_VIEW_BODY : AUTOMATION_SWITCHED_OFF_BODY;
   if (failure.chainStopped) return chainStopped(failure, name);
   return failure.neverStarted ? NEVER_STARTED_ELSEWHERE_BODY : FAILED_ELSEWHERE_BODY;
 }

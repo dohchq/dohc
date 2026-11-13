@@ -53,7 +53,9 @@ describe("dev tools ipc", () => {
   it("refuses untrusted senders on every channel", async () => {
     const h = harness(true);
     for (const channel of h.handlers.keys()) {
-      await expect(async () => h.invoke(channel, { target: "state-dir" }, false)).rejects.toThrow("untrusted");
+      await expect(async () => h.invoke(channel, { target: "state-dir" }, false)).rejects.toThrow(
+        "untrusted",
+      );
     }
   });
 

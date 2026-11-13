@@ -69,17 +69,18 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
         const answer = {
           ok: true,
           revision: relay.revision,
-          agents: relay.agents.map(agent => ({ ...agent })),
+          agents: relay.agents.map((agent) => ({ ...agent })),
           workspaces: [{ workspaceId: "ws-1", name: "Trip" }],
         };
-        if (relay.holdReads) await new Promise<void>(resolve => relay.held.push(resolve));
+        if (relay.holdReads) await new Promise<void>((resolve) => relay.held.push(resolve));
         return Response.json(answer);
       }
-      if (relay.refuse !== null) return Response.json({ ok: false, error: "refused" }, { status: relay.refuse });
+      if (relay.refuse !== null)
+        return Response.json({ ok: false, error: "refused" }, { status: relay.refuse });
       const [, id, kind] = /^\/sync\/personal-agents\/([^/]+)\/([a-z-]+)$/u.exec(path) ?? [];
-      const agent = relay.agents.find(entry => entry.agentId === decodeURIComponent(id ?? ""));
+      const agent = relay.agents.find((entry) => entry.agentId === decodeURIComponent(id ?? ""));
       if (!agent) return Response.json({ ok: false, error: "not found" }, { status: 404 });
-      const body = request.method === "PUT" ? await request.json() as Partial<RelayAgent> : {};
+      const body = request.method === "PUT" ? ((await request.json()) as Partial<RelayAgent>) : {};
       if (kind === "name" && body.name) agent.name = body.name;
       if (kind === "hue" && body.hue) agent.hue = body.hue;
       if (kind === "reach" && body.reach) agent.reach = body.reach;
@@ -96,30 +97,34 @@ function fakeRelay(agents: RelayAgent[] = [relayAgent()]): FakeRelay {
 function setup(relay: FakeRelay, signedIn: { key: string } | null = { key: KEY }) {
   const pushed: PersonalAgentsEvent[] = [];
   const unauthorized = vi.fn(async () => {});
-  const session = (): PersonalAgentSession | null => signedIn && {
-    key: signedIn.key,
-    origin: "https://relay.test",
-    relay: { baseUrl: "https://relay.test", token: "user:ana", fetch: relay.fetch },
-    isCurrent: () => true,
-    unauthorized,
-  };
+  const session = (): PersonalAgentSession | null =>
+    signedIn && {
+      key: signedIn.key,
+      origin: "https://relay.test",
+      relay: { baseUrl: "https://relay.test", token: "user:ana", fetch: relay.fetch },
+      isCurrent: () => true,
+      unauthorized,
+    };
   const roster = createPersonalAgentRoster({
     session: async () => session(),
-    onChanged: (view) => { pushed.push(view); },
+    onChanged: (view) => {
+      pushed.push(view);
+    },
   });
   return { roster, pushed, unauthorized };
 }
 
 function names(view: PersonalAgentsEvent): string[] {
-  return view.accounts.flatMap(account => account.roster?.agents.map(agent => agent.name) ?? []);
+  return view.accounts.flatMap(
+    (account) => account.roster?.agents.map((agent) => agent.name) ?? [],
+  );
 }
 
 function reads(relay: FakeRelay): number {
-  return relay.requests.filter(request => request === "GET /sync/personal-agents").length;
+  return relay.requests.filter((request) => request === "GET /sync/personal-agents").length;
 }
 
 describe("the personal agents roster in main", () => {
-
   it("reads again only when a notice page carries another revision", async () => {
     const relay = fakeRelay();
     const { roster, pushed } = setup(relay);
@@ -154,7 +159,7 @@ describe("the personal agents roster in main", () => {
     relay.held.shift()!();
     await vi.waitFor(() => expect(reads(relay)).toBe(3));
     await vi.waitFor(() => expect(roster.view().accounts[0]?.roster?.revision).toBe(4));
-    expect(pushed.slice(renamedAt).every(view => names(view).join() === "Iris")).toBe(true);
+    expect(pushed.slice(renamedAt).every((view) => names(view).join() === "Iris")).toBe(true);
   });
 
   it("drops a removed agent and brings it back signed out on undo", async () => {
@@ -165,7 +170,10 @@ describe("the personal agents roster in main", () => {
     const removed = await roster.change(KEY, AGENT_ID, { kind: "remove" });
     expect(removed.ok && removed.personalAgents.accounts[0]?.roster?.agents).toEqual([]);
     const restored = await roster.change(KEY, AGENT_ID, { kind: "restore" });
-    expect(restored.ok && restored.personalAgents.accounts[0]?.roster?.agents.map(agent => agent.status)).toEqual(["signed_out"]);
+    expect(
+      restored.ok &&
+        restored.personalAgents.accounts[0]?.roster?.agents.map((agent) => agent.status),
+    ).toEqual(["signed_out"]);
   });
 
   it("ends the session when the relay refuses its token", async () => {
@@ -174,8 +182,10 @@ describe("the personal agents roster in main", () => {
     await roster.read(false);
 
     relay.refuse = 401;
-    expect(await roster.change(KEY, AGENT_ID, { kind: "sign-out" }))
-      .toEqual({ ok: false, error: "Your server session expired. Sign in again, then retry." });
+    expect(await roster.change(KEY, AGENT_ID, { kind: "sign-out" })).toEqual({
+      ok: false,
+      error: "Your server session expired. Sign in again, then retry.",
+    });
     expect(unauthorized).toHaveBeenCalledTimes(1);
   });
 
@@ -183,9 +193,14 @@ describe("the personal agents roster in main", () => {
     const relay = fakeRelay();
     const { roster } = setup(relay);
 
-    expect(await roster.change("https://server.test#https://relay.test#bo", AGENT_ID, { kind: "sign-out" }))
-      .toEqual({ ok: false, error: "Sign in to the account this agent belongs to, then try again." });
+    expect(
+      await roster.change("https://server.test#https://relay.test#bo", AGENT_ID, {
+        kind: "sign-out",
+      }),
+    ).toEqual({
+      ok: false,
+      error: "Sign in to the account this agent belongs to, then try again.",
+    });
     expect(relay.requests).toEqual([]);
   });
-
 });

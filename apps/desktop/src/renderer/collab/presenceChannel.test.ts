@@ -29,7 +29,20 @@ function fakeTransport() {
   const transport: PresenceTransport = {
     async publish(input) {
       publishes.push(input);
-      return { version: publishes.length, peers: [{ faceToken: "me", sessionToken: input.clientId, isSelf: true, displayName: null, paletteSlot: 0, state: input.state, updatedAtMs: 0 }] };
+      return {
+        version: publishes.length,
+        peers: [
+          {
+            faceToken: "me",
+            sessionToken: input.clientId,
+            isSelf: true,
+            displayName: null,
+            paletteSlot: 0,
+            state: input.state,
+            updatedAtMs: 0,
+          },
+        ],
+      };
     },
     async leave(input) {
       leaves.push(input);
@@ -94,11 +107,9 @@ describe("createPresenceChannel", () => {
       },
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const first = createPresenceChannel({
@@ -139,8 +150,24 @@ describe("createPresenceChannel", () => {
     await f.resolvePoll({
       version: 9,
       peers: [
-        { faceToken: "me", sessionToken: "c1", isSelf: true, displayName: null, paletteSlot: 0, state: {}, updatedAtMs: 0 },
-        { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
+        {
+          faceToken: "me",
+          sessionToken: "c1",
+          isSelf: true,
+          displayName: null,
+          paletteSlot: 0,
+          state: {},
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "bob",
+          sessionToken: "cb",
+          isSelf: false,
+          displayName: "Bob",
+          paletteSlot: 0,
+          state: { displayName: "Bob" },
+          updatedAtMs: 0,
+        },
       ],
     });
     await flush();
@@ -178,7 +205,20 @@ describe("createPresenceChannel", () => {
       },
     ]);
     // A poll that resolves after stop must not repaint.
-    await f.resolvePoll({ version: 99, peers: [{ faceToken: "x", sessionToken: "cx", isSelf: false, displayName: null, paletteSlot: 0, state: {}, updatedAtMs: 0 }] });
+    await f.resolvePoll({
+      version: 99,
+      peers: [
+        {
+          faceToken: "x",
+          sessionToken: "cx",
+          isSelf: false,
+          displayName: null,
+          paletteSlot: 0,
+          state: {},
+          updatedAtMs: 0,
+        },
+      ],
+    });
     await flush();
     expect(peers).not.toHaveBeenCalled();
   });
@@ -260,11 +300,9 @@ describe("createPresenceChannel", () => {
       },
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const channel = createPresenceChannel({
@@ -293,20 +331,16 @@ describe("createPresenceChannel", () => {
     const transport: PresenceTransport = {
       publish: () => {
         publishCalls += 1;
-        return publishCalls === 1
-          ? Promise.resolve({ version: 1, peers: [] })
-          : publishGate;
+        return publishCalls === 1 ? Promise.resolve({ version: 1, peers: [] }) : publishGate;
       },
       async leave(input) {
         leaves.push(input);
       },
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const channel = createPresenceChannel({
@@ -348,11 +382,9 @@ describe("createPresenceChannel", () => {
       leave: async () => undefined,
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const channel = createPresenceChannel({
@@ -414,12 +446,18 @@ describe("createRelayPresenceTransport", () => {
       scope: { kind: "share", shareId: "share-1" },
       fetch: fakeFetch,
     });
-    await transport.poll({ clientId: "c1", topic: "notes/a.md", since: 3, signal: new AbortController().signal });
+    await transport.poll({
+      clientId: "c1",
+      topic: "notes/a.md",
+      since: 3,
+      signal: new AbortController().signal,
+    });
     expect(calls[0]).toContain("/sync/shares/share-1/presence?topic=notes%2Fa.md&since=3");
   });
 
   it("surfaces non-2xx publish/leave/poll responses as rejections — which the channel swallows", async () => {
-    const fakeFetch = (async () => new Response("relay says no", { status: 503 })) as unknown as typeof fetch;
+    const fakeFetch = (async () =>
+      new Response("relay says no", { status: 503 })) as unknown as typeof fetch;
     const transport = createRelayPresenceTransport({
       baseUrl: "http://relay.test",
       token: "tok",
@@ -442,7 +480,12 @@ describe("createRelayPresenceTransport", () => {
       }),
     ).rejects.toThrow("presence leave failed: 503");
     await expect(
-      transport.poll({ clientId: "c1", topic: "t", since: 0, signal: new AbortController().signal }),
+      transport.poll({
+        clientId: "c1",
+        topic: "t",
+        since: 0,
+        signal: new AbortController().signal,
+      }),
     ).rejects.toThrow("presence poll failed: 503");
 
     // The channel contract: those rejections degrade to dark presence and
@@ -464,7 +507,15 @@ describe("createRelayPresenceTransport", () => {
 });
 
 describe("resolvePeerDisplayName", () => {
-  const peer = (state: unknown) => ({ faceToken: "u", sessionToken: "c", isSelf: false, displayName: (state as { displayName?: string } | null)?.displayName ?? null, paletteSlot: 0, state, updatedAtMs: 0 });
+  const peer = (state: unknown) => ({
+    faceToken: "u",
+    sessionToken: "c",
+    isSelf: false,
+    displayName: (state as { displayName?: string } | null)?.displayName ?? null,
+    paletteSlot: 0,
+    state,
+    updatedAtMs: 0,
+  });
 
   it("returns the trimmed name and caps hostile lengths", () => {
     // The name a peer publishes is untrusted payload: padding must not leak

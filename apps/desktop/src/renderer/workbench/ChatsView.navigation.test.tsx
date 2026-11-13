@@ -27,21 +27,25 @@ describe("ChatsView expand-to-tab", () => {
     bridgeMock.listChatChannels.mockRejectedValue(new Error("Engine unavailable"));
     bridgeMock.syncDms.mockRejectedValue(new Error("Engine unavailable"));
     renderView(vi.fn(), vi.fn(), {
-      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+      variant: "page",
+      editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
     });
     expect(await screen.findByText("Engine unavailable")).toBeTruthy();
     const retry = screen.getByRole("button", { name: "Try again" });
     expect(screen.queryByText("Loading Chats...")).toBeNull();
     const before = bridgeMock.listChatChannels.mock.calls.length;
     await userEvent.click(retry);
-    await waitFor(() => expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThan(before));
+    await waitFor(() =>
+      expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThan(before),
+    );
     expect(await screen.findByText("Engine unavailable")).toBeTruthy();
   });
 
   it("restores a DM after a failed lookup succeeds on an activity retry", async () => {
     bridgeMock.syncDms.mockRejectedValueOnce(new Error("offline"));
     renderView(vi.fn(), vi.fn(), {
-      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+      variant: "page",
+      editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
     });
     await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
     expect(screen.getByText("Loading Chats...")).toBeTruthy();
@@ -55,7 +59,8 @@ describe("ChatsView expand-to-tab", () => {
     const pending = deferred<{ available: boolean; dms: ReturnType<typeof dm>[] }>();
     bridgeMock.syncDms.mockImplementation(() => pending.promise);
     renderView(vi.fn(), vi.fn(), {
-      variant: "page", editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
+      variant: "page",
+      editorTabPath: chatTabPath({ kind: "dm", id: dm().channelId }),
     });
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalled());
     expect(screen.getByText("Loading Chats...")).toBeTruthy();
@@ -133,9 +138,13 @@ describe("ChatsView expand-to-tab", () => {
   it("keeps thread navigation inside its channel editor", async () => {
     const user = userEvent.setup();
     const onOpenInTab = vi.fn();
-    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ openingMessage: openingPreview() })] });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+    });
     renderView(vi.fn(), vi.fn(), {
-      variant: "page", initialNav: { level: "channel", channel: channel() }, onOpenInTab,
+      variant: "page",
+      initialNav: { level: "channel", channel: channel() },
+      onOpenInTab,
       editorTabPath: chatTabPath({ kind: "channel", id: channel().id }),
     });
 
@@ -199,9 +208,7 @@ describe("ChatsView expand-to-tab", () => {
 
     const view = await screen.findByTestId("chats-channel-view");
     expect(view.dataset.variant).toBe("page");
-    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe(
-      "general",
-    );
+    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("general");
   });
 
   it("never reports the default overview position while a seed is pending", async () => {
@@ -218,9 +225,7 @@ describe("ChatsView expand-to-tab", () => {
 
     await screen.findByTestId("chats-thread-view");
     await waitFor(() =>
-      expect(onNavChange).toHaveBeenCalledWith(
-        expect.objectContaining({ level: "thread" }),
-      ),
+      expect(onNavChange).toHaveBeenCalledWith(expect.objectContaining({ level: "thread" })),
     );
     expect(onNavChange).not.toHaveBeenCalledWith({ level: "channels" });
     expect(onNavChange.mock.calls[0]?.[0]).toMatchObject({ level: "thread" });
@@ -235,9 +240,7 @@ describe("ChatsView expand-to-tab", () => {
 
     const view = await screen.findByTestId("chats-dm-view");
     expect(view.dataset.variant).toBe("page");
-    expect((await screen.findByTestId("chats-dm-title")).textContent).toBe(
-      "bob@example.com",
-    );
+    expect((await screen.findByTestId("chats-dm-title")).textContent).toBe("bob@example.com");
   });
 
   it("opens a Feed DM directly in the page and preserves its focused message", async () => {
@@ -319,9 +322,9 @@ describe("ChatsView expand-to-tab", () => {
 
     await screen.findByTestId("chats-thread-view");
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("chats-composer") as HTMLTextAreaElement).value,
-      ).toBe("half-typed reply"),
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(
+        "half-typed reply",
+      ),
     );
     // A poll's choices come back with its question, so Send still asks it.
     expect(
@@ -410,9 +413,7 @@ describe("ChatsView expand-to-tab", () => {
     await user.type(screen.getByTestId("chats-new-thread-composer"), "hi");
 
     await waitFor(() =>
-      expect(onDraftsChange).toHaveBeenCalledWith(
-        expect.objectContaining({ newThreadBody: "hi" }),
-      ),
+      expect(onDraftsChange).toHaveBeenCalledWith(expect.objectContaining({ newThreadBody: "hi" })),
     );
   });
 
@@ -530,24 +531,14 @@ describe("ChatsView expand-to-tab", () => {
     });
 
     const { rerender } = render(
-      <ChatsView
-        workspaceId="workspace-old"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-      />,
+      <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
     );
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const oldButton = await screen.findByTestId("chats-feed-bookmark");
     await userEvent.click(oldButton);
     expect((oldButton as HTMLButtonElement).disabled).toBe(true);
 
-    rerender(
-      <ChatsView
-        workspaceId="workspace-new"
-        onOpenFileChat={vi.fn()}
-        onError={vi.fn()}
-      />,
-    );
+    rerender(<ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />);
     await userEvent.click(await screen.findByTestId("chats-feed-link"));
     const newButton = await screen.findByTestId("chats-feed-bookmark");
     expect((newButton as HTMLButtonElement).disabled).toBe(false);

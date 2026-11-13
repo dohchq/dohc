@@ -26,7 +26,8 @@ const TIMEOUT_MS = 30_000;
 const DELETE_TIMEOUT_MS = 90_000;
 const UNREACHABLE = "dohc could not reach this server. Check your connection, then try again.";
 const SESSION_EXPIRED = "Your server session expired. Sign in again, then retry.";
-const RATE_LIMITED = "The server paused deletion after too many attempts. Wait a few minutes, then try again.";
+const RATE_LIMITED =
+  "The server paused deletion after too many attempts. Wait a few minutes, then try again.";
 // The server's preview token lives five minutes.
 const REVIEW_MS = 5 * 60_000;
 // Server codes whose message is written for the person deleting.
@@ -42,7 +43,12 @@ function sameServer(left: string, right: string): boolean {
 
 // The folder name, as the workspace list shows it.
 function workspaceName(rootPath: string): string {
-  return rootPath.replace(/[\\/]+$/u, "").split(/[\\/]/u).pop() || "workspace";
+  return (
+    rootPath
+      .replace(/[\\/]+$/u, "")
+      .split(/[\\/]/u)
+      .pop() || "workspace"
+  );
 }
 
 async function errorBody(response: Response): Promise<{ code?: string; message?: string }> {
@@ -62,7 +68,9 @@ function failure(status: number, body: { code?: string; message?: string }, fail
   if (status === 401) return new Error(SESSION_EXPIRED);
   if (status === 429) return new Error(RATE_LIMITED);
   if (body.code && SERVER_WORDS.has(body.code) && body.message) return new Error(body.message);
-  return new Error(`${failed} The server answered ${status}. Try again, or contact the server owner.`);
+  return new Error(
+    `${failed} The server answered ${status}. Try again, or contact the server owner.`,
+  );
 }
 
 export function createServerAccountDeletion(options: ServerAccountDeletionOptions) {
@@ -92,16 +100,27 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
     return credentials;
   }
 
-  async function post(credentials: CloudCredentials, path: string, body: unknown, timeoutMs: number): Promise<Response> {
+  async function post(
+    credentials: CloudCredentials,
+    path: string,
+    body: unknown,
+    timeoutMs: number,
+  ): Promise<Response> {
     try {
-      return await fetchImpl(`${credentials.serverUrl.replace(/\/+$/u, "")}/api/auth/account/${path}`, {
-        method: "POST",
-        redirect: "error",
-        credentials: "omit",
-        signal: AbortSignal.timeout(timeoutMs),
-        headers: { authorization: `Bearer ${credentials.token}`, "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      return await fetchImpl(
+        `${credentials.serverUrl.replace(/\/+$/u, "")}/api/auth/account/${path}`,
+        {
+          method: "POST",
+          redirect: "error",
+          credentials: "omit",
+          signal: AbortSignal.timeout(timeoutMs),
+          headers: {
+            authorization: `Bearer ${credentials.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        },
+      );
     } catch {
       throw new Error(UNREACHABLE);
     }
@@ -111,19 +130,39 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
     async preview(): Promise<ServerAccountDeletionPreview> {
       const credentials = await session();
       const response = await post(credentials, "deletion-preview", {}, TIMEOUT_MS);
-      if (!response.ok) throw failure(response.status, await errorBody(response), "The server could not list what deletion removes.");
+      if (!response.ok)
+        throw failure(
+          response.status,
+          await errorBody(response),
+          "The server could not list what deletion removes.",
+        );
       const body: unknown = await response.json().catch(() => null);
-      const scope = body && typeof body === "object" ? body as Record<string, unknown> : {};
+      const scope = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
       const ids = scope.workspaceIds;
-      if (scope.passwordRequired !== true || typeof scope.email !== "string" || typeof scope.previewToken !== "string" ||
-          !Array.isArray(ids) || !ids.every((id): id is string => typeof id === "string")) {
-        throw new Error("The server returned an invalid deletion preview. Contact the server owner.");
+      if (
+        scope.passwordRequired !== true ||
+        typeof scope.email !== "string" ||
+        typeof scope.previewToken !== "string" ||
+        !Array.isArray(ids) ||
+        !ids.every((id): id is string => typeof id === "string")
+      ) {
+        throw new Error(
+          "The server returned an invalid deletion preview. Contact the server owner.",
+        );
       }
       const owned = new Set(ids);
-      const workspaces = options.workspaces()
+      const workspaces = options
+        .workspaces()
         .filter((workspace) => owned.has(workspace.workspaceId))
-        .map((workspace) => ({ workspaceId: workspace.workspaceId, name: workspaceName(workspace.rootPath) }))
-        .sort((left, right) => left.name.localeCompare(right.name) || left.workspaceId.localeCompare(right.workspaceId));
+        .map((workspace) => ({
+          workspaceId: workspace.workspaceId,
+          name: workspaceName(workspace.rootPath),
+        }))
+        .sort(
+          (left, right) =>
+            left.name.localeCompare(right.name) ||
+            left.workspaceId.localeCompare(right.workspaceId),
+        );
       const parsed = ServerAccountDeletionPreview.safeParse({
         email: scope.email,
         server: credentials.serverUrl,
@@ -134,10 +173,18 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
         heldGrantCount: scope.heldGrantCount,
         previewToken: scope.previewToken,
       });
-      if (!parsed.success) throw new Error("The server returned an invalid deletion preview. Contact the server owner.");
+      if (!parsed.success)
+        throw new Error(
+          "The server returned an invalid deletion preview. Contact the server owner.",
+        );
       const now = Date.now();
-      for (const [token, review] of reviews) if (now - review.at >= REVIEW_MS) reviews.delete(token);
-      reviews.set(parsed.data.previewToken, { serverUrl: credentials.serverUrl, userId: credentials.userId, at: now });
+      for (const [token, review] of reviews)
+        if (now - review.at >= REVIEW_MS) reviews.delete(token);
+      reviews.set(parsed.data.previewToken, {
+        serverUrl: credentials.serverUrl,
+        userId: credentials.userId,
+        at: now,
+      });
       return parsed.data;
     },
 
@@ -145,37 +192,72 @@ export function createServerAccountDeletion(options: ServerAccountDeletionOption
       const credentials = await session();
       // The password goes only to the server and account the person reviewed.
       if (!sameServer(input.server, credentials.serverUrl)) {
-        return { ok: false, code: "preview-changed", reason: "This computer is now connected to another server. Review deletion again." };
+        return {
+          ok: false,
+          code: "preview-changed",
+          reason: "This computer is now connected to another server. Review deletion again.",
+        };
       }
       const review = reviews.get(input.previewToken);
       if (!review || Date.now() - review.at >= REVIEW_MS) {
-        return { ok: false, code: "preview-changed", reason: "The review expired, or what deletion removes changed. Review it again." };
+        return {
+          ok: false,
+          code: "preview-changed",
+          reason: "The review expired, or what deletion removes changed. Review it again.",
+        };
       }
-      if (!sameServer(review.serverUrl, credentials.serverUrl) || review.userId !== credentials.userId) {
-        return { ok: false, code: "preview-changed", reason: "This computer is now connected to another account. Review deletion again." };
+      if (
+        !sameServer(review.serverUrl, credentials.serverUrl) ||
+        review.userId !== credentials.userId
+      ) {
+        return {
+          ok: false,
+          code: "preview-changed",
+          reason: "This computer is now connected to another account. Review deletion again.",
+        };
       }
-      const response = await post(credentials, "delete", { previewToken: input.previewToken, password: input.password }, DELETE_TIMEOUT_MS);
+      const response = await post(
+        credentials,
+        "delete",
+        { previewToken: input.previewToken, password: input.password },
+        DELETE_TIMEOUT_MS,
+      );
       if (response.status === 429) return { ok: false, code: "rate-limited", reason: RATE_LIMITED };
       if (!response.ok) {
         const body = await errorBody(response);
         if (body.code === "PREVIEW_CHANGED" || body.code === "PREVIEW_REQUIRED") {
-          return { ok: false, code: "preview-changed", reason: "The review expired, or what deletion removes changed. Review it again." };
+          return {
+            ok: false,
+            code: "preview-changed",
+            reason: "The review expired, or what deletion removes changed. Review it again.",
+          };
         }
         if (body.code === "INVALID_PASSWORD" || body.code === "PASSWORD_REQUIRED") {
-          return { ok: false, code: "wrong-password", reason: "The password is incorrect. Enter your server account password." };
+          return {
+            ok: false,
+            code: "wrong-password",
+            reason: "The password is incorrect. Enter your server account password.",
+          };
         }
         throw failure(response.status, body, "The server could not delete this account.");
       }
       // Only an answer that says finished or pending means the account is
       // gone. Anything else leaves the session alone.
       const deleted = Deleted.safeParse(await response.json().catch(() => null));
-      if (!deleted.success) throw new Error("The server returned an invalid answer to deletion. Contact the server owner.");
+      if (!deleted.success)
+        throw new Error(
+          "The server returned an invalid answer to deletion. Contact the server owner.",
+        );
       // The server already ended every session of the account, finished or
       // not. The disconnect clears the cached session before anything that
       // can fail, so a failure here must not hide the deletion.
       const disconnectError = await disconnect(credentials);
       return ServerAccountDeleteResult.parse({
-        ok: true, finished: deleted.data.finished, email: credentials.email, server: credentials.serverUrl, disconnectError,
+        ok: true,
+        finished: deleted.data.finished,
+        email: credentials.email,
+        server: credentials.serverUrl,
+        disconnectError,
       });
     },
 

@@ -16,9 +16,7 @@ const SENTINEL_BASELINE = "comments-unmodified-802c4f9b";
 
 async function requireOk(response: Response, operation: string): Promise<Response> {
   if (response.ok) return response;
-  throw new Error(
-    `${operation} failed with ${String(response.status)}: ${await response.text()}`,
-  );
+  throw new Error(`${operation} failed with ${String(response.status)}: ${await response.text()}`);
 }
 
 async function appendNamedComment(input: {
@@ -190,11 +188,10 @@ test("keeps a narrowed Comment link readable without weakening transition invali
     await expect(page.getByText("Retuned link", { exact: true })).toBeVisible();
     await expect(page.getByLabel("Comment", { exact: true })).toHaveCount(0);
 
-    const replacementPage = await openLink(
-      replacementContext,
-      stack.shareWebUrl,
-      { grantId: seeded.grantId, secret: seeded.secret },
-    );
+    const replacementPage = await openLink(replacementContext, stack.shareWebUrl, {
+      grantId: seeded.grantId,
+      secret: seeded.secret,
+    });
     await expect(replacementPage.locator(".badge")).toHaveText("View only");
 
     const invalidatingCases = [
@@ -212,13 +209,11 @@ test("keeps a narrowed Comment link readable without weakening transition invali
       },
       {
         label: "rotate",
-        transition: (grantId: string) =>
-          rotateSeededLink(stack.relayUrl, seeded, grantId),
+        transition: (grantId: string) => rotateSeededLink(stack.relayUrl, seeded, grantId),
       },
       {
         label: "revoke",
-        transition: (grantId: string) =>
-          revokeSeededLink(stack.relayUrl, seeded, grantId),
+        transition: (grantId: string) => revokeSeededLink(stack.relayUrl, seeded, grantId),
       },
     ] as const;
     for (const invalidatingCase of invalidatingCases) {
@@ -252,9 +247,10 @@ test("keeps two open public comment sessions current", async ({ browser, stack }
     await firstPage.getByLabel("Name (optional)").fill("First Reader");
     await firstPage.getByLabel("Comment", { exact: true }).fill(liveBody);
     const [appendResponse] = await Promise.all([
-      firstPage.waitForResponse((response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/api/view/discussion"
+      firstPage.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname === "/api/view/discussion",
       ),
       firstPage.getByRole("button", { name: "Post comment" }).click(),
     ]);
@@ -273,11 +269,13 @@ test("keeps two open public comment sessions current", async ({ browser, stack }
       messageId: appendBody.message.messageId,
     });
 
-    await expect(secondPage.getByText("Comment deleted by the owner", { exact: true }))
-      .toBeVisible();
+    await expect(
+      secondPage.getByText("Comment deleted by the owner", { exact: true }),
+    ).toBeVisible();
     await expect(secondPage.getByText(liveBody, { exact: true })).toHaveCount(0);
-    await expect(firstPage.getByText("Comment deleted by the owner", { exact: true }))
-      .toBeVisible();
+    await expect(
+      firstPage.getByText("Comment deleted by the owner", { exact: true }),
+    ).toBeVisible();
     await expect(firstPage.getByText(liveBody, { exact: true })).toHaveCount(0);
   } finally {
     await Promise.all([firstContext.close(), secondContext.close()]);
@@ -304,8 +302,7 @@ test("converges one browser profile name across two open tabs", async ({ browser
     await firstPage.getByLabel("Name (optional)").fill("Stable Name");
     await firstPage.getByLabel("Comment", { exact: true }).fill("Tab A commits the name.");
     await firstPage.getByRole("button", { name: "Post comment" }).click();
-    await expect(firstPage.getByText("Tab A commits the name.", { exact: true }))
-      .toBeVisible();
+    await expect(firstPage.getByText("Tab A commits the name.", { exact: true })).toBeVisible();
 
     await expect(secondPage.getByLabel("Name (optional)")).toHaveValue("Stable Name");
     await expect(secondPage.getByLabel("Name (optional)")).toBeDisabled();
@@ -316,8 +313,9 @@ test("converges one browser profile name across two open tabs", async ({ browser
     const retainedRow = secondPage.locator(".comment-row").filter({ hasText: retainedBody });
     await expect(retainedRow).toBeVisible();
     await expect(retainedRow.locator(".comment-author")).toHaveText("Stable NameUnverified");
-    await expect(secondPage.getByText("The comment didn't post. Try again.", { exact: true }))
-      .toHaveCount(0);
+    await expect(
+      secondPage.getByText("The comment didn't post. Try again.", { exact: true }),
+    ).toHaveCount(0);
   } finally {
     await context.close();
   }
@@ -343,11 +341,10 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
   });
   const context = await browser.newContext();
   try {
-    const commentPage = await openLink(
-      context,
-      stack.shareWebUrl,
-      { grantId: seeded.grantId, secret: seeded.secret },
-    );
+    const commentPage = await openLink(context, stack.shareWebUrl, {
+      grantId: seeded.grantId,
+      secret: seeded.secret,
+    });
     await expect(commentPage.locator(".badge")).toHaveText("Can comment");
     await expect(commentPage.getByText(namedBody, { exact: true })).toBeVisible();
     await commentPage.getByLabel("Name (optional)").fill("Link Reader");
@@ -372,21 +369,19 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
     const cookieNames = (await context.cookies()).map((cookie) => cookie.name);
     expect(cookieNames).toContain(`dohc_share_${commentSession}`);
     expect(cookieNames).toContain(`dohc_share_${viewSession}`);
-    expect(cookieNames.filter((name) => name.startsWith("dohc_share_profile_")).sort())
-      .toEqual([
-        `dohc_share_profile_${commentSession}`,
-        `dohc_share_profile_${viewSession}`,
-      ].sort());
+    expect(cookieNames.filter((name) => name.startsWith("dohc_share_profile_")).sort()).toEqual(
+      [`dohc_share_profile_${commentSession}`, `dohc_share_profile_${viewSession}`].sort(),
+    );
 
     const afterProfilesBody = "Committed after both profiles exist.";
     await commentPage.bringToFront();
     await commentPage.getByLabel("Comment", { exact: true }).fill(afterProfilesBody);
     await commentPage.getByRole("button", { name: "Post comment" }).click();
-    const afterProfilesRow = commentPage.locator(".comment-row")
+    const afterProfilesRow = commentPage
+      .locator(".comment-row")
       .filter({ hasText: afterProfilesBody });
     await expect(afterProfilesRow).toBeVisible();
-    await expect(afterProfilesRow.locator(".comment-author"))
-      .toHaveText("Link ReaderUnverified");
+    await expect(afterProfilesRow.locator(".comment-author")).toHaveText("Link ReaderUnverified");
 
     await viewPage.reload();
     await openComments(viewPage);
@@ -414,17 +409,13 @@ test("keeps mixed View and Comment links isolated over one committed discussion"
   }
 });
 
-test("keeps hostile comment text inert in the real viewer", async ({
-  browser,
-  probe,
-  stack,
-}) => {
+test("keeps hostile comment text inert in the real viewer", async ({ browser, probe, stack }) => {
   const seeded = await seedShare({
     access: "comment",
     relayUrl: stack.relayUrl,
     files: [{ path: "docs/hostile.md", content: "# Hostile comments fixture\n" }],
   });
-  const hostileName = '<img src=x onerror=attack()>\u202e e\u0301';
+  const hostileName = "<img src=x onerror=attack()>\u202e e\u0301";
   const projectedName = hostileName
     .normalize("NFC")
     .replace(/[\p{Cc}\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, "")
@@ -447,10 +438,10 @@ test("keeps hostile comment text inert in the real viewer", async ({
   });
   try {
     const page = await context.newPage();
-    await page.addInitScript(
-      ({ name, value }) => Reflect.set(window, name, value),
-      { name: ATTACK_SENTINEL, value: SENTINEL_BASELINE },
-    );
+    await page.addInitScript(({ name, value }) => Reflect.set(window, name, value), {
+      name: ATTACK_SENTINEL,
+      value: SENTINEL_BASELINE,
+    });
     await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
     await openComments(page);
     await page.getByLabel("Name (optional)").fill(hostileName);
@@ -472,8 +463,9 @@ test("keeps hostile comment text inert in the real viewer", async ({
     const viewerUrl = page.url();
     await row.locator(".comment-body").click();
     expect(page.url()).toBe(viewerUrl);
-    expect(await page.evaluate((name) => Reflect.get(window, name), ATTACK_SENTINEL))
-      .toBe(SENTINEL_BASELINE);
+    expect(await page.evaluate((name) => Reflect.get(window, name), ATTACK_SENTINEL)).toBe(
+      SENTINEL_BASELINE,
+    );
     const browserControlRequest = context.waitForEvent(
       "request",
       (request) => request.url() === controlUrl,
@@ -494,16 +486,14 @@ test("keeps hostile comment text inert in the real viewer", async ({
     const controlPage = await controlPagePromise;
     await controlPage.waitForLoadState("domcontentloaded");
     await controlPage.close();
-    await expect.poll(
-      () => probe.requests.filter((request) => request.path === controlPath).length,
-    ).toBe(1);
+    await expect
+      .poll(() => probe.requests.filter((request) => request.path === controlPath).length)
+      .toBe(1);
     expect({
       browser: authoredProbeUrls.filter((url) => new URL(url).pathname === controlPath).length,
       probe: probe.requests.filter((request) => request.path === controlPath).length,
     }).toEqual({ browser: 1, probe: 1 });
-    expect(
-      authoredProbeUrls.filter((url) => new URL(url).pathname !== controlPath),
-    ).toEqual([]);
+    expect(authoredProbeUrls.filter((url) => new URL(url).pathname !== controlPath)).toEqual([]);
     expect(probe.requests.filter((request) => request.path !== controlPath)).toEqual([]);
   } finally {
     await context.close();
@@ -524,13 +514,18 @@ test("keeps a Comment version share pinned through a main-version rename", async
   });
   const pinned = seeded.files[0]!;
   await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
-  await expect(page.getByRole("navigation", { name: "Shared files" }).getByRole("button", { name: "pinned.md", exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Shared files" })
+      .getByRole("button", { name: "pinned.md", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
   await openComments(page);
   await page.getByLabel("Comment", { exact: true }).fill("Snapshot discussion stays writable.");
   await page.getByRole("button", { name: "Post comment" }).click();
-  await expect(page.getByText("Snapshot discussion stays writable.", { exact: true }))
-    .toBeVisible();
+  await expect(
+    page.getByText("Snapshot discussion stays writable.", { exact: true }),
+  ).toBeVisible();
 
   const liveContent = "# Live main version\n\nThese bytes must stay outside the snapshot.";
   const liveSha = createHash("sha256").update(liveContent).digest("hex");
@@ -550,25 +545,27 @@ test("keeps a Comment version share pinned through a main-version rename", async
       headers: ownerHeaders(seeded.ownerUserId, true),
       body: JSON.stringify({
         originId: `comments-version-${randomBytes(8).toString("hex")}`,
-        ops: [{
-          originSeq: 0,
-          opKind: "moment.append",
-          recordedAtMs,
-          payload: {
-            momentId: `comments-version-${randomBytes(8).toString("hex")}`,
-            versionId: "main",
-            objectId: pinned.objectId,
-            path: "docs/live.md",
+        ops: [
+          {
+            originSeq: 0,
+            opKind: "moment.append",
             recordedAtMs,
-            operation: "rename",
-            payloadBeforeBlobSha256: pinned.blobSha256,
-            payloadBeforePath: pinned.path,
-            payloadAfterBlobSha256: liveSha,
-            payloadAfterPath: "docs/live.md",
-            metadata: { origin: "user" },
-            beforePresent: "present",
+            payload: {
+              momentId: `comments-version-${randomBytes(8).toString("hex")}`,
+              versionId: "main",
+              objectId: pinned.objectId,
+              path: "docs/live.md",
+              recordedAtMs,
+              operation: "rename",
+              payloadBeforeBlobSha256: pinned.blobSha256,
+              payloadBeforePath: pinned.path,
+              payloadAfterBlobSha256: liveSha,
+              payloadAfterPath: "docs/live.md",
+              metadata: { origin: "user" },
+              beforePresent: "present",
+            },
           },
-        }],
+        ],
       }),
     }),
     "append live main rename",
@@ -576,20 +573,33 @@ test("keeps a Comment version share pinned through a main-version rename", async
 
   const forwardRefreshResponse = page.waitForResponse((response) => {
     const pathname = new URL(response.url()).pathname;
-    return response.request().method() === "GET" &&
+    return (
+      response.request().method() === "GET" &&
       response.ok() &&
-      (pathname === "/api/view/current" || pathname === "/api/view/log");
+      (pathname === "/api/view/current" || pathname === "/api/view/log")
+    );
   });
   await page.clock.fastForward(4 * 60_000);
   expect(await (await forwardRefreshResponse).finished()).toBeNull();
-  await expect(page.getByRole("navigation", { name: "Shared files" }).getByRole("button", { name: "pinned.md", exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole("navigation", { name: "Shared files" })
+      .getByRole("button", { name: "pinned.md", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("heading", { name: "Pinned version" })).toBeVisible();
-  await expect(page.getByText("These bytes belong to the snapshot.", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("These bytes belong to the snapshot.", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("Live main version", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("navigation", { name: "Shared files" })
-    .getByRole("button", { name: "live.md", exact: true })).toHaveCount(0);
-  await expect(page.getByText("Snapshot discussion stays writable.", { exact: true }))
-    .toBeVisible();
-  await expect(page.locator('main.content textarea, main.content [contenteditable="true"]'))
-    .toHaveCount(0);
+  await expect(
+    page
+      .getByRole("navigation", { name: "Shared files" })
+      .getByRole("button", { name: "live.md", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Snapshot discussion stays writable.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.locator('main.content textarea, main.content [contenteditable="true"]'),
+  ).toHaveCount(0);
 });

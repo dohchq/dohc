@@ -11,24 +11,15 @@ export function createJoinedWorkspaceRunner(dependencies: {
   // The folder's canonicalWorkspaceRoot. The reservation, the folder, and the
   // registry row must name the same root.
   canonicalizeRoot(rootPath: string): string;
-  reserve(input: {
-    workspaceId: string;
-    rootPath: string;
-  }): WorkspaceAuthorityReservation;
+  reserve(input: { workspaceId: string; rootPath: string }): WorkspaceAuthorityReservation;
   createFolder(input: {
     rootPath: string;
     workspaceId: string;
     kind: "personal";
   }): Promise<CreatedWorkspace>;
-  register(
-    reservation: WorkspaceAuthorityReservation,
-    workspace: RegistryEntry,
-  ): Binding;
+  register(reservation: WorkspaceAuthorityReservation, workspace: RegistryEntry): Binding;
   remove(binding: Binding, cleanup: () => Promise<void>): Promise<void>;
-  release(
-    reservation: WorkspaceAuthorityReservation,
-    cleanup: () => Promise<void>,
-  ): Promise<void>;
+  release(reservation: WorkspaceAuthorityReservation, cleanup: () => Promise<void>): Promise<void>;
   closeRelay(workspaceId: string): Promise<void>;
   rollbackComplete(): void;
   logError(message: string, error: unknown): void;
@@ -51,9 +42,7 @@ export function createJoinedWorkspaceRunner(dependencies: {
         workspaceId: input.workspaceId,
         kind: "personal",
       });
-      const registered = input.prepare
-        ? await input.prepare(workspace)
-        : workspace;
+      const registered = input.prepare ? await input.prepare(workspace) : workspace;
       binding = dependencies.register(reservation, registered);
       await input.populate(workspace, binding);
       return workspace;
@@ -72,10 +61,7 @@ export function createJoinedWorkspaceRunner(dependencies: {
           await dependencies.release(reservation, cleanup);
         }
       } catch (cleanupError) {
-        dependencies.logError(
-          `[desktop] ${input.rollbackLabel} rollback cleanup:`,
-          cleanupError,
-        );
+        dependencies.logError(`[desktop] ${input.rollbackLabel} rollback cleanup:`, cleanupError);
         throw new Error(input.cleanupFailureMessage);
       }
       dependencies.rollbackComplete();

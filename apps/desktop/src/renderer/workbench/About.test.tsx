@@ -8,7 +8,12 @@ import type { AccessAnswer, AccessShareRow } from "@dohc/workspace-contracts/acc
 import type { ChatFileMentionsPage } from "@dohc/workspace-contracts/chat-file-mentions";
 import type { LinksInResult } from "@dohc/workspace-contracts/links";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
-import type { ChatFileMentionRecord, DohcDesktopBridge, EngineMomentRecord, ListEngineMomentsResponse } from "../../ipc/bridgeContract";
+import type {
+  ChatFileMentionRecord,
+  DohcDesktopBridge,
+  EngineMomentRecord,
+  ListEngineMomentsResponse,
+} from "../../ipc/bridgeContract";
 import { ipcWireError } from "../../ipc/errorWords";
 import { deferred } from "../../testing/deferred";
 import { historyCursor, historyPageFields } from "../../testing/historyPageFixture";
@@ -16,9 +21,19 @@ import { AboutAccess, AboutHistory, AboutLinks, type AboutFile } from "./About";
 import type { AccessFacts } from "./accessReason";
 
 const bridgeMock = {
-  getObjectAccess: vi.fn<(input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>>(),
+  getObjectAccess:
+    vi.fn<
+      (input: { workspaceId: string; ref: unknown; cursor?: string }) => Promise<AccessAnswer>
+    >(),
   requestAccessRefresh: vi.fn<(input: { workspaceId: string; reason: string }) => Promise<void>>(),
-  listEngineMoments: vi.fn<(input: { workspaceId: string; objectId?: string; limit?: number }) => Promise<ListEngineMomentsResponse>>(),
+  listEngineMoments:
+    vi.fn<
+      (input: {
+        workspaceId: string;
+        objectId?: string;
+        limit?: number;
+      }) => Promise<ListEngineMomentsResponse>
+    >(),
   linksIn: vi.fn<DohcDesktopBridge["linksIn"]>(),
   chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
 };
@@ -28,9 +43,19 @@ const notices = { report: vi.fn(), clear: vi.fn() };
 const openSyncSettings = vi.fn();
 const connect = vi.fn();
 // A workspace that syncs, with its account signed in.
-const SYNCED: AccessFacts = { cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true }, shareView: false };
+const SYNCED: AccessFacts = {
+  cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true },
+  shareView: false,
+};
 beforeEach(() => {
-  for (const mock of [...Object.values(bridgeMock), notices.report, notices.clear, openSyncSettings, connect]) mock.mockReset();
+  for (const mock of [
+    ...Object.values(bridgeMock),
+    notices.report,
+    notices.clear,
+    openSyncSettings,
+    connect,
+  ])
+    mock.mockReset();
   bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
   vi.stubGlobal("dohcDesktop", bridgeMock);
 });
@@ -47,7 +72,8 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
     ref: { kind: "path", path: "docs/plan.md", versionId: null },
     rows: [],
     visibility: "visible",
-    unknownReason: null, coverage: { kind: "granted", complete: true, observation: "interval" },
+    unknownReason: null,
+    coverage: { kind: "granted", complete: true, observation: "interval" },
     checkedAtMs: CHECKED_AT,
     freshness: "fresh",
     nextCursor: null,
@@ -57,7 +83,8 @@ function answer(overrides: Partial<AccessAnswer> = {}): AccessAnswer {
 
 // What main answers when it has no observation to read: no coverage at all.
 const UNKNOWN = answer({
-  unknownReason: "not-listed-yet", coverage: { kind: "unavailable", complete: false, observation: "interval" },
+  unknownReason: "not-listed-yet",
+  coverage: { kind: "unavailable", complete: false, observation: "interval" },
   checkedAtMs: null,
   freshness: "unknown",
 });
@@ -83,7 +110,10 @@ function share(overrides: Partial<AccessShareRow> = {}): AccessShareRow {
 }
 
 // One context per facts object, the same object every render as the shell's.
-const contexts = new Map<AccessFacts, { facts: AccessFacts; openSyncSettings: () => void; connect: () => void }>();
+const contexts = new Map<
+  AccessFacts,
+  { facts: AccessFacts; openSyncSettings: () => void; connect: () => void }
+>();
 function contextFor(facts: AccessFacts) {
   let context = contexts.get(facts);
   if (!context) {
@@ -93,7 +123,13 @@ function contextFor(facts: AccessFacts) {
   return context;
 }
 
-function Access(props: { workspaceId?: string; path?: string; open?: boolean; facts?: AccessFacts; sharing?: boolean }) {
+function Access(props: {
+  workspaceId?: string;
+  path?: string;
+  open?: boolean;
+  facts?: AccessFacts;
+  sharing?: boolean;
+}) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
     <AboutAccess
@@ -108,15 +144,30 @@ function Access(props: { workspaceId?: string; path?: string; open?: boolean; fa
 }
 
 describe("About Access", () => {
-
   it("lists each grant with its person or link and its level, and counts only active grants", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(
       answer({
         rows: [
-          share({ via: "link", grantId: "grant-link", recipientEmail: null, recipientUserId: null, access: "view" }),
+          share({
+            via: "link",
+            grantId: "grant-link",
+            recipientEmail: null,
+            recipientUserId: null,
+            access: "view",
+          }),
           share(),
-          share({ grantId: "grant-old", recipientEmail: "kim@example.com", status: "revoked", access: null }),
-          share({ grantId: "grant-gone", recipientEmail: "lee@example.com", status: "removed", access: null }),
+          share({
+            grantId: "grant-old",
+            recipientEmail: "kim@example.com",
+            status: "revoked",
+            access: null,
+          }),
+          share({
+            grantId: "grant-gone",
+            recipientEmail: "lee@example.com",
+            status: "removed",
+            access: null,
+          }),
         ],
       }),
     );
@@ -128,7 +179,10 @@ describe("About Access", () => {
     expect(screen.getByTitle(`Checked ${formatChatTime(CHECKED_AT).label}`)).toBeTruthy();
     const rows = screen.getAllByTestId("about-access-row");
     expect(rows.map((row) => row.textContent)).toEqual([
-      "Anyone with the linkCan view", "Ssam@example.comCan edit", "Kkim@example.comended", "Llee@example.comended",
+      "Anyone with the linkCan view",
+      "Ssam@example.comCan edit",
+      "Kkim@example.comended",
+      "Llee@example.comended",
     ]);
     expect(within(rows[0]!).getByText("Can view")).toBeTruthy();
     expect(within(rows[1]!).getByText("Can edit")).toBeTruthy();
@@ -137,7 +191,9 @@ describe("About Access", () => {
     expect(within(rows[2]!).queryByRole("img")).toBeNull();
     // Two grants give access now; the two ended ones stay listed, their names a step down from ink.
     expect(screen.getByTestId("about-access-count").textContent).toBe("2");
-    expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-ink"))).toEqual([true, true, false, false]);
+    expect(rows.map((row) => row.querySelector(".flex-1")!.classList.contains("text-ink"))).toEqual(
+      [true, true, false, false],
+    );
   });
 
   it("tells a cause it cannot name apart from no access, and checks again on Try again", async () => {
@@ -177,7 +233,8 @@ describe("About Access", () => {
   it("neither reports nor clears when workspace A's read fails after the switch to B", async () => {
     const forA = deferred<AccessAnswer>();
     bridgeMock.getObjectAccess.mockImplementation(({ workspaceId }) =>
-      workspaceId === "workspace-a" ? forA.promise : Promise.resolve(answer()));
+      workspaceId === "workspace-a" ? forA.promise : Promise.resolve(answer()),
+    );
     const { rerender } = render(<Access workspaceId="workspace-a" />);
     await waitFor(() => expect(bridgeMock.getObjectAccess).toHaveBeenCalledTimes(1));
     rerender(<Access workspaceId="workspace-b" />);
@@ -195,15 +252,21 @@ describe("About Access", () => {
   it("never shows workspace A's answer after a switch to workspace B", async () => {
     const forA = deferred<AccessAnswer>();
     bridgeMock.getObjectAccess.mockImplementation(({ workspaceId }) =>
-      workspaceId === "workspace-a" ? forA.promise : Promise.resolve(answer({ rows: [share({ recipientEmail: "b@example.com" })] })),
+      workspaceId === "workspace-a"
+        ? forA.promise
+        : Promise.resolve(answer({ rows: [share({ recipientEmail: "b@example.com" })] })),
     );
     const { rerender } = render(<Access workspaceId="workspace-a" />);
     await waitFor(() => expect(bridgeMock.getObjectAccess).toHaveBeenCalledTimes(1));
     rerender(<Access workspaceId="workspace-b" />);
     expect((await screen.findByTestId("about-access-row")).textContent).toContain("b@example.com");
 
-    await act(async () => forA.resolve(answer({ rows: [share({ recipientEmail: "a@example.com" })] })));
-    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual(["Bb@example.comCan edit"]);
+    await act(async () =>
+      forA.resolve(answer({ rows: [share({ recipientEmail: "a@example.com" })] })),
+    );
+    expect(screen.getAllByTestId("about-access-row").map((row) => row.textContent)).toEqual([
+      "Bb@example.comCan edit",
+    ]);
   });
 
   it("reads from the start when the listing changed under its cursor", async () => {
@@ -211,7 +274,11 @@ describe("About Access", () => {
       .mockResolvedValueOnce(answer({ rows: [share()], nextCursor: "page-2" }))
       // Main refuses a cursor from an older listing with an unknown answer.
       .mockResolvedValueOnce({ ...UNKNOWN, visibility: "unknown" })
-      .mockResolvedValueOnce(answer({ rows: [share(), share({ grantId: "grant-new", recipientEmail: "new@example.com" })] }));
+      .mockResolvedValueOnce(
+        answer({
+          rows: [share(), share({ grantId: "grant-new", recipientEmail: "new@example.com" })],
+        }),
+      );
     render(<Access />);
     await screen.findByTestId("about-access-more");
     await userEvent.setup().click(screen.getByTestId("about-access-more"));
@@ -230,32 +297,76 @@ function link(source: string, line: number, ordinal = 0): LinkRecord {
   const title = source.split("/").at(-1)!.replace(/\.md$/, "");
   const snippet = `${title} cites [[plan]] here.`;
   const start = snippet.indexOf("[[");
-  return { source, title, ordinal, span: [start, start + 8], line, snippet, highlightStart: start, highlightEnd: start + 8 };
+  return {
+    source,
+    title,
+    ordinal,
+    span: [start, start + 8],
+    line,
+    snippet,
+    highlightStart: start,
+    highlightEnd: start + 8,
+  };
 }
 
 function linksPage(entries: LinkRecord[], overrides: Partial<LinksPage> = {}): LinksPage {
   return {
-    versionId: "main", subject: { path: "docs/plan.md", objectId: "plan" }, entries, unchecked: [],
-    complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null, ...overrides,
-  };
-}
-
-function chatLink(id: string, overrides: Partial<ChatFileMentionRecord> = {}): ChatFileMentionRecord {
-  return {
-    attachment: {
-      attachmentId: `attachment-${id}`, threadId: `thread-${id}`, messageId: `message-${id}`, targetKind: "file",
-      objectId: "plan", pathHint: "docs/plan.md", createdAtMs: CHECKED_AT,
-    },
-    message: { id: `message-${id}`, authorDisplayName: "Sam", preview: `See docs/plan.md ${id}`, createdAtMs: CHECKED_AT },
-    thread: { id: `thread-${id}`, title: `Thread ${id}`, createdAtMs: CHECKED_AT, updatedAtMs: CHECKED_AT },
+    versionId: "main",
+    subject: { path: "docs/plan.md", objectId: "plan" },
+    entries,
+    unchecked: [],
+    complete: true,
+    indexBuilding: false,
+    mountsCovered: true,
+    nextCursor: null,
     ...overrides,
   };
 }
 
-function chatPage(entries: ChatFileMentionRecord[], nextCursor: string | null = null): NonNullable<ChatFileMentionsPage> {
+function chatLink(
+  id: string,
+  overrides: Partial<ChatFileMentionRecord> = {},
+): ChatFileMentionRecord {
   return {
-    versionId: "main", subject: { objectId: "plan", path: "docs/plan.md" }, entries, unchecked: [], complete: true,
-    indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor,
+    attachment: {
+      attachmentId: `attachment-${id}`,
+      threadId: `thread-${id}`,
+      messageId: `message-${id}`,
+      targetKind: "file",
+      objectId: "plan",
+      pathHint: "docs/plan.md",
+      createdAtMs: CHECKED_AT,
+    },
+    message: {
+      id: `message-${id}`,
+      authorDisplayName: "Sam",
+      preview: `See docs/plan.md ${id}`,
+      createdAtMs: CHECKED_AT,
+    },
+    thread: {
+      id: `thread-${id}`,
+      title: `Thread ${id}`,
+      createdAtMs: CHECKED_AT,
+      updatedAtMs: CHECKED_AT,
+    },
+    ...overrides,
+  };
+}
+
+function chatPage(
+  entries: ChatFileMentionRecord[],
+  nextCursor: string | null = null,
+): NonNullable<ChatFileMentionsPage> {
+  return {
+    versionId: "main",
+    subject: { objectId: "plan", path: "docs/plan.md" },
+    entries,
+    unchecked: [],
+    complete: true,
+    indexBuilding: false,
+    mountsCovered: true,
+    sharedChannelRowsUncovered: 0,
+    nextCursor,
   };
 }
 
@@ -264,25 +375,31 @@ function chatPage(entries: ChatFileMentionRecord[], nextCursor: string | null = 
 // observed row out of view and back, so each reports again.
 function observeAllInView() {
   const live = new Set<() => void>();
-  vi.stubGlobal("IntersectionObserver", class {
-    private report: (() => void) | null = null;
-    private readonly callback: IntersectionObserverCallback;
-    constructor(callback: IntersectionObserverCallback) {
-      this.callback = callback;
-    }
-    observe(target: Element) {
-      const report = () =>
-        this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
-      this.report = report;
-      live.add(report);
-      void Promise.resolve().then(() => {
-        if (live.has(report)) report();
-      });
-    }
-    disconnect() {
-      if (this.report) live.delete(this.report);
-    }
-  });
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      private report: (() => void) | null = null;
+      private readonly callback: IntersectionObserverCallback;
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+      }
+      observe(target: Element) {
+        const report = () =>
+          this.callback(
+            [{ isIntersecting: true, target } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver,
+          );
+        this.report = report;
+        live.add(report);
+        void Promise.resolve().then(() => {
+          if (live.has(report)) report();
+        });
+      }
+      disconnect() {
+        if (this.report) live.delete(this.report);
+      }
+    },
+  );
   return async () => {
     for (let pass = 0; pass < 3; pass += 1) {
       act(() => {
@@ -301,7 +418,13 @@ async function settleAll() {
 const openLink = vi.fn<(path: string, line: number) => void>();
 const openChat = vi.fn<(mention: ChatFileMentionRecord) => void>();
 
-function Links(props: { workspaceId?: string; path?: string; revision?: number; open?: boolean; chats?: boolean }) {
+function Links(props: {
+  workspaceId?: string;
+  path?: string;
+  revision?: number;
+  open?: boolean;
+  chats?: boolean;
+}) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
     <AboutLinks
@@ -347,29 +470,54 @@ describe("About Links", () => {
     const report = notices.report.mock.calls[0]![0] as { retry: () => void };
     await act(async () => report.retry());
     await waitFor(() => expect(linkRows()).toHaveLength(2));
-    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, "one", undefined, "one"]);
+    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([
+      undefined,
+      "one",
+      undefined,
+      "one",
+    ]);
   });
 
   it("reads Show more after a read again lands, so a page never lands on rows that read replaced", async () => {
-    bridgeMock.linksIn.mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2), link("notes/removed.md", 3)], { nextCursor: "first" }));
+    bridgeMock.linksIn.mockResolvedValueOnce(
+      linksPage([link("notes/alpha.md", 2), link("notes/removed.md", 3)], { nextCursor: "first" }),
+    );
     const view = render(<Links revision={0} />);
     await waitFor(() => expect(linkRows()).toHaveLength(2));
 
     const again = deferred<LinksPage>();
-    bridgeMock.linksIn.mockReturnValueOnce(again.promise).mockResolvedValueOnce(linksPage([link("notes/gamma.md", 7)]));
+    bridgeMock.linksIn
+      .mockReturnValueOnce(again.promise)
+      .mockResolvedValueOnce(linksPage([link("notes/gamma.md", 7)]));
     view.rerender(<Links revision={1} />);
     await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2));
     await userEvent.setup().dblClick(screen.getByTestId("about-links-more"));
     expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
 
-    await act(async () => again.resolve(linksPage([link("notes/alpha.md", 2), link("notes/beta.md", 5)], { nextCursor: "after-beta" })));
+    await act(async () =>
+      again.resolve(
+        linksPage([link("notes/alpha.md", 2), link("notes/beta.md", 5)], {
+          nextCursor: "after-beta",
+        }),
+      ),
+    );
     await waitFor(() => expect(linkRows()).toHaveLength(3));
-    expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/alpha.md", "notes/beta.md", "notes/gamma.md"]);
-    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([undefined, undefined, "after-beta"]);
+    expect(linkRows().map((row) => row.dataset.path)).toEqual([
+      "notes/alpha.md",
+      "notes/beta.md",
+      "notes/gamma.md",
+    ]);
+    expect(bridgeMock.linksIn.mock.calls.map(([input]) => input.cursor)).toEqual([
+      undefined,
+      undefined,
+      "after-beta",
+    ]);
   });
 
   it("asks for one page however often Show more is pressed while that page is read", async () => {
-    bridgeMock.linksIn.mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)], { nextCursor: "after-alpha" }));
+    bridgeMock.linksIn.mockResolvedValueOnce(
+      linksPage([link("notes/alpha.md", 2)], { nextCursor: "after-alpha" }),
+    );
     render(<Links />);
     await waitFor(() => expect(linkRows()).toHaveLength(1));
     const next = deferred<LinksPage>();
@@ -402,7 +550,10 @@ describe("About Links", () => {
     expect(linkRows().map((row) => row.dataset.line)).toEqual(["2", "5"]);
     await act(async () => last.resolve(linksPage([link("notes/gamma.md", 7)])));
     expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/alpha.md", "notes/gamma.md"]);
-    expect(bridgeMock.linksIn.mock.calls.slice(2).map(([input]) => input.cursor)).toEqual([undefined, "one"]);
+    expect(bridgeMock.linksIn.mock.calls.slice(2).map(([input]) => input.cursor)).toEqual([
+      undefined,
+      "one",
+    ]);
 
     bridgeMock.linksIn
       .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 4)], { nextCursor: "one" }))
@@ -414,12 +565,23 @@ describe("About Links", () => {
 
   it("reports a failed read to the shell, shows only Try again, and clears the row once a read answers", async () => {
     const error = new Error("engine unavailable");
-    bridgeMock.linksIn.mockRejectedValueOnce(error).mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)]));
+    bridgeMock.linksIn
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce(linksPage([link("notes/alpha.md", 2)]));
     render(<Links />);
     await screen.findByTestId("about-links-failed");
     expect(notices.report).toHaveBeenCalledOnce();
-    const report = notices.report.mock.calls[0]![0] as { identity: string; message: string; cause: unknown; retry: () => void };
-    expect(report).toMatchObject({ identity: "about-links:docs/plan.md", message: expect.stringContaining("engine unavailable"), cause: error });
+    const report = notices.report.mock.calls[0]![0] as {
+      identity: string;
+      message: string;
+      cause: unknown;
+      retry: () => void;
+    };
+    expect(report).toMatchObject({
+      identity: "about-links:docs/plan.md",
+      message: expect.stringContaining("engine unavailable"),
+      cause: error,
+    });
     expect(screen.getByTestId("about-links-failed").textContent).toBe("Try again");
 
     await act(async () => report.retry());
@@ -429,14 +591,21 @@ describe("About Links", () => {
 
   it("never shows a reply for a file or workspace it left, nor asks for its next page", async () => {
     const old = deferred<LinksPage>();
-    bridgeMock.linksIn.mockReturnValueOnce(old.promise).mockResolvedValueOnce(linksPage([link("notes/current.md", 2)]));
+    bridgeMock.linksIn
+      .mockReturnValueOnce(old.promise)
+      .mockResolvedValueOnce(linksPage([link("notes/current.md", 2)]));
     const view = render(<Links workspaceId="workspace-a" path="docs/plan.md" />);
     view.rerender(<Links workspaceId="workspace-b" path="docs/other.md" />);
     await waitFor(() => expect(linkRows()).toHaveLength(1));
-    await act(async () => old.resolve(linksPage([link("notes/stale.md", 2)], { nextCursor: "stale-next" })));
+    await act(async () =>
+      old.resolve(linksPage([link("notes/stale.md", 2)], { nextCursor: "stale-next" })),
+    );
     expect(linkRows().map((row) => row.dataset.path)).toEqual(["notes/current.md"]);
     expect(bridgeMock.linksIn).toHaveBeenCalledTimes(2);
-    expect(bridgeMock.linksIn).toHaveBeenLastCalledWith({ workspaceId: "workspace-b", subject: { path: "docs/other.md" } });
+    expect(bridgeMock.linksIn).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-b",
+      subject: { path: "docs/other.md" },
+    });
   });
 
   it("reads the next page of chats that link here, shows a row repeated across pages once, and focuses the row it adds", async () => {
@@ -450,7 +619,11 @@ describe("About Links", () => {
     more.focus();
     await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.getAllByTestId("chat-file-mention")).toHaveLength(2));
-    expect(bridgeMock.chatFileMentionsPage).toHaveBeenLastCalledWith({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" }, cursor: "next" });
+    expect(bridgeMock.chatFileMentionsPage).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-a",
+      subject: { path: "docs/plan.md" },
+      cursor: "next",
+    });
     // The repeated row is a new record, the same row by key; the last page
     // took Show more away, and focus lands on the row it added.
     expect(screen.queryByTestId("about-chat-links-more")).toBeNull();
@@ -461,7 +634,10 @@ describe("About Links", () => {
   it.each(["chat-mention-access-changed"])(
     "drops chat rows and reads once from the start when their cursor's %s",
     async (reason) => {
-      const refusal = () => new Error(`Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({ code: "CONFLICT", message: reason, retry: "no" }, null)))}`);
+      const refusal = () =>
+        new Error(
+          `Error invoking remote method 'desktop:chat-file-mentions-page': ${String(ipcWireError(new DaemonRefusalError({ code: "CONFLICT", message: reason, retry: "no" }, null)))}`,
+        );
       const restarted = deferred<NonNullable<ChatFileMentionsPage>>();
       bridgeMock.linksIn.mockResolvedValue(linksPage([link("notes/alpha.md", 2)]));
       bridgeMock.chatFileMentionsPage
@@ -471,13 +647,18 @@ describe("About Links", () => {
       render(<Links chats />);
       await userEvent.setup().click(await screen.findByTestId("about-chat-links-more"));
       await waitFor(() => expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledTimes(3));
-      expect(bridgeMock.chatFileMentionsPage.mock.calls[2]![0]).toEqual({ workspaceId: "workspace-a", subject: { path: "docs/plan.md" } });
+      expect(bridgeMock.chatFileMentionsPage.mock.calls[2]![0]).toEqual({
+        workspaceId: "workspace-a",
+        subject: { path: "docs/plan.md" },
+      });
       expect(screen.queryByTestId("chat-file-mention")).toBeNull();
       expect(notices.report).not.toHaveBeenCalled();
 
       await act(async () => restarted.reject(refusal()));
       expect(notices.report).toHaveBeenCalledOnce();
-      expect(notices.report.mock.calls[0]![0]).toMatchObject({ identity: "about-chat-links:docs/plan.md" });
+      expect(notices.report.mock.calls[0]![0]).toMatchObject({
+        identity: "about-chat-links:docs/plan.md",
+      });
       expect(screen.getByTestId("about-chat-links-failed")).toBeTruthy();
       expect(linkRows()).toHaveLength(1);
       expect(bridgeMock.chatFileMentionsPage).toHaveBeenCalledTimes(3);
@@ -503,8 +684,8 @@ function page(moments: EngineMomentRecord[], more = false): ListEngineMomentsRes
     moments,
     nextCursor: more ? historyCursor(1) : null,
     latestMomentOrder: 4,
-    activeVersionId: "main", ...historyPageFields,
-
+    activeVersionId: "main",
+    ...historyPageFields,
   };
 }
 
@@ -555,20 +736,35 @@ describe("About History", () => {
   it("never shows another file's changes after a switch", async () => {
     const forFirst = deferred<ListEngineMomentsResponse>();
     bridgeMock.listEngineMoments.mockImplementation(({ objectId }) =>
-      objectId === "object-1" ? forFirst.promise : Promise.resolve(page([moment({ id: "moment-b", summary: "Second file" })])),
+      objectId === "object-1"
+        ? forFirst.promise
+        : Promise.resolve(page([moment({ id: "moment-b", summary: "Second file" })])),
     );
     const { rerender } = render(<HistorySection objectId="object-1" />);
     await waitFor(() => expect(bridgeMock.listEngineMoments).toHaveBeenCalledTimes(1));
     rerender(<HistorySection objectId="object-2" />);
     expect((await screen.findByTestId("engine-moment-open")).textContent).toContain("Second file");
     await act(async () => forFirst.resolve(page([moment({ summary: "First file" })])));
-    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId)).toEqual(["moment-b"]);
+    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId)).toEqual([
+      "moment-b",
+    ]);
   });
 
   it("folds an agent's run into one row and shows the three latest rows", async () => {
-    const agent = { kind: "agent" as const, agentId: "nova", agentRunId: "run", onBehalfOf: "device" };
+    const agent = {
+      kind: "agent" as const,
+      agentId: "nova",
+      agentRunId: "run",
+      onBehalfOf: "device",
+    };
     const run = ["run-1", "run-2", "run-3"].map((id) =>
-      moment({ id, agentAuthorName: "Nova", authors: [agent], authorPresentations: [{ group: "agent:nova", hue: null, self: false }] }));
+      moment({
+        id,
+        agentAuthorName: "Nova",
+        authors: [agent],
+        authorPresentations: [{ group: "agent:nova", hue: null, self: false }],
+      }),
+    );
     const edits = ["edit-1", "edit-2", "edit-3"].map((id) => moment({ id }));
     bridgeMock.listEngineMoments.mockResolvedValue(page([...run, ...edits]));
     render(<HistorySection />);
@@ -579,8 +775,12 @@ describe("About History", () => {
     expect(screen.getByTestId("about-history-count").textContent).toBe("6");
     // The run opens in place, its earlier edits under its newest.
     await userEvent.setup().click(fold);
-    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId))
-      .toEqual(["run-1", "run-2", "run-3", "edit-1", "edit-2"]);
+    expect(screen.getAllByTestId("engine-moment-open").map((row) => row.dataset.momentId)).toEqual([
+      "run-1",
+      "run-2",
+      "run-3",
+      "edit-1",
+      "edit-2",
+    ]);
   });
-
 });

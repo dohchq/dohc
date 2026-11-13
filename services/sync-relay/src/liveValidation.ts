@@ -4,12 +4,26 @@ import { createRequire } from "node:module";
 import type { Socket } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { OrderedLiveUpdateCutPolicy } from "@dohc/ydoc-projection/live-journal-validation";
-import type { OwnerOutboxAdmission, CapacityLiveAdmissionValidator } from "./ownerOutboxDelivery.js";
-import type { OrdinaryActivationValidation, OrdinaryActivationValidator, OrdinaryActivationWork, OrdinaryFoldResult, OrdinaryFoldWork } from "./storage/ordinaryActivationValidation.js";
+import type {
+  OwnerOutboxAdmission,
+  CapacityLiveAdmissionValidator,
+} from "./ownerOutboxDelivery.js";
+import type {
+  OrdinaryActivationValidation,
+  OrdinaryActivationValidator,
+  OrdinaryActivationWork,
+  OrdinaryFoldResult,
+  OrdinaryFoldWork,
+} from "./storage/ordinaryActivationValidation.js";
 import { checkpointPolicySha256 } from "./storage/ordinaryActivationCheckpoint.js";
 import type { LiveJournalValidation } from "./storage/types.js";
-import {WORKER_LIVE_VALIDATION_POLICY} from "@dohc/ydoc-projection/live-journal-validation";
-import { liveRestoreValidator, type LiveRestoreReply, type LiveRestoreValidator, type LiveRestoreWork } from "./liveRestoreValidation.js";
+import { WORKER_LIVE_VALIDATION_POLICY } from "@dohc/ydoc-projection/live-journal-validation";
+import {
+  liveRestoreValidator,
+  type LiveRestoreReply,
+  type LiveRestoreValidator,
+  type LiveRestoreWork,
+} from "./liveRestoreValidation.js";
 
 export type SettlementNormalizationInput = {
   document: import("@dohc/live-session-contract").LiveDocumentKey;
@@ -46,7 +60,13 @@ type CapacityRetry = {
   reason: "admission-unavailable";
   waitForCapacity(signal?: AbortSignal): Promise<void>;
 };
-type Slot = { child: ChildProcess; busy: boolean; auxiliary: boolean; heapExhausted: boolean; exited: Promise<void> };
+type Slot = {
+  child: ChildProcess;
+  busy: boolean;
+  auxiliary: boolean;
+  heapExhausted: boolean;
+  exited: Promise<void>;
+};
 /** The validator threw instead of judging the edit, so the edit is tried again. */
 export class LiveValidatorFailure extends Error {
   constructor(readonly errorClass: string) {
@@ -56,15 +76,29 @@ export class LiveValidatorFailure extends Error {
 }
 const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
 /** Names each validator failure once per document, candidate edit and error class. */
-export function createValidatorFailureLog(log: (message: string) => void = message => console.error(message)) {
+export function createValidatorFailureLog(
+  log: (message: string) => void = (message) => console.error(message),
+) {
   const logged = new Set<string>();
-  return (document: import("@dohc/live-session-contract").LiveDocumentKey, candidate: Uint8Array, errorClass: string) => {
-    const key = JSON.stringify([document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId,
-      createHash("sha256").update(candidate).digest("hex"), errorClass]);
+  return (
+    document: import("@dohc/live-session-contract").LiveDocumentKey,
+    candidate: Uint8Array,
+    errorClass: string,
+  ) => {
+    const key = JSON.stringify([
+      document.workspaceId,
+      document.mainVersionId,
+      document.objectId,
+      document.lineageClaimId,
+      createHash("sha256").update(candidate).digest("hex"),
+      errorClass,
+    ]);
     if (logged.has(key)) return;
     if (logged.size >= MAX_LOGGED_VALIDATOR_FAILURES) logged.delete(logged.values().next().value!);
     logged.add(key);
-    log(`[sync-relay] live validation failed with ${errorClass} for document ${document.objectId}; the edit waits and is tried again.`);
+    log(
+      `[sync-relay] live validation failed with ${errorClass} for document ${document.objectId}; the edit waits and is tried again.`,
+    );
   };
 }
 /**
@@ -72,19 +106,24 @@ export function createValidatorFailureLog(log: (message: string) => void = messa
  * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
  * Activation and restore together hold at most one slot, so live edits always keep the other.
  */
-export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFailure = createValidatorFailureLog()) {
+export function createLiveValidationExecutor(
+  heapLimitMb = 512,
+  logValidatorFailure = createValidatorFailureLog(),
+) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
   let closed = false;
-  const hasCapacity = (auxiliary = false) => !closed && (!auxiliary || ![...slots].some(slot => slot.auxiliary)) && (slots.size < 2 || [...slots].some((slot) => !slot.busy));
+  const hasCapacity = (auxiliary = false) =>
+    !closed &&
+    (!auxiliary || ![...slots].some((slot) => slot.auxiliary)) &&
+    (slots.size < 2 || [...slots].some((slot) => !slot.busy));
   const notify = () => {
     for (const wake of [...waiters]) wake();
   };
   function waitForCapacity(signal?: AbortSignal, auxiliary = false): Promise<void> {
     signal?.throwIfAborted();
     if (closed) return Promise.reject(new Error("Live validation closed."));
-    if (hasCapacity(auxiliary))
-      return Promise.resolve();
+    if (hasCapacity(auxiliary)) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
       const dispose = () => {
         waiters.delete(wake);
@@ -128,10 +167,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       {
         execArgv: [
           ...(source
-            ? [
-                "--import",
-                pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href,
-              ]
+            ? ["--import", pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href]
             : []),
           `--max-old-space-size=${heapLimitMb}`,
           // A worker thread's default 4 MiB stack, less Node's 192 KiB guard.
@@ -166,8 +202,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     child.stderr?.on("data", (text: string) => {
       process.stderr.write(text);
       const seen = carry + text;
-      if (/Reached heap limit|JavaScript heap out of memory/.test(seen))
-        slot.heapExhausted = true;
+      if (/Reached heap limit|JavaScript heap out of memory/.test(seen)) slot.heapExhausted = true;
       carry = seen.slice(-32);
     });
     hold(slot, false);
@@ -181,9 +216,10 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     signal?.throwIfAborted();
     if (closed) throw new Error("Live validation closed.");
     const auxiliary = work.kind === "activation" || work.kind === "restore";
-    const slot = auxiliary && [...slots].some((slot) => slot.auxiliary) ? undefined :
-      [...slots].find((slot) => !slot.busy) ??
-      (slots.size < 2 ? spawn() : undefined);
+    const slot =
+      auxiliary && [...slots].some((slot) => slot.auxiliary)
+        ? undefined
+        : ([...slots].find((slot) => !slot.busy) ?? (slots.size < 2 ? spawn() : undefined));
     if (!slot)
       return {
         kind: "retry",
@@ -224,8 +260,13 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         slot.auxiliary = false;
         // A result that arrives after `close` began must not release its hold.
         if (!closed) hold(slot, false);
-        const failed = value as {kind?: unknown; errorClass?: unknown};
-        if (failed.kind === "failed") reject(new LiveValidatorFailure(typeof failed.errorClass === "string" ? failed.errorClass : "unknown"));
+        const failed = value as { kind?: unknown; errorClass?: unknown };
+        if (failed.kind === "failed")
+          reject(
+            new LiveValidatorFailure(
+              typeof failed.errorClass === "string" ? failed.errorClass : "unknown",
+            ),
+          );
         else resolve(value as Result);
         notify();
       };
@@ -245,9 +286,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
       }
     });
   }
-  function validator(
-    policy: OrderedLiveUpdateCutPolicy,
-  ): CapacityLiveAdmissionValidator {
+  function validator(policy: OrderedLiveUpdateCutPolicy): CapacityLiveAdmissionValidator {
     const ownedPolicy = Object.freeze({ ...policy });
     const validate: OwnerOutboxAdmission["validate"] = (input, signal) =>
       submit<LiveJournalValidation>(
@@ -255,7 +294,8 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
         { kind: "refused", reason: "capacity-refused", source: "final" },
         signal,
       ).catch((error: unknown) => {
-        if (error instanceof LiveValidatorFailure) logValidatorFailure(input.document, input.candidate, error.errorClass);
+        if (error instanceof LiveValidatorFailure)
+          logValidatorFailure(input.document, input.candidate, error.errorClass);
         throw error;
       });
     return Object.assign(validate, { waitForCapacity, hasCapacity });
@@ -266,13 +306,19 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
    */
   function ordinaryActivation(policy: OrderedLiveUpdateCutPolicy): OrdinaryActivationValidator {
     const ownedPolicy = Object.freeze({ ...policy });
-    return Object.assign((input: OrdinaryActivationWork | OrdinaryFoldWork, signal?: AbortSignal) =>
-      submit<OrdinaryActivationValidation | OrdinaryFoldResult>(
-        { kind: "activation", policy: ownedPolicy, input },
-        { kind: "capacity-refused" },
-        signal,
-      ), { hasCapacity: () => hasCapacity(true), waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, true),
-        policySha256: checkpointPolicySha256(ownedPolicy) });
+    return Object.assign(
+      (input: OrdinaryActivationWork | OrdinaryFoldWork, signal?: AbortSignal) =>
+        submit<OrdinaryActivationValidation | OrdinaryFoldResult>(
+          { kind: "activation", policy: ownedPolicy, input },
+          { kind: "capacity-refused" },
+          signal,
+        ),
+      {
+        hasCapacity: () => hasCapacity(true),
+        waitForCapacity: (signal?: AbortSignal) => waitForCapacity(signal, true),
+        policySha256: checkpointPolicySha256(ownedPolicy),
+      },
+    );
   }
   /** Preparation refuses a busy pool; admission waits with its captured reads and cancellation signal. */
   function restore(policy: OrderedLiveUpdateCutPolicy): LiveRestoreValidator {
@@ -301,10 +347,7 @@ export function createLiveValidationExecutor(heapLimitMb = 512, logValidatorFail
     validator,
     ordinaryActivation,
     restore,
-    async normalizeSettlement(
-      input: SettlementNormalizationInput,
-      signal?: AbortSignal,
-    ) {
+    async normalizeSettlement(input: SettlementNormalizationInput, signal?: AbortSignal) {
       return submit<SettlementNormalizationResult>(
         { kind: "settlement", policy: WORKER_LIVE_VALIDATION_POLICY, input },
         { kind: "refused", reason: "capacity-refused", source: "registration-input" },

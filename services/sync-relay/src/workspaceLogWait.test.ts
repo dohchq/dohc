@@ -124,7 +124,9 @@ describe("held device log reads", () => {
   it("releases the parked read when the device goes away", async () => {
     const { h, activity } = await ownedLog();
     const device = new AbortController();
-    const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000", { signal: device.signal }));
+    const held = h(
+      request("owner", "/sync/workspace/log?since=1&hold=30000", { signal: device.signal }),
+    );
     await vi.waitFor(() => expect(activity.stats().waiters).toBe(1));
     device.abort();
     await held.catch(() => undefined);
@@ -152,7 +154,10 @@ describe("held device log reads", () => {
       shouldPark: () => true,
     });
     expect(() =>
-      activity.wait(linkLogWaitGroup("workspace"), "link:other", { holdMs: 30_000, shouldPark: () => true }),
+      activity.wait(linkLogWaitGroup("workspace"), "link:other", {
+        holdMs: 30_000,
+        shouldPark: () => true,
+      }),
     ).toThrow(DiscussionActivityCapacityError);
 
     const held = h(request("owner", "/sync/workspace/log?since=1&hold=30000"));

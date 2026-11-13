@@ -6,7 +6,7 @@ export function guardRelayResponses(
   storage: Pick<SyncRelayStorage, "captureStanding" | "unavailable">,
   handler: (request: Request) => Promise<Response>,
 ): (request: Request) => Promise<Response> {
-  return async request => {
+  return async (request) => {
     let response: Response | undefined;
     const controller = new AbortController();
     const signal = controller.signal;
@@ -24,10 +24,16 @@ export function guardRelayResponses(
       if (request.signal.aborted) requestAborted();
       if (unavailable.aborted) storageUnavailable();
       const inner = new Request(request, { signal });
-      try { response = await handler(inner); }
-      finally { carryRequestMark(inner, request); }
+      try {
+        response = await handler(inner);
+      } finally {
+        carryRequestMark(inner, request);
+      }
       check();
-      if (!response.body) { releaseSignals(); return response; }
+      if (!response.body) {
+        releaseSignals();
+        return response;
+      }
       const reader = response.body.getReader();
       let stopped = false;
       const stop = () => {
@@ -43,35 +49,52 @@ export function guardRelayResponses(
         stop();
         sink.error(new Error("Relay response is unavailable."));
       };
-      const body = new ReadableStream<Uint8Array>({
-        start(value) {
-          sink = value;
-          signal.addEventListener("abort", abort, { once: true });
-          if (signal.aborted) abort();
-        },
-        async pull(output) {
-          if (stopped) return;
-          try {
-            check();
-            const next = await reader.read();
+      const body = new ReadableStream<Uint8Array>(
+        {
+          start(value) {
+            sink = value;
+            signal.addEventListener("abort", abort, { once: true });
+            if (signal.aborted) abort();
+          },
+          async pull(output) {
             if (stopped) return;
-            check();
-            if (next.done) {
-              stopped = true;
-              releaseSignals();
-              signal.removeEventListener("abort", abort);
-              output.close();
-            } else output.enqueue(next.value);
-          } catch (error) { if (!stopped) { stop(); output.error(error); } }
+            try {
+              check();
+              const next = await reader.read();
+              if (stopped) return;
+              check();
+              if (next.done) {
+                stopped = true;
+                releaseSignals();
+                signal.removeEventListener("abort", abort);
+                output.close();
+              } else output.enqueue(next.value);
+            } catch (error) {
+              if (!stopped) {
+                stop();
+                output.error(error);
+              }
+            }
+          },
+          cancel() {
+            stop();
+          },
         },
-        cancel() { stop(); },
-      }, { highWaterMark: 0 });
-      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+        { highWaterMark: 0 },
+      );
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
     } catch (error) {
       releaseSignals();
       void response?.body?.cancel().catch(() => undefined);
       if (storage.unavailable.aborted) {
-        return Response.json({ ok: false, error: "service unavailable" }, { status: 503, headers: { "cache-control": "no-store" } });
+        return Response.json(
+          { ok: false, error: "service unavailable" },
+          { status: 503, headers: { "cache-control": "no-store" } },
+        );
       }
       throw error;
     }

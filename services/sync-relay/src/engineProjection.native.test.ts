@@ -18,19 +18,14 @@ describe.skipIf(engine.missing)("native store-free projection wire", () => {
     for (const file of ["yjs.json", "yrs.json"]) {
       const vectors = JSON.parse(
         readFileSync(
-          new URL(
-            `../../../crates/dohc-engine-sync/tests/settle-parity/${file}`,
-            import.meta.url,
-          ),
+          new URL(`../../../crates/dohc-engine-sync/tests/settle-parity/${file}`, import.meta.url),
           "utf8",
         ),
       ) as { name: string; updates: string[]; markdown: string }[];
       for (const v of vectors) {
         const result = await projection!.project({
           contentKind: "richdoc",
-          updates: v.updates.map(
-            (u) => new Uint8Array(Buffer.from(u, "base64")),
-          ),
+          updates: v.updates.map((u) => new Uint8Array(Buffer.from(u, "base64"))),
         });
         expect(result, `${v.name}: ${JSON.stringify(result)}`).toMatchObject({
           kind: "projected",
@@ -61,9 +56,7 @@ describe.skipIf(engine.missing)("native store-free projection wire", () => {
         updates: [new Uint8Array(v.bytes)],
       });
       expect(result, `${v.name}: ${JSON.stringify(result)}`).toMatchObject(
-        v.projectionRefused
-          ? { kind: "refused", reason: "invalid" }
-          : { kind: "projected" },
+        v.projectionRefused ? { kind: "refused", reason: "invalid" } : { kind: "projected" },
       );
       if (result.kind === "projected")
         expect(result.content.toString("utf8"), v.name).toBe(v.markdown);
@@ -98,9 +91,7 @@ describe.skipIf(engine.missing)("native store-free projection wire", () => {
       stderr += String(d);
     });
     child.stdout.resume();
-    const code = await new Promise<number | null>((resolve) =>
-      child.once("close", resolve),
-    );
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
     expect(code).toBe(1);
     expect(stderr).toContain("projection mode takes no configuration");
   });

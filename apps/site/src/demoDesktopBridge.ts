@@ -41,11 +41,9 @@ const activityListeners = new Set<(event: WorkspaceActivityEvent) => void>();
 const assetUrls = new Map<string, string>();
 const ASSET_DB_NAME = "dohc-marketing-demo";
 const ASSET_STORE_NAME = "workspace-assets";
-export const DEMO_ASSET_PERSISTENCE_EVENT =
-  "dohc-demo-asset-persistence-unavailable";
+export const DEMO_ASSET_PERSISTENCE_EVENT = "dohc-demo-asset-persistence-unavailable";
 const now = Date.now();
-let assetPersistenceAvailable =
-  typeof window !== "undefined" && "indexedDB" in window;
+let assetPersistenceAvailable = typeof window !== "undefined" && "indexedDB" in window;
 
 type StoredDemoAsset = {
   path: string;
@@ -95,9 +93,9 @@ async function readStoredAssets(): Promise<StoredDemoAsset[]> {
   const database = await openAssetDatabase();
   try {
     const transaction = database.transaction(ASSET_STORE_NAME, "readonly");
-    const request = transaction
-      .objectStore(ASSET_STORE_NAME)
-      .getAll() as IDBRequest<StoredDemoAsset[]>;
+    const request = transaction.objectStore(ASSET_STORE_NAME).getAll() as IDBRequest<
+      StoredDemoAsset[]
+    >;
     const assets = await new Promise<StoredDemoAsset[]>((resolve, reject) => {
       request.addEventListener("success", () => resolve(request.result));
       request.addEventListener("error", () => reject(request.error));
@@ -109,10 +107,7 @@ async function readStoredAssets(): Promise<StoredDemoAsset[]> {
   }
 }
 
-async function rewriteStoredAssets(
-  prefix: string,
-  nextPrefix: string | null,
-): Promise<void> {
+async function rewriteStoredAssets(prefix: string, nextPrefix: string | null): Promise<void> {
   const affected = (await readStoredAssets()).filter((asset) =>
     isPathAtOrBelow(asset.path, prefix),
   );
@@ -147,9 +142,7 @@ function markAssetPersistenceUnavailable(error: unknown): void {
   window.dispatchEvent(new Event(DEMO_ASSET_PERSISTENCE_EVENT));
 }
 
-async function persistAssetMutation(
-  mutation: () => Promise<void>,
-): Promise<void> {
+async function persistAssetMutation(mutation: () => Promise<void>): Promise<void> {
   if (!assetPersistenceAvailable) return;
   try {
     await mutation();
@@ -159,9 +152,7 @@ async function persistAssetMutation(
 }
 
 function rewriteAssetUrls(prefix: string, nextPrefix: string | null): void {
-  const affected = [...assetUrls.entries()].filter(([path]) =>
-    isPathAtOrBelow(path, prefix),
-  );
+  const affected = [...assetUrls.entries()].filter(([path]) => isPathAtOrBelow(path, prefix));
   for (const [path] of affected) assetUrls.delete(path);
   for (const [path, url] of affected) {
     if (nextPrefix === null) {
@@ -205,33 +196,31 @@ function mediaTypeForPath(path: string): string {
 }
 
 async function pickBrowserImages() {
-  return new Promise<Array<{ name: string; mediaType: string; bytes: Uint8Array }>>(
-    (resolve) => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "image/*";
-      input.multiple = true;
-      input.addEventListener(
-        "change",
-        async () => {
-          const files = Array.from(input.files ?? [])
-            .slice(0, 20)
-            .filter((file) => file.size <= 20 * 1024 * 1024);
-          const images = await Promise.all(
-            files.map(async (file) => ({
-              name: file.name,
-              mediaType: file.type || mediaTypeForPath(file.name),
-              bytes: new Uint8Array(await file.arrayBuffer()),
-            })),
-          );
-          resolve(images);
-        },
-        { once: true },
-      );
-      input.addEventListener("cancel", () => resolve([]), { once: true });
-      input.click();
-    },
-  );
+  return new Promise<Array<{ name: string; mediaType: string; bytes: Uint8Array }>>((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.multiple = true;
+    input.addEventListener(
+      "change",
+      async () => {
+        const files = Array.from(input.files ?? [])
+          .slice(0, 20)
+          .filter((file) => file.size <= 20 * 1024 * 1024);
+        const images = await Promise.all(
+          files.map(async (file) => ({
+            name: file.name,
+            mediaType: file.type || mediaTypeForPath(file.name),
+            bytes: new Uint8Array(await file.arrayBuffer()),
+          })),
+        );
+        resolve(images);
+      },
+      { once: true },
+    );
+    input.addEventListener("cancel", () => resolve([]), { once: true });
+    input.click();
+  });
 }
 
 export function resolveDemoWorkspaceAssetUrl(workspacePath: string): string | null {
@@ -388,7 +377,8 @@ function thread(channelId = "channel-general", body = "What needs attention next
     lastReadSequence: 1,
     unreadCount: channelId === "channel-agent" ? 1 : 0,
     openDecisionCount: 0,
-    openingMessage: { presentation: { group: "demo-you", hue: null, self: true },
+    openingMessage: {
+      presentation: { group: "demo-you", hue: null, self: true },
       id: `message-${channelId}-1`,
       authorKind: "human" as const,
       authorDisplayName: "You",
@@ -408,7 +398,8 @@ function demoThreadBody(channelId: string): string {
 }
 
 function message(threadId: string, id: string, body: string, agent = false) {
-  return { presentation: { group: agent ? "demo-agent" : "demo-you", hue: null, self: true },
+  return {
+    presentation: { group: agent ? "demo-agent" : "demo-you", hue: null, self: true },
     id,
     threadId,
     authorKind: agent ? ("agent" as const) : ("human" as const),
@@ -426,8 +417,14 @@ export function answerDemoJoinedLane(
 
 const demoBridge = {
   // The desktop renderer chooses each shortcut's modifier from the platform.
-  platform: /Mac|iP(hone|[oa]d)/.test(navigator.platform) ? "darwin" : /Win/.test(navigator.platform) ? "win32" : "linux",
-  onUpdateState() { return () => undefined; },
+  platform: /Mac|iP(hone|[oa]d)/.test(navigator.platform)
+    ? "darwin"
+    : /Win/.test(navigator.platform)
+      ? "win32"
+      : "linux",
+  onUpdateState() {
+    return () => undefined;
+  },
   async getUpdateState() {
     return { status: "idle" as const, message: "Updates are unavailable in the demo." };
   },
@@ -435,9 +432,7 @@ const demoBridge = {
     searchListeners.add(listener);
     return () => searchListeners.delete(listener);
   },
-  async searchWorkspace(
-    payload: Parameters<DohcDesktopBridge["searchWorkspace"]>[0],
-  ) {
+  async searchWorkspace(payload: Parameters<DohcDesktopBridge["searchWorkspace"]>[0]) {
     const batch: SearchResultsEvent = {
       searchId: payload.searchId,
       entries: searchDemoDocuments(context.documents, payload),
@@ -450,11 +445,25 @@ const demoBridge = {
   async cancelWorkspaceSearch() {},
   async linksEdges() {
     // Explicit sample data for the demo, independent of the engine index.
-    return { versionId: "demo", files: context.documents.slice(0, 50).map(document => ({
-      objectId: document.path, path: document.path, title: document.title,
-    })), entries: context.documents.slice(1, 50).map((document, ordinal) => ({
-      source: context.documents[0]?.path ?? document.path, target: document.path, kind: "wikilink" as const, ordinal,
-    })), unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, nextCursor: null };
+    return {
+      versionId: "demo",
+      files: context.documents.slice(0, 50).map((document) => ({
+        objectId: document.path,
+        path: document.path,
+        title: document.title,
+      })),
+      entries: context.documents.slice(1, 50).map((document, ordinal) => ({
+        source: context.documents[0]?.path ?? document.path,
+        target: document.path,
+        kind: "wikilink" as const,
+        ordinal,
+      })),
+      unchecked: [],
+      complete: true,
+      indexBuilding: false,
+      mountsCovered: true,
+      nextCursor: null,
+    };
   },
   async createWorkspaceFile(payload: { relativePath: string }) {
     const filePaths = context.documents.map((document) => document.path);
@@ -462,10 +471,7 @@ const demoBridge = {
     if (fileAncestor) {
       throw new Error(`A file cannot contain ${payload.relativePath}: ${fileAncestor}`);
     }
-    const workspacePaths = collectWorkspacePaths([
-      ...filePaths,
-      ...context.folders,
-    ]);
+    const workspacePaths = collectWorkspacePaths([...filePaths, ...context.folders]);
     if (workspacePaths.includes(payload.relativePath)) {
       throw new Error(`A document already exists at ${payload.relativePath}`);
     }
@@ -484,10 +490,7 @@ const demoBridge = {
     if (fileAncestor) {
       throw new Error(`A file cannot contain ${payload.relativePath}: ${fileAncestor}`);
     }
-    const workspacePaths = collectWorkspacePaths([
-      ...filePaths,
-      ...context.folders,
-    ]);
+    const workspacePaths = collectWorkspacePaths([...filePaths, ...context.folders]);
     if (workspacePaths.includes(payload.relativePath)) {
       throw new Error(`A folder already exists at ${payload.relativePath}`);
     }
@@ -508,14 +511,8 @@ const demoBridge = {
       ...context.folders,
       ...assetUrls.keys(),
     ]);
-    planDemoPathMove(
-      workspacePaths,
-      payload.fromPath,
-      payload.toPath,
-    );
-    await persistAssetMutation(() =>
-      rewriteStoredAssets(payload.fromPath, payload.toPath),
-    );
+    planDemoPathMove(workspacePaths, payload.fromPath, payload.toPath);
+    await persistAssetMutation(() => rewriteStoredAssets(payload.fromPath, payload.toPath));
     context.movePath(payload.fromPath, payload.toPath);
     context.documents = context.documents.map((document) => ({
       ...document,
@@ -536,9 +533,7 @@ const demoBridge = {
     if (!workspacePaths.some((path) => isPathAtOrBelow(path, payload.relativePath))) {
       throw new Error(`No workspace entry exists at ${payload.relativePath}`);
     }
-    await persistAssetMutation(() =>
-      rewriteStoredAssets(payload.relativePath, null),
-    );
+    await persistAssetMutation(() => rewriteStoredAssets(payload.relativePath, null));
     context.deletePath(payload.relativePath);
     context.documents = context.documents.filter(
       (document) => !isPathAtOrBelow(document.path, payload.relativePath),
@@ -692,9 +687,7 @@ const demoBridge = {
   async sendChatMessage(payload: { threadId: string; body: string }) {
     return { message: message(payload.threadId, `message-${Date.now()}`, payload.body) };
   },
-  async setChatReaction(
-    payload: Parameters<DohcDesktopBridge["setChatReaction"]>[0],
-  ) {
+  async setChatReaction(payload: Parameters<DohcDesktopBridge["setChatReaction"]>[0]) {
     return {
       viewerAuthorId: "demo-user",
       reaction: {
@@ -730,14 +723,18 @@ const demoBridge = {
   },
   async leaveSharedChannel() {},
   async revokeRelayShare() {
-    return {undo: {undoId: "demo-undo", expiresAtMs: Date.now() + 600_000}};
+    return { undo: { undoId: "demo-undo", expiresAtMs: Date.now() + 600_000 } };
   },
   async startDm() {
     throw new Error("Direct messages are unavailable in the demo");
   },
   // A browser saves an export as a download. A PDF opens the browser's print
   // dialog, where the person saves it as a PDF.
-  async exportDocumentFile(payload: { suggestedName: string; content: string; kind: "markdown" | "html" | "pdf" }) {
+  async exportDocumentFile(payload: {
+    suggestedName: string;
+    content: string;
+    kind: "markdown" | "html" | "pdf";
+  }) {
     if (payload.kind === "pdf") {
       const frame = document.createElement("iframe");
       frame.sandbox.add("allow-same-origin", "allow-modals");

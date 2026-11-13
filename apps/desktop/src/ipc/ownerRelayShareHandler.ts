@@ -1,7 +1,8 @@
 import { credentialScopedOperation } from "../workspaces/credentialScopedOperation";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 
-export const OWNER_RELAY_SHARE_INACTIVE_MESSAGE = "Sharing stopped because this window changed workspaces.";
+export const OWNER_RELAY_SHARE_INACTIVE_MESSAGE =
+  "Sharing stopped because this window changed workspaces.";
 
 export function assertOriginalWorkspace(workspace: { shareView?: unknown }): void {
   if (shareViewIsPresent(workspace.shareView)) {
@@ -10,7 +11,10 @@ export function assertOriginalWorkspace(workspace: { shareView?: unknown }): voi
 }
 
 type OwnerRelayShareDependencies<Workspace, Credentials> = {
-  remoteForWorkspace(workspace: Workspace, options?: { allowPaused: boolean }): Promise<{
+  remoteForWorkspace(
+    workspace: Workspace,
+    options?: { allowPaused: boolean },
+  ): Promise<{
     credentials: Credentials;
     credentialGeneration: number;
   }>;
@@ -34,8 +38,10 @@ export function createOwnerRelayShareOperation<
   ): Promise<Result> {
     operation.assertCurrent();
     assertWorkspace?.(operation.workspace);
-    const { credentials, credentialGeneration } =
-      await dependencies.remoteForWorkspace(operation.workspace, options);
+    const { credentials, credentialGeneration } = await dependencies.remoteForWorkspace(
+      operation.workspace,
+      options,
+    );
     const session = credentialScopedOperation({
       assertCurrent: () => operation.assertCurrent(),
       capturedGeneration: credentialGeneration,
@@ -51,14 +57,16 @@ export function createOwnerRelayShareHandler<
   Workspace,
   Operation extends { workspace: Workspace; assertCurrent(): void },
   Credentials,
->(dependencies: OwnerRelayShareDependencies<Workspace, Credentials> & {
-  withWorkspaceOperation<Result>(
-    sender: Sender,
-    workspaceId: string,
-    inactiveMessage: string,
-    work: (operation: Operation) => Promise<Result>,
-  ): Promise<Result>;
-}) {
+>(
+  dependencies: OwnerRelayShareDependencies<Workspace, Credentials> & {
+    withWorkspaceOperation<Result>(
+      sender: Sender,
+      workspaceId: string,
+      inactiveMessage: string,
+      work: (operation: Operation) => Promise<Result>,
+    ): Promise<Result>;
+  },
+) {
   const read = createOwnerRelayShareOperation<Workspace, Operation, Credentials>(dependencies);
   return function ownerRelayShareHandler<Result>(
     sender: Sender,
@@ -75,7 +83,7 @@ export function createOwnerRelayShareHandler<
       sender,
       workspaceId,
       OWNER_RELAY_SHARE_INACTIVE_MESSAGE,
-      operation => read(operation, work, assertWorkspace, options),
+      (operation) => read(operation, work, assertWorkspace, options),
     );
   };
 }

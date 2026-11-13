@@ -89,7 +89,17 @@ const iconButtonClass =
 
 function Chevron({ next }: { next: boolean }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
       <path d={next ? "m9 18 6-6-6-6" : "m15 18-6-6 6-6"} />
     </svg>
   );
@@ -103,12 +113,20 @@ function day(value: string): Date | null {
 
 /** The record day closest to the month grid around `month`, the later one on a tie, or null when the grid shows one. */
 function nearestDay(month: Date, days: readonly Date[]): Date | null {
-  const first = startOfWeek(startOfMonth(month)), last = endOfWeek(endOfMonth(month));
-  let nearest: Date | null = null, distance = Infinity;
+  const first = startOfWeek(startOfMonth(month)),
+    last = endOfWeek(endOfMonth(month));
+  let nearest: Date | null = null,
+    distance = Infinity;
   for (const candidate of days) {
     if (candidate >= first && candidate <= last) return null;
-    const away = candidate < first ? differenceInCalendarDays(first, candidate) : differenceInCalendarDays(candidate, last);
-    if (away < distance || (away === distance && nearest !== null && candidate > nearest)) { nearest = candidate; distance = away; }
+    const away =
+      candidate < first
+        ? differenceInCalendarDays(first, candidate)
+        : differenceInCalendarDays(candidate, last);
+    if (away < distance || (away === distance && nearest !== null && candidate > nearest)) {
+      nearest = candidate;
+      distance = away;
+    }
   }
   return nearest;
 }
@@ -208,7 +226,11 @@ export function CalendarView({
   );
 
   const nearest = useMemo(
-    () => nearestDay(shown, [...events.map((event) => event.start), ...(nearbyDates ?? []).flatMap((value) => day(value) ?? [])]),
+    () =>
+      nearestDay(shown, [
+        ...events.map((event) => event.start),
+        ...(nearbyDates ?? []).flatMap((value) => day(value) ?? []),
+      ]),
     [shown, events, nearbyDates],
   );
 
@@ -222,10 +244,22 @@ export function CalendarView({
         <button type="button" className={textButtonClass} onClick={() => navigate(new Date())}>
           Today
         </button>
-        <button type="button" aria-label="Previous month" title="Previous month" className={iconButtonClass} onClick={() => navigate(addMonths(shown, -1))}>
+        <button
+          type="button"
+          aria-label="Previous month"
+          title="Previous month"
+          className={iconButtonClass}
+          onClick={() => navigate(addMonths(shown, -1))}
+        >
           <Chevron next={false} />
         </button>
-        <button type="button" aria-label="Next month" title="Next month" className={iconButtonClass} onClick={() => navigate(addMonths(shown, 1))}>
+        <button
+          type="button"
+          aria-label="Next month"
+          title="Next month"
+          className={iconButtonClass}
+          onClick={() => navigate(addMonths(shown, 1))}
+        >
           <Chevron next />
         </button>
         <span className="text-sm font-medium text-ink">{format(shown, "MMMM yyyy")}</span>
@@ -248,11 +282,13 @@ export function CalendarView({
           components={components}
           draggableAccessor={() => !!onCellChange}
           onEventDrop={handleEventDrop}
-          onSelectEvent={
-            onOpenRecord ? (event) => onOpenRecord(event.record) : undefined
-          }
+          onSelectEvent={onOpenRecord ? (event) => onOpenRecord(event.record) : undefined}
           // The open record's entry wears a line around it, clear of the entry's own fill.
-          eventPropGetter={(event) => (event.record.id === openRecordId ? { className: "ring-2 ring-ink ring-offset-1 ring-offset-bg" } : {})}
+          eventPropGetter={(event) =>
+            event.record.id === openRecordId
+              ? { className: "ring-2 ring-ink ring-offset-1 ring-offset-bg" }
+              : {}
+          }
         />
       </div>
     </div>

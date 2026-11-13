@@ -106,7 +106,10 @@ export function ActivityBar(props: {
           Sharing and Settings buttons off the rail. It spans the rail and pads
           its ends, so the clip keeps the active bar and the focus ring, and
           never scrolls sideways. */}
-      <div inert={props.viewsDisabled || undefined} className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1">
+      <div
+        inert={props.viewsDisabled || undefined}
+        className="flex min-h-0 w-full flex-col items-center gap-1 overflow-y-auto overflow-x-hidden py-1"
+      >
         {props.views.map((view) => (
           <RailButton
             key={view}

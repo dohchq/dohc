@@ -16,7 +16,10 @@ export const MAX_SUBMIT_ID_CHARS = 128;
  * One file as its writer names it: its path, the content it replaces (null
  * to create it), and its new UTF-8 content as text or as base64.
  */
-export type CollectionFileWrite = { path: string; basedOnBlobSha256: string | null } & ({ text: string } | { base64: string });
+export type CollectionFileWrite = { path: string; basedOnBlobSha256: string | null } & (
+  | { text: string }
+  | { base64: string }
+);
 
 /**
  * What became of a write. `accepted` means the relay recorded it in the
@@ -34,18 +37,31 @@ export type CollectionWriteOutcome =
 /** The bytes of each file's content, which the write limits count. */
 export function collectionWriteContentBytes(files: readonly CollectionFileWrite[]): number {
   const encoder = new TextEncoder();
-  return files.reduce((total, file) => total + ("text" in file
-    ? encoder.encode(file.text).byteLength
-    : file.base64.length / 4 * 3 - (file.base64.endsWith("==") ? 2 : file.base64.endsWith("=") ? 1 : 0)), 0);
+  return files.reduce(
+    (total, file) =>
+      total +
+      ("text" in file
+        ? encoder.encode(file.text).byteLength
+        : (file.base64.length / 4) * 3 -
+          (file.base64.endsWith("==") ? 2 : file.base64.endsWith("=") ? 1 : 0)),
+    0,
+  );
 }
 
 /** The request body: the relay's link envelope, with each file's text as base64. */
-export function collectionWriteBody(submitId: string, files: readonly CollectionFileWrite[], recordedAtMs: number): string {
+export function collectionWriteBody(
+  submitId: string,
+  files: readonly CollectionFileWrite[],
+  recordedAtMs: number,
+): string {
   return JSON.stringify({ submitId, changes: collectionWriteChanges(files, recordedAtMs) });
 }
 
 /** The envelope's changes, which a personal agent's write sends with its workspace. */
-export function collectionWriteChanges(files: readonly CollectionFileWrite[], recordedAtMs: number): Record<string, unknown>[] {
+export function collectionWriteChanges(
+  files: readonly CollectionFileWrite[],
+  recordedAtMs: number,
+): Record<string, unknown>[] {
   const encoder = new TextEncoder();
   return files.map((file) => ({
     basedOnPath: file.basedOnBlobSha256 === null ? null : file.path,
@@ -73,18 +89,47 @@ function exactKeys(value: Record<string, unknown>, keys: string): boolean {
 }
 
 /** The outcome share-web answered, or `unknown` for anything it did not. */
-export function parseCollectionWriteOutcome(status: number, value: unknown): CollectionWriteOutcome {
-  const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  if (status === 200 && body && exactKeys(body, "ok,outcome,submitId") && body.ok === true &&
-      body.outcome === "accepted" && typeof body.submitId === "string") {
+export function parseCollectionWriteOutcome(
+  status: number,
+  value: unknown,
+): CollectionWriteOutcome {
+  const body =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  if (
+    status === 200 &&
+    body &&
+    exactKeys(body, "ok,outcome,submitId") &&
+    body.ok === true &&
+    body.outcome === "accepted" &&
+    typeof body.submitId === "string"
+  ) {
     return { ok: true, outcome: "accepted", submitId: body.submitId };
   }
-  if (status === 409 && body && exactKeys(body, "currentBlobSha256,ok,outcome,path") && body.outcome === "stale" &&
-      typeof body.path === "string" && (body.currentBlobSha256 === null ||
-        (typeof body.currentBlobSha256 === "string" && SHA256.test(body.currentBlobSha256)))) {
-    return { ok: false, outcome: "stale", path: body.path, currentBlobSha256: body.currentBlobSha256 };
+  if (
+    status === 409 &&
+    body &&
+    exactKeys(body, "currentBlobSha256,ok,outcome,path") &&
+    body.outcome === "stale" &&
+    typeof body.path === "string" &&
+    (body.currentBlobSha256 === null ||
+      (typeof body.currentBlobSha256 === "string" && SHA256.test(body.currentBlobSha256)))
+  ) {
+    return {
+      ok: false,
+      outcome: "stale",
+      path: body.path,
+      currentBlobSha256: body.currentBlobSha256,
+    };
   }
-  if (status === 403 && body && exactKeys(body, "ok,outcome,reason") && body.outcome === "refused" && typeof body.reason === "string") {
+  if (
+    status === 403 &&
+    body &&
+    exactKeys(body, "ok,outcome,reason") &&
+    body.outcome === "refused" &&
+    typeof body.reason === "string"
+  ) {
     return { ok: false, outcome: "refused", reason: body.reason };
   }
   if (status === 404) return { ok: false, outcome: "unavailable" };

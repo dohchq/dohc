@@ -22,21 +22,27 @@ const FORMS: ReadonlyArray<{ form: UrlForm; label: string; icon: LucideIcon; tes
 
 const ROW_BUTTON =
   "flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] transition-colors duration-75";
-const ROW_BUTTON_TONE = { rest: "text-muted hover:bg-hover hover:text-ink", current: "bg-selected text-ink font-medium" };
+const ROW_BUTTON_TONE = {
+  rest: "text-muted hover:bg-hover hover:text-ink",
+  current: "bg-selected text-ink font-medium",
+};
 
 // The row itself, without a place: the editor floats it under the pasted
 // line, and the states page draws it in place. Before a choice it offers the
 // two forms, the current one pressed; after one, Undo.
-export const UrlPasteOfferRow = forwardRef<HTMLDivElement, {
-  form: UrlForm;
-  chosen: boolean;
-  className?: string;
-  style?: CSSProperties;
-  onChoose?: (form: UrlForm) => void;
-  onUndo?: () => void;
-  onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
-  onBlur?: (event: FocusEvent<HTMLDivElement>) => void;
-}>(function UrlPasteOfferRow(props, ref) {
+export const UrlPasteOfferRow = forwardRef<
+  HTMLDivElement,
+  {
+    form: UrlForm;
+    chosen: boolean;
+    className?: string;
+    style?: CSSProperties;
+    onChoose?: (form: UrlForm) => void;
+    onUndo?: () => void;
+    onKeyDown?: (event: KeyboardEvent<HTMLDivElement>) => void;
+    onBlur?: (event: FocusEvent<HTMLDivElement>) => void;
+  }
+>(function UrlPasteOfferRow(props, ref) {
   return (
     <div
       ref={ref}
@@ -126,7 +132,12 @@ export function UrlPasteOffer(props: {
   } catch {
     return null;
   }
-  const position = resolveFloatingMenuPosition({ cursorRect: coords, menuWidth: 200, menuMaxHeight: 32, gap: 4 });
+  const position = resolveFloatingMenuPosition({
+    cursorRect: coords,
+    menuWidth: 200,
+    menuMaxHeight: 32,
+    gap: 4,
+  });
   const leave = () => {
     onDismiss();
     view.focus();
@@ -137,7 +148,13 @@ export function UrlPasteOffer(props: {
       form={offer.form}
       chosen={offer.chosen}
       className={MENU_ENTER}
-      style={{ position: "fixed", left: position.x, top: position.y, zIndex: 60, ...menuEnterFrom(position.placement) }}
+      style={{
+        position: "fixed",
+        left: position.x,
+        top: position.y,
+        zIndex: 60,
+        ...menuEnterFrom(position.placement),
+      }}
       // A choice of the current form and Undo close the row: focus they held
       // goes back to the editor, at its caret.
       onChoose={(form) => {
@@ -165,7 +182,8 @@ export function UrlPasteOffer(props: {
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         const buttons = [...event.currentTarget.querySelectorAll("button")];
         const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
-        const next = buttons[(at + (event.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length];
+        const next =
+          buttons[(at + (event.key === "ArrowRight" ? 1 : buttons.length - 1)) % buttons.length];
         event.preventDefault();
         next?.focus();
       }}

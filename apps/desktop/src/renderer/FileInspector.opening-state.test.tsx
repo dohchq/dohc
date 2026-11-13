@@ -9,8 +9,23 @@ import { FileInspector } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { captureOrphanedDraft, resetOrphanedDrafts } from "./orphanedDrafts";
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
-import { textEditorContent, codeEditorText, replaceCodeEditorText, typeInMarkdownEditor, ONE_FRAME_MS, advanceAutosaveDebounce, useAutoAdvancingFakeTimers, stubEditorGlobals, findSourceEditor, type CodeEditorTestHost } from "./FileInspector.editor-fixture";
-import { settleAfterUnmount, resetOrphanedDraftsAndSettle, TEST_CONTENT_HASH } from "./FileInspector.draft-fixture";
+import {
+  textEditorContent,
+  codeEditorText,
+  replaceCodeEditorText,
+  typeInMarkdownEditor,
+  ONE_FRAME_MS,
+  advanceAutosaveDebounce,
+  useAutoAdvancingFakeTimers,
+  stubEditorGlobals,
+  findSourceEditor,
+  type CodeEditorTestHost,
+} from "./FileInspector.editor-fixture";
+import {
+  settleAfterUnmount,
+  resetOrphanedDraftsAndSettle,
+  TEST_CONTENT_HASH,
+} from "./FileInspector.draft-fixture";
 import { type DraftFlush } from "./useAutosavedTextDraft";
 
 setupFileInspectorTests();
@@ -26,16 +41,15 @@ describe("markdown document opening state", () => {
     const bridgeMock = {
       platform: "linux" as const,
       onWorkspaceActivity: vi.fn(() => () => undefined),
-      readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
-        async () => ({
-          text: DOC_MARKDOWN,
-          truncated: false,
-          contentHash: TEST_CONTENT_HASH,
-        }),
-      ),
-      writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
-        async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
-      ),
+      readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(async () => ({
+        text: DOC_MARKDOWN,
+        truncated: false,
+        contentHash: TEST_CONTENT_HASH,
+      })),
+      writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(async () => ({
+        status: "written",
+        contentHash: TEST_CONTENT_HASH,
+      })),
       listWorkspaceFiles: vi.fn(async () => ({
         files: [{ path: "a.md", kind: "file" }],
         folders: [],
@@ -52,20 +66,18 @@ describe("markdown document opening state", () => {
             initialUpdate?: Uint8Array;
             lineageGeneration?: number;
             documentUnavailable?: boolean;
-          }>(
-            (resolve) => {
-              settle = (available) =>
-                resolve(
-                  available
-                    ? {
-                        available: true,
-                        initialUpdate: Y.encodeStateAsUpdate(serverDoc),
-                        lineageGeneration: 1,
-                      }
-                    : { available: false },
-                );
-            },
-          ),
+          }>((resolve) => {
+            settle = (available) =>
+              resolve(
+                available
+                  ? {
+                      available: true,
+                      initialUpdate: Y.encodeStateAsUpdate(serverDoc),
+                      lineageGeneration: 1,
+                    }
+                  : { available: false },
+              );
+          }),
       ),
       applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
       closeEngineYDocSession: vi.fn(async () => undefined),
@@ -73,18 +85,28 @@ describe("markdown document opening state", () => {
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn((listener: Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]) => {
-        saveListeners.add(listener);
-        return () => saveListeners.delete(listener);
-      }),
+      onEngineYDocSaveState: vi.fn(
+        (listener: Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]) => {
+          saveListeners.add(listener);
+          return () => saveListeners.delete(listener);
+        },
+      ),
     };
     return {
       bridgeMock,
       bind: () => act(() => settle?.(true)),
-      reportSavedOutcome: () => act(() => {
-        const sessionId = bridgeMock.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
-        for (const listener of saveListeners) listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 0 });
-      }),
+      reportSavedOutcome: () =>
+        act(() => {
+          const sessionId = bridgeMock.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
+          for (const listener of saveListeners)
+            listener({
+              sessionId,
+              workspaceId: "ws-1",
+              path: "notes/a.md",
+              state: { kind: "saved-here" },
+              seq: 0,
+            });
+        }),
       answerNotEngineBacked: () => act(() => settle?.(false)),
     };
   }
@@ -102,13 +124,9 @@ describe("markdown document opening state", () => {
         registerDraftFlush={registerDraftFlush}
       />,
     );
-    await waitFor(() =>
-      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     return view;
   }
 
@@ -160,23 +178,18 @@ describe("markdown document opening state", () => {
     await screen.findByTestId("view-markdown");
 
     await attemptToType(user);
-    expect(bridgeMock.writeWorkspaceText.mock.calls, "`const opening = false` in MarkdownView. The plain editor renders during the held open, the edit toggle is live, and this typing lands `writeWorkspaceText({ text: '…Base paragraph.\\nDraft!' })` — the write the binding session never sees. Asserted first so the mutation fails here, on the phantom write, not on the missing chip.").toEqual([]);
+    expect(
+      bridgeMock.writeWorkspaceText.mock.calls,
+      "`const opening = false` in MarkdownView. The plain editor renders during the held open, the edit toggle is live, and this typing lands `writeWorkspaceText({ text: '…Base paragraph.\\nDraft!' })` — the write the binding session never sees. Asserted first so the mutation fails here, on the phantom write, not on the missing chip.",
+    ).toEqual([]);
 
     // The wait is visible and named, and the document still reads.
-    expect(screen.getByTestId("markdown-open-state").textContent).toBe(
-      "Opening…",
-    );
+    expect(screen.getByTestId("markdown-open-state").textContent).toBe("Opening…");
     await waitFor(() =>
-      expect(screen.getByTestId("view-markdown").textContent).toContain(
-        "Base paragraph.",
-      ),
+      expect(screen.getByTestId("view-markdown").textContent).toContain("Base paragraph."),
     );
-    expect(
-      screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled"),
-    ).toBe("true");
-    expect(
-      (screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly,
-    ).toBe(true);
+    expect(screen.getByTestId("markdown-edit-toggle").getAttribute("aria-disabled")).toBe("true");
+    expect((screen.getByTestId("page-title") as HTMLTextAreaElement).readOnly).toBe(true);
 
     // The open answers: the session is live, and the same keystroke now goes
     // through it (the title is frontmatter in the canonical Y.Doc) instead of
@@ -188,15 +201,11 @@ describe("markdown document opening state", () => {
     // silently no-op, and the test burns its whole window waiting for a state
     // nobody moved -- #590 shape 2, the same trap as the source toggle below.
     // Wait for the call that creates settle; never optional-chain it away.
-    await waitFor(() =>
-      expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bind();
     await screen.findByTestId("markdown-source-toggle");
     await user.type(screen.getByTestId("page-title"), "Retitled");
-    await waitFor(() =>
-      expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
@@ -206,26 +215,13 @@ describe("markdown document opening state", () => {
     extraProps: Partial<Parameters<typeof FileInspector>[0]> = {},
   ) {
     const view = render(
-      <FileInspector
-        workspaceId="ws-1"
-        path="a.md"
-        engineVersionKey={1}
-        {...extraProps}
-      />,
+      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} {...extraProps} />,
     );
-    await waitFor(() =>
-      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await typeInMarkdownEditor(
-      user,
-      await screen.findByTestId("markdown-editor"),
-      "Draft!",
-    );
+    await typeInMarkdownEditor(user, await screen.findByTestId("markdown-editor"), "Draft!");
     expect(bridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     // The version switch: same mount, same pending draft, same armed timer.
     // The second open stays held — the "Opening…" window under test.
@@ -238,12 +234,8 @@ describe("markdown document opening state", () => {
         refreshKey={(extraProps.refreshKey ?? 0) + 1}
       />,
     );
-    expect(screen.getByTestId("markdown-open-state").textContent).toBe(
-      "Opening…",
-    );
-    await waitFor(() =>
-      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2),
-    );
+    expect(screen.getByTestId("markdown-open-state").textContent).toBe("Opening…");
+    await waitFor(() => expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(2));
     return view;
   }
 
@@ -255,31 +247,28 @@ describe("markdown document opening state", () => {
     await armDraftThenReopen(user, bridge);
 
     await advanceAutosaveDebounce();
-    expect(bridge.bridgeMock.writeWorkspaceText.mock.calls, "pending-timer path: remove the render-phase capture's clearTimeout and `|| openingRef.current` from writeDraftNow's guard. The 800ms timer then fires inside this wait and the write lands while the header reads 'Opening…' — the previous version's draft on the switched tree.").toEqual([]);
+    expect(
+      bridge.bridgeMock.writeWorkspaceText.mock.calls,
+      "pending-timer path: remove the render-phase capture's clearTimeout and `|| openingRef.current` from writeDraftNow's guard. The 800ms timer then fires inside this wait and the write lands while the header reads 'Opening…' — the previous version's draft on the switched tree.",
+    ).toEqual([]);
 
     // Cancelled is not dropped: the draft is surfaced for the user to copy,
     // eagerly serialized at the flip (the editor that held it is unmounted by
     // the same commit).
-    expect(
-      screen.getByTestId("orphaned-draft-notice").textContent,
-    ).toContain("Copy your edits to keep them.");
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "Copy your edits to keep them.",
+    );
     await user.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(
-        "# Plan\n\nBase paragraph.\nDraft!",
-      ),
+      expect(await navigator.clipboard.readText()).toBe("# Plan\n\nBase paragraph.\nDraft!"),
     );
 
     // The chip shows beside "Opening…", not underneath it: the header slot
     // used to be either/or, hiding any state in this window. Recovery has its
     // own chip state — "Couldn't save" would invite a retry that cannot help.
     expect(screen.queryByTestId("markdown-open-state")).not.toBeNull();
-    expect(
-      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
-    ).toBe("recovery");
-    expect(screen.getByTestId("markdown-save-state").textContent).toBe(
-      "Edit set aside",
-    );
+    expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("recovery");
+    expect(screen.getByTestId("markdown-save-state").textContent).toBe("Edit set aside");
   });
 
   it("hands the surface back to the document after the reopen — the set-aside draft cannot re-arm a save", async () => {
@@ -295,31 +284,27 @@ describe("markdown document opening state", () => {
     //
     bridge.answerNotEngineBacked();
     await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state"), "restore path: in the capture, keep `unsavedDraft.current` true and drop the setDraft/setSavedBody/latestDraft reset together. Neither the sync effect (blocked by the flag) nor the direct reset hands the surface back, and the assertion below finds 'Draft!' still in the source editor.").toBeNull(),
+      expect(
+        screen.queryByTestId("markdown-open-state"),
+        "restore path: in the capture, keep `unsavedDraft.current` true and drop the setDraft/setSavedBody/latestDraft reset together. Neither the sync effect (blocked by the flag) nor the direct reset hands the surface back, and the assertion below finds 'Draft!' still in the source editor.",
+      ).toBeNull(),
     );
     await waitFor(() =>
-      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
-        DOC_MARKDOWN,
-      ),
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(DOC_MARKDOWN),
     );
 
     // Dismiss retires the notice, and the save pipeline is healthy again.
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-    await typeInMarkdownEditor(
-      user,
-      screen.getByTestId("markdown-editor"),
-      "New!",
-    );
-    await waitFor(
-      () =>
-        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
-          workspaceId: "ws-1",
-          relativePath: "a.md",
-          text: "# Plan\n\nBase paragraph.\nNew!",
-          expectedContentHash: TEST_CONTENT_HASH,
-        }),
+    await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "New!");
+    await waitFor(() =>
+      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
+        workspaceId: "ws-1",
+        relativePath: "a.md",
+        text: "# Plan\n\nBase paragraph.\nNew!",
+        expectedContentHash: TEST_CONTENT_HASH,
+      }),
     );
   });
 
@@ -333,33 +318,24 @@ describe("markdown document opening state", () => {
 
     // The reopen resolves, the user types again, and a third open starts.
     bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
-    await typeInMarkdownEditor(
-      user,
-      screen.getByTestId("markdown-editor"),
-      "More!",
-    );
-    view.rerender(
-      <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={3} />,
-    );
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
+    await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "More!");
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={3} />);
 
     await waitFor(() =>
-      expect(screen.getAllByTestId("orphaned-draft-notice"), "append: make captureOrphanedDraft overwrite instead of append. Only one row survives and the first edit is gone.").toHaveLength(2),
+      expect(
+        screen.getAllByTestId("orphaned-draft-notice"),
+        "append: make captureOrphanedDraft overwrite instead of append. Only one row survives and the first edit is gone.",
+      ).toHaveLength(2),
     );
     const copies = screen.getAllByTestId("orphaned-draft-copy");
     await user.click(copies[0]);
     await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(
-        "# Plan\n\nBase paragraph.\nDraft!",
-      ),
+      expect(await navigator.clipboard.readText()).toBe("# Plan\n\nBase paragraph.\nDraft!"),
     );
     await user.click(copies[1]);
     await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(
-        "# Plan\n\nBase paragraph.\nMore!",
-      ),
+      expect(await navigator.clipboard.readText()).toBe("# Plan\n\nBase paragraph.\nMore!"),
     );
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls).toEqual([]);
   });
@@ -367,17 +343,13 @@ describe("markdown document opening state", () => {
   it("drains a source edit made during a held flush before close can strand it", async () => {
     const bridge = makeHeldOpenBridge();
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-      },
-    );
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>((resolve) => {
+      releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+    });
     let releaseSecond!: () => void;
-    const heldSecond = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-      },
-    );
+    const heldSecond = new Promise<{ status: "written"; contentHash: string }>((resolve) => {
+      releaseSecond = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+    });
     let secondStarted!: () => void;
     const secondWriteStarted = new Promise<void>((resolve) => {
       secondStarted = resolve;
@@ -397,9 +369,7 @@ describe("markdown document opening state", () => {
     await waitFor(() => expect(flush).not.toBeNull());
 
     const flushPromise = flush!();
-    await waitFor(() =>
-      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     const newestSource = `${source.value}Two`;
     replaceCodeEditorText(source, newestSource);
     expect(source.value).toBe(newestSource);
@@ -413,9 +383,7 @@ describe("markdown document opening state", () => {
       flushPromise.then(() => "flush" as const),
     ]);
     expect(firstToFinish).toBe("second-write");
-    expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
-      newestSource,
-    );
+    expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(newestSource);
 
     await act(async () => {
       releaseSecond();
@@ -459,12 +427,9 @@ describe("markdown document opening state", () => {
         status: "conflict";
         currentContentHash: string;
       }>((resolve) => {
-        resolveConflict = () =>
-          resolve({ status: "conflict", currentContentHash: externalHash });
+        resolveConflict = () => resolve({ status: "conflict", currentContentHash: externalHash });
       });
-      bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(
-        () => heldConflict,
-      );
+      bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
       let registeredFlush: DraftFlush | null = null;
       await renderLegacyMarkdown(bridge, (flush) => {
         registeredFlush = flush;
@@ -477,28 +442,20 @@ describe("markdown document opening state", () => {
         await vi.advanceTimersByTimeAsync(ONE_FRAME_MS);
       });
       await waitFor(() =>
-        expect(screen.getByTestId("markdown-save-state").dataset.state).toBe(
-          "saving",
-        ),
+        expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("saving"),
       );
       const flush = await waitFor(() => {
         if (!registeredFlush) throw new Error("draft flush has not registered");
         return registeredFlush;
       });
       const firstFlush = flush();
-      await waitFor(() =>
-        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-      );
-      const firstIssuedBody = bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]
-        .text;
+      await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
+      const firstIssuedBody = bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text;
       expect(firstIssuedBody).toContain("L1");
 
       await user.type(editor, "L2");
       expect(editor.textContent).toBe("L1PlanBase paragraph.L2");
-      const newestLocalBody = firstIssuedBody.replace(
-        "Base paragraph.",
-        "Base paragraph.L2",
-      );
+      const newestLocalBody = firstIssuedBody.replace("Base paragraph.", "Base paragraph.L2");
       await act(async () => {
         resolveConflict();
         await heldConflict;
@@ -508,12 +465,8 @@ describe("markdown document opening state", () => {
       await screen.findByText("Changed elsewhere.");
       await screen.findByTestId("orphaned-draft-notice");
       fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
-      await waitFor(async () =>
-        expect(await navigator.clipboard.readText()).toBe(newestLocalBody),
-      );
-      expect(
-        (await screen.findByTestId("markdown-editor")).textContent,
-      ).not.toContain("L2");
+      await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(newestLocalBody));
+      expect((await screen.findByTestId("markdown-editor")).textContent).not.toContain("L2");
       expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
@@ -541,12 +494,9 @@ describe("markdown document opening state", () => {
       status: "conflict";
       currentContentHash: string;
     }>((resolve) => {
-      resolveConflict = () =>
-        resolve({ status: "conflict", currentContentHash: externalHash });
+      resolveConflict = () => resolve({ status: "conflict", currentContentHash: externalHash });
     });
-    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(
-      () => heldConflict,
-    );
+    bridge.bridgeMock.writeWorkspaceText.mockImplementationOnce(() => heldConflict);
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
     const localBody = `${source.value}Draft`;
@@ -575,9 +525,7 @@ describe("markdown document opening state", () => {
     await renderLegacyMarkdown(remountBridge);
     await screen.findByTestId("orphaned-draft-notice");
     fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(localBody),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(localBody));
     await screen.findByText("Changed elsewhere.");
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     expect(remountBridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
@@ -593,11 +541,9 @@ describe("markdown document opening state", () => {
       contentHash: initialHash,
     });
     let resolveFirst!: () => void;
-    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
-      },
-    );
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>((resolve) => {
+      resolveFirst = () => resolve({ status: "written", contentHash: firstHash });
+    });
     bridge.bridgeMock.writeWorkspaceText
       .mockImplementationOnce(() => heldFirst)
       .mockRejectedValueOnce(new Error("disk unavailable"));
@@ -614,9 +560,7 @@ describe("markdown document opening state", () => {
       resolveFirst();
       await heldFirst;
     });
-    await waitFor(() =>
-      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     const remountBridge = makeHeldOpenBridge();
     remountBridge.bridgeMock.readWorkspaceText.mockResolvedValue({
       text: `${DOC_MARKDOWN}First`,
@@ -626,9 +570,7 @@ describe("markdown document opening state", () => {
     await renderLegacyMarkdown(remountBridge);
     await screen.findByTestId("orphaned-draft-notice");
     fireEvent.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(newestBody),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(newestBody));
   });
 
   // Overlapping writes. Autosave A awaiting its IPC and a
@@ -640,11 +582,9 @@ describe("markdown document opening state", () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const bridge = makeHeldOpenBridge();
     let releaseFirst!: () => void;
-    const heldFirst = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-      },
-    );
+    const heldFirst = new Promise<{ status: "written"; contentHash: string }>((resolve) => {
+      releaseFirst = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+    });
     let writes = 0;
     bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
       writes += 1;
@@ -654,43 +594,28 @@ describe("markdown document opening state", () => {
     });
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={1} />);
-    await waitFor(() =>
-      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await typeInMarkdownEditor(
-      user,
-      await screen.findByTestId("markdown-editor"),
-      "One",
-    );
+    await typeInMarkdownEditor(user, await screen.findByTestId("markdown-editor"), "One");
     await advanceAutosaveDebounce();
-    await waitFor(
-      () =>
-        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
 
     // The user keeps typing while write one is still in flight; a second
     // autosave arms and fires.
-    await typeInMarkdownEditor(
-      user,
-      screen.getByTestId("markdown-editor"),
-      "Two",
-    );
+    await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Two");
     await advanceAutosaveDebounce();
-    expect(bridge.bridgeMock.writeWorkspaceText, "serialization: remove the `while (pendingWrite.current)` wait in writeDraftNow. The second write issues inside this window, overlapping the first.").toHaveBeenCalledTimes(1);
+    expect(
+      bridge.bridgeMock.writeWorkspaceText,
+      "serialization: remove the `while (pendingWrite.current)` wait in writeDraftNow. The second write issues inside this window, overlapping the first.",
+    ).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       releaseFirst();
       await heldFirst;
     });
-    await waitFor(
-      () =>
-        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[1]).toEqual([
       {
         workspaceId: "ws-1",
@@ -717,17 +642,13 @@ describe("markdown document opening state", () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const bridge = makeHeldOpenBridge();
     let releaseA!: () => void;
-    const heldA = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        releaseA = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-      },
-    );
+    const heldA = new Promise<{ status: "written"; contentHash: string }>((resolve) => {
+      releaseA = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+    });
     let releaseB!: () => void;
-    const heldB = new Promise<{ status: "written"; contentHash: string }>(
-      (resolve) => {
-        releaseB = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
-      },
-    );
+    const heldB = new Promise<{ status: "written"; contentHash: string }>((resolve) => {
+      releaseB = () => resolve({ status: "written" as const, contentHash: TEST_CONTENT_HASH });
+    });
     let writes = 0;
     bridge.bridgeMock.writeWorkspaceText.mockImplementation(() => {
       writes += 1;
@@ -746,30 +667,15 @@ describe("markdown document opening state", () => {
         registerDraftFlush={registerDraftFlush}
       />,
     );
-    await waitFor(() =>
-      expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.openEngineYDocSession).toHaveBeenCalledTimes(1));
     bridge.answerNotEngineBacked();
-    await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("markdown-open-state")).toBeNull());
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await typeInMarkdownEditor(
-      user,
-      await screen.findByTestId("markdown-editor"),
-      "One",
-    );
+    await typeInMarkdownEditor(user, await screen.findByTestId("markdown-editor"), "One");
     await advanceAutosaveDebounce();
-    await waitFor(
-      () =>
-        expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1));
     // B arms and fires while A holds the slot: B is parked in the queue.
-    await typeInMarkdownEditor(
-      user,
-      screen.getByTestId("markdown-editor"),
-      "Two",
-    );
+    await typeInMarkdownEditor(user, screen.getByTestId("markdown-editor"), "Two");
     await advanceAutosaveDebounce();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(flush).not.toBeNull());
@@ -783,13 +689,14 @@ describe("markdown document opening state", () => {
       releaseA();
       await heldA;
     });
-    await waitFor(() =>
-      expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(2));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
     });
-    expect(flushSettled, "flush loop: make the seam await `pendingWrite` ONCE. The flush settles right here, with B still landing the old text.").toBe(false);
+    expect(
+      flushSettled,
+      "flush loop: make the seam await `pendingWrite` ONCE. The flush settles right here, with B still landing the old text.",
+    ).toBe(false);
 
     await act(async () => {
       releaseB();
@@ -820,7 +727,10 @@ describe("markdown document opening state", () => {
     await screen.findByTestId("orphaned-draft-notice");
     await user.click(screen.getByTestId("orphaned-draft-copy"));
     await waitFor(async () =>
-      expect(await navigator.clipboard.readText(), "error-branch render: drop {recoveryNotices} from the loading/error branch. The screen says only 'dohc could not read this file' while the close warning demands actions that render nowhere.").toBe("Kept!"),
+      expect(
+        await navigator.clipboard.readText(),
+        "error-branch render: drop {recoveryNotices} from the loading/error branch. The screen says only 'dohc could not read this file' while the close warning demands actions that render nowhere.",
+      ).toBe("Kept!"),
     );
   });
 });

@@ -19,21 +19,32 @@ test("Undo refuses an old path occupied by an outside write @undo-outside-write"
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "old.md");
-    await expect.poll(() => page.evaluate(async workspaceId => {
-      const result = await window.dohcDesktop!.listEngineMoments({ workspaceId });
-      return "moments" in result && result.moments.some(moment => moment.path === "old.md");
-    }, workspace.workspaceId)).toBe(true);
-    const moved = await page.evaluate(workspaceId => window.dohcDesktop!.moveWorkspacePath({
-      workspaceId, fromPath: "old.md", toPath: "new.md",
-    }), workspace.workspaceId);
+    await expect
+      .poll(() =>
+        page.evaluate(async (workspaceId) => {
+          const result = await window.dohcDesktop!.listEngineMoments({ workspaceId });
+          return "moments" in result && result.moments.some((moment) => moment.path === "old.md");
+        }, workspace.workspaceId),
+      )
+      .toBe(true);
+    const moved = await page.evaluate(
+      (workspaceId) =>
+        window.dohcDesktop!.moveWorkspacePath({
+          workspaceId,
+          fromPath: "old.md",
+          toPath: "new.md",
+        }),
+      workspace.workspaceId,
+    );
     expect(moved.operationId).toBeTruthy();
     if (!moved.operationId) throw new Error("Rename did not return a History operation.");
     expect(moved.undo?.available).toBe(true);
 
     await writeFile(join(temp.rootPath, "old.md"), "Outside content KEEP.\n");
     const started = performance.now();
-    const result = await page.evaluate(input => window.dohcDesktop!.undoHistoryOperation(input), {
-      workspaceId: workspace.workspaceId, operationId: moved.operationId,
+    const result = await page.evaluate((input) => window.dohcDesktop!.undoHistoryOperation(input), {
+      workspaceId: workspace.workspaceId,
+      operationId: moved.operationId,
     });
     const observation = { elapsedMs: performance.now() - started, result };
     console.log("Undo after outside write", JSON.stringify(observation));

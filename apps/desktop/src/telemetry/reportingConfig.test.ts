@@ -20,13 +20,18 @@ function resolve(overrides: Partial<Parameters<typeof resolveReporting>[0]> = {}
 describe("which builds report", () => {
   it("sends both kinds of report to the build's PostHog project", () => {
     const reporting = resolve();
-    expect(reporting?.usage).toEqual({ url: new URL("https://us.i.posthog.com/batch/"), key: BUILD.posthogKey });
+    expect(reporting?.usage).toEqual({
+      url: new URL("https://us.i.posthog.com/batch/"),
+      key: BUILD.posthogKey,
+    });
     expect(reporting?.errors).toEqual({ host: "https://us.i.posthog.com", key: BUILD.posthogKey });
     expect(reporting?.dist).toBe("win-x64");
   });
 
   it("keeps a host's path prefix", () => {
-    const reporting = resolve({ build: { ...BUILD, posthogHost: "https://ph.example.test/ingest/" } });
+    const reporting = resolve({
+      build: { ...BUILD, posthogHost: "https://ph.example.test/ingest/" },
+    });
     expect(reporting?.usage?.url.href).toBe("https://ph.example.test/ingest/batch/");
     expect(reporting?.errors?.host).toBe("https://ph.example.test/ingest");
   });
@@ -53,13 +58,17 @@ describe("which builds report", () => {
   });
 
   it("falls back to this platform for a dist that is not a plain name", () => {
-    expect(resolve({ build: { ...BUILD, dist: "../x y" } })?.dist).toBe(`${process.platform}-${process.arch}`);
+    expect(resolve({ build: { ...BUILD, dist: "../x y" } })?.dist).toBe(
+      `${process.platform}-${process.arch}`,
+    );
   });
 });
 
 describe("project settings", () => {
   it("accepts only https hosts and project keys", () => {
-    expect(posthogProject(" phc_abcdefghij0123 ", "https://eu.i.posthog.com/")?.key).toBe("phc_abcdefghij0123");
+    expect(posthogProject(" phc_abcdefghij0123 ", "https://eu.i.posthog.com/")?.key).toBe(
+      "phc_abcdefghij0123",
+    );
     expect(posthogProject("phc_abcdefghij0123", "http://us.i.posthog.com")).toBeNull();
     expect(posthogProject("phc_abcdefghij0123", "https://user:pass@us.i.posthog.com")).toBeNull();
     expect(posthogProject("phc_abcdefghij0123", "https://us.i.posthog.com/?x=1")).toBeNull();

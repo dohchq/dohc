@@ -15,12 +15,20 @@ import { closeHistory } from "@tiptap/pm/history";
 import { prosemirrorJSONToYXmlFragment } from "y-prosemirror";
 import { DohcTaskItem } from "@dohc/ydoc-projection/markdown-extensions";
 import { desktopMarkdownExtensions } from "./extensions";
-import { getDohcProseMirrorSchema, getDohcYDocBodyFragment, markdownToYDoc } from "@dohc/ydoc-projection";
+import {
+  getDohcProseMirrorSchema,
+  getDohcYDocBodyFragment,
+  markdownToYDoc,
+} from "@dohc/ydoc-projection";
 import { MarkdownEditor, type MarkdownEditorHandle } from "./MarkdownEditor";
 import { sendToFocusedEditor } from "./editorMenuCommands";
 import { findReplaceKey } from "./findReplace";
 import { makeCodeBlockContinuationPlugin } from "./codeBlockChrome";
-import { CLOSED_SLASH_COMMAND_STATE, runSlashCommand, type SlashCommandState } from "./slashCommands";
+import {
+  CLOSED_SLASH_COMMAND_STATE,
+  runSlashCommand,
+  type SlashCommandState,
+} from "./slashCommands";
 
 const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
   Element.prototype,
@@ -89,11 +97,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   if (scrollIntoViewDescriptor) {
-    Object.defineProperty(
-      Element.prototype,
-      "scrollIntoView",
-      scrollIntoViewDescriptor,
-    );
+    Object.defineProperty(Element.prototype, "scrollIntoView", scrollIntoViewDescriptor);
   } else {
     Reflect.deleteProperty(Element.prototype, "scrollIntoView");
   }
@@ -120,10 +124,15 @@ it("keeps editor tokenizers out of the process-wide Markdown registry", async ()
   };
   const before = registrations();
   for (let index = 0; index < 3; index++) {
-    const view = render(createElement(MarkdownEditor, {
-      value: "A ==highlight== and [[note]]\n\n> [!NOTE]\n> callout\n",
-      onDirty: vi.fn(), workspaceId: "workspace-1", path: `note-${index}.md`, knownFiles: [],
-    }));
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: "A ==highlight== and [[note]]\n\n> [!NOTE]\n> callout\n",
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: `note-${index}.md`,
+        knownFiles: [],
+      }),
+    );
     const editor = await screen.findByTestId("markdown-editor");
     expect(editor.querySelector("mark")?.textContent).toBe("highlight");
     expect(editor.textContent).toContain("callout");
@@ -133,7 +142,6 @@ it("keeps editor tokenizers out of the process-wide Markdown registry", async ()
 });
 
 describe("MarkdownEditor collaboration selection", () => {
-
   // The selection seed must be recomputed on every editor rebuild, not just
   // when collab.ydoc's own identity changes. useEditor rebuilds (destroys
   // and reconstructs the tiptap Editor) whenever `extensions` changes
@@ -144,8 +152,7 @@ describe("MarkdownEditor collaboration selection", () => {
   // with a stale (here: paragraph-first) path even though the doc's real
   // leading node is now a taskList, recreating the invalid selection.
   it("recomputes the selection seed on a rebuild, not the mount-time doc shape", async () => {
-    const selectionWarning =
-      /TextSelection endpoint not pointing into a node with inline content/;
+    const selectionWarning = /TextSelection endpoint not pointing into a node with inline content/;
     const warn = vi.spyOn(console, "warn");
     const ydoc = markdownToYDoc("First paragraph.");
     const view = render(
@@ -163,9 +170,7 @@ describe("MarkdownEditor collaboration selection", () => {
     try {
       await screen.findByTestId("markdown-editor");
       await waitFor(() =>
-        expect(screen.getByTestId("markdown-editor").textContent).toContain(
-          "First paragraph.",
-        ),
+        expect(screen.getByTestId("markdown-editor").textContent).toContain("First paragraph."),
       );
 
       // Rewrite the same Y.Doc's body to a taskList-first shape — an
@@ -192,9 +197,7 @@ describe("MarkdownEditor collaboration selection", () => {
                 {
                   type: "taskItem",
                   attrs: { checked: false },
-                  content: [
-                    { type: "paragraph", content: [{ type: "text", text: "parent" }] },
-                  ],
+                  content: [{ type: "paragraph", content: [{ type: "text", text: "parent" }] }],
                 },
               ],
             },
@@ -222,9 +225,7 @@ describe("MarkdownEditor collaboration selection", () => {
       await waitFor(() =>
         expect(screen.getByTestId("markdown-editor").textContent).toContain("parent"),
       );
-      expect(warn).not.toHaveBeenCalledWith(
-        expect.stringMatching(selectionWarning),
-      );
+      expect(warn).not.toHaveBeenCalledWith(expect.stringMatching(selectionWarning));
     } finally {
       view.unmount();
       awareness?.destroy();
@@ -344,10 +345,7 @@ describe("MarkdownEditor code block continuation", () => {
     });
   }
 
-  function pressAtEndOfCode(
-    editor: Editor,
-    init: KeyboardEventInit,
-  ): boolean {
+  function pressAtEndOfCode(editor: Editor, init: KeyboardEventInit): boolean {
     const plugin = makeCodeBlockContinuationPlugin();
     // End of the "code" text inside the leading code block: pos 1 + 4.
     editor.commands.setTextSelection(5);
@@ -379,149 +377,230 @@ describe("MarkdownEditor code block continuation", () => {
     expect(editor.state.doc.child(1).content.size).toBe(0);
     editor.destroy();
   });
-
 });
 
 // The live editor registers its own extension list, and the collaboration
 // binding converts the Y.Doc through that schema. A `paragraph+` task item
 // makes the indented list schema-invalid, so binding drops the whole task list
 // and the document opens empty.
-describe.each(["local", "collaboration"])("MarkdownEditor nested list interactions (%s)", (mode) => {
-  let ydoc: Y.Doc | undefined;
-  afterEach(() => { cleanup(); ydoc?.destroy(); ydoc = undefined; });
-
-  async function mount(markdown: string) {
-    ydoc = mode === "collaboration" ? markdownToYDoc(markdown) : undefined;
-    render(createElement(MarkdownEditor, {
-      value: markdown, onDirty: vi.fn(), workspaceId: "workspace-1",
-      path: "nested.md", knownFiles: [],
-      collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
-    }));
-    const surface = await screen.findByTestId("markdown-editor");
-    const editor = editorBehind(surface);
-    return { surface, editor };
-  }
-
-  function caret(editor: Editor, text: string, offset = 0) {
-    let position = -1;
-    editor.state.doc.descendants((node, pos) => {
-      if (node.isTextblock && node.textContent === text) position = pos + 1 + offset;
+describe.each(["local", "collaboration"])(
+  "MarkdownEditor nested list interactions (%s)",
+  (mode) => {
+    let ydoc: Y.Doc | undefined;
+    afterEach(() => {
+      cleanup();
+      ydoc?.destroy();
+      ydoc = undefined;
     });
-    expect(position).toBeGreaterThan(0);
-    act(() => { editor.commands.setTextSelection(position); editor.view.focus(); });
-  }
 
-  function reversible(surface: HTMLElement, editor: Editor, action: () => void, check: () => void) {
-    // Isolate the action from fixture edits in either history implementation.
-    fireEvent.focus(surface);
-    editor.view.dispatch(closeHistory(editor.state.tr));
-    const before = editor.getJSON();
-    act(action);
-    check();
-    const after = editor.getJSON();
-    expect(after).not.toEqual(before);
-    fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
-    expect(editor.getJSON()).toEqual(before);
-    fireEvent.keyDown(surface, { key: "y", ctrlKey: true });
-    expect(editor.getJSON()).toEqual(after);
-  }
+    async function mount(markdown: string) {
+      ydoc = mode === "collaboration" ? markdownToYDoc(markdown) : undefined;
+      render(
+        createElement(MarkdownEditor, {
+          value: markdown,
+          onDirty: vi.fn(),
+          workspaceId: "workspace-1",
+          path: "nested.md",
+          knownFiles: [],
+          collab: ydoc ? { ydoc, status: "connected", peerCount: 0, synced: true } : undefined,
+        }),
+      );
+      const surface = await screen.findByTestId("markdown-editor");
+      const editor = editorBehind(surface);
+      return { surface, editor };
+    }
 
-  it.each(["task"])("indents and outdents %s items with Tab and Shift-Tab", async (kind) => {
-    const marker = kind === "task" ? "- [ ]" : kind === "ordered" ? "1." : "-";
-    const { surface, editor } = await mount(`${marker} parent\n${marker} child`);
-    caret(editor, "child");
-    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Tab" }); }, () => {
-      expect(surface.querySelector("li li")?.textContent).toContain("child");
-    });
-    caret(editor, "child");
-    reversible(surface, editor, () => { fireEvent.keyDown(surface, { key: "Tab", shiftKey: true }); }, () => {
-      expect(surface.querySelector("li li")).toBeNull();
-    });
-  });
+    function caret(editor: Editor, text: string, offset = 0) {
+      let position = -1;
+      editor.state.doc.descendants((node, pos) => {
+        if (node.isTextblock && node.textContent === text) position = pos + 1 + offset;
+      });
+      expect(position).toBeGreaterThan(0);
+      act(() => {
+        editor.commands.setTextSelection(position);
+        editor.view.focus();
+      });
+    }
 
-  it("toggles a child checkbox without changing its parent", async () => {
-    const { surface, editor } = await mount("- [ ] parent\n  - [ ] child");
-    reversible(surface, editor, () => { fireEvent.click(surface.querySelectorAll("input[type=checkbox]")[1]!); }, () => {
-      expect(surface.querySelector("li li")?.getAttribute("data-checked")).toBe("true");
-      expect(surface.querySelector("li")?.getAttribute("data-checked")).toBe("false");
-    });
-  });
+    function reversible(
+      surface: HTMLElement,
+      editor: Editor,
+      action: () => void,
+      check: () => void,
+    ) {
+      // Isolate the action from fixture edits in either history implementation.
+      fireEvent.focus(surface);
+      editor.view.dispatch(closeHistory(editor.state.tr));
+      const before = editor.getJSON();
+      act(action);
+      check();
+      const after = editor.getJSON();
+      expect(after).not.toEqual(before);
+      fireEvent.keyDown(surface, { key: "z", ctrlKey: true });
+      expect(editor.getJSON()).toEqual(before);
+      fireEvent.keyDown(surface, { key: "y", ctrlKey: true });
+      expect(editor.getJSON()).toEqual(after);
+    }
 
-  it.each([
-    ["bullet", "task-list"],
-    ["ordered", "bulleted-list"],
-    ["task", "numbered-list"],
-  ] as const)("turns a %s child into %s and keeps its descendants", async (from, kind) => {
-    const child = from === "task" ? "- [x] child" : from === "ordered" ? "1. child" : "- child";
-    const { surface, editor } = await mount(`- parent\n  ${child}\n${" ".repeat(from === "ordered" ? 5 : 4)}- grandchild`);
-    caret(editor, "child", 2);
-    reversible(surface, editor, () => {
-      runSlashCommand(editor, kind, {
-        open: true, query: "", selected: 0, x: 0, y: 0,
-        bottom: null, maxHeight: 300, placement: "below",
-        from: editor.state.selection.from, to: editor.state.selection.from,
-      }, vi.fn());
-    }, () => {
-      const node = surface.querySelector("li > " + (kind === "numbered-list" ? "ol" : kind === "task-list" ? 'ul[data-type="taskList"]' : 'ul'));
-      expect(node?.textContent).toContain("child");
-      expect(node?.querySelector("li li")?.textContent).toContain("grandchild");
-      expect(editor.state.selection.$from.parent.textContent).toBe("child");
-      expect(editor.state.selection.$from.parentOffset).toBe(2);
-      expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+    it.each(["task"])("indents and outdents %s items with Tab and Shift-Tab", async (kind) => {
+      const marker = kind === "task" ? "- [ ]" : kind === "ordered" ? "1." : "-";
+      const { surface, editor } = await mount(`${marker} parent\n${marker} child`);
+      caret(editor, "child");
+      reversible(
+        surface,
+        editor,
+        () => {
+          fireEvent.keyDown(surface, { key: "Tab" });
+        },
+        () => {
+          expect(surface.querySelector("li li")?.textContent).toContain("child");
+        },
+      );
+      caret(editor, "child");
+      reversible(
+        surface,
+        editor,
+        () => {
+          fireEvent.keyDown(surface, { key: "Tab", shiftKey: true });
+        },
+        () => {
+          expect(surface.querySelector("li li")).toBeNull();
+        },
+      );
     });
-  });
 
-  it.each(["markdown", "html"])("pastes a nested list from %s", async (format) => {
-    const { surface, editor } = await mount("");
-    act(() => { editor.view.focus(); });
-    reversible(surface, editor, () => {
-      const markdown = "- parent\n  - child\n    - grandchild";
-      fireEvent.paste(surface, { clipboardData: {
-        files: [], types: [format === "html" ? "text/html" : "text/plain"],
-        getData: (type: string) => type === "text/html" && format === "html"
-          ? "<ul><li><p>parent</p><ul><li><p>child</p><ul><li><p>grandchild</p></li></ul></li></ul></li></ul>"
-          : type === "text/plain" ? markdown : "",
-      } });
-    }, () => {
-      expect(surface.querySelector("li li li")?.textContent).toBe("grandchild");
+    it("toggles a child checkbox without changing its parent", async () => {
+      const { surface, editor } = await mount("- [ ] parent\n  - [ ] child");
+      reversible(
+        surface,
+        editor,
+        () => {
+          fireEvent.click(surface.querySelectorAll("input[type=checkbox]")[1]!);
+        },
+        () => {
+          expect(surface.querySelector("li li")?.getAttribute("data-checked")).toBe("true");
+          expect(surface.querySelector("li")?.getAttribute("data-checked")).toBe("false");
+        },
+      );
     });
-  });
-});
+
+    it.each([
+      ["bullet", "task-list"],
+      ["ordered", "bulleted-list"],
+      ["task", "numbered-list"],
+    ] as const)("turns a %s child into %s and keeps its descendants", async (from, kind) => {
+      const child = from === "task" ? "- [x] child" : from === "ordered" ? "1. child" : "- child";
+      const { surface, editor } = await mount(
+        `- parent\n  ${child}\n${" ".repeat(from === "ordered" ? 5 : 4)}- grandchild`,
+      );
+      caret(editor, "child", 2);
+      reversible(
+        surface,
+        editor,
+        () => {
+          runSlashCommand(
+            editor,
+            kind,
+            {
+              open: true,
+              query: "",
+              selected: 0,
+              x: 0,
+              y: 0,
+              bottom: null,
+              maxHeight: 300,
+              placement: "below",
+              from: editor.state.selection.from,
+              to: editor.state.selection.from,
+            },
+            vi.fn(),
+          );
+        },
+        () => {
+          const node = surface.querySelector(
+            "li > " +
+              (kind === "numbered-list"
+                ? "ol"
+                : kind === "task-list"
+                  ? 'ul[data-type="taskList"]'
+                  : "ul"),
+          );
+          expect(node?.textContent).toContain("child");
+          expect(node?.querySelector("li li")?.textContent).toContain("grandchild");
+          expect(editor.state.selection.$from.parent.textContent).toBe("child");
+          expect(editor.state.selection.$from.parentOffset).toBe(2);
+          expect(editor.state.doc.firstChild?.type.name).toBe("bulletList");
+        },
+      );
+    });
+
+    it.each(["markdown", "html"])("pastes a nested list from %s", async (format) => {
+      const { surface, editor } = await mount("");
+      act(() => {
+        editor.view.focus();
+      });
+      reversible(
+        surface,
+        editor,
+        () => {
+          const markdown = "- parent\n  - child\n    - grandchild";
+          fireEvent.paste(surface, {
+            clipboardData: {
+              files: [],
+              types: [format === "html" ? "text/html" : "text/plain"],
+              getData: (type: string) =>
+                type === "text/html" && format === "html"
+                  ? "<ul><li><p>parent</p><ul><li><p>child</p><ul><li><p>grandchild</p></li></ul></li></ul></li></ul>"
+                  : type === "text/plain"
+                    ? markdown
+                    : "",
+            },
+          });
+        },
+        () => {
+          expect(surface.querySelector("li li li")?.textContent).toBe("grandchild");
+        },
+      );
+    });
+  },
+);
 
 // The block gutter selects a whole table, which Backspace and Delete then
 // remove. Without the editor's table node selection, Tiptap turns the gutter's
 // selection into a selection of the table's cells.
 describe("MarkdownEditor table gutter", () => {
-  it.each(["Backspace"])("selects a whole table from its gutter and deletes it with %s", async (key) => {
-    render(
-      createElement(MarkdownEditor, {
-        value: "Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter",
-        onDirty: vi.fn(),
-        workspaceId: "workspace-1",
-        path: "notes/table.md",
-        knownFiles: [],
-      }),
-    );
-    const surface = await screen.findByTestId("markdown-editor");
-    const editor = editorBehind(surface);
-    const handle = surface.querySelectorAll<HTMLElement>(".dohc-block-handle")[1];
-    expect(handle).toBeDefined();
+  it.each(["Backspace"])(
+    "selects a whole table from its gutter and deletes it with %s",
+    async (key) => {
+      render(
+        createElement(MarkdownEditor, {
+          value: "Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter",
+          onDirty: vi.fn(),
+          workspaceId: "workspace-1",
+          path: "notes/table.md",
+          knownFiles: [],
+        }),
+      );
+      const surface = await screen.findByTestId("markdown-editor");
+      const editor = editorBehind(surface);
+      const handle = surface.querySelectorAll<HTMLElement>(".dohc-block-handle")[1];
+      expect(handle).toBeDefined();
 
-    fireEvent.click(handle!);
-    const { selection } = editor.state;
-    expect(selection).toBeInstanceOf(NodeSelection);
-    expect((selection as NodeSelection).node.type.name).toBe("table");
+      fireEvent.click(handle!);
+      const { selection } = editor.state;
+      expect(selection).toBeInstanceOf(NodeSelection);
+      expect((selection as NodeSelection).node.type.name).toBe("table");
 
-    fireEvent.keyDown(surface, { key });
-    const blocks: string[] = [];
-    editor.state.doc.forEach((block) => blocks.push(block.type.name));
-    expect(blocks).toEqual(["paragraph", "paragraph"]);
-    expect(editor.state.doc.textContent).toBe("BeforeAfter");
-  });
+      fireEvent.keyDown(surface, { key });
+      const blocks: string[] = [];
+      editor.state.doc.forEach((block) => blocks.push(block.type.name));
+      expect(blocks).toEqual(["paragraph", "paragraph"]);
+      expect(editor.state.doc.textContent).toBe("BeforeAfter");
+    },
+  );
 });
 
 describe("MarkdownEditor history", () => {
-
   it("shares one ordered undo history across duplicate collaboration views", async () => {
     const ydoc = markdownToYDoc("seed");
     const user = userEvent.setup();
@@ -571,9 +650,7 @@ describe("MarkdownEditor history", () => {
         expect(paneA!.textContent).toBe("seedA");
       });
 
-      view.rerender(
-        createElement("div", null, paneAElement(), paneBElement()),
-      );
+      view.rerender(createElement("div", null, paneAElement(), paneBElement()));
       await waitFor(() => {
         expect(screen.getAllByTestId("markdown-editor")).toHaveLength(2);
       });
@@ -649,11 +726,9 @@ describe("MarkdownEditor history", () => {
       ydoc.destroy();
     }
   });
-
 });
 
 describe("MarkdownEditor remote carets", () => {
-
   it("renders a remote peer's caret once their synced cursor lands in awareness", async () => {
     // Two mirror Y.Docs bridged both ways, the same shape as
     // engineYDocProvider's main<->renderer echo-guarded relay: every local
@@ -841,9 +916,7 @@ describe("MarkdownEditor markdown export: code fence widening", () => {
     );
     await screen.findByRole("button", { name: "Old section" });
 
-    act(() =>
-      ref.current?.replaceMarkdown("# After\n\n## New section\n\n### Details"),
-    );
+    act(() => ref.current?.replaceMarkdown("# After\n\n## New section\n\n### Details"));
 
     await screen.findByRole("button", { name: "New section" });
     expect(screen.getByRole("button", { name: "Details" })).not.toBeNull();
@@ -878,16 +951,11 @@ describe("MarkdownEditor markdown export: code fence widening", () => {
     fireEvent(document, new Event("selectionchange"));
     await waitFor(() => expect(selectionTextOffset(editor)).toBe(99));
 
-    act(() =>
-      ref.current?.replaceMarkdown(
-        `${"x".repeat(100)}${stable}${"y".repeat(100)}`,
-      ),
-    );
+    act(() => ref.current?.replaceMarkdown(`${"x".repeat(100)}${stable}${"y".repeat(100)}`));
 
     expect(selectionTextOffset(editor)).toBe(103);
     expect(onDirty).not.toHaveBeenCalled();
   });
-
 });
 
 describe("MarkdownEditor read-only links", () => {
@@ -1040,14 +1108,10 @@ describe("MarkdownEditor dirty tracking", () => {
 
     try {
       await screen.findByTestId("markdown-editor");
-      view.rerender(
-        createElement(MarkdownEditor, { ...editorProps(onDirty), collab: null }),
-      );
+      view.rerender(createElement(MarkdownEditor, { ...editorProps(onDirty), collab: null }));
 
       const editor = await screen.findByTestId("markdown-editor");
-      await waitFor(() =>
-        expect(editor.textContent).toContain("Base paragraph."),
-      );
+      await waitFor(() => expect(editor.textContent).toContain("Base paragraph."));
       await user.click(editor);
       await user.type(editor, "Z");
 
@@ -1107,19 +1171,31 @@ describe("MarkdownEditor focus", () => {
       view.unmount();
     }
   });
-
 });
 
 it("hands Edit > Find to the editor that has focus, including its find bar", async () => {
   vi.stubGlobal("dohcDesktop", { platform: "darwin" });
   // The find bar scrolls its active match into view.
-  Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
   const left = createRef<MarkdownEditorHandle>();
   const right = createRef<MarkdownEditorHandle>();
-  const props = { value: "the cat, the mat, the hat", onDirty: vi.fn(), workspaceId: "ws", knownFiles: [] };
-  render(createElement("div", null,
-    createElement(MarkdownEditor, { ...props, key: "left", ref: left, path: "left.md" }),
-    createElement(MarkdownEditor, { ...props, key: "right", ref: right, path: "right.md" })));
+  const props = {
+    value: "the cat, the mat, the hat",
+    onDirty: vi.fn(),
+    workspaceId: "ws",
+    knownFiles: [],
+  };
+  render(
+    createElement(
+      "div",
+      null,
+      createElement(MarkdownEditor, { ...props, key: "left", ref: left, path: "left.md" }),
+      createElement(MarkdownEditor, { ...props, key: "right", ref: right, path: "right.md" }),
+    ),
+  );
   const [leftSurface, rightSurface] = await waitFor(() => {
     const surfaces = screen.getAllByTestId("markdown-editor");
     expect(surfaces).toHaveLength(2);

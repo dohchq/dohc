@@ -23,9 +23,7 @@ const LIST_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
 
 function listItemLineSource(line: string, task: boolean): string {
   const marker = LIST_ITEM_RE.exec(line);
-  let source = line
-    .slice(marker?.[0].length ?? 0)
-    .replace(/^[ \t]*/, "");
+  let source = line.slice(marker?.[0].length ?? 0).replace(/^[ \t]*/, "");
   if (task) source = source.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
   return source;
 }
@@ -91,14 +89,7 @@ export function intraBlockRange(
     return codeLineRange(container, containerPos, lines, offset);
   }
   if (LIST_TYPES.has(container.type.name)) {
-    return listItemRange(
-      container,
-      containerPos,
-      lines,
-      offset,
-      renderInlineText,
-      topLevel,
-    );
+    return listItemRange(container, containerPos, lines, offset, renderInlineText, topLevel);
   }
   return null;
 }
@@ -194,20 +185,11 @@ function listItemRange(
     listItemLineSource(itemLines[0] ?? "", task),
     ...itemLines.slice(1).map((line) => dedentLine(line, content)),
   ];
-  const nestedTarget = blockTargetForLine(
-    dedentedLines.join("\n"),
-    itemLocalOffset + 1,
-  );
+  const nestedTarget = blockTargetForLine(dedentedLines.join("\n"), itemLocalOffset + 1);
   const nestedIndex = dedentedLines[0] === "" ? 0 : 1;
   if (nestedTarget.index !== nestedIndex || !nestedTarget.match) return itemRange;
   const nestedPos = from + 1 + itemNode.child(0).nodeSize;
-  const refined = intraBlockRange(
-    nested,
-    nestedPos,
-    nestedTarget.match,
-    renderInlineText,
-    false,
-  );
+  const refined = intraBlockRange(nested, nestedPos, nestedTarget.match, renderInlineText, false);
   if (refined) return refined;
   if (nested.type.name !== "codeBlock" || content <= 0) return itemRange;
   const nestedStart = itemLocalOffset - nestedTarget.match.offset;

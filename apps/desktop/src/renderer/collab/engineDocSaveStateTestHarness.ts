@@ -1,11 +1,7 @@
 import { engineSaveState } from "../../workspaces/engineYDocSaveState";
 import { act } from "@testing-library/react";
 import * as Y from "yjs";
-import {
-  declareSceneRoots,
-  insertElementRevision,
-  putSceneAsset,
-} from "@dohc/excalidraw-scene";
+import { declareSceneRoots, insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import { EngineYDocUpdateTooLargeError } from "./engineYDocProvider";
@@ -25,14 +21,18 @@ type LineageReplacementListener = (event: {
   sessionId: string;
   update: Uint8Array;
   recoveredPaths: string[];
-  artifactAssets: readonly typeof IMAGE_DESCRIPTOR[];
+  artifactAssets: readonly (typeof IMAGE_DESCRIPTOR)[];
   lineageGeneration: number;
 }) => void;
 
 export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   const saveStateListeners = new Set<SaveStateListener>();
   const remoteUpdateListeners = new Set<
-    (event: { sessionId: string; update: Uint8Array; head?: { sha256: string | null; committed?: true } }) => void
+    (event: {
+      sessionId: string;
+      update: Uint8Array;
+      head?: { sha256: string | null; committed?: true };
+    }) => void
   >();
   const lineageReplacementListeners = new Set<LineageReplacementListener>();
   const applied: Array<{ sessionId: string; seq: number }> = [];
@@ -67,13 +67,10 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     message: string;
   } | null = null;
   let emitDeletedDuringOpen = false;
-  let artifactAssets: readonly typeof IMAGE_DESCRIPTOR[] = [];
+  let artifactAssets: readonly (typeof IMAGE_DESCRIPTOR)[] = [];
   let artifactAssetsInvalid = false;
   let lineageReplacementFailure: Error | null = null;
-  let lineageReplacementRefusal:
-    | "session-unavailable"
-    | "lineage-transition"
-    | null = null;
+  let lineageReplacementRefusal: "session-unavailable" | "lineage-transition" | null = null;
   let permanentApplyFailure = false;
   let readArtifactAsset: (descriptor: typeof IMAGE_DESCRIPTOR) => Promise<{
     descriptor: typeof IMAGE_DESCRIPTOR;
@@ -89,7 +86,13 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       openedSessionId = payload.sessionId;
       if (emitDeletedDuringOpen) {
         for (const listener of [...saveStateListeners]) {
-          listener({ sessionId: payload.sessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState("deleted"), seq: 0 });
+          listener({
+            sessionId: payload.sessionId,
+            workspaceId: "ws-1",
+            path: "notes/a.md",
+            ...engineSaveState("deleted"),
+            seq: 0,
+          });
         }
       }
       if (removalInProgress) {
@@ -105,17 +108,11 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
         lineageGeneration: currentLineageGeneration,
       };
     },
-    async applyEngineYDocUpdate(payload: {
-      sessionId: string;
-      update: Uint8Array;
-      seq: number;
-    }) {
+    async applyEngineYDocUpdate(payload: { sessionId: string; update: Uint8Array; seq: number }) {
       applyAttempts.push({ sessionId: payload.sessionId, seq: payload.seq });
       if (permanentApplyFailure) {
         permanentApplyFailure = false;
-        throw new EngineYDocUpdateTooLargeError(
-          ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
-        );
+        throw new EngineYDocUpdateTooLargeError(ENGINE_YDOC_UPDATE_MAX_BYTES + 1);
       }
       if (deferredApplyFailure) {
         const failure = deferredApplyFailure;
@@ -134,7 +131,11 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       return readArtifactAsset(payload.descriptor);
     },
     onEngineYDocRemoteUpdate: (
-      listener: (event: { sessionId: string; update: Uint8Array; head?: { sha256: string | null; committed?: true } }) => void,
+      listener: (event: {
+        sessionId: string;
+        update: Uint8Array;
+        head?: { sha256: string | null; committed?: true };
+      }) => void,
     ) => {
       remoteUpdateListeners.add(listener);
       return () => remoteUpdateListeners.delete(listener);
@@ -145,9 +146,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       lineageReplacementListeners.add(listener);
       return () => lineageReplacementListeners.delete(listener);
     },
-    async acknowledgeEngineYDocLineageReplacement(payload: {
-      lineageGeneration: number;
-    }) {
+    async acknowledgeEngineYDocLineageReplacement(payload: { lineageGeneration: number }) {
       acknowledgedGenerations.push(payload.lineageGeneration);
       if (lineageReplacementFailure) throw lineageReplacementFailure;
       if (lineageReplacementRefusal) {
@@ -178,7 +177,10 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     doc.getText("plainText").insert(doc.getText("plainText").length, suffix);
     const update = Y.encodeStateAsUpdate(doc, before);
     const event = {
-      sessionId: openedSessionId, update, lineageGeneration: currentLineageGeneration, ...(head ? { head } : {}),
+      sessionId: openedSessionId,
+      update,
+      lineageGeneration: currentLineageGeneration,
+      ...(head ? { head } : {}),
     };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
@@ -186,9 +188,17 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   }
 
   // A head with no change, as main sends the head of a save.
-  function emitHead(head: { sha256: string | null; committed?: true }, lineageGeneration = 1): void {
+  function emitHead(
+    head: { sha256: string | null; committed?: true },
+    lineageGeneration = 1,
+  ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
-    const event = { sessionId: openedSessionId, update: new Uint8Array([0, 0]), head, lineageGeneration };
+    const event = {
+      sessionId: openedSessionId,
+      update: new Uint8Array([0, 0]),
+      head,
+      lineageGeneration,
+    };
     act(() => {
       for (const listener of [...remoteUpdateListeners]) listener(event);
     });
@@ -196,7 +206,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
 
   function emitLineageReplacement(
     text: string,
-    replacementAssets: readonly typeof IMAGE_DESCRIPTOR[] = [],
+    replacementAssets: readonly (typeof IMAGE_DESCRIPTOR)[] = [],
     lineageGeneration = 2,
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
@@ -257,7 +267,14 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   ): void {
     const target = sessionId ?? openedSessionId;
     if (target === null) throw new Error("session not open yet");
-    const event = { sessionId: target, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq, authorCapacity };
+    const event = {
+      sessionId: target,
+      workspaceId: "ws-1",
+      path: "notes/a.md",
+      ...engineSaveState(state),
+      seq,
+      authorCapacity,
+    };
     act(() => {
       for (const listener of [...saveStateListeners]) listener(event);
     });
@@ -278,7 +295,13 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     for (const listener of [...saveStateListeners]) {
-      listener({ sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md", ...engineSaveState(state), seq });
+      listener({
+        sessionId: openedSessionId,
+        workspaceId: "ws-1",
+        path: "notes/a.md",
+        ...engineSaveState(state),
+        seq,
+      });
     }
   }
 
@@ -286,8 +309,12 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
   function emitChangedOutside(unsaved: boolean, seq: number): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     const event = {
-      sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md",
-      ...engineSaveState(unsaved ? "changed-on-disk" : "saved"), changedOutside: { unsaved }, seq,
+      sessionId: openedSessionId,
+      workspaceId: "ws-1",
+      path: "notes/a.md",
+      ...engineSaveState(unsaved ? "changed-on-disk" : "saved"),
+      changedOutside: { unsaved },
+      seq,
     };
     act(() => {
       for (const listener of [...saveStateListeners]) listener(event);
@@ -299,8 +326,12 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
     if (openedSessionId === null) throw new Error("session not open yet");
     const editRefusal = { workspaceId: "ws-1", path: "notes/a.md", requestId: "refused", message };
     const event = {
-      sessionId: openedSessionId, workspaceId: "ws-1", path: "notes/a.md",
-      ...engineSaveState("error", editRefusal), editRefusal, seq,
+      sessionId: openedSessionId,
+      workspaceId: "ws-1",
+      path: "notes/a.md",
+      ...engineSaveState("error", editRefusal),
+      editRefusal,
+      seq,
     };
     act(() => {
       for (const listener of [...saveStateListeners]) listener(event);
@@ -337,7 +368,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       emitDeletedDuringOpen = value;
     },
     setArtifactReader(
-      descriptors: readonly typeof IMAGE_DESCRIPTOR[],
+      descriptors: readonly (typeof IMAGE_DESCRIPTOR)[],
       reader: typeof readArtifactAsset,
     ) {
       artifactAssets = descriptors;

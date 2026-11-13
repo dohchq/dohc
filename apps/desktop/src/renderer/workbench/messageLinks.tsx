@@ -14,14 +14,19 @@ export const MessageLinks = createContext<MakeMessageLink | null>(null);
 
 export const MESSAGE_LINK_FAILURE = "dohc could not copy a link to this message.";
 
-export function useMessageLinkMaker(workspace: Pick<WorkspaceSummary, "workspaceId" | "sync">): MakeMessageLink | null {
+export function useMessageLinkMaker(
+  workspace: Pick<WorkspaceSummary, "workspaceId" | "sync">,
+): MakeMessageLink | null {
   const { workspaceId } = workspace;
   const requests = useRequestSequence([workspaceId]);
-  const make = useCallback(async (messageId: string) => {
-    const epoch = requests.current();
-    const made = await bridge().makeMessageLink({ workspaceId, messageId });
-    return requests.isCurrent(epoch) ? made?.url ?? null : null;
-  }, [requests, workspaceId]);
+  const make = useCallback(
+    async (messageId: string) => {
+      const epoch = requests.current();
+      const made = await bridge().makeMessageLink({ workspaceId, messageId });
+      return requests.isCurrent(epoch) ? (made?.url ?? null) : null;
+    },
+    [requests, workspaceId],
+  );
   return offersWorkLinks(workspace) ? make : null;
 }
 
