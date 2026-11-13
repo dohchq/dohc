@@ -56,6 +56,7 @@ export function createShareInventoryRoutes(
     | "lookupHistoryAccounts"
     | "listActiveIndependentShareGrants"
     | "workspaceRoleOf"
+    | "workspaceLevelChangedBy"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string) => Promise<void>,
@@ -188,11 +189,17 @@ export function createShareInventoryRoutes(
         throw notFound();
       // Opening a joined workspace keeps the member's name current, so mentions find them.
       if (role !== undefined) await accountDisplayName(lookupUserDisplayName, actor.userId);
+      // The person who set the members' level, named from the relay's own record of the change.
+      const changedBy =
+        role === "member" ? storage.workspaceLevelChangedBy(authorized.share.workspaceId) : null;
+      const levelChangedBy =
+        changedBy === null ? null : await accountDisplayName(lookupUserDisplayName, changedBy);
       return jsonResponse(
         {
           status: "current",
           access: fileSideOf(authorized.effectiveSelector)?.access ?? "view",
           ...(role === undefined ? {} : { role }),
+          ...(levelChangedBy === null ? {} : { levelChangedBy }),
         },
         200,
         { "cache-control": "private, no-store" },

@@ -1943,6 +1943,7 @@ export interface SyncRelayStorage {
   // Workspace members (storage/workspaceMembers.ts).
   workspaceMemberGrantIsCurrent: WorkspaceMembersMethod<"workspaceMemberGrantIsCurrent">;
   workspaceRoleOf: WorkspaceMembersMethod<"workspaceRoleOf">;
+  workspaceLevelChangedBy: WorkspaceMembersMethod<"workspaceLevelChangedBy">;
   readWorkspaceMembers: WorkspaceMembersMethod<"readWorkspaceMembers">;
   getWorkspaceMembershipByShare: WorkspaceMembersMethod<"getWorkspaceMembershipByShare">;
   inviteWorkspaceMember: WorkspaceMembersMethod<"inviteWorkspaceMember">;

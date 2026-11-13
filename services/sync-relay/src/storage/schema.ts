@@ -66,7 +66,11 @@ import {
 import { initializeLiveRoomSchema } from "./liveRoomEdits";
 import { initializeLiveRoomPauseSchema } from "./liveRoomPauses";
 import { initializePhoneAppSchema } from "./phoneApps";
-import { initializeWorkspaceMemberSchema } from "./workspaceMembers";
+
+import {
+  initializeWorkspaceLevelChanges,
+  initializeWorkspaceMemberSchema,
+} from "./workspaceMembers";
 import { initializeAccountNames } from "./accountNames";
 import type { SqliteDb } from "./types";
 
@@ -1691,6 +1695,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeLiveRoomPauseSchema(db);
   initializePhoneAppSchema(db);
   initializeAccountNames(db);
+  initializeWorkspaceLevelChanges(db);
   db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)

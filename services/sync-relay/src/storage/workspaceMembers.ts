@@ -127,7 +127,54 @@ export function initializeWorkspaceMemberSchema(db: SqliteDb): void {
   );
 }
 
-export type StoredMemberState = "invited" | "active" | "removed";
+// Who last set the members' level. The relay's own record, so a member's
+// computer can name the person; it goes with the membership.
+const LEVEL_CHANGES_MARKER = "workspace-level-changes-v1";
+const LEVEL_CHANGES = "sync_relay_workspace_level_changes";
+const LEVEL_CHANGES_SQL = `CREATE TABLE ${LEVEL_CHANGES} (
+  workspace_id TEXT PRIMARY KEY REFERENCES ${MEMBERSHIPS}(workspace_id) ON DELETE CASCADE,
+  member_level TEXT NOT NULL CHECK (member_level IN ('view', 'comment', 'edit')),
+  changed_by_user_id TEXT NOT NULL,
+  changed_at_ms INTEGER NOT NULL CHECK (changed_at_ms >= 0)
+) STRICT`;
+
+export function initializeWorkspaceLevelChanges(db: SqliteDb): void {
+  const assert = () => {
+    const row = db.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get(LEVEL_CHANGES);
+    if (typeof row?.sql !== "string" || normalize(row.sql) !== normalize(LEVEL_CHANGES_SQL)) {
+      throw new Error("workspace level change schema is missing or damaged");
+    }
+  };
+  if (
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(LEVEL_CHANGES_MARKER)
+  )
+    return assert();
+  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name = ?").get(LEVEL_CHANGES)) {
+    throw new Error("unmarked workspace level change schema already exists");
+  }
+  db.exec(LEVEL_CHANGES_SQL);
+  assert();
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    LEVEL_CHANGES_MARKER,
+    Date.now(),
+  );
+}
+
+/** The account that set the members' current level, or null when no record names one. */
+export function workspaceLevelChangedBy(
+  storage: StorageContext,
+  workspaceId: string,
+): string | null {
+  const row = storage.db
+    .prepare(`SELECT c.changed_by_user_id FROM ${LEVEL_CHANGES} c
+    JOIN ${MEMBERSHIPS} m USING (workspace_id) WHERE c.workspace_id = ? AND c.member_level = m.member_level`)
+    .get(workspaceId);
+  return row ? String(row.changed_by_user_id) : null;
+}
+
+export type StoredMemberState = "invited" | "active" | "left" | "removed";
 
 export interface WorkspaceMembershipRow {
   workspaceId: string;
@@ -565,6 +612,11 @@ export function setWorkspaceMemberLevel(
     storage.db
       .prepare(`UPDATE ${MEMBERSHIPS} SET member_level = ? WHERE workspace_id = ?`)
       .run(input.level, input.workspaceId);
+    storage.db
+      .prepare(`INSERT INTO ${LEVEL_CHANGES} (workspace_id, member_level, changed_by_user_id, changed_at_ms)
+      VALUES (?, ?, ?, ?) ON CONFLICT(workspace_id) DO UPDATE SET member_level = excluded.member_level,
+      changed_by_user_id = excluded.changed_by_user_id, changed_at_ms = excluded.changed_at_ms`)
+      .run(input.workspaceId, input.level, input.actorUserId, Math.trunc(input.nowMs));
     const membership = getWorkspaceMembership(storage, input.workspaceId)!;
     const entries = storage.db
       .prepare(
@@ -958,15 +1010,18 @@ export type CreateWorkspaceGroupResult =
  * The Group names no folder. A folder exists in a workspace only through the
  * files in it, and nothing here writes a file.
  */
-export function createWorkspaceGroup(storage: StorageContext, input: {
-  shareId: string;
-  actorUserId: string;
-  name: string;
-  slug: string;
-  type: WorkspaceGroupType | undefined;
-  purpose: string | undefined;
-  nowMs: number;
-}): CreateWorkspaceGroupResult {
+export function createWorkspaceGroup(
+  storage: StorageContext,
+  input: {
+    shareId: string;
+    actorUserId: string;
+    name: string;
+    slug: string;
+    type: WorkspaceGroupType | undefined;
+    purpose: string | undefined;
+    nowMs: number;
+  },
+): CreateWorkspaceGroupResult {
   return storage.tx((): CreateWorkspaceGroupResult => {
     const membership = getWorkspaceMembershipByShare(storage, input.shareId);
     if (!membership) return { ok: false, reason: "not-found" };
@@ -978,17 +1033,32 @@ export function createWorkspaceGroup(storage: StorageContext, input: {
     const channelWireId = `channel_${randomUUID().replaceAll("-", "")}`;
     const originId = workspaceAdminOrigin(actor.memberId);
     const payloadJson = JSON.stringify({
-      channelId: channelWireId, wireId: channelWireId, name: input.name, slug: input.slug, kind: "channel",
+      channelId: channelWireId,
+      wireId: channelWireId,
+      name: input.name,
+      slug: input.slug,
+      kind: "channel",
       ...(input.type === undefined ? {} : { type: input.type }),
       ...(input.purpose === undefined ? {} : { purpose: input.purpose }),
       createdAtMs,
     });
-    if (workspaceUsageBytes(storage, workspaceId) + Buffer.byteLength(payloadJson) > storage.options.workspaceQuotaBytes) {
+    if (
+      workspaceUsageBytes(storage, workspaceId) + Buffer.byteLength(payloadJson) >
+      storage.options.workspaceQuotaBytes
+    ) {
       return { ok: false, reason: "workspace-quota" };
     }
     appendLogBatchInTransaction(storage, {
-      workspaceId, originId,
-      ops: [{ originSeq: maxOriginSeq(storage, workspaceId, originId) + 1, opKind: "chat.channel.create", payloadJson, recordedAtMs: createdAtMs }],
+      workspaceId,
+      originId,
+      ops: [
+        {
+          originSeq: maxOriginSeq(storage, workspaceId, originId) + 1,
+          opKind: "chat.channel.create",
+          payloadJson,
+          recordedAtMs: createdAtMs,
+        },
+      ],
     });
     return { ok: true, workspaceId, channelWireId };
   });

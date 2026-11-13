@@ -6670,6 +6670,8 @@ export const CheckSharedViewAccessResult = z.object({
   // A membership's role, and whether this check changed its level.
   role: z.enum(["admin", "member"]).optional(),
   levelChanged: z.literal(true).optional(),
+  // Who changed it, as the relay recorded the change. Only with levelChanged.
+  levelChangedBy: z.string().min(1).optional(),
 });
 export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
 

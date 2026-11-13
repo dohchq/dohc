@@ -37,3 +37,12 @@ it("recognizes only the relay's access-removed reason", async () => {
   await expect(check(200, { status: "current", access: "comment", role: "member" })).resolves.toEqual({ access: "comment", role: "member" });
   await expect(check(200, { status: "current", access: "comment", role: "owner" })).rejects.toThrow();
 });
+
+it("reads who set a membership's level, and only as a name", async () => {
+  const check = (body: unknown) => fetchShareViewAccess({ shareId: "share", relay: { baseUrl: "https://relay.test", token: "session",
+    fetch: async () => Response.json(body) } });
+  await expect(check({ status: "current", access: "view", role: "member", levelChangedBy: "Ana" }))
+    .resolves.toEqual({ access: "view", role: "member", levelChangedBy: "Ana" });
+  await expect(check({ status: "current", access: "view", role: "member", levelChangedBy: 7 })).rejects.toThrow();
+  await expect(check({ status: "current", access: "view", role: "member", levelChangedBy: "" })).rejects.toThrow();
+});

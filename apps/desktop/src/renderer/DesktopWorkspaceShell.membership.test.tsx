@@ -105,6 +105,14 @@ describe("a joined workspace", () => {
     expect(bridge.checkSharedViewAccess).toHaveBeenCalled();
   });
 
+  it("names who changed the level in the toast and its Notices row", async () => {
+    withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
+    const toast = await screen.findByTestId("workspace-shell-notice");
+    expect(toast.textContent).toContain("Ana changed members to View.");
+    fireEvent.click(screen.getByTestId("notice-center-toggle"));
+    expect(await within(screen.getByTestId("notice-center")).findByText("Ana changed members to View.")).toBeTruthy();
+  });
+
   it("says nothing when the check finds the level it already had", async () => {
     const bridge = withGroup("comment", { status: "current", access: "comment", role: "member" });
     await waitFor(() => expect(bridge.checkSharedViewAccess).toHaveBeenCalled());

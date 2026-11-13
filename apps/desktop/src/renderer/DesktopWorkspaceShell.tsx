@@ -3148,9 +3148,13 @@ export function DesktopWorkspaceShell(props: {
         setAccessFor({ view: shareView, access: result.access });
       if (shareView.membership && shareView.shareId && result.role)
         setRoleFor({ shareId: shareView.shareId, role: result.role });
-      // The relay does not say who changed the level, so the words name none.
-      if (shareView.membership && result.levelChanged && result.access)
-        showSuccessNotice(`Members can now ${result.access}.`);
+      if (shareView.membership && result.levelChanged && result.access) {
+        showSuccessNotice(
+          result.levelChangedBy
+            ? `${result.levelChangedBy} changed members to ${({ view: "View", comment: "Comment", edit: "Edit" } as const)[result.access]}.`
+            : `Members can now ${result.access}.`,
+        );
+      }
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
         void props.refreshWorkspaceRegistry().catch(() => undefined);
       }

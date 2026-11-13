@@ -982,7 +982,14 @@ export function registerSharedViewsIpcHandlers<
                     status: "current",
                     access: committedPin.access,
                     ...(stated.role ? { role: stated.role } : {}),
-                    ...(committedPin.access !== pin.access ? { levelChanged: true } : {}),
+                    ...(committedPin.access !== pin.access
+                      ? {
+                          levelChanged: true,
+                          ...(stated.levelChangedBy
+                            ? { levelChangedBy: stated.levelChangedBy }
+                            : {}),
+                        }
+                      : {}),
                   }
                 : { status: "current", access: committedPin.access };
             },

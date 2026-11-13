@@ -211,7 +211,7 @@ export async function fetchShareViewAccess(input: {
   relay: SyncRelayConnection;
   shareId: string;
   signal?: AbortSignal;
-}): Promise<{ access: ShareAccess; role?: WorkspaceRole }> {
+}): Promise<{ access: ShareAccess; role?: WorkspaceRole; levelChangedBy?: string }> {
   const response = await (input.relay.fetch ?? relayApiFetch())(
     shareUrl(input.relay, `/sync/shares/${encodeURIComponent(input.shareId)}/access`),
     { headers: { authorization: `Bearer ${input.relay.token}` }, signal: input.signal },
@@ -240,11 +240,13 @@ export async function fetchShareViewAccess(input: {
   ) {
     throw new ShareSelectorInvalidError(input.shareId);
   }
-  // A membership also names its role.
+  // A membership also names its role, and the person who set its level.
   if (!("role" in body)) return { access: body.access };
   const role = readWorkspaceRole(body);
   if (role === null) throw new ShareSelectorInvalidError(input.shareId);
-  return { access: body.access, role };
+  if (!("levelChangedBy" in body)) return { access: body.access, role };
+  if (typeof body.levelChangedBy !== "string" || !body.levelChangedBy.trim()) throw new ShareSelectorInvalidError(input.shareId);
+  return { access: body.access, role, levelChangedBy: body.levelChangedBy };
 }
 
 export async function probeShareViewLog(input: {

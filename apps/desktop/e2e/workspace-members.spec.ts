@@ -632,13 +632,15 @@ test("@two-client a member posts in a Group, follows a level change, and sees an
     const note = mine.getByTestId("chats-readonly-note");
     await expect(note).toHaveText("Only people who can comment post here.", { timeout: 120_000 });
     await expect(composer).toHaveCount(0);
-    const toast = mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: "Members can now view." });
+    // The test relay names each account by its id.
+    const changed = `${OWNER.user} changed members to View.`;
+    const toast = mine.getByTestId("notice-toasts").getByTestId("workspace-shell-notice").filter({ hasText: changed });
     await expect(toast).toBeVisible({ timeout: 30_000 });
     await mine.screenshot({ path: shot("level-toast-dark") });
     for (const theme of ["Light", "Dark"] as const) {
       await setTheme(mine, theme);
       await mine.getByTestId("notice-center-toggle").click();
-      await expect(mine.getByTestId("notice-center").getByText("Members can now view.")).toBeVisible();
+      await expect(mine.getByTestId("notice-center").getByText(changed)).toBeVisible();
       await mine.screenshot({ path: shot(`level-notices-${theme.toLowerCase()}`) });
       await mine.keyboard.press("Escape");
       await expect(note).toBeVisible();

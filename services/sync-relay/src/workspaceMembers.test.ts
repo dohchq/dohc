@@ -1142,10 +1142,12 @@ describe("ending access", () => {
         nextCursor: first.nextCursor,
         levelChanged: true,
       });
+      // The access check that follows names who changed it.
       expect(await json(await h(request("ana", `/sync/shares/${shareId}/access`)))).toEqual({
         status: "current",
         access: "view",
         role: "member",
+        levelChangedBy: `Name ${OWNER}`,
       });
       const after = await pull(h, "ana", shareId);
       expect(after.status).toBe(200);
@@ -1154,6 +1156,44 @@ describe("ending access", () => {
       controller.abort();
       await held.catch(() => undefined);
     }
+  });
+
+  it("names who changed the level from its own record, never from the request", async () => {
+    const { h } = await seed();
+    await invited(h, "ana");
+    const kai = await invited(h, "kai");
+    const shareId = await shareIdOf(h, "ana");
+    const access = async () => json(await h(request("ana", `/sync/shares/${shareId}/access`)));
+    // No one has changed the level yet.
+    expect(await access()).toEqual({ status: "current", access: "comment", role: "member" });
+    expect(
+      (
+        await post(h, OWNER, `/sync/${WORKSPACE}/members/level`, {
+          level: "view",
+          levelChangedBy: "Mallory",
+          actorUserId: "kai",
+        })
+      ).status,
+    ).toBe(200);
+    expect(await access()).toEqual({
+      status: "current",
+      access: "view",
+      role: "member",
+      levelChangedBy: `Name ${OWNER}`,
+    });
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${kai}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    await shareIdOf(h, "kai");
+    expect(
+      (await post(h, "kai", `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status,
+    ).toBe(200);
+    expect(await access()).toEqual({
+      status: "current",
+      access: "edit",
+      role: "member",
+      levelChangedBy: "Name kai",
+    });
   });
 
   it("ends everyone's access when the owner ends the membership", async () => {

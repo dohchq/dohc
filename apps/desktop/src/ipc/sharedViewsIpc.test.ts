@@ -390,6 +390,15 @@ describe("metadata-only access checks", () => {
       await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload),
     ).toEqual({ status: "current", access: "comment" });
   });
+  it("names who changed a membership's level only when this check moved it", async () => {
+    const h = await harness();
+    h.workspace.shareView!.grantedSelector = { paths: [], versionId: null, access: "edit", wholeWorkspace: true };
+    h.fetchAccess.mockResolvedValue({ access: "view", role: "member", levelChangedBy: "Ana" });
+    expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload))
+      .toEqual({ status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
+    expect(await h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, payload))
+      .toEqual({ status: "current", access: "view", role: "member" });
+  });
   it("names a membership's role, and never a path share's", async () => {
     const h = await harness();
     h.fetchAccess.mockResolvedValue({ access: "edit", role: "admin" });
