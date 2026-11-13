@@ -7,7 +7,7 @@ import {
 import { activeTabPath, defaultWorkbenchState, type WorkbenchState } from "../workbench/workbenchState";
 
 /** The record a pending canonical DM navigation checks itself against. */
-export type DmNavigationRequest = { workspaceId: string; sequence: number };
+type DmNavigationRequest = { workspaceId: string; sequence: number };
 
 // Cancel any in-flight canonical DM navigation so its late answer cannot land
 // a chat destination over wherever the user went meanwhile. REPLACE the
@@ -31,7 +31,7 @@ export interface WorkspaceAdmission {
 }
 
 /** The workbench this visit shows, and the only ways to change it. */
-export interface VisitWorkbench {
+interface VisitWorkbench {
   /** The workbench this render shows. */
   readonly state: WorkbenchState;
   /**

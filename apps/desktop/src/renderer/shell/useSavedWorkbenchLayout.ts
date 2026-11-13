@@ -48,7 +48,7 @@ const SETTINGS_COMMANDS: ReadonlySet<CommandId> = new Set(["settings", "settings
 
 type Listing = ReturnType<typeof useWorkspaceListing>;
 
-export interface SavedWorkbenchLayoutInput {
+interface SavedWorkbenchLayoutInput {
   visit: WorkspaceVisit;
   // Listing freshness: a restored tab closes only once a settled listing
   // lacks its file, checked again whenever a listing settles.
