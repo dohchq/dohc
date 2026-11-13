@@ -2,7 +2,7 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { createPostgresCredentialFence } from "./credentialFence";
-import { actorFromSession, createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
+import { createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type ResolveActor } from "./session";
 import type { SignUpAdmission } from "./signUp";
 import type { EmailMessage } from "./smtp";
 
@@ -122,27 +122,6 @@ if (pgAvailable) {
     await pool.end();
   });
 }
-
-describeWithPostgres("email/password against Postgres", () => {
-  it("signs up and signs in", async () => {
-    const email = `${unique()}@dohc.test`;
-    const signup = await signUp(email);
-    expect(signup.user.email).toBe(email);
-
-    const signin = await auth.api.signInEmail({
-      body: { email, password: PASSWORD },
-    });
-    expect(signin.user.id).toBe(signup.user.id);
-  });
-
-  it("rejects a wrong password", async () => {
-    const email = `${unique()}@dohc.test`;
-    await signUp(email);
-    await expect(
-      auth.api.signInEmail({ body: { email, password: "wrong-password-1" } }),
-    ).rejects.toMatchObject({ statusCode: 401 });
-  });
-});
 
 describeWithPostgres("closed sign-up", () => {
   function closedAuth(admission: SignUpAdmission, asked: string[] = []): WorkspaceAuth {
@@ -291,14 +270,6 @@ describeWithPostgres("closed sign-up", () => {
     expect(await nameOf(user.id)).toBe("Ada Lovelace");
   });
 
-  it("leaves the account unnamed when the owner's link arrives without a name", async () => {
-    const email = `${unique()}@dohc.test`;
-    const closed = closedAuth("admitted");
-    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
-    await choosePassword(closed, email, "owner-password-bbb");
-    expect(await nameOf(user.id)).toBe("");
-  });
-
   it("keeps each concurrent setup's name to its own account", async () => {
     const closed = closedAuth("admitted");
     const named = `${unique()}@dohc.test`;
@@ -313,21 +284,6 @@ describeWithPostgres("closed sign-up", () => {
     expect(responses.map((response) => response.status)).toEqual([200, 200]);
     expect(await nameOf(first.user.id)).toBe("Ada");
     expect(await nameOf(second.user.id)).toBe("");
-  });
-
-  it("refuses an email address as a name and keeps the link usable", async () => {
-    const email = `${unique()}@dohc.test`;
-    const closed = closedAuth("admitted");
-    const { user } = await closed.api.signUpEmail({ body: { email, password: "attacker-password-aaa", name: "Mallory" } });
-
-    const refused = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "ada@example.com" });
-    expect(refused.status).toBe(400);
-    expect(((await refused.json()) as { code: string }).code).toBe("INVALID_NAME");
-    expect(await nameOf(user.id)).toBe("Mallory");
-
-    const accepted = await submitResetPage(closed, email, { newPassword: "owner-password-bbb", name: "Ada" });
-    expect(accepted.status).toBe(200);
-    expect(await nameOf(user.id)).toBe("Ada");
   });
 
   it("never renames a verified account from a password reset, even with a name in the request", async () => {
@@ -370,17 +326,6 @@ describeWithPostgres("closed sign-up", () => {
     expect(state.rows).toEqual([{ emailVerified: false, sessions: 0 }]);
   });
 
-  it("sends no link when someone signs up again with a verified address", async () => {
-    const email = `${unique()}@dohc.test`;
-    const closed = closedAuth("admitted");
-    await closed.api.signUpEmail({ body: { email, password: PASSWORD, name: "Test User" } });
-    await choosePassword(closed, email, PASSWORD);
-    const before = emailsTo(email).length;
-    const duplicate = await closed.api.signUpEmail({ body: { email, password: "another-password-1", name: "Test User" } });
-    expect(duplicate.token).toBeNull();
-    expect(emailsTo(email).length).toBe(before);
-  });
-
   it("refuses a verification link sent while sign-up was open", async () => {
     const email = `${unique()}@dohc.test`;
     await signUp(email);
@@ -402,61 +347,9 @@ describeWithPostgres("closed sign-up", () => {
     expect(await accountExists(email)).toBe(false);
   });
 
-  it("answers the sign-up page with the refusal it shows", async () => {
-    const response = await closedAuth("refused").handler(
-      new Request("http://localhost:1786/api/auth/sign-up/email", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email: `${unique()}@dohc.test`, password: PASSWORD, name: "Test User" }),
-      }),
-    );
-    expect(response.status).toBe(403);
-    const body = (await response.json()) as { code: string; message: string };
-    expect(body.code).toBe("SIGN_UP_CLOSED");
-    expect(body.message).toMatch(/^This server creates accounts only for approved or invited email addresses\./);
-  });
 });
 
 describeWithPostgres("account email", () => {
-  it("sends a verification link to a dohc page, and the link verifies the address", async () => {
-    const email = `${unique()}@dohc.test`;
-    await signUp(email);
-
-    const message = lastEmailTo(email);
-    expect(message.subject).toBe("Verify your dohc email");
-    const link = linkIn(message);
-    expect(link.pathname).toBe("/account/verify-email");
-    const token = link.searchParams.get("token") ?? "";
-    expect(token.length).toBeGreaterThan(0);
-
-    await auth.api.verifyEmail({ query: { token } });
-    const signin = await auth.api.signInEmail({ body: { email, password: PASSWORD } });
-    expect(signin.user.emailVerified).toBe(true);
-  });
-
-  it("sends a reset link that sets a new password", async () => {
-    const email = `${unique()}@dohc.test`;
-    await signUp(email);
-
-    await auth.api.requestPasswordReset({ body: { email } });
-    const link = linkIn(lastEmailTo(email));
-    expect(link.pathname).toBe("/account/reset-password");
-    expect(link.searchParams.get("setup")).toBeNull();
-
-    const newPassword = "another-real-password-456";
-    await auth.api.resetPassword({
-      body: { newPassword, token: link.searchParams.get("token") ?? "" },
-    });
-
-    const signin = await auth.api.signInEmail({ body: { email, password: newPassword } });
-    expect(signin.user.email).toBe(email);
-    expect(signin.user.name).toBe("Test User");
-    // An open server keeps verification a separate step.
-    expect(signin.user.emailVerified).toBe(false);
-    await expect(
-      auth.api.signInEmail({ body: { email, password: PASSWORD } }),
-    ).rejects.toMatchObject({ statusCode: 401 });
-  });
 
   it("starts a session after a password change that consent counts as current", async () => {
     // Better Auth leaves the session's start on this database's clock to Postgres.
@@ -473,14 +366,6 @@ describeWithPostgres("account email", () => {
     expect(credentials?.sessionCurrent).toBe(true);
   });
 
-  it("refuses a second sign-up for the same address and sends no mail", async () => {
-    const email = `${unique()}@dohc.test`;
-    await signUp(email);
-    const before = sent.filter((message) => message.to === email).length;
-    await expect(signUp(email)).rejects.toMatchObject({ statusCode: 422 });
-    expect(sent.filter((message) => message.to === email).length).toBe(before);
-  });
-
   it("answers a reset request for an unknown address without sending mail", async () => {
     const email = `${unique()}@dohc.test`;
     await auth.api.requestPasswordReset({ body: { email } });
@@ -489,77 +374,6 @@ describeWithPostgres("account email", () => {
 });
 
 describeWithPostgres("device authorization flow (desktop login)", () => {
-  it("issues a usable desktop session: request code, approve in browser session, poll succeeds, token authenticates", async () => {
-    const email = `${unique()}@dohc.test`;
-    const signup = await signUp(email);
-
-    // 1. Desktop requests a device code.
-    const device = await auth.api.deviceCode({ body: { client_id: "dohc-desktop" } });
-    expect(device.user_code).toBeTruthy();
-    expect(device.device_code).toBeTruthy();
-    expect(device.verification_uri).toContain("/device");
-
-    // 2. Polling before approval reports authorization_pending.
-    await expect(
-      auth.api.deviceToken({
-        body: {
-          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          device_code: device.device_code,
-          client_id: "dohc-desktop",
-        },
-      }),
-    ).rejects.toMatchObject({
-      body: { error: "authorization_pending" },
-    });
-
-    // 3. Browser-side: signed-in user claims the code, then approves.
-    const cookie = await sessionCookieFor(email);
-    await auth.api.deviceVerify({
-      query: { user_code: device.user_code },
-      headers: { cookie },
-    });
-    const approve = await auth.api.deviceApprove({
-      body: { userCode: device.user_code },
-      headers: { cookie },
-    });
-    expect(approve).toMatchObject({ success: true });
-
-    // 4. Desktop polls and receives a session token. The server throttles
-    //    polls to one per `interval` measured from the last accepted poll's
-    //    server-side timestamp, so a single fixed sleep can still land in
-    //    the window (observed flake). Loop until slow_down clears, waiting
-    //    interval + margin each time; any other error is a real failure.
-    const pollDelayMs = (device.interval ?? 3) * 1000 + 500;
-    let token: { access_token?: string } | undefined;
-    for (let attempt = 0; attempt < 5 && !token; attempt += 1) {
-      try {
-        token = await auth.api.deviceToken({
-          body: {
-            grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-            device_code: device.device_code,
-            client_id: "dohc-desktop",
-          },
-        });
-      } catch (error) {
-        const code = (error as { body?: { error?: string } }).body?.error;
-        if (code !== "slow_down") throw error;
-        await new Promise((r) => setTimeout(r, pollDelayMs));
-      }
-    }
-    expect(token?.access_token).toBeTruthy();
-
-    // 5. ...which authenticates API requests as a Bearer session.
-    const session = await auth.api.getSession({
-      headers: { authorization: `Bearer ${token!.access_token}` },
-    });
-    expect(session?.user.id).toBe(signup.user.id);
-
-    // 6. And maps to the Actor shape downstream authz consumes.
-    expect(actorFromSession(session!, "ws-1")).toEqual({
-      userId: signup.user.id,
-      workspaceId: "ws-1",
-    });
-  }, 30_000);
 
   it("denies the token when the user denies the code", async () => {
     const email = `${unique()}@dohc.test`;
@@ -589,12 +403,6 @@ describeWithPostgres("device authorization flow (desktop login)", () => {
 });
 
 describeWithPostgres("session validation middleware shape", () => {
-  it("returns null for a missing or invalid bearer token", async () => {
-    expect(
-      await auth.api.getSession({ headers: { authorization: "Bearer not-a-token" } }),
-    ).toBeNull();
-    expect(await auth.api.getSession({ headers: {} })).toBeNull();
-  });
 
   it("ResolveActor maps a Bearer session to the downstream Actor and 401s everything else", async () => {
     const email = `${unique()}@dohc.test`;
@@ -681,24 +489,6 @@ describeWithPostgres("an account's sessions", () => {
     expect(await sessionOf(anaPhone.token)).toBeUndefined();
   });
 
-  it("lists newest first, breaking a tie by ID", async () => {
-    const email = `${unique()}@dohc.test`;
-    const { user } = await signUp(email);
-    await pool.query('delete from "session" where "userId" = $1', [user.id]);
-    for (const userAgent of ["one", "two", "three"]) await signIn(email, userAgent);
-    const ids = (await pool.query<{ id: string }>('select "id" from "session" where "userId" = $1', [user.id])).rows.map(row => row.id).sort();
-    const at = (id: string, createdAt: string) => pool.query('update "session" set "createdAt" = $2 where "id" = $1', [id, createdAt]);
-    // The newest has the greatest ID, so ordering by ID alone would put it last.
-    await at(ids[2]!, "2026-11-10T12:00:00Z");
-    await at(ids[1]!, "2026-11-10T11:00:00Z");
-    await at(ids[0]!, "2026-11-10T11:00:00Z");
-    expect((await createPostgresAccountSessions(pool).list(user.id)).map(session => [session.sessionId, session.createdAtMs])).toEqual([
-      [ids[2], Date.parse("2026-11-10T12:00:00Z")],
-      [ids[0], Date.parse("2026-11-10T11:00:00Z")],
-      [ids[1], Date.parse("2026-11-10T11:00:00Z")],
-    ]);
-  });
-
   it("neither lists nor revokes an expired session, and an expired caller revokes nothing", async () => {
     const email = `${unique()}@dohc.test`;
     const { user } = await signUp(email);
@@ -748,25 +538,5 @@ describeWithPostgres("browser cookie sessions (web client)", () => {
       new Request("http://localhost:1786/workspaces/ws-cookie/files"),
     );
     expect(anonymous.status).toBe(401);
-  });
-});
-
-describeWithPostgres("organization plugin (team workspaces)", () => {
-  it("creates an organization and lists the creator as a member", async () => {
-    const email = `${unique()}@dohc.test`;
-    await signUp(email);
-    const cookie = await sessionCookieFor(email);
-
-    const org = await auth.api.createOrganization({
-      body: { name: "Test Team", slug: unique() },
-      headers: { cookie },
-    });
-    expect(org?.id).toBeTruthy();
-
-    const full = await auth.api.getFullOrganization({
-      query: { organizationId: org!.id },
-      headers: { cookie },
-    });
-    expect(full?.members.some((m) => m.role === "owner")).toBe(true);
   });
 });

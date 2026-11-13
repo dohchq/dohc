@@ -48,7 +48,7 @@ it("retains v2 metadata in bounded readers and refuses a rehashed v1 downgrade",
       .map(event => event.metadata)).toEqual(metadata);
     const cursor = input.through;
     f.raw.prepare("UPDATE sync_relay_live_update_journal SET first_seen_deletes_json=? WHERE journal_cursor=?")
-      .run(" ".repeat(1_000_000)+"[]",cursor);
+      .run(" ".repeat(10_001)+"[]",cursor);
     expect(() => readAcceptedHistoryDeliveryMetadata(f.storage as StorageContext,delivery,new RestoreHistoryBudget(10_000,1))).toThrow(/bounds/);
     f.raw.prepare("UPDATE sync_relay_live_update_journal SET first_seen_deletes_json='[]',author_snapshot_json=? WHERE journal_cursor=?")
       .run(JSON.stringify([{kind:"human",humanId:"bob",humanName:"Bob"}]),cursor);

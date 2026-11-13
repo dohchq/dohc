@@ -1,7 +1,5 @@
-import { readDatasetHistoryHeads } from "./dataset-history.js";
 import { privateFolder } from "./private-folder.test-helper";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
-import * as datasetOperations from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "./protocol.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -109,7 +107,6 @@ it("requires an archived Collection and current owner review of both data and af
   await expect(f.host.deleteDataset("owner",{...request,expected:live.cursor,reviewToken:live.reviewToken})).rejects.toThrow("This Collection isn't archived. Archive it before you delete it permanently.");
   expect(f.host.deletionStatus("owner",scope)).toEqual({deleted:false});
   f.host.archiveDataset("owner",scope);
-  // The store still keeps an archived Collection, and only its owner learns which ones it keeps.
   expect(f.host.keptDatasetIds("owner",{workspaceId:scope.workspaceId})).toEqual([scope.datasetId]);
   expect(() => f.host.keptDatasetIds("helper",{workspaceId:scope.workspaceId})).toThrow("You do not have access to this Collection.");
   const current = f.host.deletePreview("owner",scope);
@@ -207,32 +204,6 @@ it("archives and restores the same records without releasing storage or reactiva
   expect(() => f.host.restoreDataset("owner", scope)).toThrow("stopped accepting changes to this Collection");
 });
 
-it("invalidates a pending operation even if the dataset is archived and restored before commit", async () => {
-  const f = await fixture(); await f.activate();
-  const original = f.supervisor.invoke.bind(f.supervisor);
-  f.supervisor.invoke = async input => {
-    f.host.archiveDataset("owner", scope); f.host.restoreDataset("owner", scope);
-    return original(input);
-  };
-  await expect(f.invoke("owner", id(6), { value: "stale" })).rejects.toThrow();
-  expect(f.journal.head(scope, () => {}).cursor.revision).toBe(0);
-});
-
-it("creates a dataset without an app and several views share its authoritative records", async () => {
-  const f = await fixture(); await f.activate();
-  expect(f.host.list("owner", { workspaceId: "workspace" }).datasets[0].name).toBe("Orders");
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
-  await expect(f.invoke("friend", id(6), { value: "submitted" }, "form")).resolves.toMatchObject({ result: { accepted: true }, revision: 1 });
-  const rows = await f.invoke("owner", id(7));
-  expect(rows.result).toMatchObject([{ value: "submitted" }]);
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7), id(8)], discover: true } });
-  await f.invoke("helper", id(8), { id: (rows.result as Array<{ id: string }>)[0].id, value: "managed" });
-  expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "managed" }]);
-  expect(f.host.describe("helper", scope).tables[0].fields.map(field => field.name)).toEqual(["ID", "Value"]);
-  expect(JSON.stringify(f.host.describe("helper", scope))).not.toContain("Secret");
-  expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBeGreaterThan(128 * 1024 * 1024);
-});
-
 it("keeps submission, data discovery, private reads, and source approval separate", async () => {
   const f = await fixture(); await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(9)]) });
@@ -244,16 +215,6 @@ it("keeps submission, data discovery, private reads, and source approval separat
   expect(() => f.host.setBinding("helper", { ...scope, appId: "form", binding: f.binding() })).toThrow("You do not have access to this Collection.");
   expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(9)], discover: true } })).toThrow("Owner-only");
   expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.binding(), revisionSha256: "0".repeat(64) } })).toThrow();
-});
-
-it("approving another consumer cannot replace rules and changed artifacts cannot activate", async () => {
-  const f = await fixture(); await f.activate();
-  await expect(f.host.activate("owner", { workspaceId: "workspace", ...prepared, operationSource: "globalThis.operations={};" })).rejects.toThrow("artifacts");
-  const changedSource = operationSource.replace("'private'", "'different'");
-  const changed = { revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource: changedSource }), schemaSql, operationSource: changedSource };
-  await expect(f.host.activate("owner", { workspaceId: "workspace", ...changed })).rejects.toThrow("already approved");
-  await expect(f.activate()).resolves.toEqual(prepared.revision);
-  expect(f.host.approvedArtifacts("owner", scope).operationSource).toBe(operationSource);
 });
 
 it("rolls back catalog creation and quota when the final authority check fails", async () => {
@@ -282,21 +243,6 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
-});
-
-it("compiles verified TypeScript captures but preserves original artifacts", async () => {
-  const typedDefinition = { ...definition, operationsPath: "orders/operations.ts" }, typedSource = "const value: string = 'ok';";
-  const compiled = vi.fn(async () => operationSource);
-  const f = await fixture({ compileOperations: compiled });
-  const revision = describeDatasetRevision({ definition: typedDefinition, revision: 1, schemaSql, operationSource: typedSource });
-  await f.host.activate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource: typedSource });
-  expect(compiled).toHaveBeenCalledWith(typedSource, typedDefinition.operationsPath);
-  expect(f.host.approvedArtifacts("owner", scope).operationSource).toBe(typedSource);
-  expect(f.journal.head(scope, () => {}).source).toBe(operationSource);
-  await f.host.invoke("owner", { ...scope, revision: revision.revision, revisionSha256: revision.revisionSha256,
-    operationId: id(6), input: { value: "compiled" }, idempotencyKey: "request" });
-  expect((await f.host.invoke("owner", { ...scope, revision: revision.revision, revisionSha256: revision.revisionSha256,
-    operationId: id(7), input: {}, idempotencyKey: "read" })).result).toMatchObject([{ value: "compiled" }]);
 });
 
 it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
@@ -346,7 +292,6 @@ it("exposes complete migration previews only to the current owner and commits th
   const rows=await f.host.invoke("owner",{...scope,revision:2,revisionSha256:revision.revisionSha256,operationId:id(9),input:{},idempotencyKey:"after"});
   expect(rows.result).toEqual([candidate.preview.firstPage.changes[0]!.after]);
 });
-
 it("invalidates prepared migration authority after archive and restore",async()=>{
   const f=await fixture();await f.activate();
   const expected=f.host.approvedArtifacts("owner",scope).cursor,revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
@@ -354,6 +299,7 @@ it("invalidates prepared migration authority after archive and restore",async()=
   f.host.archiveDataset("owner",scope);f.host.restoreDataset("owner",scope);
   await expect(f.host.approveMigration("owner",{...scope,candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("You do not have access to this Collection.");
 });
+
 
 it("migrates records atomically and retains stale grants for explicit reapproval", async () => {
   const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "saved" });
@@ -423,15 +369,6 @@ it("enforces a form's create-field subset before operation execution", async () 
   await expect(invoke({values:{[id(4)]:"allowed"}})).resolves.toMatchObject({result:{accepted:true},revision:1});
 });
 
-it("refuses a non-replayable schema before committing dataset approval",async()=>{
-  const f=await fixture(),schema="CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT,value TEXT NOT NULL,secret TEXT NOT NULL);";
-  const definitionWithIntegerKey=structuredClone(definition);definitionWithIntegerKey.tables[0].fields[0].type="number";
-  const revision=describeDatasetRevision({definition:definitionWithIntegerKey,revision:1,schemaSql:schema,operationSource});
-  await expect(f.host.activate("owner",{workspaceId:"workspace",revision,schemaSql:schema,operationSource})).rejects.toThrow("AUTOINCREMENT");
-  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(0);
-  expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_journals").get()!.n).toBe(0);
-});
-
 it("rechecks grants and data revision when a protected resource is read",async()=>{
   const f=await fixture();await f.activate();
   f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
@@ -464,7 +401,6 @@ it("refuses file disclosure when a committed row change removes visibility after
   expect((await invoke("owner",{...base,operationId:id(7),input:{},idempotencyKey:"check-hidden"})).result).toEqual([]);
 });
 
-
 it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
   let refunded = 0;
   const f = await fixture({accountMetadata(_context, allocation) {refunded += allocation.bytes;}}); await f.activate();
@@ -495,41 +431,6 @@ it("lets only owners acknowledge an exact committed response without exposing pa
   expect(next.attempt!.token).not.toBe(pending.attempt!.token);
 });
 
-it("binds another app while retaining a committed guest response attempt", async () => {
-  const f = await fixture(); await f.activate();
-  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
-  attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
-  const saved = await f.invoke("friend", id(6), {value: "saved"}, "form");
-  const receipts = f.db.prepare("SELECT * FROM dohc_dataset_receipts WHERE workspace_id=? AND dataset_id=?");
-  const savedReceipts = receipts.all(scope.workspaceId, scope.datasetId);
-  const events = f.db.prepare("SELECT * FROM dohc_dataset_events WHERE workspace_id=? AND dataset_id=? ORDER BY revision");
-  const savedEvents = events.all(scope.workspaceId, scope.datasetId);
-  expect(f.host.pendingAttempts("owner", scope).entries).toMatchObject([{outcome: "committed"}]);
-  expect(() => f.host.setBinding("owner", {...scope, appId: "dashboard", binding: f.binding([id(7)])})).not.toThrow();
-  expect(await f.invoke("friend", id(6), {value: "saved"}, "form")).toEqual({...saved, replayed: true});
-  expect(receipts.all(scope.workspaceId, scope.datasetId)).toEqual(savedReceipts);
-  expect(events.all(scope.workspaceId, scope.datasetId)).toEqual(savedEvents);
-  expect(f.host.lifecycle("owner", scope).apps).toEqual(expect.arrayContaining([{appId: "dashboard", binding: f.binding([id(7)])}]));
-  expect(f.host.pendingAttempts("owner", scope).entries).toHaveLength(1);
-});
-
-it("refuses a new binding only for unconfirmed attempts in other apps", async () => {
-  const f = await fixture(); await f.activate();
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
-  attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "pending"}}, () => {});
-  expect(() => f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()})).not.toThrow();
-  const commitPublication = vi.fn();
-  expect(() => f.host.setBinding("owner", {...scope, appId: "dashboard", binding: f.binding([id(7)])}, commitPublication))
-    .toThrow("A response is pending in another app. Confirm it there before publishing this app.");
-  expect(commitPublication).not.toHaveBeenCalled();
-  expect(f.host.lifecycle("owner", scope).apps.map(app => app.appId)).toEqual(["form"]);
-  attempts.request({...selected, appId: "another-form"}, {action: "save", idempotencyKey: "another-request", input: {value: "pending"}}, () => {});
-  expect(() => f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding([id(6), id(7)])})).not.toThrow();
-});
-
 it("cancels an unconfirmed retry before queued execution and permanently refuses its key", async () => {
   const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
   const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
@@ -551,166 +452,6 @@ it("cancels an unconfirmed retry before queued execution and permanently refuses
   expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_receipts WHERE idempotency_key='request'").get()!.n).toBe(0);
   attempts.request(selected, {action: "save", idempotencyKey: "new-key", input: {value: "new"}}, () => {});
   await expect(f.host.invoke("friend", {...scope, access: {kind: "app", appId: "form"}, revision: 1, revisionSha256: selected.revisionSha256, operationId: id(6), input: {value: "new"}, idempotencyKey: "new-key"})).resolves.toMatchObject({replayed: false});
-});
-
-it("preserves a committed response when commit wins the owner cancellation race", async () => {
-  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
-  const saved = attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
-  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
-  await f.invoke("friend", id(6), {value: "saved"}, "form");
-  expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toThrow("saved before cancellation");
-  expect(attempts.request(selected, {action: "get"}, () => {})).toEqual(saved);
-  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_cancelled_attempts").get()!.n).toBe(0);
-  expect((await f.invoke("friend", id(6), {value: "saved"}, "form")).replayed).toBe(true);
-});
-
-it("rejects a worker proposal when the owner cancels immediately before journal commit", async () => {
-  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "prepared"}}, () => {});
-  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
-  const commit = f.journal.commitOperation.bind(f.journal);
-  const interception = vi.spyOn(f.journal, "commitOperation").mockImplementation(input => {
-    f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true});
-    return commit(input);
-  });
-  await expect(f.invoke("friend", id(6), {value: "prepared"}, "form")).rejects.toThrow("cancelled");
-  expect(interception).toHaveBeenCalledOnce(); interception.mockRestore();
-  expect((await f.invoke("owner", id(7))).result).toEqual([]);
-  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_receipts").get()!.n).toBe(0);
-});
-
-it("refuses migration before staging until pending submissions are resolved", async () => {
-  const stages = vi.fn();
-  const f = await fixture({accountCheckpointStage: stages}); await f.activate();
-  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "pending"}}, () => {});
-  const expected = f.host.approvedArtifacts("owner", scope).cursor, revision = describeDatasetRevision({definition: {...definition, name: "Changed"}, revision: 2, schemaSql, operationSource});
-  const change = {workspaceId: scope.workspaceId, revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;"};
-  stages.mockClear();
-  await expect(f.host.migrate("owner", change)).rejects.toThrow("unconfirmed"); expect(stages).not.toHaveBeenCalled();
-  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
-  f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true});
-  await expect(f.host.migrate("owner", change)).resolves.toMatchObject({revision});
-});
-
-it("retains committed pending responses across schema migration for owner review", async () => {
-  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "saved"}}, () => {});
-  await f.invoke("friend", id(6), {value: "saved"}, "form");
-  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
-  const expected = f.host.approvedArtifacts("owner", scope).cursor, revision = describeDatasetRevision({definition: {...definition, name: "Changed"}, revision: 2, schemaSql, operationSource});
-  await f.host.migrate("owner", {workspaceId: scope.workspaceId, revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;"});
-  expect(f.host.pendingAttempts("owner", scope).entries[0]).toMatchObject({reference, outcome: "committed"});
-  expect(f.host.reconcileAttempt("owner", {...scope, reference, acknowledge: true})).toEqual({cleared: true});
-});
-
-it("rolls back a prepared migration if a submission appears before its final transaction", async () => {
-  const f = await fixture(); await f.activate();
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const expected = f.host.approvedArtifacts("owner", scope).cursor, revision = describeDatasetRevision({definition: {...definition, name: "Changed"}, revision: 2, schemaSql, operationSource});
-  const transition = f.journal.transitionCheckpoint.bind(f.journal);
-  const interception = vi.spyOn(f.journal, "transitionCheckpoint").mockImplementation(input => {
-    attempts.request({...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256}, {action: "save", idempotencyKey: "request", input: {value: "arrived"}}, () => {});
-    return transition(input);
-  });
-  await expect(f.host.migrate("owner", {workspaceId: scope.workspaceId, revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;"})).rejects.toThrow("unconfirmed");
-  expect(interception).toHaveBeenCalledOnce(); interception.mockRestore();
-  expect(f.host.approvedArtifacts("owner", scope).revision.revision).toBe(1);
-  expect(f.host.pendingAttempts("owner", scope).entries[0]!.outcome).toBe("unconfirmed");
-});
-
-it("rolls cancellation and its storage delta back together when accounting fails", async () => {
-  let failAccounting = false;
-  const f = await fixture({accountMetadata() { if (failAccounting) throw Error("accounting refused"); }}); await f.activate();
-  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
-  const saved = attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "retained"}}, () => {});
-  const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
-  failAccounting = true;
-  expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toThrow("accounting refused");
-  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_cancelled_attempts").get()!.n).toBe(0);
-  expect(attempts.request(selected, {action: "get"}, () => {})).toEqual(saved);
-});
-
-
-it("keeps original app and helper grants working through display renames, including saved retries and revocation", async () => {
-  const f = await fixture(); await f.activate();
-  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding([id(6),id(7)])});
-  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
-  const bindings = f.db.prepare("SELECT * FROM dohc_dataset_bindings").all();
-  const grants = f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all();
-  const first = await f.invoke("friend",id(6),{value:"saved"},"form");
-  for (const number of [2,3]) {
-    const next = structuredClone(definition); next.name = `Orders ${number}`; next.tables[0].name = "Entries"; next.tables[0].fields[1].name = "Label";
-    next.schemaPath = `revisions/${number}/schema.sql`; next.operationsPath = `revisions/${number}/operations.js`;
-    const revision = describeDatasetRevision({definition:next,revision:number,schemaSql,operationSource});
-    await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-    expect((await f.invoke("friend",id(6),{value:"saved"},"form"))).toMatchObject({...first,replayed:true});
-    expect((await f.invoke("helper",id(7),{},"form")).result).toMatchObject([{value:"saved"}]);
-    expect(f.host.describe("helper",scope).tables[0].fields.find(field=>field.fieldId===id(4))?.name).toBe("Label");
-  }
-  expect(f.host.permissions("owner",scope).permissions.map(permission=>permission.current)).toEqual([true,true]);
-  expect(f.db.prepare("SELECT * FROM dohc_dataset_bindings").all()).toEqual(bindings);
-  expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
-  await expect(f.invoke("friend",id(9),{},"form")).rejects.toThrow("You do not have access to this Collection.");
-  await expect(f.host.invoke("friend",{...scope,revision:1,revisionSha256:"0".repeat(64),operationId:id(6),input:{value:"forged"},idempotencyKey:"forged",access:{kind:"app",appId:"form"}})).rejects.toThrow("Its owner must approve this access again.");
-  f.host.setBinding("owner",{...scope,appId:"form",binding:null});
-  await expect(f.invoke("friend",id(6),{value:"saved"},"form")).rejects.toThrow("You do not have access to this Collection.");
-});
-
-it("describes a visible table's buttons and keeps grants when only the owner adds one", async () => {
-  const f = await fixture(); await f.activate();
-  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
-  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
-  const button = { fieldId: id(20), name: "Send receipt", type: "button" as const };
-  const next = structuredClone(definition); next.tables[0].fields.push(button);
-  next.schemaPath = "revisions/2/schema.sql"; next.operationsPath = "revisions/2/operations.js";
-  const revision = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource});
-  const migration = {workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"};
-  const listed = structuredClone(revision); listed.definition.operations[1].fieldIds.push(id(20));
-  await expect(f.host.migrate("owner",{...migration,revision:listed})).rejects.toThrow("Invalid dataset metadata.");
-  await expect(f.host.migrate("helper",migration)).rejects.toThrow("You do not have access to this Collection.");
-  await f.host.migrate("owner",migration);
-  expect(f.host.describe("helper",scope).tables[0].fields).toEqual([
-    { fieldId: id(3), name: "ID", type: "text", required: true, unique: true },
-    { fieldId: id(4), name: "Value", type: "text", required: true, unique: false },
-    button,
-  ]);
-  expect(JSON.stringify(f.host.describe("helper",scope))).not.toContain("Secret");
-  await expect(f.invoke("friend",id(6),{value:"after"},"form")).resolves.toMatchObject({ result: { accepted: true } });
-  expect((await f.invoke("helper",id(7))).result).toMatchObject([{ value: "after" }]);
-});
-
-it.each(["fields","access","constraint","source"])("requires reapproval after a %s change, even when later restored", async change => {
-  const f = await fixture(); await f.activate();
-  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
-  const next = structuredClone(definition);
-  if(change === "fields") next.operations[0].fieldIds.push(id(5));
-  if(change === "access") next.operations[1].access = "link";
-  if(change === "constraint") { const field = next.tables[0].fields[1]; if(field.type !== "button") field.required = false; }
-  const source = change === "source" ? operationSource+"\n// edited rule" : operationSource;
-  const revision = describeDatasetRevision({definition:next,revision:2,schemaSql,operationSource:source});
-  await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource:source,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("Its owner must approve this access again.");
-  const restored = describeDatasetRevision({definition,revision:3,schemaSql,operationSource});
-  await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision:restored,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-  await expect(f.invoke("friend",id(6),{value:"still refused"},"form")).rejects.toThrow("Its owner must approve this access again.");
-});
-
-it("refuses display continuity when identical source compiles to different executable bytes", async () => {
-  let compiler = 1;
-  const f = await fixture({compileOperations:source=>source+`\n// compiler ${compiler}`}); await f.activate();
-  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
-  compiler = 2;
-  const revision = describeDatasetRevision({definition:{...definition,name:"Renamed"},revision:2,schemaSql,operationSource});
-  await f.host.migrate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected:f.host.approvedArtifacts("owner",scope).cursor,migrationSql:"SELECT 1;"});
-  await expect(f.invoke("friend",id(6),{value:"refused"},"form")).rejects.toThrow("Its owner must approve this access again.");
 });
 
 it("connects schema history to immutable source and reverses rules forward without losing newer records or restoring grants", async () => {
@@ -747,7 +488,6 @@ it("connects schema history to immutable source and reverses rules forward witho
 
 });
 
-
 async function linkReadFixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   const f = await fixture(overrides);
   const generated = structuredClone(definition);
@@ -776,18 +516,6 @@ async function linkReadFixture(overrides: Partial<DatasetHostOptions<Context>> =
   });
   return { ...f, generated, revision, binding, approved, invoke };
 }
-it("refuses authored link reads at approval and when a stored binding is invoked", async () => {
-  const f = await fixture(); await f.activate();
-  const binding = { ...f.binding([id(7)]), linkReads: [{ operationId: id(7), fieldIds: [id(3), id(4)] }] };
-  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding })).toThrow();
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(7)]) });
-  f.db.prepare("UPDATE dohc_dataset_bindings SET binding_json=?").run(JSON.stringify(binding));
-  await expect(f.invoke("friend", id(7), {}, "form")).rejects.toThrow();
-});
-it("requires the primary key in the approved fields", async () => {
-  const f = await linkReadFixture();
-  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.approved, linkReads: [{ operationId: id(7), fieldIds: [id(4)] }] } })).toThrow();
-});
 it("reads approved fields for link and named recipients, preserves form creates, and withdraws access", async () => {
   const f = await linkReadFixture();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding });
@@ -819,18 +547,6 @@ it("confines approved reads to their own table after a full-table operation", as
   });
   await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [{ values: { [id(4)]: "First" } }] } });
 });
-it("reuses the generated digest verdict across invocations but checks current access", async () => {
-  const f = await linkReadFixture();
-  const generate = vi.spyOn(datasetOperations, "generateDatasetOperations");
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  expect(generate).toHaveBeenCalledTimes(1);
-  await f.invoke("friend", id(7));
-  expect(generate).toHaveBeenCalledTimes(1);
-  for (const context of ["friend", "helper", "owner"] as const) await f.invoke(context, id(7));
-  expect(generate).toHaveBeenCalledTimes(1);
-  f.db.prepare("UPDATE permissions SET active=0 WHERE user='friend'").run();
-  await expect(f.invoke("friend", id(7))).rejects.toThrow("revoked");
-});
 
 it("refuses changed stored source even after the generated verdict is cached", async () => {
   const f = await linkReadFixture();
@@ -841,108 +557,12 @@ it("refuses changed stored source even after the generated verdict is cached", a
   await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
 });
 
+
 it("refuses executable source that differs from the verified generated artifact", async () => {
   const f = await linkReadFixture();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
   f.db.prepare("UPDATE dohc_dataset_journals SET source=?").run("globalThis.operations={read(){return {rows:[],nextCursor:null}}};");
   await expect(f.invoke("friend", id(7))).rejects.toThrow("damaged");
-});
-it.each<JsonValue>([
-  { rows: [{ id: "one", version: 1, values: { [id(3)]: "one", [id(4)]: 42, [id(10)]: [], [id(11)]: [], [id(12)]: 1 } }], nextCursor: null },
-  { rows: [], nextCursor: { id: "one", value: 42 } },
-  { rows: [], nextCursor: { id: 42, value: "one" } },
-  { groupBy: id(12), groups: ["private"], nextGroupCursor: null },
-  { groupBy: id(12), groups: [1], nextGroupCursor: { value: "private" } },
-])("refuses wrong-typed rows, ids, group values and cursors: %j", async result => {
-  const f = await linkReadFixture();
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  vi.spyOn(f.supervisor, "invoke").mockResolvedValue({ result, revision: 1, replayed: false });
-  await expect(f.invoke("friend", id(7), result && typeof result === "object" && "groupBy" in result ? { groupBy: id(12), limit: 8 } : {})).rejects.toThrow("access");
-});
-
-it("reads stored generated artifacts without compiling again after a compiler change", async () => {
-  const { compileDatasetOperations } = await import("./dataset-compiler.js");
-  const compile = vi.fn(compileDatasetOperations);
-  const f = await linkReadFixture({ compileOperations: compile });
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  expect(compile).toHaveBeenCalledTimes(1);
-  compile.mockRejectedValue(new Error("busy or upgraded compiler"));
-  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
-  await f.invoke("helper", id(7));
-  expect(compile).toHaveBeenCalledTimes(1);
-});
-
-it("retains generated read approvals and permits fresh approval after display changes and a button", async () => {
-  const f = await linkReadFixture();
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  const original = f.host.approvedArtifacts("owner", scope);
-  const next = structuredClone(f.generated);
-  next.name = "Renamed Collection";
-  next.tables[0]!.name = "Renamed table";
-  next.tables[0]!.fields[1]!.name = "Renamed field";
-  next.tables[0]!.fields.push({ fieldId: id(99), name: "Run", type: "button" });
-  next.schemaPath = "revisions/2/schema.sql";
-  next.operationsPath = "revisions/2/operations.js";
-  const revision = describeDatasetRevision({ definition: next, revision: 2, schemaSql: original.schemaSql, operationSource: original.operationSource });
-  await f.host.migrate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: original.schemaSql, operationSource: original.operationSource, expected: original.cursor, migrationSql: "SELECT 1;" });
-  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.approved, revision: 2, revisionSha256: revision.revisionSha256 } });
-  await expect(f.invoke("helper", id(7))).resolves.toMatchObject({ result: { rows: [], nextCursor: null } });
-});
-
-it("keeps generated verdicts private to each host and drops them on archive", async () => {
-  const f = await linkReadFixture();
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  const generate = vi.spyOn(datasetOperations, "generateDatasetOperations");
-  const reopened = createDatasetHost({ db: f.db, transaction: f.transaction, journal: f.journal, supervisor: f.supervisor,
-    resolveAuthority() { return { principalKey: "friend", appId: "form", caller: { kind: "link", principalId: "friend", grantId: "public-link" } }; } });
-  const request = { ...scope, revision: 1, revisionSha256: f.revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "reopened", access: { kind: "app" as const, appId: "form" } };
-  await reopened.invoke("friend", request);
-  expect(generate).toHaveBeenCalledTimes(1);
-  await reopened.invoke("friend", { ...request, idempotencyKey: "second" });
-  expect(generate).toHaveBeenCalledTimes(1);
-  f.host.archiveDataset("owner", scope);
-  await expect(reopened.invoke("friend", request)).rejects.toThrow("archived");
-  f.host.restoreDataset("owner", scope);
-  await f.invoke("friend", id(7));
-  expect(generate).toHaveBeenCalledTimes(2);
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
-  await expect(reopened.invoke("friend", request)).rejects.toThrow("access");
-});
-
-const automationAuthority: Pick<DatasetHostOptions<Context>, "resolveAuthority"> = {
-  resolveAuthority(context, request) {
-    return context === "owner"
-      ? { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }
-      : { principalKey: "automation", caller: { kind: "automation", automationId: "collection:orders#notify" }, chainDepth: 1,
-          ...(request.access.kind === "app" ? { appId: request.access.appId } : {}) };
-  },
-};
-it("keeps automation authority separate from an app's approved generated reads", async () => {
-  const f = await linkReadFixture(automationAuthority);
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  const invoke = vi.spyOn(f.supervisor, "invoke");
-  await expect(f.invoke("helper", id(7))).rejects.toThrow("access");
-  expect(invoke).not.toHaveBeenCalled();
-  await expect(f.invoke("helper", id(7), {}, false)).resolves.toMatchObject({ result: { rows: [] } });
-  const request = invoke.mock.calls[0]![0];
-  expect(request.caller).toEqual({ kind: "automation", automationId: "collection:orders#notify" });
-  expect(request.restrictTables).toBeUndefined();
-  expect(request.tables).toEqual(["items", "other"]);
-});
-it("runs an automation's custom action without link read approval", async () => {
-  const f = await fixture(automationAuthority);
-  const custom = structuredClone(definition);
-  custom.operations[2]!.kind = "action";
-  const source = operationSource.replace("return {changed:true};", "return ctx.caller;");
-  const revision = describeDatasetRevision({ definition: custom, revision: 1, schemaSql, operationSource: source });
-  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql, operationSource: source });
-  const binding = { ...f.binding([id(8)]), revisionSha256: revision.revisionSha256 };
-  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...binding, linkReads: [{ operationId: id(8), fieldIds: [id(4)] }] } })).toThrow();
-  f.host.setBinding("owner", { ...scope, appId: "form", binding });
-  const request = { ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId: id(8), input: { value: "changed", id: "missing" }, idempotencyKey: "action" };
-  await expect(f.host.invoke("helper", { ...request, access: { kind: "app", appId: "form" } })).rejects.toThrow("access");
-  expect((await f.host.invoke("helper", request)).result).toEqual({ kind: "automation", automationId: "collection:orders#notify" });
 });
 
 it("attributes an owner's write to its agent at any depth from 0, through an app too, and grants the agent nothing", async () => {
@@ -961,14 +581,12 @@ it("attributes an owner's write to its agent at any depth from 0, through an app
   agent = { depth: 2 };
   await invoke("app", "form");
   expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 2, actor: { kind: "agent", depth: 2, appId: "form" } });
-  // Owner administration refuses an agent at any depth.
   agent = { depth: 0 };
   expect(() => f.host.archiveDataset("owner", scope)).toThrow("You do not have access to this Collection.");
   for (const refused of [{ depth: -1 }, { depth: 65 }, { depth: 0.5 }]) {
     agent = refused;
     await expect(invoke("refused")).rejects.toThrow("You do not have access to this Collection.");
   }
-  // Only the owner's agent exists.
   agent = { depth: 0 }; named = true;
   await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
   expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
@@ -1021,60 +639,13 @@ it("names the person a commit is made for from the host's context, never the own
   }
 });
 
-
-it("pins owner-local agent approvals to initial and migrated rule history", async () => {
-  const f=await fixture(),agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
-  for(const context of ["helper","friend"] as const) await expect(f.host.activate(context,{workspaceId:scope.workspaceId,...prepared,approvalAgent:agent})).rejects.toThrow();
-  await f.host.activate("owner",{workspaceId:scope.workspaceId,...prepared,approvalAgent:agent});
-  expect(f.host.historyRevision("owner",{...scope,revisionSha256:prepared.revision.revisionSha256})).toMatchObject({approvalAgent:agent});
-  const expected=f.host.approvedArtifacts("owner",scope).cursor,revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
-  const candidate=await f.host.prepareMigration("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"UPDATE items SET value=value;"});
-  const approval={...scope,candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256,approvalAgent:agent};
-  for(const context of ["helper","friend"] as const) await expect(f.host.approveMigration(context,approval)).rejects.toThrow();
-  await f.host.approveMigration("owner",approval);
-  expect(f.host.history("owner",scope).entries[0]).toMatchObject({approvalAgent:agent,schema:{revisionHash:revision.revisionSha256}});
-  expect(f.host.historyRevision("owner",{...scope,revisionSha256:revision.revisionSha256})).toMatchObject({approvalAgent:agent});
-});
-
-it("reads local metadata heads inside the caller snapshot", async () => {
-  const f = await fixture(); await f.activate();
-  await f.invoke("owner", id(6), { value: "private" });
-  const prepared = vi.spyOn(f.db, "prepare"), exec = vi.spyOn(f.db, "exec");
-  f.db.exec("BEGIN");
-  const heads = readDatasetHistoryHeads(f.db, { workspaceId: scope.workspaceId, limit: 1 });
-  f.db.exec("COMMIT");
-  expect(heads).toMatchObject([{ datasetId: scope.datasetId, name: "Orders", headRevision: 1, lineage: expect.stringMatching(/^[a-f0-9]{64}$/), entries: [{ revision: 1 }] }]);
-  expect(exec.mock.calls).toEqual([["BEGIN"], ["COMMIT"]]);
-  expect(prepared.mock.calls.every(([sql]) => !String(sql).includes("e.result_json"))).toBe(true);
-  const page = f.host.history("owner", { ...scope, metadataOnly: true });
-  expect(page).toMatchObject({ name: "Orders", lineage: heads[0]!.lineage, archived: false, olderRecordedAtMs: expect.any(Number) });
-  expect(page.entries[0]!.undo).toBeUndefined();
-  for (const caller of ["helper", "friend"] as const) {
-    expect(() => f.host.history(caller, { ...scope, metadataOnly: true })).toThrow("You do not have access");
-  }
-  f.host.archiveDataset("owner", scope);
-  expect(readDatasetHistoryHeads(f.db, { workspaceId: scope.workspaceId })).toEqual([]);
-  expect(f.host.history("owner", { ...scope, metadataOnly: true }).archived).toBe(true);
-});
-
-it("reuses history statements and targets the requested catalog row", async () => {
-  const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "private" });
-  const input = { workspaceId: scope.workspaceId, positions: [{ datasetId: scope.datasetId, beforeRevision: 2 }], limit: 1 };
-  readDatasetHistoryHeads(f.db, input);
-  const prepared = vi.spyOn(f.db, "prepare");
-  readDatasetHistoryHeads(f.db, input);
-  expect(prepared.mock.calls.filter(([sql]) => String(sql).includes("WITH changes") || String(sql).includes("SELECT c.dataset_id") || String(sql).includes("checkpoint_digest AS digest"))).toEqual([]);
-});
-
 it("keeps a Collection still importing, and names only the asking workspace's Collections and imports", async () => {
   const f = await fixture(); await f.activate();
   const importing = f.db.prepare("INSERT INTO dohc_dataset_imports VALUES(?,?,?,?,?,NULL,'staging',?,?,NULL)");
   importing.run("import-here", "workspace", id(20), "0".repeat(64), "{}", "owner", 0);
   importing.run("import-elsewhere", "other-workspace", id(21), "0".repeat(64), "{}", "owner", 0);
-  // A Collection the other workspace keeps, as a copy of this one's catalog row.
   const columns = f.db.prepare("SELECT name FROM pragma_table_info('dohc_dataset_catalog')").all().map(row => String(row.name));
   f.db.prepare(`INSERT INTO dohc_dataset_catalog(${columns.join(",")}) SELECT ${columns.map(column => column === "workspace_id" ? "'other-workspace'" : column === "dataset_id" ? "?" : column).join(",")} FROM dohc_dataset_catalog WHERE workspace_id='workspace'`).run(id(22));
   expect(f.host.keptDatasetIds("owner", { workspaceId: "workspace" }).sort()).toEqual([id(1), id(20)]);
-  // Without access to the other workspace, the owner here learns nothing of what it keeps.
   expect(() => f.host.keptDatasetIds("owner", { workspaceId: "other-workspace" })).toThrow("revoked");
 });

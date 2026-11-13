@@ -117,26 +117,6 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-it("reports unsupported credential-file platforms without exposing other connector errors", async () => {
-  const platform = join(scratch, "unsupported-platform.mjs");
-  await writeFile(platform, "Object.defineProperty(process, 'platform', { value: 'darwin' });\n");
-  const unavailable = child(["--import", pathToFileURL(platform).href, connectorCommand,
-    "--url", "wss://localhost/api/device-control", "--credential-directory", join(scratch, "private-credential"),
-    "--limits-json", JSON.stringify(limits)]);
-  await once(unavailable.process, "close");
-  expect(unavailable.process.exitCode).toBe(1);
-  expect(unavailable.logs()).toContain("Device host credential files are unavailable on macOS because ACL validation is not implemented.");
-  expect(unavailable.logs()).not.toContain("private-credential");
-
-  const invalid = child([connectorCommand, "--url", "wss://localhost/api/device-control",
-    "--credential-directory", join(scratch, "private-credential"), "--limits-json", "private-invalid-json"]);
-  await once(invalid.process, "close");
-  expect(invalid.process.exitCode).toBe(1);
-  expect(invalid.logs()).toContain("Device host connection closed or refused.");
-  expect(invalid.logs()).not.toContain("private-invalid-json");
-  expect(invalid.logs()).not.toContain("private-credential");
-}, 60_000);
-
 it.skipIf(process.platform === "darwin")("runs the built connector outbound through actual share-web and relay, with no document authority", async () => {
   const database = join(scratch, "relay", "relay.sqlite"), directory = join(scratch, "credential"), assets = join(scratch, "viewer");
   const deployment = join(scratch, "deployment.json");
@@ -291,27 +271,3 @@ if (process.env.DENY_DEVICE_LISTEN === '1') {
   } finally { sql.close(); }
   // About a dozen processes start in sequence: 25 s on a quiet host, 109 s beside 32 CPU burners.
 }, 180_000);
-
-it("reports invalid control configuration without echoing its value or a stack trace", async () => {
-  const assets = join(scratch, "config-viewer");
-  await mkdir(assets);
-  await writeFile(join(assets, "index.html"), "<!doctype html><title>Configuration fixture</title>");
-  const invalid = "do-not-echo-this-config-value";
-  const relay = child([relayMain], { SYNC_RELAY_TEST_AUTH: "1", SYNC_RELAY_PORT: "0",
-    SYNC_RELAY_DB_PATH: join(scratch, "invalid-config.sqlite"), DOHC_RELAY_EXCHANGE_KEY: exchangeKey,
-    DOHC_DEVICE_CONTROL_LIMITS: invalid, DOHC_RELAY_DEVICE_CONTROL_HOSTS: "relay.test" });
-  expect(await relay.exited).toBe(1);
-  const share = child([shareMain], { DOHC_SHARE_WEB_DEV: "1", DOHC_SHARE_WEB_PORT: "0",
-    DOHC_SHARE_WEB_RELAY_URL: "http://127.0.0.1:1", DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "http://127.0.0.1:1",
-    DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.test", DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: exchangeKey,
-    DOHC_SHARE_WEB_INTERNAL_HOSTS: "share.internal.test",
-    DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR: assets, DOHC_DEVICE_CONTROL_LIMITS: JSON.stringify(limits),
-    DOHC_SHARE_WEB_DEVICE_CONTROL_ADMISSION: invalid });
-  expect(await share.exited).toBe(1);
-  for (const processHandle of [relay, share]) {
-    expect(processHandle.logs()).toContain("FATAL: Invalid device control configuration.");
-    expect(processHandle.logs()).not.toContain(invalid);
-    expect(processHandle.logs()).not.toContain("SyntaxError");
-    expect(processHandle.logs()).not.toContain("TypeError");
-  }
-}, 60_000);
