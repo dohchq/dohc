@@ -83,10 +83,10 @@ function SettingsScreen() {
     }
   }, [pending, signIn]);
 
-  // Signing out deletes the outbox, so the sheet counts what it would lose.
+  // Signing out deletes the outbox, so the sheet counts what it would lose, or warns when it can't count.
   const signOut = useCallback(async () => {
-    const { unsent, maySend } = outbox.signOutCounts();
-    const message = accountWords.signOutBody(unsent, maySend);
+    const counts = outbox.signOutCounts();
+    const message = counts ? accountWords.signOutBody(counts.unsent, counts.maySend) : accountWords.signOutUnchecked;
     if (await confirm({ title: accountWords.signOutTitle(server), message, confirm: accountWords.signOut, destructive: true })) {
       void account.signOut();
     }

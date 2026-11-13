@@ -156,6 +156,50 @@ describe("the sign-in generation", () => {
 });
 
 describe("signing out", () => {
+  it("runs the outbox's delete before the token goes, also from a session the server ended, and never at a 401 or launch", async () => {
+    const server = testServer();
+    const tokens = memoryStore(SAVED);
+    const order: string[] = [];
+    const account = createAccount({
+      store: tokens.store, fetch: server.fetch,
+      onSignOut: async () => { order.push(tokens.current() ? "outbox, token kept" : "outbox, token gone"); },
+    });
+    await account.restore();
+    server.on("GET", "/sync/account/sessions", "offline");
+    await account.signOut();
+    expect(order).toEqual(["outbox, token kept"]);
+    expect(tokens.current()).toBeNull();
+
+    // A 401 ends the session without Sign out; Sign out after it still deletes the outbox.
+    const ended = setup();
+    const cleaned = vi.fn(async () => {});
+    const endedAccount = createAccount({ store: ended.tokens.store, fetch: ended.server.fetch, onSignOut: cleaned });
+    await endedAccount.restore();
+    ended.server.on("GET", "/sync/account/workspaces", { status: 401 });
+    await expect(listWorkspaces(signedIn(endedAccount).client)).rejects.toEqual(new ServerError("signed-out", 401));
+    expect(cleaned).not.toHaveBeenCalled();
+    await endedAccount.signOut();
+    expect(cleaned).toHaveBeenCalledTimes(1);
+
+    // A launch with nothing saved shows signed out without running it.
+    const empty = vi.fn(async () => {});
+    const launched = createAccount({ store: memoryStore(null).store, fetch: server.fetch, onSignOut: empty });
+    await launched.restore();
+    expect(empty).not.toHaveBeenCalled();
+  });
+
+  it("refuses to sign in again while signed in, keeping the sign-in and the outbox", async () => {
+    const { server, tokens } = setup();
+    const cleaned = vi.fn(async () => {});
+    const guarded = createAccount({ store: tokens.store, fetch: server.fetch, onSignOut: cleaned });
+    await guarded.restore();
+    await expect(guarded.signIn(server.origin, () => {})).rejects.toThrow("This phone is already signed in.");
+    expect(signedIn(guarded).email).toBe(SAVED.email);
+    expect(tokens.current()).toEqual(SAVED);
+    expect(cleaned).not.toHaveBeenCalled();
+    expect(server.calls).toHaveLength(0);
+  });
+
   it("deletes the token first, then revokes this phone's session with the copy in memory", async () => {
     const { server, tokens, account } = setup();
     await account.restore();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readChatWrite, readWriteAnswer, sendWrite } from "./chatWrites";
+import { derivedMessageId, readChatWrite, readWriteAnswer, sendWrite } from "./chatWrites";
 import { createServerClient, ServerError } from "./client";
 import { testServer } from "./testServer";
 
@@ -81,5 +81,26 @@ describe("checking a write", () => {
       { operation: "post", args: { groupId: "group-1", body: "Hi", options: Array.from({ length: 13 }, (_, i) => `${i}`) } },
       { operation: "markRead", args: { threadId: "thread-1", messageId: "message-1" } },
     ]) expect(readChatWrite(write)).toBeNull();
+  });
+});
+
+describe("a write's message ID", () => {
+  // Each vector is SHA-256 of the canonical JSON the relay's phoneWriteIds hashes
+  // (services/sync-relay/src/accountChatWrites.ts:107, canonicalJson.ts), cut to 32 hex characters.
+  it("matches the relay's derivation for a post, a send, a reply, and escaped text", async () => {
+    await expect(derivedMessageId("u-1", "ws-1", "op-1", { operation: "post", args: { groupId: "group-1", body: "Hi" } }))
+      .resolves.toBe("message-7d3792fc451f8c3341ad9dbfe9f7d769");
+    // A send takes the post role.
+    await expect(derivedMessageId("u-1", "ws-1", "op-1", { operation: "send", args: { streamId: "dm-1", body: "Hi" } }))
+      .resolves.toBe("message-7d3792fc451f8c3341ad9dbfe9f7d769");
+    await expect(derivedMessageId("u-1", "ws-1", "op-1", { operation: "reply", args: { threadId: "thread-1", body: "Hi" } }))
+      .resolves.toBe("message-a51cabdf539dc73124527fc565441db7");
+    await expect(derivedMessageId("owner-é", "ws \"1\"", "op/2", { operation: "reply", args: { threadId: null, body: "Hi" } }))
+      .resolves.toBe("message-e4b88f7800a2b4a9bc923615d9457d68");
+  });
+
+  it("is none for a reaction, which makes no message", async () => {
+    await expect(derivedMessageId("u-1", "ws-1", "op-1", { operation: "react", args: { messageId: "message-1", emoji: "👍", state: "added" } }))
+      .resolves.toBeNull();
   });
 });

@@ -47,7 +47,7 @@ export const accountWords = {
   account: "Account",
   signOut: "Sign out",
   signOutTitle: (server: string) => `Sign out of ${server}?`,
-  /** What Sign out deletes from the phone's outbox: messages never sent or refused, and ones that may still send. */
+  /** What Sign out deletes from the phone's outbox: messages not sent, and ones that may still send. */
   signOutBody: (unsent: number, maySend: number): string => {
     const lines = [
       unsent === 1 ? "1 message hasn't been sent. Signing out deletes it." : unsent > 1 ? `${unsent} messages haven't been sent. Signing out deletes them.` : null,
@@ -55,6 +55,8 @@ export const accountWords = {
     ].filter(line => line !== null);
     return lines.length > 0 ? lines.join(" ") : "This phone stops reading your workspaces. Your work stays where it is.";
   },
+  /** Sign out's body while the phone can't read its outbox, so it can't count what it deletes. */
+  signOutUnchecked: "dohc could not check this phone for unsent messages. Signing out deletes any it has.",
 
   showOnPhone: "Show on phone",
   showOnPhoneLabel: (workspace: string) => `Show ${workspace} on phone`,

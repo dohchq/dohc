@@ -12,7 +12,8 @@ import { sleep, startDeviceSignIn, waitForDeviceToken } from "./deviceFlow";
 //
 // Ending a token deletes it from the store first, then revokes its session with the copy held in memory, so a phone
 // closed mid-way never keeps a token it signed out of. Writes to the store run one at a time, in order, so a delete
-// always lands after a save it raced.
+// always lands after a save it raced. Sign out runs `onSignOut`, the outbox's delete, before the token goes, so a phone
+// closed between the two keeps its sign-in rather than messages it said it deleted.
 
 /** What the token store keeps for this phone: the server, the session token, and whose it is. */
 export interface StoredSignIn {
@@ -55,15 +56,16 @@ export interface Account {
   restore(): Promise<void>;
   /**
    * Signs in to `origin` through the device flow, superseding any sign-in in progress. `onCode` gets the code and the
-   * approval page while the sign-in is still current. Rejects with a ServerError when the server can't be used.
-   * A signed-in phone signs out first.
+   * approval page while the sign-in is still current. Rejects with a ServerError when the server can't be used, and
+   * at once on a signed-in phone, which signs out first through Settings, where Sign out says what it deletes.
    */
   signIn(origin: string, onCode: (code: { readonly userCode: string; readonly approvalUrl: string }) => void): Promise<SignInOutcome>;
   /** Ends a sign-in in progress. A completed sign-in stays. */
   cancelSignIn(): void;
   /**
-   * Signs the phone out at once, ending everything the sign-in started. Then it deletes the token, and revokes its
-   * session on the server, which may fail. It never rejects: a failed delete shows as `forgetFailed`.
+   * Signs the phone out at once, ending everything the sign-in started, including after the server ended the session.
+   * Then it runs `onSignOut`, deletes the token, and revokes its session on the server, which may fail. It never
+   * rejects: a failed delete shows as `forgetFailed`.
    */
   signOut(): Promise<void>;
   /** Tries again to delete the tokens whose delete failed. */
@@ -77,6 +79,8 @@ export function createAccount(options: {
   readonly fetch: Fetch;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Sign out's own cleanup, awaited before the token goes. Only Sign out runs it: a 401 and a launch never do. */
+  readonly onSignOut?: () => Promise<void>;
 }): Account {
   const { store, fetch } = options;
   const now = options.now ?? Date.now;
@@ -169,7 +173,8 @@ export function createAccount(options: {
     advance();
     saved = null;
     setState(signedOut(origin, false));
-    return ending ? endToken(ending.origin, ending.token) : Promise.resolve();
+    const cleaned = options.onSignOut?.().catch(() => undefined) ?? Promise.resolve();
+    return cleaned.then(() => ending ? endToken(ending.origin, ending.token) : undefined);
   }
 
   return {
@@ -193,7 +198,7 @@ export function createAccount(options: {
     },
 
     async signIn(origin, onCode) {
-      if (state.status === "signed-in") void signOut();
+      if (state.status === "signed-in") throw new Error("This phone is already signed in.");
       const attempt = advance();
       const isCurrent = () => attempt.id === generation;
       let token: string | null = null;

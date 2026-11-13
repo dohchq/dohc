@@ -47,9 +47,11 @@ const noOpen = { subscribe: () => () => undefined, state: () => NONE };
 //
 // The outbox (src/server/outbox.ts) is the account's too, beside the cache and outside any workspace's store. It sends
 // only with its records' own account, keeps them through a 401, and deletes them at Sign out. A read that shows a saved
-// write's result hands it off. An app-state change reads it again if iOS kept it locked, and asks again at once.
+// write's result hands it off. An app-state change tries again whatever failed, and asks again at once.
 export function AccountProvider({ children }: { children: ReactNode }) {
-  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch }));
+  // Sign out deletes the outbox, awaited, before it deletes the token.
+  const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
+  const [account] = useState(() => createAccount({ store: secureSignInStore, fetch, onSignOut: () => outbox.signOut() }));
   const state = useSyncExternalStore(account.subscribe, account.state);
   useEffect(() => void account.restore(), [account]);
   const signIn = state.status === "signed-in" ? state.signIn : null;
@@ -57,7 +59,6 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [cache] = useState(() => createReadCache(createCacheFiles()));
   useEffect(() => cache.follow(account), [account, cache]);
 
-  const [outbox] = useState(() => createOutbox({ files: createDurableFiles(nativeDurableFile()) }));
   useEffect(() => outbox.follow(account), [account, outbox]);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", () => outbox.wake());

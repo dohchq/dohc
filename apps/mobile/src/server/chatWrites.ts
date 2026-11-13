@@ -88,6 +88,22 @@ export function sendWrite(client: ServerClient, workspaceId: string, operationId
     { signal, timeoutMs: WRITE_TIMEOUT_MS });
 }
 
+/**
+ * The ID of the message a write makes, as the relay derives it (`phoneWriteIds`,
+ * services/sync-relay/src/accountChatWrites.ts:107): SHA-256 of the canonical JSON of
+ * `[accountId, workspaceId, operationId, role, "message"]`, and `message-` with its first 32 hex characters. A send
+ * takes the post role. A reaction makes no message.
+ */
+export async function derivedMessageId(accountId: string, workspaceId: string, operationId: string, write: ChatWrite): Promise<string | null> {
+  if (write.operation === "react") return null;
+  const role = write.operation === "reply" ? "reply" : "post";
+  // The relay's canonical JSON of an array of strings: each as JSON.stringify writes it, joined by commas, in brackets.
+  const canonical = `[${[accountId, workspaceId, operationId, role, "message"].map(part => JSON.stringify(part)).join(",")}]`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  const hex = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return `message-${hex.slice(0, 32)}`;
+}
+
 // --- checking a write ---------------------------------------------------------------------------------------------
 
 const BODY_MAX = 2 * MAX_CHAT_MESSAGE_BODY_BYTES;
