@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createLinkLiveClient } from "./linkLiveClient";
+import type { LinkBrowserMaterial } from "./server";
 import {
   LINK_REFUSALS,
   linkRefusalBody,
@@ -64,15 +65,19 @@ function request(
 }
 function fixture(
   fetchRelay = vi.fn(async (_request: Request) => Response.json({ objectId: "object-a" })),
-) {
-  const resolveMaterial = vi.fn(
-    async (_discriminator: string, _cookie: string | null, _signal: AbortSignal) => ({
-      ok: true as const,
+  {
+    holdsSession,
+    material = {
+      ok: true,
       capabilityToken,
       profileSecret,
       setCookie: null,
       currentCapability: async () => capabilityToken,
-    }),
+    },
+  }: { holdsSession?: boolean; material?: LinkBrowserMaterial } = {},
+) {
+  const resolveMaterial = vi.fn(
+    async (_discriminator: string, _cookie: string | null, _signal: AbortSignal) => material,
   );
   return {
     fetchRelay,
@@ -85,9 +90,15 @@ function fixture(
       browserLimits,
       resolveMaterial,
       fetchRelay,
+      ...(holdsSession === undefined ? {} : { holdsSession: () => holdsSession }),
     }),
   };
 }
+const ticketRequest = () =>
+  request({ discriminator, objectId: "object-a" }, "/api/live/link-ticket");
+const opaque = [404, '{"ok":false,"error":"not found"}'];
+const tryAgain = [503, JSON.stringify(linkRefusalBody("link_live_unavailable"))];
+const answered = async (response: Response) => [response.status, await response.text()];
 afterEach(() => vi.restoreAllMocks());
 it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])(
   "preserves only the scoped relay refusal %s",
@@ -104,15 +115,13 @@ it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])(
       const refused = await fixture(
         vi.fn(async () => Response.json(value, { status })),
       ).client.handle(request());
-      expect([refused.status, await refused.text()]).toEqual([
-        404,
-        '{"ok":false,"error":"not found"}',
-      ]);
+      // A relay failure that is not a clean refusal is still the servers' trouble.
+      expect(await answered(refused)).toEqual(status >= 500 ? tryAgain : opaque);
     }
   },
 );
 
-it.each([401, 404, 429, 503])("keeps unverified relay failures opaque (%s)", async (status) => {
+it.each([401, 404, 429])("keeps unverified relay failures opaque (%s)", async (status) => {
   const f = fixture(
     vi.fn(async () => Response.json({ ok: false, error: "private detail" }, { status })),
   );
@@ -297,4 +306,76 @@ it("bounds admission even when an injected relay ignores cancellation", async ()
   await vi.waitFor(async () => {
     expect((await f.client.handle(request())).status).toBe(200);
   });
+});
+
+// The servers' own trouble while a viewer's page is open. Each answered 404 before, which stops the page.
+const serverTrouble: [string, () => Promise<Response>][] = [
+  [
+    "relay unreachable",
+    async () => {
+      throw new TypeError("fetch failed");
+    },
+  ],
+  ["proxy error page", async () => new Response("<html>Bad gateway</html>", { status: 502 })],
+  [
+    "relay failure without a code",
+    async () => Response.json({ ok: false, error: "private detail" }, { status: 500 }),
+  ],
+];
+it.each(serverTrouble)("tells a viewer to try again after %s", async (_name, relay) => {
+  const f = fixture(vi.fn(relay), { holdsSession: true });
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
+  expect(await answered(await f.client.handle(request()))).toEqual(tryAgain);
+});
+it("tells a viewer to try again when share-web can't renew its session", async () => {
+  const f = fixture(undefined, { holdsSession: true, material: { ok: false, status: 503 } });
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
+});
+it("stops a viewer whose link has ended", async () => {
+  const f = fixture(undefined, { holdsSession: true, material: { ok: false, status: 404 } });
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(opaque);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
+});
+it("tells a viewer to try again when the relay doesn't answer in time", async () => {
+  const f = fixture(
+    vi.fn(() => new Promise<Response>(() => {})),
+    { holdsSession: true },
+  );
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
+});
+it("gives anyone without a session and every agent the same 404 in each server state", async () => {
+  for (const [, relay] of serverTrouble) {
+    const stranger = fixture(vi.fn(relay), {
+      holdsSession: false,
+      material: { ok: false, status: 404 },
+    });
+    expect(await answered(await stranger.client.handle(ticketRequest()))).toEqual(opaque);
+    const agent = fixture(vi.fn(relay), { holdsSession: false }).client.agent({
+      accessToken: "C".repeat(43),
+      resource: `${origin}/mcp/s/${"A".repeat(43)}`,
+    });
+    expect(await answered(await agent.ticket("object-a", AbortSignal.timeout(1000)))).toEqual(
+      opaque,
+    );
+  }
+});
+it("tells only a viewer with a session to try again when requests are full", async () => {
+  for (const holdsSession of [true, false]) {
+    let release!: (value: Response) => void;
+    const held = new Promise<Response>((done) => {
+      release = done;
+    });
+    const f = fixture(
+      vi.fn(() => held),
+      { holdsSession },
+    );
+    const first = f.client.handle(request());
+    await vi.waitFor(() => expect(f.fetchRelay).toHaveBeenCalledTimes(1));
+    expect(await answered(await f.client.handle(ticketRequest()))).toEqual(
+      holdsSession ? tryAgain : opaque,
+    );
+    release(Response.json({ objectId: "object-a" }));
+    expect((await first).status).toBe(200);
+  }
 });

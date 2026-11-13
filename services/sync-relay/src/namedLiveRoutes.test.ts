@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import {
@@ -1821,3 +1821,63 @@ it.each(["view", "comment"] as const)(
     expect(f.native.client.openLiveAppliedSync).not.toHaveBeenCalled();
   },
 );
+
+// A link page stops editing on a 404 and tries again on a 503. Each of these answered 404 before.
+describe("a link ticket while the relay is busy", () => {
+  const tryAgain = [503, linkRefusalBody("link_live_unavailable")];
+  const opaque = [404, { ok: false, error: "not found" }];
+  const ask = async (f: LinkFixture) => {
+    const response = await f.post("/sync/live/link-tickets", {
+      discriminator: f.discriminator,
+      objectId: binding.objectId,
+    });
+    return [response.status, await response.json()];
+  };
+  const unknownAgent = (agent: ReturnType<typeof linkAgent>) => ({
+    ...agent.headers,
+    authorization: `DohcAgent ${"Z".repeat(43)}`,
+  });
+
+  it("asks a holder to try again while the relay stops, and tells an agent nothing", async () => {
+    const f = await fixture(limits, true),
+      agent = linkAgent(f);
+    f.routes.close();
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(agent.headers);
+    expect(await ask(f)).toEqual(opaque);
+  });
+
+  it("asks a holder to try again while requests are full, and tells an agent nothing", async () => {
+    const f = await fixture({ ...limits, upgradeTimeoutMs: 10_000 }, true),
+      agent = linkAgent(f);
+    let release!: () => void;
+    const held = new Promise<null>((done) => {
+      release = () => done(null);
+    });
+    const mint = vi.spyOn(f.tickets, "mint").mockImplementation(() => held);
+    const waiting = Array.from({ length: limits.maxPendingRequests }, () => ask(f));
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(limits.maxPendingRequests));
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(agent.headers);
+    expect(await ask(f)).toEqual(opaque);
+    release();
+    expect(await Promise.all(waiting)).toEqual(waiting.map(() => opaque));
+  });
+
+  it("asks a holder to try again when a ticket takes too long", async () => {
+    const f = await fixture(limits, true);
+    vi.spyOn(f.tickets, "mint").mockImplementation(() => new Promise(() => {}));
+    expect(await ask(f)).toEqual(tryAgain);
+  });
+
+  it("asks a known caller to try again when minting fails, and tells an unknown agent nothing", async () => {
+    const f = await fixture(limits, true),
+      agent = linkAgent(f);
+    vi.spyOn(f.tickets, "mint").mockRejectedValue(new Error("Live-ticket operation failed."));
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(agent.headers);
+    expect(await ask(f)).toEqual(tryAgain);
+    f.useCredentials(unknownAgent(agent));
+    expect(await ask(f)).toEqual(opaque);
+  });
+});

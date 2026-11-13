@@ -19,7 +19,11 @@ import {
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
-import { linkRefusalBody, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
+import {
+  LINK_REFUSALS,
+  linkRefusalBody,
+  parseLinkRefusal,
+} from "@dohc/security-contract/link-refusal";
 
 export type HostReceive = Parameters<LiveGatewayOptions["openHostRoute"]>[2];
 /** The credential headers one relay call carries, and a renewed viewer cookie to pass on. */
@@ -160,6 +164,8 @@ export function createLinkLiveClient(options: {
     cookie: string | null,
     signal: AbortSignal,
   ): Promise<LinkBrowserMaterial>;
+  /** Whether these cookies hold a current viewer session for any link. */
+  holdsSession?(cookie: string | null): boolean;
   fetchRelay(request: Request): Promise<Response>;
 }) {
   const limits = parseNamedLiveBrowserClientLimits(options.limits),
@@ -182,31 +188,38 @@ export function createLinkLiveClient(options: {
       { ok: false, error: "not found" },
       { status: 404, headers: { "cache-control": "private, no-store" } },
     );
+  // A link page tries again on a 503 and stops on a 404. Only a viewer whose session this
+  // server holds learns that the servers are busy; anyone else gets the 404 in every state.
+  const unavailable = () =>
+    Response.json(linkRefusalBody("link_live_unavailable"), {
+      status: LINK_REFUSALS.link_live_unavailable.status,
+      headers: { "cache-control": "private, no-store" },
+    });
   let pending = 0;
   async function holder(
     discriminator: string,
     cookie: string | null,
     signal: AbortSignal,
-  ): Promise<RelayCredential | null> {
+  ): Promise<RelayCredential | "unavailable" | null> {
     const material = await options.resolveMaterial(discriminator, cookie, signal);
     signal.throwIfAborted();
-    return material.ok
-      ? {
-          setCookie: material.setCookie,
-          headers: {
-            authorization: `LinkCapability ${material.capabilityToken}`,
-            "x-dohc-link-profile-secret": material.profileSecret,
-          },
-        }
-      : null;
+    if (!material.ok) return material.status === 503 ? "unavailable" : null;
+    return {
+      setCookie: material.setCookie,
+      headers: {
+        authorization: `LinkCapability ${material.capabilityToken}`,
+        "x-dohc-link-profile-secret": material.profileSecret,
+      },
+    };
   }
   async function relayRequest(
-    credential: RelayCredential | null,
+    credential: RelayCredential | "unavailable" | null,
     path: string,
     body: unknown,
     signal: AbortSignal,
   ) {
     if (!credential) return null;
+    if (credential === "unavailable") return credential;
     const encoded = JSON.stringify(body);
     if (Buffer.byteLength(encoded) > limits.maxRequestBytes) return null;
     const response = await options.fetchRelay(
@@ -225,55 +238,59 @@ export function createLinkLiveClient(options: {
     );
     try {
       signal.throwIfAborted();
+      if (response.redirected || response.headers.has("location")) return null;
+      // A proxy in front of a stopped relay answers with its own page.
       if (
-        response.redirected ||
-        response.headers.has("location") ||
         response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
-          "application/json"
+        "application/json"
       )
-        return null;
+        return response.status >= 500 ? "unavailable" : null;
       const value = await readBoundedJson(response, limits.maxResponseBytes, signal);
       if (response.status !== 200) {
         const code = parseLinkRefusal(value, response.status);
-        return code
-          ? {
-              refusal: Response.json(linkRefusalBody(code), {
-                status: response.status,
-                headers: { "cache-control": "private, no-store" },
-              }),
-            }
-          : null;
+        if (code)
+          return {
+            refusal: Response.json(linkRefusalBody(code), {
+              status: response.status,
+              headers: { "cache-control": "private, no-store" },
+            }),
+          };
+        return response.status >= 500 ? "unavailable" : null;
       }
       return { value, setCookie: credential.setCookie };
     } finally {
       await response.body?.cancel().catch(() => {});
     }
   }
-  // One admission for every live request, from a viewer or an agent.
+  // One admission for every live request, from a viewer or an agent. A full queue, a timeout
+  // or a failure is the servers' state, which only a viewer with a session here learns.
   function admitted(
     parent: AbortSignal,
+    holdsSession: boolean,
     run: (signal: AbortSignal) => Promise<Response>,
   ): Promise<Response> {
-    if (parent.aborted || pending >= limits.maxPendingRequests) return Promise.resolve(refused());
+    const busy = () => (holdsSession && !parent.aborted ? unavailable() : refused());
+    if (parent.aborted || pending >= limits.maxPendingRequests) return Promise.resolve(busy());
     pending++;
     const signal = AbortSignal.any([parent, AbortSignal.timeout(limits.timeoutMs)]);
     const work = (async () => {
       try {
         return await run(signal);
       } catch {
-        return refused();
+        return busy();
       } finally {
         pending--;
       }
     })();
     // A transport that ignores cancellation keeps its admission slot until it settles.
-    return untilAborted(work, signal, refused);
+    return untilAborted(work, signal, busy);
   }
   async function answer(
     document: boolean,
     body: Record<string, unknown>,
-    credential: RelayCredential | null,
+    credential: RelayCredential | "unavailable" | null,
     signal: AbortSignal,
+    viewer: boolean,
   ): Promise<Response> {
     const result = await relayRequest(
       credential,
@@ -282,6 +299,8 @@ export function createLinkLiveClient(options: {
       signal,
     );
     if (!result) return refused();
+    // A viewer's credential came from its session here; an agent's token is not checked here.
+    if (result === "unavailable") return viewer ? unavailable() : refused();
     if (result.refusal) return result.refusal;
     let output: unknown;
     if (document) {
@@ -327,14 +346,17 @@ export function createLinkLiveClient(options: {
         "application/json"
     )
       return refused();
-    return admitted(request.signal, async (signal) => {
-      const body = await readBoundedJson(request, limits.maxRequestBytes, signal);
+    const cookie = request.headers.get("cookie");
+    return admitted(request.signal, options.holdsSession?.(cookie) ?? false, async (signal) => {
+      // A body that can't be read is the browser's fault, not the servers'.
+      const body = await readBoundedJson(request, limits.maxRequestBytes, signal).catch(() => null);
       if (!liveInput(document, body)) return refused();
       return answer(
         document,
         body,
-        await holder(String(body.discriminator), request.headers.get("cookie"), signal),
+        await holder(String(body.discriminator), cookie, signal),
         signal,
+        true,
       );
     });
   }
@@ -356,6 +378,7 @@ export function createLinkLiveClient(options: {
         );
         if (
           !result ||
+          result === "unavailable" ||
           "refusal" in result ||
           !exact(result.value, "grantId,kind,principalId,sessionId,shareId,workspaceId") ||
           result.value.kind !== "link"
@@ -381,8 +404,13 @@ export function createLinkLiveClient(options: {
   const openHostRoute: LiveGatewayOptions["openHostRoute"] = async (input, signal, receive) => {
     const request = browserRequest(input.request, options.publicOrigin, signal);
     if (!request) return null;
+    const credential = await holder(
+      input.discriminator,
+      request.headers.get("cookie"),
+      signal,
+    ).catch(() => null);
     return openRoute(
-      await holder(input.discriminator, request.headers.get("cookie"), signal).catch(() => null),
+      credential === "unavailable" ? null : credential,
       input.discriminator,
       input.ticketToken,
       signal,
@@ -430,8 +458,10 @@ export function createLinkLiveClient(options: {
       },
     };
     const call = (document: boolean, body: Record<string, unknown>, signal: AbortSignal) =>
-      admitted(signal, async (admittedSignal) =>
-        liveInput(document, body) ? answer(document, body, credential, admittedSignal) : refused(),
+      admitted(signal, false, async (admittedSignal) =>
+        liveInput(document, body)
+          ? answer(document, body, credential, admittedSignal, false)
+          : refused(),
       );
     return {
       document: (path, signal) => call(true, { discriminator, path }, signal),

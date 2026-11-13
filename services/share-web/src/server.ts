@@ -1216,6 +1216,14 @@ export function createShareWebApplication({
           browserLimits: linkLiveConfig.editor,
           fetchRelay,
           resolveMaterial: resolveLinkBrowserMaterial,
+          holdsSession(cookie) {
+            const cookies = parseCookies(cookie),
+              prefix = cookieName("");
+            for (const name of cookies.keys())
+              if (name.startsWith(prefix) && readBrowserSession(name.slice(prefix.length), cookies))
+                return true;
+            return false;
+          },
         })
       : undefined;
   // A personal agent edits live documents through the relay, which hosts them only on a self-hosted live host and refuses elsewhere.

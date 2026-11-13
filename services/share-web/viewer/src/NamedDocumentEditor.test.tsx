@@ -117,6 +117,32 @@ it("says the file could not open, not that the connection failed, when the share
   expect(live.reconnect).toHaveBeenCalledOnce();
 });
 
+it("says the server could not open the file, not that the connection failed, while the server is busy", async () => {
+  const live = session("Body");
+  const busy: NamedLiveBrowserState = {
+    ...live.state(),
+    status: "disconnected",
+    reason: "host-unavailable",
+  };
+  await act(async () =>
+    root.render(
+      <NamedDocumentEditor
+        session={{ ...live, state: () => busy }}
+        path="docs/a.md"
+        link
+        onState={() => {}}
+      />,
+    ),
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(
+    "The server could not open the file for editing. dohc keeps trying.",
+  );
+  const button = container.querySelector("button");
+  expect(button?.textContent).toBe("Try again");
+  await act(async () => button?.click());
+  expect(live.reconnect).toHaveBeenCalledOnce();
+});
+
 it("asks the reader to check the connection when the connection failed", async () => {
   const live = session("Body");
   const closed: NamedLiveBrowserState = {

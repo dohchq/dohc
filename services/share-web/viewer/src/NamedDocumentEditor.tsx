@@ -46,6 +46,8 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
     return "Editing stopped. Copy any unsynced changes you want to keep.";
   if (state.reason === "authority-unavailable")
     return "dohc could not open the file for editing. Try again.";
+  if (state.reason === "host-unavailable")
+    return "The server could not open the file for editing. dohc keeps trying.";
   return "Editing paused. Check your connection, then retry.";
 }
 /**
@@ -110,7 +112,9 @@ export function NamedDocumentEditor({
       {statusSlot && working ? createPortal(status, statusSlot) : status}
       {state.status === "disconnected" && (
         <button className="handoff-button secondary" onClick={() => void session.reconnect()}>
-          {state.reason === "authority-unavailable" || liveConnectionLimitMessage(state.reason)
+          {state.reason === "authority-unavailable" ||
+          state.reason === "host-unavailable" ||
+          liveConnectionLimitMessage(state.reason)
             ? "Try again"
             : "Retry connection"}
         </button>
