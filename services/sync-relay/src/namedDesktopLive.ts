@@ -7,10 +7,7 @@ import {
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
-import {
-  createNamedLiveBrowserSessions,
-  NAMED_SESSIONS_PER_ACCOUNT,
-} from "./namedLiveBrowserSessions";
+import { createNamedLiveBrowserSessions } from "./namedLiveBrowserSessions";
 import {
   parseNamedLiveBrowserHttpLimits,
   type NamedLiveBrowserHttpLimits,
@@ -51,12 +48,12 @@ export function createNamedDesktopLive(options: {
     );
   }
   // A desktop session only opens its socket, and the desktop asks again before every connect,
-  // so it lasts as long as its ticket and ends once the socket opens.
+  // so it lasts as long as its ticket and ends once the socket opens. It has no per-account
+  // limit: a note that keeps failing to connect would push out another note's slow connect.
   const sessions = createNamedLiveBrowserSessions({
     ...options,
     ...limits,
     retentionMs: LIVE_TICKET_LIFETIME_MS,
-    maxSessionsPerAccount: NAMED_SESSIONS_PER_ACCOUNT,
     authentication: "bearer",
   });
   const refuse = () =>

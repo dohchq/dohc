@@ -1904,21 +1904,19 @@ describe("a desktop's session", () => {
     return { f, open, resolve, clock };
   };
 
-  it("ends once its socket opens, and one account keeps only its latest that haven't opened", async () => {
+  it("ends once its socket opens", async () => {
     const { open, resolve } = await opening();
     const opened: string[] = [];
-    for (let index = 0; index < 17; index++) opened.push(await open());
-    expect(await resolve(opened[0]!)).toBeNull();
-    for (const discriminator of opened.slice(1))
+    for (let index = 0; index < 3; index++) opened.push(await open());
+    for (const discriminator of opened)
       expect(await resolve(discriminator)).toMatchObject({ kind: "named", userId: scope.userId });
-    for (const discriminator of opened.slice(1)) expect(await resolve(discriminator)).toBeNull();
+    for (const discriminator of opened) expect(await resolve(discriminator)).toBeNull();
   });
 
-  // One account holds at most maxConnectionsPerPrincipal live sockets, and each socket's session
-  // ends as it opens, so a desktop never has more sessions waiting than it may hold sockets.
-  it("lets one account have as many notes in two shares waiting to open as it may hold sockets, and opens one more as before", async () => {
-    const { f, open, resolve } = await opening();
-    const sockets = selfHostLiveProfile().namedLive.transport.maxConnectionsPerPrincipal;
+  // A desktop asks again before every connect, so its notes that keep failing to connect
+  // leave sessions behind until their tickets expire. They must not cost a slow connect its own.
+  it("keeps a slow connect's session while the same account's other notes retry", async () => {
+    const { f, open, resolve, clock } = await opening();
     f.storage.createShare({
       share: {
         shareId: "desktop-second-share",
@@ -1941,7 +1939,7 @@ describe("a desktop's session", () => {
         parentGrantId: null,
       },
     });
-    const notes = Array.from({ length: sockets + 1 }, (_, index) => ({
+    const notes = Array.from({ length: 4 }, (_, index) => ({
       shareId: index % 2 ? "desktop-second-share" : scope.shareId,
       path: `docs/note-${index}.md`,
     }));
@@ -1960,16 +1958,15 @@ describe("a desktop's session", () => {
           "b".repeat(64),
         ),
     );
-    const waiting: string[] = [];
-    for (const note of notes.slice(0, sockets)) waiting.push(await open(note.shareId, note.path));
-    const contexts = await Promise.all(waiting.map(resolve));
-    expect(new Set(contexts.map((context) => context?.grantId))).toEqual(
-      new Set([scope.grantId, "desktop-second-grant"]),
-    );
-    expect(contexts.every((context) => context?.userId === scope.userId)).toBe(true);
-    // The route's own connection limit, unchanged, decides whether this socket may join them.
-    const oneMore = await open(notes[sockets]!.shareId, notes[sockets]!.path);
-    expect(await resolve(oneMore)).toMatchObject({ kind: "named", userId: scope.userId });
+    const slow = await open(notes[0]!.shareId, notes[0]!.path);
+    const retries: string[] = [];
+    for (let attempt = 0; attempt < 18; attempt++) {
+      const note = notes[1 + (attempt % 3)]!;
+      retries.push(await open(note.shareId, note.path));
+    }
+    expect(await resolve(slow)).toMatchObject({ kind: "named", userId: scope.userId });
+    clock.now += LIVE_TICKET_LIFETIME_MS;
+    for (const discriminator of retries) expect(await resolve(discriminator)).toBeNull();
   });
 
   it("lasts no longer than its ticket", async () => {
