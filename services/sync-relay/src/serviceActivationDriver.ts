@@ -40,6 +40,9 @@ export function parseServiceActivationTarget(value:unknown){
 }
 export type ServiceActivationTarget=ReturnType<typeof parseServiceActivationTarget>;
 const targetKey=(target:ServiceActivationTarget)=>JSON.stringify([target.workspaceId,target.path]);
+const keptKey=(workspaceId:string,objectId:string)=>JSON.stringify([workspaceId,objectId]);
+type TargetBlock={reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|{reason:"released-lineage-unsettled";digest:string};
+type TargetFailure={count:number;until:number;overBudget:boolean;run?:{since:number;failures:number;word:KnownRefusalWord;shown:boolean}};
 // A moved document's target is keyed by its object too, so a document now at its old path keeps its own state.
 const movedKey=(target:ServiceActivationTarget,objectId:string)=>JSON.stringify([target.workspaceId,target.path,objectId]);
 /** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
@@ -131,12 +134,14 @@ export class ServiceActivationDriver {
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.
   // One held for released retained work never captures: only the resolution of the binding whose digest it keeps clears it.
-  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|
-    {reason:"released-lineage-unsettled";digest:string}>();
+  readonly #blocked=new Map<string,TargetBlock>();
   // Targets whose activation failed, with how many times in a row, when the next try may start, and whether the last
   // failure was a history past the read budget. `run` is the failures in that row that have a word: when the first came,
   // how many, the latest one's word, and whether its owner sees them.
-  readonly #failures=new Map<string,{count:number;until:number;overBudget:boolean;run?:{since:number;failures:number;word:KnownRefusalWord;shown:boolean}}>();
+  readonly #failures=new Map<string,TargetFailure>();
+  // Blocks and waits kept for documents that left while no owner stopped them, by document. Adding the same document
+  // again applies its entry and removes it.
+  readonly #kept=new Map<string,{block?:TargetBlock;failure?:TargetFailure}>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
   readonly #objects=new Map<string,string>();
   // How often each target's activation began to retire. An activation that started before then never becomes ready.
@@ -171,7 +176,35 @@ export class ServiceActivationDriver {
   addTarget(target:ServiceActivationTarget,objectId:string){
     this.#targets=[...this.#targets.filter(row=>targetKey(row)!==targetKey(target)),target];
     this.#objects.set(targetKey(target),objectId);this.#enrolled.set(targetKey(target),objectId);
+    const document=keptKey(target.workspaceId,objectId),kept=this.#kept.get(document);
+    this.#kept.delete(document);
+    if(kept?.block)this.#blocked.set(targetKey(target),kept.block);
+    if(kept?.failure)this.#failures.set(targetKey(target),kept.failure);
   }
+  /**
+   * Keeps the target's block and wait for its document, if it has either, so they apply when the document is added again.
+   * A hold the engine or the relay reports keeps no block here: the next pass finds it again.
+   */
+  keep(target:ServiceActivationTarget,objectId:string){
+    const block=this.#blocked.get(targetKey(target)),failure=this.#failures.get(targetKey(target));
+    const kept=block?.reason==="refused"||block?.reason==="without-lineage"?block:undefined;
+    if(kept||failure)this.#kept.set(keptKey(target.workspaceId,objectId),{block:kept,failure});
+  }
+  /** The block a document's kept entry applies when it is added again, if it has one. */
+  keptBlock(document:{workspaceId:string;objectId:string}):ServiceActivationBlock|undefined{
+    const kept=this.#kept.get(keptKey(document.workspaceId,document.objectId));
+    if(kept?.block)return kept.block.reason==="released-lineage-unsettled"?undefined:kept.block.reason;
+    return kept?.failure?.overBudget?"history-over-budget":undefined;
+  }
+  /** Removes a document's kept block and wait. Returns whether it had a block or a failure run its owner saw. */
+  forgetKept(document:{workspaceId:string;objectId:string}){
+    const key=keptKey(document.workspaceId,document.objectId);
+    const named=this.keptBlock(document)!==undefined||this.#kept.get(key)?.failure?.run?.shown===true;
+    this.#kept.delete(key);
+    return named;
+  }
+  /** The documents with a kept block or wait. */
+  keptDocuments(){return [...this.#kept.keys()].map(key=>{const [workspaceId,objectId]=JSON.parse(key) as [string,string];return {workspaceId,objectId};});}
   /** Whether this driver may have loaded the document into the engine. */
   loaded(target:ServiceActivationTarget){return this.#loaded.has(targetKey(target));}
   /** Whether the target's last pass delivered and settled it. */
