@@ -2,11 +2,10 @@
 // killProcessTreeWin32. Signalling only a child's own pid leaves the servers
 // and workers it started running, still holding their ports and their cwd.
 //
-// The negated "-pid" process-group form cannot do this job here: the callers
-// fork children through Electron's utilityProcess.fork, which has no
-// `detached` option, so a child never becomes its own group leader and "-pid"
-// would signal this app's own group. Enumerate the tree from the process
-// table instead and signal each pid.
+// The negated "-pid" process-group form cannot do this job here: children
+// forked through Electron's utilityProcess.fork have no `detached` option, so
+// they never lead their own group and "-pid" would signal this app's own
+// group. Enumerate the tree from the process table instead and signal each pid.
 import { execFile } from "node:child_process";
 
 // The nominal read cap equals the default total shutdown budget. A stopped
