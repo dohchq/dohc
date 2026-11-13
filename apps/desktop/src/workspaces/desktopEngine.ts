@@ -504,7 +504,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               const blocked = result === "frozen" && !refusedPaths(workspaceId).has(path);
               if (result === "retry" || blocked) failures.add(path); else failures.delete(path);
               if (blocked) frozen.add(path); else if (result !== "retry") frozen.delete(path);
-              // A pass delivers one waiting edit, so only an empty queue takes edits again.
+              // A pass that delivered edits may have left some waiting, so only a pass that finds the queue empty takes edits again.
               // A refused queue, which this pass may have found, has its own notice.
               for (const pausedPath of paused) if ((pausedPath === path && result === "empty") || refusedPaths(workspaceId).has(pausedPath)) {paused.delete(pausedPath); unpaused = true;}
               if (result === "acknowledged" || result === "frozen") {notifyRenderer({workspaceId}); dependencies.notifyOwnerDraftsChanged?.(workspaceId);}
