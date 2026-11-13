@@ -1496,13 +1496,9 @@ pub(super) fn materialize_relay_page_on_store(
         .filter(|(_, _, head)| *head)
         .map(|(_, change, _)| change.path.as_str())
         .collect();
-    // The paths whose queued projection writes a hosted replica ends once
-    // the page has brought their files to their heads.
-    let projected_paths: Vec<String> = if hosted {
-        target_paths.iter().map(|path| (*path).to_owned()).collect()
-    } else {
-        Vec::new()
-    };
+    // The paths whose queued projection writes end once the page has brought
+    // their files to their heads.
+    let projected_paths: Vec<String> = target_paths.iter().map(|path| (*path).to_owned()).collect();
     let spelling_aliases = case_alias_targets(
         page.iter().map(|(_, change, _)| change.path.as_str()),
         &target_paths,
@@ -1753,32 +1749,35 @@ pub(super) fn materialize_relay_page_on_store(
         for path in &deleted {
             remove_emptied_folders(store, root_dir, path, None);
         }
-        end_page_projection_writes(
-            store,
-            root_dir,
-            workspace_id,
-            self_writes,
-            &holds,
-            &projected_paths,
-            now_ms,
-        )?;
     }
+    end_page_projection_writes(
+        store,
+        root_dir,
+        workspace_id,
+        self_writes,
+        &holds,
+        &projected_paths,
+        now_ms,
+    )?;
     Ok(())
 }
 
-/// End the file writes this page's Y.Doc projections queued, on a hosted
-/// replica. Each projection a pull applies queues a write of its document's
-/// file that expects the head before it, and the page then brings the file
-/// to the newest head through a job of its own. Nothing runs the queued
-/// writes while the replica is up, and each later replay kept one earlier
-/// state beside the file as a conflict file (#3804). So once a path's file
-/// holds its head, its writes of earlier states are cancelled and the write
-/// of the head is replayed, which marks it complete without writing.
+/// End the file writes this page's Y.Doc projections queued. Only a server's
+/// copies call this page: its hosted replica and its automations copy. Each
+/// projection a pull applies queues a write of its document's file that
+/// expects the head before it, and the page then brings the file to the
+/// newest head through a job of its own. Nothing runs the queued writes while
+/// the copy is up, and each later replay kept one earlier state beside the
+/// file as a conflict file (#3804). So once a path's file holds its head, its
+/// writes of earlier states are cancelled and the write of the head is
+/// replayed, which marks it complete without writing.
 ///
 /// This runs after the page's own writes, in transactions of its own. A stop
-/// between the two leaves the writes queued over a file that holds its head,
-/// which every later replay ends the same way. A file that does not hold its
-/// head keeps its writes.
+/// between the two leaves the writes queued over a file that holds its head.
+/// On a hosted replica every later replay ends them the same way. The
+/// automations copy replays them at its next start, before the page comes
+/// again, so each write of an earlier state leaves a conflict file. A file
+/// that does not hold its head keeps its writes.
 fn end_page_projection_writes(
     store: &mut EngineStore,
     root_dir: &std::path::Path,
@@ -2892,13 +2891,14 @@ pub(super) mod tests {
         assert_eq!(conflict_files(root), Vec::<String>::new());
     }
 
-    /// The page of a replica that is not hosted is unchanged: it writes the
-    /// file and leaves the projections' writes queued, as before (#3804). A
-    /// server's automation replica runs this page. A desktop does not.
+    /// A server's automations copy joins as an ordinary replica, not a hosted
+    /// one, and runs the same page. Its projections' queued writes end once
+    /// the file holds the head, so the replay at its next start finds nothing
+    /// to write and keeps no earlier state beside the file.
     #[test]
-    fn a_page_off_a_hosted_replica_leaves_its_projection_writes_queued() {
+    fn an_ordinary_server_copy_ends_the_writes_its_projections_queued() {
         use dohc_engine_storage::JobStatus;
-        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let (scratch, path, mut store) = dohc_engine_testkit::open_store();
         ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
         three_queued_projection_writes(&mut store);
         materialize_relay_page_on_store(
@@ -2915,6 +2915,40 @@ pub(super) mod tests {
             std::fs::read_to_string(scratch.join("note.md")).unwrap(),
             "third\n"
         );
-        assert_eq!(projection_write_statuses(&store), [JobStatus::Pending; 3]);
+
+        // The copy restarts, and its open replays every pending write.
+        drop(store);
+        let mut store = dohc_engine_storage::EngineStore::open(&path, 30).unwrap();
+        let replayed = super::super::materialization::replay_pending_materializations(
+            &mut store,
+            &scratch,
+            super::super::materialization::MaterializationReplayScope {
+                holds: None,
+                workspace_id: "ws",
+                self_writes: None,
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+                planned_against_active_heads: false,
+            },
+            30,
+            &NoFaults,
+            None,
+            false,
+        );
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+        replayed.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("note.md")).unwrap(),
+            "third\n"
+        );
+        assert_eq!(
+            projection_write_statuses(&store),
+            [
+                JobStatus::Cancelled,
+                JobStatus::Cancelled,
+                JobStatus::Complete
+            ]
+        );
     }
 }
