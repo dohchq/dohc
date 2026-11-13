@@ -1,6 +1,10 @@
 import { asRecord, RESERVED_WORKSPACE_IDS } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
-import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS, MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "./wireLimits";
+import {
+  MAX_LOG_PAGE_SIZE,
+  MAX_SHARE_ID_CHARS,
+  MAX_DISCUSSION_ACTIVITY_HOLD_MS,
+} from "./wireLimits";
 import { badRequest, notFound } from "./errors";
 
 export { RESERVED_WORKSPACE_IDS };
@@ -46,7 +50,8 @@ export function parseString(value: unknown, name: string, maxChars: number): str
 export function parseCursor(value: string | null): number {
   if (value === null || value === "") return 0;
   const cursor = Number(value);
-  if (!Number.isInteger(cursor) || cursor < 0) throw badRequest("since must be a non-negative integer");
+  if (!Number.isInteger(cursor) || cursor < 0)
+    throw badRequest("since must be a non-negative integer");
   return cursor;
 }
 
@@ -73,7 +78,11 @@ export function cursorCodec<Cursor extends object>(
     decode: (value) => {
       if (value === null) return undefined;
       const invalid = () => badRequest(`${label} is invalid`);
-      if (value.length === 0 || value.length > CURSOR_MAX_CHARS || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+      if (
+        value.length === 0 ||
+        value.length > CURSOR_MAX_CHARS ||
+        !/^[A-Za-z0-9_-]+$/u.test(value)
+      ) {
         throw invalid();
       }
       let decoded: unknown;
@@ -133,7 +142,8 @@ export function parseLimit(value: string | null): number {
 }
 
 export function assertSha256(value: string): void {
-  if (!SHA256_HEX_PATTERN.test(value)) throw badRequest("sha256 must be 64 lowercase hex characters");
+  if (!SHA256_HEX_PATTERN.test(value))
+    throw badRequest("sha256 must be 64 lowercase hex characters");
 }
 
 export function parseShareId(value: string | undefined): string {
@@ -154,11 +164,7 @@ export function parseLinkLogHold(value: string | null): number {
     throw badRequest("hold must be a non-negative integer");
   }
   const hold = Number(value);
-  if (
-    !Number.isSafeInteger(hold) ||
-    hold < 0 ||
-    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
-  ) {
+  if (!Number.isSafeInteger(hold) || hold < 0 || hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
     throw badRequest(
       `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
     );

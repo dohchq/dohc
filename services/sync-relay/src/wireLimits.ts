@@ -1,4 +1,7 @@
-import { APP_PUBLICATION_MAX_REQUEST_BYTES, APP_PUBLICATION_MAX_BLOB_BYTES } from "@dohc/security-contract/app-publication";
+import {
+  APP_PUBLICATION_MAX_REQUEST_BYTES,
+  APP_PUBLICATION_MAX_BLOB_BYTES,
+} from "@dohc/security-contract/app-publication";
 export const MAX_PAYLOAD_JSON_BYTES = APP_PUBLICATION_MAX_REQUEST_BYTES;
 export const MAX_SHARE_ID_CHARS = 128;
 export { MAX_DISCUSSION_ACTIVITY_HOLD_MS } from "@dohc/security-contract/share-discussion";

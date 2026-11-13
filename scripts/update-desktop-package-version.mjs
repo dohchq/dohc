@@ -58,9 +58,7 @@ function parseArgs(argv) {
   }
   out.version ??= process.env.DESKTOP_VERSION;
   if (!out.version) {
-    throw new Error(
-      "Usage: update-desktop-package-version <version> or DESKTOP_VERSION=<version>",
-    );
+    throw new Error("Usage: update-desktop-package-version <version> or DESKTOP_VERSION=<version>");
   }
   return out;
 }

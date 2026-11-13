@@ -13,11 +13,20 @@ function claim() {
   return {
     ticketId: "ticket-1",
     audience: "https://share.example.test",
-    authority: { principalKind: "named", principalId: "user-1", grantId: "grant-1", grantGeneration: 3 },
+    authority: {
+      principalKind: "named",
+      principalId: "user-1",
+      grantId: "grant-1",
+      grantGeneration: 3,
+    },
     binding: {
-      workspaceId: "workspace-1", mainVersionId: "main", objectId: "object-1",
-      lineageClaimId: "lineage-1", currentPath: "notes/owner.md",
-      selectorPaths: ["notes/owner.md"], restoreFenceGeneration: 7,
+      workspaceId: "workspace-1",
+      mainVersionId: "main",
+      objectId: "object-1",
+      lineageClaimId: "lineage-1",
+      currentPath: "notes/owner.md",
+      selectorPaths: ["notes/owner.md"],
+      restoreFenceGeneration: 7,
     },
     hostEpoch: 2,
     mintedAtMs: 1_000,
@@ -26,10 +35,22 @@ function claim() {
 }
 
 describe("shared live-ticket audience", () => {
-  it.each(["https://share.example.test", "http://localhost:4173", "https://[::1]:4433"])("accepts canonical origin %s", value => {
-    expect(parseLiveTicketAudience(value)).toBe(value);
-  });
-  it.each(["https://share.example.test/", "https://share.example.test:443", "HTTPS://share.example.test", "https://user@share.example.test", "https://share.example.test?query", "null", null, "https://" + "a".repeat(2048)])("refuses noncanonical audience %s", value => {
+  it.each(["https://share.example.test", "http://localhost:4173", "https://[::1]:4433"])(
+    "accepts canonical origin %s",
+    (value) => {
+      expect(parseLiveTicketAudience(value)).toBe(value);
+    },
+  );
+  it.each([
+    "https://share.example.test/",
+    "https://share.example.test:443",
+    "HTTPS://share.example.test",
+    "https://user@share.example.test",
+    "https://share.example.test?query",
+    "null",
+    null,
+    "https://" + "a".repeat(2048),
+  ])("refuses noncanonical audience %s", (value) => {
     expect(() => parseLiveTicketAudience(value)).toThrow(TypeError);
   });
 });
@@ -92,8 +113,10 @@ describe("shared live-ticket claims", () => {
 
 describe("live-ticket token representation", () => {
   const token = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-  const expected = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31];
+  const expected = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+  ];
 
   it("decodes independent byte vectors and returns fresh arrays", () => {
     expect(LIVE_TICKET_ENTROPY_BYTES).toBe(32);
@@ -108,10 +131,23 @@ describe("live-ticket token representation", () => {
   });
 
   it.each([
-    null, undefined, 1, {}, new String(token), "", token.slice(1), token + "0",
-    token.toUpperCase(), " " + token, token + " ", token + "\n", token + "\r\n",
-    token.slice(0, 63) + "\n", token.slice(0, 63) + "g", "0x" + token,
-  ])("refuses malformed token %# without normalization", value => {
+    null,
+    undefined,
+    1,
+    {},
+    new String(token),
+    "",
+    token.slice(1),
+    token + "0",
+    token.toUpperCase(),
+    " " + token,
+    token + " ",
+    token + "\n",
+    token + "\r\n",
+    token.slice(0, 63) + "\n",
+    token.slice(0, 63) + "g",
+    "0x" + token,
+  ])("refuses malformed token %# without normalization", (value) => {
     expect(() => parseLiveTicketToken(value)).toThrow(TypeError);
   });
 });
@@ -123,9 +159,17 @@ describe("live-ticket authority and coordinates", () => {
       input.authority.principalKind = principalKind;
       expect(parseLiveTicketClaims(input).authority).toEqual(input.authority);
     }
-    expect(() => parseLiveTicketClaims({ ...claim(), authority: {
-      principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null,
-    } })).toThrow(TypeError);
+    expect(() =>
+      parseLiveTicketClaims({
+        ...claim(),
+        authority: {
+          principalKind: "owner",
+          principalId: "owner-1",
+          grantId: null,
+          grantGeneration: null,
+        },
+      }),
+    ).toThrow(TypeError);
   });
 
   it("uses canonical identifier, authority, binding, and epoch bounds", () => {
@@ -138,8 +182,18 @@ describe("live-ticket authority and coordinates", () => {
     for (const hostEpoch of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, "2"]) {
       expect(() => parseLiveTicketClaims({ ...claim(), hostEpoch })).toThrow();
     }
-    expect(() => parseLiveTicketClaims({ ...claim(), authority: { ...claim().authority, grantGeneration: 0 } })).toThrow();
-    expect(() => parseLiveTicketClaims({ ...claim(), binding: { ...claim().binding, currentPath: "../outside.md" } })).toThrow();
+    expect(() =>
+      parseLiveTicketClaims({
+        ...claim(),
+        authority: { ...claim().authority, grantGeneration: 0 },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseLiveTicketClaims({
+        ...claim(),
+        binding: { ...claim().binding, currentPath: "../outside.md" },
+      }),
+    ).toThrow();
   });
 });
 
@@ -147,19 +201,41 @@ describe("live-ticket audience and time", () => {
   it("accepts canonical HTTP and HTTPS origins up to the exact byte boundary", () => {
     const boundary = "https://" + "a.".repeat(1019) + "aa";
     expect(new TextEncoder().encode(boundary).byteLength).toBe(2_048);
-    for (const audience of ["http://localhost:8080", "https://share.example.test", "https://[::1]:8443", boundary]) {
+    for (const audience of [
+      "http://localhost:8080",
+      "https://share.example.test",
+      "https://[::1]:8443",
+      boundary,
+    ]) {
       expect(parseLiveTicketClaims({ ...claim(), audience }).audience).toBe(audience);
     }
-    expect(() => parseLiveTicketClaims({ ...claim(), audience: boundary + "a" })).toThrow(TypeError);
+    expect(() => parseLiveTicketClaims({ ...claim(), audience: boundary + "a" })).toThrow(
+      TypeError,
+    );
   });
 
   it.each([
-    null, 123, "https://example.test/", "https://example.test/path", "https://example.test?x",
-    "https://example.test#x", "https://user:password@example.test", "https://example.test:443",
-    "HTTPS://example.test", "https://EXAMPLE.test", " https://example.test", "https://example.test\n",
-    "https://example.test\u007f", "https://\ud800.test", "https://\udfff.test", "https://é.test",
-    "file:///tmp", "ws://example.test", "null", "",
-  ])("refuses noncanonical or malformed audience %#", audience => {
+    null,
+    123,
+    "https://example.test/",
+    "https://example.test/path",
+    "https://example.test?x",
+    "https://example.test#x",
+    "https://user:password@example.test",
+    "https://example.test:443",
+    "HTTPS://example.test",
+    "https://EXAMPLE.test",
+    " https://example.test",
+    "https://example.test\n",
+    "https://example.test\u007f",
+    "https://\ud800.test",
+    "https://\udfff.test",
+    "https://é.test",
+    "file:///tmp",
+    "ws://example.test",
+    "null",
+    "",
+  ])("refuses noncanonical or malformed audience %#", (audience) => {
     expect(() => parseLiveTicketClaims({ ...claim(), audience })).toThrow(TypeError);
   });
 
@@ -170,16 +246,28 @@ describe("live-ticket audience and time", () => {
       for (const redeemedAtMs of [mintedAtMs, input.expiresAtMs - 1]) {
         expect(parseRedeemedLiveTicket({ ...input, redeemedAtMs }).redeemedAtMs).toBe(redeemedAtMs);
       }
-      expect(() => parseRedeemedLiveTicket({ ...input, redeemedAtMs: input.expiresAtMs })).toThrow(TypeError);
-      expect(() => parseRedeemedLiveTicket({ ...input, redeemedAtMs: mintedAtMs - 1 })).toThrow(TypeError);
+      expect(() => parseRedeemedLiveTicket({ ...input, redeemedAtMs: input.expiresAtMs })).toThrow(
+        TypeError,
+      );
+      expect(() => parseRedeemedLiveTicket({ ...input, redeemedAtMs: mintedAtMs - 1 })).toThrow(
+        TypeError,
+      );
     }
-    expect(() => parseLiveTicketClaims({ ...claim(), mintedAtMs: Number.MAX_SAFE_INTEGER - 29_999, expiresAtMs: Number.MAX_SAFE_INTEGER })).toThrow(TypeError);
+    expect(() =>
+      parseLiveTicketClaims({
+        ...claim(),
+        mintedAtMs: Number.MAX_SAFE_INTEGER - 29_999,
+        expiresAtMs: Number.MAX_SAFE_INTEGER,
+      }),
+    ).toThrow(TypeError);
     for (const expiresAtMs of [30_999, 31_001]) {
       expect(() => parseLiveTicketClaims({ ...claim(), expiresAtMs })).toThrow(TypeError);
     }
     for (const field of ["mintedAtMs", "expiresAtMs", "redeemedAtMs"]) {
       for (const value of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "1000", null]) {
-        expect(() => parseRedeemedLiveTicket({ ...claim(), redeemedAtMs: 1_000, [field]: value })).toThrow(TypeError);
+        expect(() =>
+          parseRedeemedLiveTicket({ ...claim(), redeemedAtMs: 1_000, [field]: value }),
+        ).toThrow(TypeError);
       }
     }
   });
@@ -197,7 +285,14 @@ describe("live-ticket descriptor snapshots", () => {
           delete target[field];
           let getterCalls = 0;
           if (kind === "inherited") Object.setPrototypeOf(target, { [field]: value });
-          if (kind === "accessor") Object.defineProperty(target, field, { enumerable: true, get() { getterCalls += 1; return value; } });
+          if (kind === "accessor")
+            Object.defineProperty(target, field, {
+              enumerable: true,
+              get() {
+                getterCalls += 1;
+                return value;
+              },
+            });
           expect(() => parseLiveTicketClaims(input)).toThrow(TypeError);
           expect(getterCalls).toBe(0);
         }
@@ -214,10 +309,17 @@ describe("live-ticket descriptor snapshots", () => {
   it("requires the distinct seven-field and eight-field envelopes", () => {
     expect(() => parseRedeemedLiveTicket(claim())).toThrow(TypeError);
     expect(() => parseLiveTicketClaims({ ...claim(), redeemedAtMs: 1_000 })).toThrow(TypeError);
-    expect(() => parseRedeemedLiveTicket({ ...claim(), redeemedAtMs: 1_000, extra: true })).toThrow(TypeError);
+    expect(() => parseRedeemedLiveTicket({ ...claim(), redeemedAtMs: 1_000, extra: true })).toThrow(
+      TypeError,
+    );
     const input = { ...claim(), redeemedAtMs: 1_000 };
     let calls = 0;
-    Object.defineProperty(input, "redeemedAtMs", { get() { calls += 1; return 1_000; } });
+    Object.defineProperty(input, "redeemedAtMs", {
+      get() {
+        calls += 1;
+        return 1_000;
+      },
+    });
     expect(() => parseRedeemedLiveTicket(input)).toThrow(TypeError);
     expect(calls).toBe(0);
   });
@@ -230,20 +332,32 @@ describe("live-ticket descriptor snapshots", () => {
       // oxlint-disable-next-line typescript/no-array-delete -- the test needs a sparse array
       if (["sparse", "inherited", "accessor"].includes(kind)) delete selectors[0];
       if (kind === "inherited") Object.setPrototypeOf(selectors, { 0: "notes/owner.md" });
-      if (kind === "accessor") Object.defineProperty(selectors, "0", { get() { calls += 1; return "notes/owner.md"; } });
+      if (kind === "accessor")
+        Object.defineProperty(selectors, "0", {
+          get() {
+            calls += 1;
+            return "notes/owner.md";
+          },
+        });
       if (kind === "extra") Object.defineProperty(selectors, "extra", { value: "notes/owner.md" });
       if (kind === "symbol") Object.defineProperty(selectors, Symbol("extra"), { value: true });
       expect(() => parseLiveTicketClaims(input)).toThrow(TypeError);
       expect(calls).toBe(0);
     }
     for (const selectorPaths of [[], Array(101).fill("notes/owner.md")]) {
-      expect(() => parseLiveTicketClaims({ ...claim(), binding: { ...claim().binding, selectorPaths } })).toThrow(TypeError);
+      expect(() =>
+        parseLiveTicketClaims({ ...claim(), binding: { ...claim().binding, selectorPaths } }),
+      ).toThrow(TypeError);
     }
   });
 
   it("turns reflection failures into invalid input without leaking thrown values", () => {
     for (const trap of ["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"] as const) {
-      const input = new Proxy(claim(), { [trap]() { throw new Error("private-value"); } });
+      const input = new Proxy(claim(), {
+        [trap]() {
+          throw new Error("private-value");
+        },
+      });
       expect(() => parseLiveTicketClaims(input)).toThrow(TypeError);
       expect(() => parseLiveTicketClaims(input)).not.toThrow("private-value");
     }

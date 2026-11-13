@@ -13,12 +13,22 @@ export function WorkspaceButton() {
   const { current: workspace } = useWorkspaces();
   if (!workspace) return null;
   return (
-    <Pressable style={styles.button} onPress={sampleBuild ? undefined : () => router.push("/workspaces")}
-      accessibilityRole="button" accessibilityLabel={`Workspace: ${workspace.name}. Switch workspace`}>
+    <Pressable
+      style={styles.button}
+      onPress={sampleBuild ? undefined : () => router.push("/workspaces")}
+      accessibilityRole="button"
+      accessibilityLabel={`Workspace: ${workspace.name}. Switch workspace`}
+    >
       <View style={[styles.mark, { backgroundColor: workspace.color }]}>
         <Text style={styles.initial}>{workspace.initial}</Text>
       </View>
-      <SymbolView name="chevron.down" size={11} weight="bold" tintColor={theme.ink} fallback={null} />
+      <SymbolView
+        name="chevron.down"
+        size={11}
+        weight="bold"
+        tintColor={theme.ink}
+        fallback={null}
+      />
     </Pressable>
   );
 }

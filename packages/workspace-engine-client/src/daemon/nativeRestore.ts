@@ -8,7 +8,8 @@ function bound(maxBytes: number): void {
 export function encodeNativeRestoreInput(headerJson: Uint8Array, maxBytes: number): Uint8Array {
   bound(maxBytes);
   const length = 4 + headerJson.byteLength;
-  if (headerJson.byteLength === 0 || length > maxBytes) throw new TypeError("Native restore input exceeds its byte bound.");
+  if (headerJson.byteLength === 0 || length > maxBytes)
+    throw new TypeError("Native restore input exceeds its byte bound.");
   const bytes = new Uint8Array(length);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, headerJson.byteLength, true);

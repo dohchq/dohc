@@ -34,7 +34,14 @@ export function agentAddressFor(linkUrl: string): string | null {
   }
   const secret = url.hash.slice(1);
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-  if (url.pathname !== "/s/" || url.search || url.username || url.password || !LINK_SECRET_PATTERN.test(secret)) return null;
+  if (
+    url.pathname !== "/s/" ||
+    url.search ||
+    url.username ||
+    url.password ||
+    !LINK_SECRET_PATTERN.test(secret)
+  )
+    return null;
   return `${url.origin}/mcp/s/${secret}`;
 }
 
@@ -79,7 +86,11 @@ export function useLinkAgentDisconnects(
   }
 
   async function run(link: AgentLink, agent: RelayShareLinkAgent) {
-    const named = { workspaceId: link.workspaceId, grantId: link.grantId, connectionId: agent.connectionId };
+    const named = {
+      workspaceId: link.workspaceId,
+      grantId: link.grantId,
+      connectionId: agent.connectionId,
+    };
     const key = disconnectedAgentKey(named);
     settle(key, { kind: "pending" });
     try {
@@ -104,14 +115,21 @@ export function useLinkAgentDisconnects(
 
   return {
     stateOf(link, connectionId) {
-      const key = disconnectedAgentKey({ workspaceId: link.workspaceId, grantId: link.grantId, connectionId });
+      const key = disconnectedAgentKey({
+        workspaceId: link.workspaceId,
+        grantId: link.grantId,
+        connectionId,
+      });
       return disconnected?.has(key) ? GONE : rows.get(key);
     },
     disconnect: (link, agent) => void run(link, agent),
   };
 }
 
-const shortTimestamp = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" });
+const shortTimestamp = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "short",
+  timeStyle: "short",
+});
 
 /**
  * The agents connected through one link, with Disconnect. Nothing shows
@@ -139,10 +157,21 @@ export function LinkAgentsList(props: {
   async function readPage(token: number, cursor?: string) {
     setReading(cursor === undefined ? "start" : "more");
     try {
-      const page = await bridge().listRelayShareLinkAgents({ ...link, ...(cursor === undefined ? {} : { cursor }) });
+      const page = await bridge().listRelayShareLinkAgents({
+        ...link,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
       if (read.current !== token) return;
-      setAgents((current) => cursor === undefined ? page.agents
-        : [...current, ...page.agents.filter((agent) => !current.some((shown) => shown.connectionId === agent.connectionId))]);
+      setAgents((current) =>
+        cursor === undefined
+          ? page.agents
+          : [
+              ...current,
+              ...page.agents.filter(
+                (agent) => !current.some((shown) => shown.connectionId === agent.connectionId),
+              ),
+            ],
+      );
       setNextCursor(page.nextCursor);
       setFailedCursor(undefined);
     } catch {
@@ -162,7 +191,9 @@ export function LinkAgentsList(props: {
   }, [props.revision]);
 
   // A read that started before a Disconnect finished must not bring its agent back.
-  const shown = agents.filter((agent) => props.disconnects.stateOf(link, agent.connectionId)?.kind !== "gone");
+  const shown = agents.filter(
+    (agent) => props.disconnects.stateOf(link, agent.connectionId)?.kind !== "gone",
+  );
   if (shown.length === 0 && failedCursor === undefined && nextCursor === null) return null;
   return (
     <section
@@ -171,9 +202,14 @@ export function LinkAgentsList(props: {
       className="flex flex-col"
     >
       <div className="flex h-6 items-center gap-2">
-        <SectionLabel as="h4" id={`share-link-agents-heading-${props.grantId}`} className="m-0">Agents</SectionLabel>
+        <SectionLabel as="h4" id={`share-link-agents-heading-${props.grantId}`} className="m-0">
+          Agents
+        </SectionLabel>
         {shown.length > 0 ? (
-          <span className="text-[12px] text-subtle">{shown.length}{nextCursor !== null ? "+" : ""}</span>
+          <span className="text-[12px] text-subtle">
+            {shown.length}
+            {nextCursor !== null ? "+" : ""}
+          </span>
         ) : null}
       </div>
       {shown.length > 0 ? (
@@ -189,14 +225,22 @@ export function LinkAgentsList(props: {
                 data-testid={`share-link-agent-${agent.connectionId}`}
                 className="flex min-h-8 items-center gap-2 py-1"
               >
-                <ChatAvatar name={name} kind="link" linkAgent presentation={neutralPresentation} size="comment" />
+                <ChatAvatar
+                  name={name}
+                  kind="link"
+                  linkAgent
+                  presentation={neutralPresentation}
+                  size="comment"
+                />
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate text-[13px] text-ink" title={name}>
                     <bdi>{name}</bdi>
                     <span className="sr-only">, agent</span>
                   </span>
                   <span className="text-[12px] text-subtle">
-                    {agent.reportedName === null ? "The agent reported no name" : "Name reported by the agent"}
+                    {agent.reportedName === null
+                      ? "The agent reported no name"
+                      : "Name reported by the agent"}
                     {" · "}
                     <span className="whitespace-nowrap">
                       {agent.lastActionAtMs === null
@@ -210,7 +254,11 @@ export function LinkAgentsList(props: {
                       data-testid={`share-link-agent-error-${agent.connectionId}`}
                       className="m-0 flex items-start gap-1.5 text-[12px] leading-4 text-muted"
                     >
-                      <TriangleAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+                      <TriangleAlert
+                        size={12}
+                        aria-hidden
+                        className="mt-0.5 shrink-0 text-danger"
+                      />
                       <span>{failure}</span>
                     </p>
                   ) : null}
@@ -234,7 +282,11 @@ export function LinkAgentsList(props: {
         <RetryRow
           testId={`share-link-agents-retry-${props.grantId}`}
           disabled={reading !== null}
-          onRetry={() => void (failedCursor === null ? readPage(++read.current) : readPage(read.current, failedCursor))}
+          onRetry={() =>
+            void (failedCursor === null
+              ? readPage(++read.current)
+              : readPage(read.current, failedCursor))
+          }
         >
           {LINK_AGENTS_FAILED}
         </RetryRow>

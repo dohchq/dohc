@@ -1,12 +1,4 @@
-import {
-  mkdir,
-  open,
-  readdir,
-  stat,
-  symlink,
-  utimes,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, open, readdir, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestScratch } from "./testTemp";
@@ -27,9 +19,16 @@ let root: string;
 beforeEach(async () => {
   root = await createTestScratch("dohc-scoped-listing-");
   for (const path of [
-    "root.md", "notes/a.md", "notes/z.mdx", "notes/wallet.sqlite",
-    "notes/deep/b.markdown", "notes/deep/deeper/c.md", "notes-other/d.md",
-    "other/e.md", "[notes]/literal.md", ".dohc/hidden.md",
+    "root.md",
+    "notes/a.md",
+    "notes/z.mdx",
+    "notes/wallet.sqlite",
+    "notes/deep/b.markdown",
+    "notes/deep/deeper/c.md",
+    "notes-other/d.md",
+    "other/e.md",
+    "[notes]/literal.md",
+    ".dohc/hidden.md",
     "notes/node_modules/hidden.md",
   ]) {
     await mkdir(dirname(join(root, path)), { recursive: true });
@@ -72,20 +71,26 @@ describe("scoped file listings", () => {
 
   it("reads only ancestors and direct file metadata for a shallow folder request", async () => {
     const listed = await listFiles(root, {
-      path: "notes", recursive: false, includeContentIdentity: true,
+      path: "notes",
+      recursive: false,
+      includeContentIdentity: true,
     });
     expect(listed.files.map((file) => file.path)).toEqual([
-      "notes/a.md", "notes/wallet.sqlite", "notes/z.mdx",
+      "notes/a.md",
+      "notes/wallet.sqlite",
+      "notes/z.mdx",
     ]);
     expect(vi.mocked(readdir).mock.calls.map(([path]) => path)).toEqual([
-      root, join(root, "notes"),
+      root,
+      join(root, "notes"),
     ]);
-    expect(vi.mocked(stat).mock.calls.map(([path]) => path).sort()).toEqual([
-      join(root, "notes/a.md"), join(root, "notes/z.mdx"),
-    ].sort());
-    expect(vi.mocked(open).mock.calls.map(([path]) => path)).toEqual([
-      join(root, "notes/a.md"),
-    ]);
+    expect(
+      vi
+        .mocked(stat)
+        .mock.calls.map(([path]) => path)
+        .sort(),
+    ).toEqual([join(root, "notes/a.md"), join(root, "notes/z.mdx")].sort());
+    expect(vi.mocked(open).mock.calls.map(([path]) => path)).toEqual([join(root, "notes/a.md")]);
   });
 
   it("reads no descendant directory or metadata for a shallow root request", async () => {

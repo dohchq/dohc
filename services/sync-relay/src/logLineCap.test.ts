@@ -13,7 +13,8 @@ it("logs a key once a window and counts what it held back in the next line", () 
 
 it("forgets the least recently logged key once it holds the most keys", () => {
   const cap = createLogLineCap(1000, 2);
-  cap("a", 0); cap("b", 1);
+  cap("a", 0);
+  cap("b", 1);
   expect(cap("a", 2)).toBeUndefined();
   // "a" logged first, so "c" evicts it and keeps "b"; a held-back line does not refresh its key.
   expect(cap("c", 3)).toBe(0);

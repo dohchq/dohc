@@ -18,19 +18,32 @@ vi.mock("./workspaceMetadata", async (importOriginal) => {
       const run = meanwhile;
       meanwhile = null;
       await run?.(rootPath);
-      return (actual.resolveWorkspaceMetadataDir as (path: string, ...more: typeof rest) => Promise<string>)(rootPath, ...rest);
+      return (
+        actual.resolveWorkspaceMetadataDir as (
+          path: string,
+          ...more: typeof rest
+        ) => Promise<string>
+      )(rootPath, ...rest);
     },
   };
 });
 
-afterEach(() => { meanwhile = null; });
+afterEach(() => {
+  meanwhile = null;
+});
 
 const linkType = process.platform === "win32" ? "junction" : "dir";
 
 async function create(rootPath: string) {
   const homeDir = await createTestScratch("dohc-fresh-home-");
   const stateDir = await createTestScratch("dohc-fresh-state-");
-  return createWorkspaceFolderWithFreshness({ rootPath, homeDir, stateDir, kind: "personal", computer: { installId: "install-here", label: "This Mac" } });
+  return createWorkspaceFolderWithFreshness({
+    rootPath,
+    homeDir,
+    stateDir,
+    kind: "personal",
+    computer: { installId: "install-here", label: "This Mac" },
+  });
 }
 
 describe("New workspace's claim that it made a folder from nothing", () => {
@@ -57,25 +70,35 @@ describe("New workspace's claim that it made a folder from nothing", () => {
     const root = join(await createTestScratch("dohc-fresh-"), "Trip");
     meanwhile = async (rootPath) => {
       await mkdir(join(rootPath, ".dohc"));
-      for (const name of ["._.dohc", ".dohc/._manifest.json", ".dohc/._sync-history.json", ".dohc/._collections.json"]) {
+      for (const name of [
+        "._.dohc",
+        ".dohc/._manifest.json",
+        ".dohc/._sync-history.json",
+        ".dohc/._collections.json",
+      ]) {
         await writeFile(join(rootPath, name), "");
       }
     };
     expect((await create(root)).fresh).not.toBeNull();
   });
 
-  it.each(["._package.json", "._", "._._.dohc", ".dohc/._settings.json", ".dohc/._engine"])("names no folder that also holds %s", async (name) => {
-    const root = join(await createTestScratch("dohc-fresh-"), "Trip");
-    meanwhile = async (rootPath) => {
-      await mkdir(join(rootPath, ".dohc"));
-      await writeFile(join(rootPath, name), "");
-    };
-    expect((await create(root)).fresh).toBeNull();
-  });
+  it.each(["._package.json", "._", "._._.dohc", ".dohc/._settings.json", ".dohc/._engine"])(
+    "names no folder that also holds %s",
+    async (name) => {
+      const root = join(await createTestScratch("dohc-fresh-"), "Trip");
+      meanwhile = async (rootPath) => {
+        await mkdir(join(rootPath, ".dohc"));
+        await writeFile(join(rootPath, name), "");
+      };
+      expect((await create(root)).fresh).toBeNull();
+    },
+  );
 
   it("names no folder that a file arrived in between the check and the manifest", async () => {
     const root = join(await createTestScratch("dohc-fresh-"), "Trip");
-    meanwhile = async (rootPath) => { await writeFile(join(rootPath, "package.json"), "{}"); };
+    meanwhile = async (rootPath) => {
+      await writeFile(join(rootPath, "package.json"), "{}");
+    };
     const { workspace, fresh } = await create(root);
     expect(workspace.workspaceId).toBeTruthy();
     expect(fresh).toBeNull();

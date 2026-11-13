@@ -2,11 +2,16 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import { deferred } from "../testing/deferred";
-import { createDesktopWorkspaceCallbacks, type DesktopWorkspaceCallbacksDependencies } from "./desktopWorkspaceCallbacks";
+import {
+  createDesktopWorkspaceCallbacks,
+  type DesktopWorkspaceCallbacksDependencies,
+} from "./desktopWorkspaceCallbacks";
 import type { RegistryEntry } from "./registryStore";
 import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 
-interface State { readonly attachmentId: symbol }
+interface State {
+  readonly attachmentId: symbol;
+}
 const events: readonly WatcherEvent[] = [
   { path: "notes/first.md", operation: "update" },
   { path: "notes/before.md", operation: "delete" },
@@ -17,8 +22,10 @@ afterEach(() => vi.restoreAllMocks());
 
 function fixture() {
   const workspace: RegistryEntry = {
-    workspaceId: "workspace-a", rootPath: resolve("callback-workspace"),
-    kind: "personal", mode: "local-first",
+    workspaceId: "workspace-a",
+    rootPath: resolve("callback-workspace"),
+    kind: "personal",
+    mode: "local-first",
   };
   const registry = new Map([[workspace.workspaceId, workspace]]);
   const disposed: symbol[] = [];
@@ -26,11 +33,15 @@ function fixture() {
     findWorkspace: (id) => registry.get(id) ?? null,
     canonicalizeRoot: (path) => path,
     createState: (binding): State => ({ attachmentId: binding.attachmentId }),
-    disposeState: (state) => { disposed.push(state.attachmentId); },
+    disposeState: (state) => {
+      disposed.push(state.attachmentId);
+    },
   });
   const notifyRenderer = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["notifyRenderer"]>();
   const handleWatcherEvents = vi.fn<(events: readonly WatcherEvent[]) => void>();
-  const scanWorkspace = vi.fn<DesktopWorkspaceCallbacksDependencies<State>["chatDispatchService"]["scanWorkspace"]>(async () => undefined);
+  const scanWorkspace = vi.fn<
+    DesktopWorkspaceCallbacksDependencies<State>["chatDispatchService"]["scanWorkspace"]
+  >(async () => undefined);
   const live: {
     dispatch: DesktopWorkspaceCallbacksDependencies<State>["chatDispatchService"];
     initialized: boolean;
@@ -42,11 +53,13 @@ function fixture() {
     notifyRenderer,
     get workspaceAuthorities() {
       if (!live.initialized) throw new Error("Authority owner is not initialized");
-      lateReads.push("authorities"); return authorities;
+      lateReads.push("authorities");
+      return authorities;
     },
     get chatDispatchService() {
       if (!live.initialized) throw new Error("Dispatch service is not initialized");
-      lateReads.push("dispatch"); return live.dispatch;
+      lateReads.push("dispatch");
+      return live.dispatch;
     },
     collectionAutomationsOf: () => ({ handleWatcherEvents }),
   });
@@ -57,8 +70,19 @@ function fixture() {
     lease.release();
     return attached;
   }
-  return { workspace, registry, authorities, disposed, notifyRenderer, handleWatcherEvents,
-    scanWorkspace, live, lateReads, callbacks, attach };
+  return {
+    workspace,
+    registry,
+    authorities,
+    disposed,
+    notifyRenderer,
+    handleWatcherEvents,
+    scanWorkspace,
+    live,
+    lateReads,
+    callbacks,
+    attach,
+  };
 }
 
 describe("desktop workspace callbacks", () => {
@@ -88,7 +112,10 @@ describe("desktop workspace callbacks", () => {
       // A reader bound to the attachment, as its dataset host's agent run is, reads nothing.
       expect(test.callbacks.withWorkspaceAttachment(original, () => "read")).toBeUndefined();
       expect(test.disposed).toEqual([]);
-    } finally { held.release(); await retired; }
+    } finally {
+      held.release();
+      await retired;
+    }
     const replacement = test.attach();
     expect(replacement.attachmentId).not.toBe(original.attachmentId);
     expect(test.callbacks.withWorkspaceAttachment(original, () => "read")).toBeUndefined();
@@ -100,7 +127,10 @@ describe("desktop workspace callbacks", () => {
     test.callbacks.onWatcherBatch(replacement, events);
     test.callbacks.createRelayOnChange(replacement)();
     expect(test.handleWatcherEvents).toHaveBeenCalledOnce();
-    expect(test.notifyRenderer).toHaveBeenCalledWith({ workspaceId: original.workspaceId, pathSetChanged: false });
+    expect(test.notifyRenderer).toHaveBeenCalledWith({
+      workspaceId: original.workspaceId,
+      pathSetChanged: false,
+    });
     expect(test.scanWorkspace).toHaveBeenCalledExactlyOnceWith(original.workspaceId);
     await test.authorities.invalidate(replacement.workspaceId);
     expect(test.disposed).toEqual([original.attachmentId, replacement.attachmentId]);
@@ -138,7 +168,10 @@ describe("desktop workspace callbacks", () => {
     const workspace = test.attach();
     const scan = deferred();
     const started = deferred();
-    test.scanWorkspace.mockImplementation(() => { started.resolve(); return scan.promise; });
+    test.scanWorkspace.mockImplementation(() => {
+      started.resolve();
+      return scan.promise;
+    });
     const callback = test.callbacks.createRelayOnChange(workspace);
     expect(callback()).toBeUndefined();
     await started.promise;
@@ -155,7 +188,10 @@ describe("desktop workspace callbacks", () => {
       await retired;
       expect(test.disposed).toEqual([workspace.attachmentId]);
       expect(test.notifyRenderer).toHaveBeenCalledOnce();
-    } finally { scan.resolve(); await retired; }
+    } finally {
+      scan.resolve();
+      await retired;
+    }
   });
 
   it("reports relay dispatch rejection with the original error and releases its lease", async () => {
@@ -164,7 +200,9 @@ describe("desktop workspace callbacks", () => {
     const failed = new Error("dispatch failed");
     const logged = deferred();
     const log = vi.spyOn(console, "error").mockImplementation(() => logged.resolve());
-    const scanWorkspace = vi.fn(async () => { throw failed; });
+    const scanWorkspace = vi.fn(async () => {
+      throw failed;
+    });
     test.live.dispatch = { scanWorkspace };
     test.callbacks.createRelayOnChange(workspace)();
     await logged.promise;
@@ -182,7 +220,9 @@ describe("desktop workspace callbacks", () => {
     test.notifyRenderer.mockImplementation(() => {
       retired = test.authorities.invalidate(workspace.workspaceId);
     });
-    expect(() => test.callbacks.createRelayOnChange(workspace)()).toThrow("This workspace was closed. Open it again.");
+    expect(() => test.callbacks.createRelayOnChange(workspace)()).toThrow(
+      "This workspace was closed. Open it again.",
+    );
     expect(test.scanWorkspace).not.toHaveBeenCalled();
     await retired;
     expect(test.disposed).toEqual([workspace.attachmentId]);
@@ -191,14 +231,28 @@ describe("desktop workspace callbacks", () => {
   it("preserves optional attachment admission and the asynchronous mismatch refusal", async () => {
     const test = fixture();
     const workspace = test.attach();
-    expect(test.callbacks.withWorkspaceAttachment({ workspaceId: workspace.workspaceId }, lease => lease.state.attachmentId))
-      .toBe(workspace.attachmentId);
-    expect(await test.callbacks.withWorkspaceAttachmentAsync({ workspaceId: workspace.workspaceId }, lease => lease.state.attachmentId))
-      .toBe(workspace.attachmentId);
+    expect(
+      test.callbacks.withWorkspaceAttachment(
+        { workspaceId: workspace.workspaceId },
+        (lease) => lease.state.attachmentId,
+      ),
+    ).toBe(workspace.attachmentId);
+    expect(
+      await test.callbacks.withWorkspaceAttachmentAsync(
+        { workspaceId: workspace.workspaceId },
+        (lease) => lease.state.attachmentId,
+      ),
+    ).toBe(workspace.attachmentId);
     const work = vi.fn();
-    expect(test.callbacks.withWorkspaceAttachment({ ...workspace, attachmentId: Symbol("old") }, work)).toBeUndefined();
-    await expect(test.callbacks.withWorkspaceAttachmentAsync({ ...workspace, attachmentId: Symbol("old") }, work))
-      .rejects.toThrow("This workspace was closed. Open it again.");
+    expect(
+      test.callbacks.withWorkspaceAttachment({ ...workspace, attachmentId: Symbol("old") }, work),
+    ).toBeUndefined();
+    await expect(
+      test.callbacks.withWorkspaceAttachmentAsync(
+        { ...workspace, attachmentId: Symbol("old") },
+        work,
+      ),
+    ).rejects.toThrow("This workspace was closed. Open it again.");
     expect(work).not.toHaveBeenCalled();
     await test.authorities.invalidate(workspace.workspaceId);
     expect(test.disposed).toEqual([workspace.attachmentId]);
@@ -215,7 +269,10 @@ describe("desktop workspace callbacks", () => {
     expect(await result).toBe(7);
     const second = test.attach();
     const heldAsync = deferred<number>();
-    const resultAsync = test.callbacks.withWorkspaceAttachmentAsync(second, () => heldAsync.promise);
+    const resultAsync = test.callbacks.withWorkspaceAttachmentAsync(
+      second,
+      () => heldAsync.promise,
+    );
     const retired = test.authorities.invalidate(second.workspaceId);
     try {
       expect(test.disposed).toEqual([first.attachmentId]);
@@ -223,6 +280,9 @@ describe("desktop workspace callbacks", () => {
       expect(await resultAsync).toBe(9);
       await retired;
       expect(test.disposed).toEqual([first.attachmentId, second.attachmentId]);
-    } finally { heldAsync.resolve(9); await retired; }
+    } finally {
+      heldAsync.resolve(9);
+      await retired;
+    }
   });
 });

@@ -6,6 +6,7 @@ export function accountDeletionKey(secret: string): string {
   return createHmac("sha256", secret).update("dohc account deletion bearer v1").digest("base64url");
 }
 export function presentsAccountDeletionKey(presented: string | null, expected: string): boolean {
-  const given = Buffer.from(presented ?? ""), key = Buffer.from(expected);
+  const given = Buffer.from(presented ?? ""),
+    key = Buffer.from(expected);
   return given.length === key.length && timingSafeEqual(given, key);
 }

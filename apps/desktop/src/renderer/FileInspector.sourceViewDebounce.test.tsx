@@ -21,11 +21,17 @@ vi.mock("./editor/import-export", async (importOriginal) => {
   };
 });
 
-const delayedProof=vi.hoisted(()=>({delay:0,active:0,maximum:0}));
-vi.mock('./editor/artifactSource',()=>({prepareArtifactSource:()=>undefined,projectArtifactSource:async(doc:Y.Doc)=>{
- const text=(await import('@dohc/ydoc-projection')).yDocToArtifactMarkdown(doc);delayedProof.maximum=Math.max(delayedProof.maximum,++delayedProof.active);
- await new Promise(resolve=>setTimeout(resolve,delayedProof.delay));delayedProof.active--;return text;
-}}));
+const delayedProof = vi.hoisted(() => ({ delay: 0, active: 0, maximum: 0 }));
+vi.mock("./editor/artifactSource", () => ({
+  prepareArtifactSource: () => undefined,
+  projectArtifactSource: async (doc: Y.Doc) => {
+    const text = (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc);
+    delayedProof.maximum = Math.max(delayedProof.maximum, ++delayedProof.active);
+    await new Promise((resolve) => setTimeout(resolve, delayedProof.delay));
+    delayedProof.active--;
+    return text;
+  },
+}));
 let engineDocState: UseEngineDoc;
 vi.mock("./collab/useEngineDoc", () => ({
   useEngineDoc: () => engineDocState,
@@ -51,7 +57,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     authorCapacity: false,
     notInVersion: false,
     documentUnavailable: false,
-  liveHostUnavailable: false,
+    liveHostUnavailable: false,
     engineMayHoldDocument: false,
     artifactAssetsInvalid: false,
     deletedWhileEditing: false,
@@ -153,7 +159,9 @@ async function openSourceView(doc: Y.Doc) {
 
 describe("FileInspector engine source update scheduling", () => {
   beforeEach(() => {
-    delayedProof.delay=0;delayedProof.active=0;delayedProof.maximum=0;
+    delayedProof.delay = 0;
+    delayedProof.active = 0;
+    delayedProof.maximum = 0;
     stubEditorGlobals();
     vi.stubGlobal(
       "dohcDesktop",
@@ -191,9 +199,7 @@ describe("FileInspector engine source update scheduling", () => {
     });
 
     expect(serialize).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("view-markdown-source").textContent).toContain(
-      "Initial paragraph.",
-    );
+    expect(screen.getByTestId("view-markdown-source").textContent).toContain("Initial paragraph.");
   });
 
   it("bounds source serializations during a sustained update burst", async () => {
@@ -235,9 +241,7 @@ describe("FileInspector engine source update scheduling", () => {
     await act(async () => vi.advanceTimersByTimeAsync(1));
 
     expect(serialize).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("markdown-source-view").textContent).toContain(
-      "Final update.",
-    );
+    expect(screen.getByTestId("markdown-source-view").textContent).toContain("Final update.");
   });
 
   it("never paints a queued projection after a document switch", async () => {
@@ -259,9 +263,7 @@ describe("FileInspector engine source update scheduling", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    expect(screen.getByTestId("markdown-source-view").textContent).toContain(
-      "Current document.",
-    );
+    expect(screen.getByTestId("markdown-source-view").textContent).toContain("Current document.");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SOURCE_UPDATE_MAX_WAIT_MS);
     });
@@ -289,10 +291,12 @@ describe("FileInspector engine source update scheduling", () => {
     delayedProof.delay = 750;
     delayedProof.maximum = 0;
     for (let t = 0; t < 2000; t += 100) {
-      act(() => doc.transact(() => {
-        text.delete(0, text.length);
-        text.insert(0, `Update at ${t} ms.`);
-      }));
+      act(() =>
+        doc.transact(() => {
+          text.delete(0, text.length);
+          text.insert(0, `Update at ${t} ms.`);
+        }),
+      );
       await act(async () => vi.advanceTimersByTimeAsync(100));
     }
     expect(screen.getByTestId("markdown-source-view").textContent).toContain("Update at");

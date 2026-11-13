@@ -1,13 +1,6 @@
 import { createHash } from "node:crypto";
-import {
-  type Request,
-  type Response,
-} from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { type Request, type Response } from "@playwright/test";
+import { expect, seedShare, test } from "./harness";
 
 const RAW_SCRIPT_SENTINEL = "__dohcIso9CredentialRawScript_6a09e667";
 const EVENT_HANDLER_SENTINEL = "__dohcIso9CredentialEventHandler_6a09e667";
@@ -37,7 +30,7 @@ function credentialFixture(probeUrl: string, safeBlobSha256: string): string {
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -107,12 +100,17 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     const safeImage = article.getByRole("img", { name: "Seeded safe image" });
     await expect(safeImage).toBeVisible();
     await expect.poll(() => safeImageResponses.length).toBeGreaterThan(0);
-    await expect.poll(() => safeImage.evaluate((element) =>
-      element instanceof HTMLImageElement &&
-      element.complete &&
-      element.naturalWidth === 1 &&
-      element.naturalHeight === 1
-    )).toBe(true);
+    await expect
+      .poll(() =>
+        safeImage.evaluate(
+          (element) =>
+            element instanceof HTMLImageElement &&
+            element.complete &&
+            element.naturalWidth === 1 &&
+            element.naturalHeight === 1,
+        ),
+      )
+      .toBe(true);
 
     expect(exchangeRequests).toHaveLength(1);
     const exchangeRequestBody = record(exchangeRequests[0]!.postDataJSON());
@@ -131,17 +129,18 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     expect(exchangeResponses).toHaveLength(1);
     const exchangeResponse = exchangeResponses[0]!;
     const exchangeResponseBody = record(await exchangeResponse.json());
-    const responseSession = typeof exchangeResponseBody?.session === "string"
-      ? exchangeResponseBody.session
-      : "";
+    const responseSession =
+      typeof exchangeResponseBody?.session === "string" ? exchangeResponseBody.session : "";
     const responseStringValues = exchangeResponseBody
-      ? Object.values(exchangeResponseBody).filter((value): value is string => typeof value === "string")
+      ? Object.values(exchangeResponseBody).filter(
+          (value): value is string => typeof value === "string",
+        )
       : [];
     expect({
       hasAbsoluteUrl: responseStringValues.some((value) => /^https?:\/\//iu.test(value)),
       hasBearer: responseStringValues.some((value) => value === seeded.secret),
       hasRelayCapabilityShape: responseStringValues.some((value) =>
-        /^[A-Za-z0-9_-]{43}$/u.test(value)
+        /^[A-Za-z0-9_-]{43}$/u.test(value),
       ),
       keys: exchangeResponseBody ? Object.keys(exchangeResponseBody).sort() : [],
       ok: exchangeResponseBody?.ok,
@@ -163,57 +162,60 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     expect(page.url().includes(seeded.secret)).toBe(false);
     expect(responseSession).not.toBe(FAKE_AUTHORED_SESSION);
 
-    const cookieEvidence = (await exchangeResponse.headerValues("set-cookie"))
-      .map((setCookie) => {
-        const cookieParts = setCookie.split(";").map((part) => part.trim());
-        const cookieNameValue = cookieParts[0] ?? "";
-        const cookieSeparator = cookieNameValue.indexOf("=");
-        const cookieName = cookieSeparator < 0 ? "" : cookieNameValue.slice(0, cookieSeparator);
-        const cookieValue = cookieSeparator < 0 ? "" : cookieNameValue.slice(cookieSeparator + 1);
-        const cookieAttributes = cookieParts.slice(1).map((part) => part.toLowerCase());
-        return {
-          attributes: cookieAttributes
-            .filter((attribute) => !attribute.startsWith("max-age="))
-            .sort(),
-          hasDomainAttribute: cookieAttributes.some((attribute) =>
-            attribute.startsWith("domain=")
-          ),
-          hasPositiveMaxAge: cookieAttributes.some((attribute) =>
-            /^max-age=[1-9][0-9]*$/u.test(attribute)
-          ),
-          name: cookieName,
-          secret: cookieValue,
-          valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
-        };
-      });
+    const cookieEvidence = (await exchangeResponse.headerValues("set-cookie")).map((setCookie) => {
+      const cookieParts = setCookie.split(";").map((part) => part.trim());
+      const cookieNameValue = cookieParts[0] ?? "";
+      const cookieSeparator = cookieNameValue.indexOf("=");
+      const cookieName = cookieSeparator < 0 ? "" : cookieNameValue.slice(0, cookieSeparator);
+      const cookieValue = cookieSeparator < 0 ? "" : cookieNameValue.slice(cookieSeparator + 1);
+      const cookieAttributes = cookieParts.slice(1).map((part) => part.toLowerCase());
+      return {
+        attributes: cookieAttributes
+          .filter((attribute) => !attribute.startsWith("max-age="))
+          .sort(),
+        hasDomainAttribute: cookieAttributes.some((attribute) => attribute.startsWith("domain=")),
+        hasPositiveMaxAge: cookieAttributes.some((attribute) =>
+          /^max-age=[1-9][0-9]*$/u.test(attribute),
+        ),
+        name: cookieName,
+        secret: cookieValue,
+        valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
+      };
+    });
     expect(new Set(cookieEvidence.map((cookie) => cookie.secret)).size).toBe(2);
-    expect(Object.fromEntries(cookieEvidence.map((cookie) => [cookie.name, {
-      attributes: cookie.attributes,
-      hasDomainAttribute: cookie.hasDomainAttribute,
-      hasPositiveMaxAge: cookie.hasPositiveMaxAge,
-      valueHasOpaqueShape: cookie.valueHasOpaqueShape,
-    }])))
-      .toEqual({
-        [`dohc_share_${responseSession}`]: {
-          attributes: ["httponly", "path=/", "samesite=strict", "secure"],
-          hasDomainAttribute: false,
-          hasPositiveMaxAge: true,
-          valueHasOpaqueShape: true,
-        },
-        [`dohc_share_profile_${responseSession}`]: {
-          attributes: ["httponly", "path=/", "samesite=strict", "secure"],
-          hasDomainAttribute: false,
-          hasPositiveMaxAge: true,
-          valueHasOpaqueShape: true,
-        },
-      });
+    expect(
+      Object.fromEntries(
+        cookieEvidence.map((cookie) => [
+          cookie.name,
+          {
+            attributes: cookie.attributes,
+            hasDomainAttribute: cookie.hasDomainAttribute,
+            hasPositiveMaxAge: cookie.hasPositiveMaxAge,
+            valueHasOpaqueShape: cookie.valueHasOpaqueShape,
+          },
+        ]),
+      ),
+    ).toEqual({
+      [`dohc_share_${responseSession}`]: {
+        attributes: ["httponly", "path=/", "samesite=strict", "secure"],
+        hasDomainAttribute: false,
+        hasPositiveMaxAge: true,
+        valueHasOpaqueShape: true,
+      },
+      [`dohc_share_profile_${responseSession}`]: {
+        attributes: ["httponly", "path=/", "samesite=strict", "secure"],
+        hasDomainAttribute: false,
+        hasPositiveMaxAge: true,
+        valueHasOpaqueShape: true,
+      },
+    });
 
     const shareCookies = (await context.cookies())
       .filter((cookie) => cookie.name.startsWith("dohc_share_"))
       .map((cookie) => ({
         domain: cookie.domain,
-        hostOnlyEquivalent: cookie.domain === new URL(stack.shareWebUrl).hostname &&
-          !cookie.domain.startsWith("."),
+        hostOnlyEquivalent:
+          cookie.domain === new URL(stack.shareWebUrl).hostname && !cookie.domain.startsWith("."),
         httpOnly: cookie.httpOnly,
         name: cookie.name,
         path: cookie.path,
@@ -221,31 +223,31 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         secure: cookie.secure,
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
-    expect(shareCookies).toEqual([
-      {
-        domain: "127.0.0.1",
-        hostOnlyEquivalent: true,
-        httpOnly: true,
-        name: `dohc_share_${responseSession}`,
-        path: "/",
-        sameSite: "Strict",
-        secure: true,
-      },
-      {
-        domain: "127.0.0.1",
-        hostOnlyEquivalent: true,
-        httpOnly: true,
-        name: `dohc_share_profile_${responseSession}`,
-        path: "/",
-        sameSite: "Strict",
-        secure: true,
-      },
-    ].sort((left, right) => left.name.localeCompare(right.name)));
-    expect((await page.evaluate(() => document.cookie)).includes("dohc_share_"))
-      .toBe(false);
+    expect(shareCookies).toEqual(
+      [
+        {
+          domain: "127.0.0.1",
+          hostOnlyEquivalent: true,
+          httpOnly: true,
+          name: `dohc_share_${responseSession}`,
+          path: "/",
+          sameSite: "Strict",
+          secure: true,
+        },
+        {
+          domain: "127.0.0.1",
+          hostOnlyEquivalent: true,
+          httpOnly: true,
+          name: `dohc_share_profile_${responseSession}`,
+          path: "/",
+          sameSite: "Strict",
+          secure: true,
+        },
+      ].sort((left, right) => left.name.localeCompare(right.name)),
+    );
+    expect((await page.evaluate(() => document.cookie)).includes("dohc_share_")).toBe(false);
 
-    await expect(article.locator("script, [onerror], [onload]"))
-      .toHaveCount(0);
+    await expect(article.locator("script, [onerror], [onload]")).toHaveCount(0);
     const sentinelsStayedAtBaseline = await page.evaluate(
       ({ baseline, names }) => names.map((name) => Reflect.get(window, name) === baseline),
       {
@@ -257,20 +259,27 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     expect(exfiltrationRequests).toHaveLength(0);
     expect(
       probe.requests.filter((request) =>
-        EXFILTRATION_PATHS.some((path) => new URL(request.path, probe.url).pathname === path)
+        EXFILTRATION_PATHS.some((path) => new URL(request.path, probe.url).pathname === path),
       ),
     ).toEqual([]);
 
     expect(safeImageRequests.length).toBeGreaterThan(0);
-    expect(safeImageRequests.every((request) => {
-      const url = new URL(request.url());
-      return request.resourceType() === "image" &&
-        url.searchParams.get("session") === responseSession &&
-        url.searchParams.get("session") !== FAKE_AUTHORED_SESSION;
-    })).toBe(true);
-    expect(safeImageResponses.every((response) =>
-      response.status() === 200 && response.headers()["content-type"] === "image/png"
-    )).toBe(true);
+    expect(
+      safeImageRequests.every((request) => {
+        const url = new URL(request.url());
+        return (
+          request.resourceType() === "image" &&
+          url.searchParams.get("session") === responseSession &&
+          url.searchParams.get("session") !== FAKE_AUTHORED_SESSION
+        );
+      }),
+    ).toBe(true);
+    expect(
+      safeImageResponses.every(
+        (response) =>
+          response.status() === 200 && response.headers()["content-type"] === "image/png",
+      ),
+    ).toBe(true);
     await expect(safeImage).toHaveAttribute(
       "src",
       `/api/view/blob/${safeBlobSha256}?session=${responseSession}`,

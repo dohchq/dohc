@@ -1,7 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
-import { appendLog, claimWorkspace, closeTestStorages, countStorageCalls, createShare as mint, denialBytes, json, jsonBody, moment, nextOpSeq, putBlob as upload, request, resetOpSeq, sha256, testHandler, testStorage } from "./testing";
+import {
+  appendLog,
+  claimWorkspace,
+  closeTestStorages,
+  countStorageCalls,
+  createShare as mint,
+  denialBytes,
+  json,
+  jsonBody,
+  moment,
+  nextOpSeq,
+  putBlob as upload,
+  request,
+  resetOpSeq,
+  sha256,
+  testHandler,
+  testStorage,
+} from "./testing";
 
 afterEach(closeTestStorages);
 
@@ -10,8 +27,11 @@ function handler(
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
   lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null,
 ): SyncRelayHandler {
-  return testHandler(storage, { nowMs: () => 5555, ...(lookupUserEmail ? { lookupUserEmail } : {}),
-    ...(lookupVerifiedUserEmail ? { lookupVerifiedUserEmail } : {}) });
+  return testHandler(storage, {
+    nowMs: () => 5555,
+    ...(lookupUserEmail ? { lookupUserEmail } : {}),
+    ...(lookupVerifiedUserEmail ? { lookupVerifiedUserEmail } : {}),
+  });
 }
 
 function countActiveRecipientGrantScans(storage: SyncRelayStorage): {
@@ -117,7 +137,6 @@ describe("createShare storage boundary", () => {
     expect(storage.getShareGrant("grant-link")).toBeNull();
   });
 
-
   it("rolls the share insert back when the grant insert fails", async () => {
     const storage = await testStorage();
     claimStorageWorkspace(storage);
@@ -168,7 +187,10 @@ describe("share grants", () => {
 
     const removed = await pending;
     expect(removed.status).toBe(404);
-    expect(await removed.json()).toMatchObject({code: "share_access_removed", error: "The owner removed your access."});
+    expect(await removed.json()).toMatchObject({
+      code: "share_access_removed",
+      error: "The owner removed your access.",
+    });
     expect(counted.scansForShare("share-post-await")).toBe(3);
   });
 
@@ -180,7 +202,11 @@ describe("share grants", () => {
       request(
         GRANTER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs", "notes.md"], access: "view" }),
+        jsonBody({
+          recipientEmail: `${RECIPIENT}@dohc.test`,
+          paths: ["docs", "notes.md"],
+          access: "view",
+        }),
       ),
     );
     expect(create.status).toBe(200);
@@ -204,7 +230,8 @@ describe("share grants", () => {
     const granterList = await json(await h(request(GRANTER, "/sync/shares")));
     expect(granterList.granted).toEqual([
       {
-        subjectName: null, sharerName: null,
+        subjectName: null,
+        sharerName: null,
         shareId: "share-0",
         workspaceId: WORKSPACE,
         recipientUserId: RECIPIENT,
@@ -257,7 +284,11 @@ describe("share grants", () => {
     await createWorkspace(h);
 
     const secret = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: [".env"], access: "view" })),
+      request(
+        GRANTER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: RECIPIENT, paths: [".env"], access: "view" }),
+      ),
     );
     expect(secret.status).toBe(400);
     expect((await json(secret)).code).toBe("secret_path");
@@ -291,13 +322,21 @@ describe("share grants", () => {
     expect((await json(traversal)).code).toBe("invalid_path");
 
     const empty = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: [], access: "view" })),
+      request(
+        GRANTER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: RECIPIENT, paths: [], access: "view" }),
+      ),
     );
     expect(empty.status).toBe(400);
     expect((await json(empty)).code).toBe("empty_selector");
 
     const self = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: GRANTER, paths: ["docs"], access: "view" })),
+      request(
+        GRANTER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientUserId: GRANTER, paths: ["docs"], access: "view" }),
+      ),
     );
     expect(self.status).toBe(400);
     expect((await json(self)).code).toBe("self_share");
@@ -356,10 +395,22 @@ describe("share grants", () => {
     const h = handler(storage);
     await createWorkspace(h);
     const foreign = await denialBytes(
-      await h(request(STRANGER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }))),
+      await h(
+        request(
+          STRANGER,
+          `/sync/${WORKSPACE}/shares`,
+          jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }),
+        ),
+      ),
     );
     const missing = await denialBytes(
-      await h(request(STRANGER, "/sync/no-such-workspace/shares", jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }))),
+      await h(
+        request(
+          STRANGER,
+          "/sync/no-such-workspace/shares",
+          jsonBody({ recipientUserId: RECIPIENT, paths: ["docs"], access: "view" }),
+        ),
+      ),
     );
     expect(foreign).toBe(missing);
   });
@@ -378,7 +429,12 @@ describe("share grants", () => {
     await putBlob(h, "deep body");
     await putBlob(h, "ciphertext");
     await appendOps(h, [
-      { originSeq: nextOpSeq(), opKind: "workspace.init", payload: { note: "init" }, recordedAtMs: 999 },
+      {
+        originSeq: nextOpSeq(),
+        opKind: "workspace.init",
+        payload: { note: "init" },
+        recordedAtMs: 999,
+      },
       momentOp("docs/shared.md", "shared body"),
       momentOp("private/hidden.md", "hidden body"),
       momentOp("docs/nested/deep.md", "deep body"),
@@ -413,7 +469,9 @@ describe("share grants", () => {
     ]);
     await createShare(h);
 
-    const page = await json(await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100")));
+    const page = await json(
+      await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0&limit=100")),
+    );
     expect(page.ok).toBe(true);
     const ops = page.ops as Array<{ opKind: string; payload: { path?: string } }>;
     expect(ops.map((op) => [op.opKind, op.payload.path ?? null])).toEqual([
@@ -431,9 +489,15 @@ describe("share grants", () => {
 
     // Non-recipient users (including the granter on the recipient route and
     // a stranger) are indistinguishable from a nonexistent share.
-    const missing = await denialBytes(await h(request(STRANGER, "/sync/shares/share-404/log?since=0")));
-    expect(await denialBytes(await h(request(STRANGER, "/sync/shares/share-0/log?since=0")))).toBe(missing);
-    expect(await denialBytes(await h(request(GRANTER, "/sync/shares/share-0/log?since=0")))).toBe(missing);
+    const missing = await denialBytes(
+      await h(request(STRANGER, "/sync/shares/share-404/log?since=0")),
+    );
+    expect(await denialBytes(await h(request(STRANGER, "/sync/shares/share-0/log?since=0")))).toBe(
+      missing,
+    );
+    expect(await denialBytes(await h(request(GRANTER, "/sync/shares/share-0/log?since=0")))).toBe(
+      missing,
+    );
     expect(await denialBytes(await h(request(STRANGER, "/sync/shares/share-0")))).toBe(missing);
 
     // Unauthenticated probes stay 401 (auth precedes share lookups).
@@ -472,11 +536,19 @@ describe("share grants", () => {
     expect(await allowed.text()).toBe("shared body");
 
     const unknownHash = sha256("never uploaded");
-    const unknown = await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${unknownHash}`)));
-    expect(await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${hiddenSha}`)))).toBe(unknown);
-    expect(await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${cipherSha}`)))).toBe(unknown);
+    const unknown = await denialBytes(
+      await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${unknownHash}`)),
+    );
+    expect(
+      await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${hiddenSha}`))),
+    ).toBe(unknown);
+    expect(
+      await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${cipherSha}`))),
+    ).toBe(unknown);
     // A stranger probing an allowed hash gets the same denial too.
-    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(unknown);
+    expect(
+      await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`))),
+    ).toBe(unknown);
   });
 
   it("keeps selected ordinary declarations unattributed for the current authenticated recipient", async () => {
@@ -486,13 +558,31 @@ describe("share grants", () => {
     await putBlob(h, "shared declaration");
     await putBlob(h, "hidden declaration");
     await appendOps(h, [
-      momentOp("docs/plan.md", "shared declaration", { authors: [
-        { kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "opaque-owner", depth: 0,
-          agentRunId: "private-run", principalId: "fabricated-authority" },
-        { kind: "automation", automationId: "private-automation", depth: 1 },
-      ], metadata: { origin: "user", summary: "private-summary", correlationId: "private-correlation" } }),
-      momentOp("private/hidden.md", "hidden declaration", { authors: [{ kind: "agent", agentId: "hidden-agent" }] }),
-      momentOp("docs/version.md", "shared declaration", { versionId: "other-version", authors: [{ kind: "agent", agentId: "other-version-agent" }] }),
+      momentOp("docs/plan.md", "shared declaration", {
+        authors: [
+          {
+            kind: "agent",
+            agentId: "trip-agent-hosted",
+            onBehalfOf: "opaque-owner",
+            depth: 0,
+            agentRunId: "private-run",
+            principalId: "fabricated-authority",
+          },
+          { kind: "automation", automationId: "private-automation", depth: 1 },
+        ],
+        metadata: {
+          origin: "user",
+          summary: "private-summary",
+          correlationId: "private-correlation",
+        },
+      }),
+      momentOp("private/hidden.md", "hidden declaration", {
+        authors: [{ kind: "agent", agentId: "hidden-agent" }],
+      }),
+      momentOp("docs/version.md", "shared declaration", {
+        versionId: "other-version",
+        authors: [{ kind: "agent", agentId: "other-version-agent" }],
+      }),
     ]);
     const shareId = await createShare(h);
     const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`));
@@ -500,8 +590,18 @@ describe("share grants", () => {
     const page = await json(response);
     const ops = page.ops as Array<{ payload: Record<string, unknown> }>;
     expect(ops).toHaveLength(1);
-    expect(ops[0]!.payload.authors).toEqual([{kind: "unattributed"}]);
-    for (const excluded of ["private-", "fabricated-authority", "hidden-agent", "other-version-agent", "agentRunId", "principalId", "onBehalfOf", "opaque-owner", "trip-agent-hosted"]) {
+    expect(ops[0]!.payload.authors).toEqual([{ kind: "unattributed" }]);
+    for (const excluded of [
+      "private-",
+      "fabricated-authority",
+      "hidden-agent",
+      "other-version-agent",
+      "agentRunId",
+      "principalId",
+      "onBehalfOf",
+      "opaque-owner",
+      "trip-agent-hosted",
+    ]) {
       expect(JSON.stringify(page)).not.toContain(excluded);
     }
     expect((await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
@@ -528,9 +628,7 @@ describe("share grants", () => {
     ]);
     await createShare(h);
 
-    const earlier = await h(
-      request(RECIPIENT, `/sync/shares/share-0/blobs/${earlierSha}`),
-    );
+    const earlier = await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${earlierSha}`));
     expect(earlier.status, await earlier.clone().text()).toBe(200);
     expect(await earlier.text()).toBe(earlierContent);
   });
@@ -551,23 +649,31 @@ describe("share grants", () => {
     });
 
     // The recipient cannot revoke; only the granter can.
-    const recipientRevoke = await h(request(RECIPIENT, "/sync/shares/share-0/revoke", { method: "POST" }));
+    const recipientRevoke = await h(
+      request(RECIPIENT, "/sync/shares/share-0/revoke", { method: "POST" }),
+    );
     expect(recipientRevoke.status).toBe(404);
 
     const revoke = await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }));
     expect(revoke.status).toBe(200);
     // Idempotent for the granter.
-    expect((await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }))).status).toBe(200);
+    expect(
+      (await h(request(GRANTER, "/sync/shares/share-0/revoke", { method: "POST" }))).status,
+    ).toBe(200);
     expect(storage.listSharesGrantedBy(GRANTER)[0]?.grant).toMatchObject({
       generation: 2,
       status: "revoked",
       revokedAtMs: 5555,
     });
 
-    for (const path of ["/sync/shares/share-0/log?since=0", "/sync/shares/share-0", `/sync/shares/share-0/blobs/${sharedSha}`]) {
+    for (const path of [
+      "/sync/shares/share-0/log?since=0",
+      "/sync/shares/share-0",
+      `/sync/shares/share-0/blobs/${sharedSha}`,
+    ]) {
       const response = await h(request(RECIPIENT, path));
       expect(response.status).toBe(404);
-      expect(await response.json()).toMatchObject({code: "share_access_removed"});
+      expect(await response.json()).toMatchObject({ code: "share_access_removed" });
       expect(await denialBytes(await h(request(STRANGER, path)))).toContain('"code":"not_found"');
     }
 
@@ -598,8 +704,22 @@ describe("share grants", () => {
           kind: "named",
           createdAtMs: 1,
           forkSnapshots: [
-            { objectId: "o1", path: "docs/a.md", blobSha256: keepSha, updatedAtMs: 1, latestMomentId: "m1", metadata: {} },
-            { objectId: "o2", path: "private/b.md", blobSha256: dropSha, updatedAtMs: 1, latestMomentId: "m2", metadata: {} },
+            {
+              objectId: "o1",
+              path: "docs/a.md",
+              blobSha256: keepSha,
+              updatedAtMs: 1,
+              latestMomentId: "m1",
+              metadata: {},
+            },
+            {
+              objectId: "o2",
+              path: "private/b.md",
+              blobSha256: dropSha,
+              updatedAtMs: 1,
+              latestMomentId: "m2",
+              metadata: {},
+            },
           ],
         },
         recordedAtMs: 900,
@@ -621,7 +741,9 @@ describe("share grants", () => {
     const unknown = await denialBytes(
       await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${sha256("never uploaded")}`)),
     );
-    expect(await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${dropSha}`)))).toBe(unknown);
+    expect(
+      await denialBytes(await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${dropSha}`))),
+    ).toBe(unknown);
   });
 
   it("advances the shared-log cursor across filtered-out rows so pagination cannot stall", async () => {
@@ -672,5 +794,4 @@ describe("share grants", () => {
     expect(later.nextCursor).toBeGreaterThan(cursor);
     expect(later.hasMore).toBe(false);
   });
-
 });

@@ -3,12 +3,20 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoticeRow, SyncStatusResult } from "../../ipc/bridgeContract";
-import { NoticeCenter, WorkspaceErrorToast, type NoticeCopy, type SentNotice, type WorkspaceErrorNotice } from "./NoticeCenter";
+import {
+  NoticeCenter,
+  WorkspaceErrorToast,
+  type NoticeCopy,
+  type SentNotice,
+  type WorkspaceErrorNotice,
+} from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
 import { Overlay } from "../Overlay";
 function liveDeliveryIcon(surface: HTMLElement): string | undefined {
   const icon = surface.querySelector("svg");
-  return [...(icon?.classList ?? [])].find((name) => name.startsWith("lucide-"))?.slice("lucide-".length);
+  return [...(icon?.classList ?? [])]
+    .find((name) => name.startsWith("lucide-"))
+    ?.slice("lucide-".length);
 }
 
 beforeEach(() => {
@@ -41,29 +49,51 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onOpenSyncSettings ? { onOpenSyncSettings: props.onOpenSyncSettings } : {})}
       onRebuildEngineStore={props.onRebuildEngineStore ?? (() => {})}
       {...(props.workspaceErrors ? { workspaceErrors: props.workspaceErrors } : {})}
-      {...(props.onRetryWorkspaceError ? { onRetryWorkspaceError: props.onRetryWorkspaceError } : {})}
-      {...(props.onWorkspaceErrorAction ? { onWorkspaceErrorAction: props.onWorkspaceErrorAction } : {})}
+      {...(props.onRetryWorkspaceError
+        ? { onRetryWorkspaceError: props.onRetryWorkspaceError }
+        : {})}
+      {...(props.onWorkspaceErrorAction
+        ? { onWorkspaceErrorAction: props.onWorkspaceErrorAction }
+        : {})}
       {...(props.onHideWorkspaceError ? { onHideWorkspaceError: props.onHideWorkspaceError } : {})}
-      {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
+      {...(props.onDismissWorkspaceError
+        ? { onDismissWorkspaceError: props.onDismissWorkspaceError }
+        : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
-      {...(props.onOpenSharingDeclined ? { onOpenSharingDeclined: props.onOpenSharingDeclined } : {})}
+      {...(props.onOpenSharingDeclined
+        ? { onOpenSharingDeclined: props.onOpenSharingDeclined }
+        : {})}
       {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
-      {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
-      {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
-      {...(props.onResetAutomationHolds ? { onResetAutomationHolds: props.onResetAutomationHolds } : {})}
-      {...(props.onRevealAutomationHolds ? { onRevealAutomationHolds: props.onRevealAutomationHolds } : {})}
+      {...(props.onAllowAutomationHold
+        ? { onAllowAutomationHold: props.onAllowAutomationHold }
+        : {})}
+      {...(props.automationHoldsUnreadable
+        ? { automationHoldsUnreadable: props.automationHoldsUnreadable }
+        : {})}
+      {...(props.onResetAutomationHolds
+        ? { onResetAutomationHolds: props.onResetAutomationHolds }
+        : {})}
+      {...(props.onRevealAutomationHolds
+        ? { onRevealAutomationHolds: props.onRevealAutomationHolds }
+        : {})}
       {...(props.sentNotices ? { sentNotices: props.sentNotices } : {})}
       {...(props.sentNoticeToast ? { sentNoticeToast: props.sentNoticeToast } : {})}
-      {...(props.onHideSentNoticeToast ? { onHideSentNoticeToast: props.onHideSentNoticeToast } : {})}
+      {...(props.onHideSentNoticeToast
+        ? { onHideSentNoticeToast: props.onHideSentNoticeToast }
+        : {})}
       {...(props.onOpenSentNotice ? { onOpenSentNotice: props.onOpenSentNotice } : {})}
       {...(props.sentNoticesLoading ? { sentNoticesLoading: props.sentNoticesLoading } : {})}
-      {...(props.sentNoticesAccount !== undefined ? { sentNoticesAccount: props.sentNoticesAccount } : {})}
+      {...(props.sentNoticesAccount !== undefined
+        ? { sentNoticesAccount: props.sentNoticesAccount }
+        : {})}
       {...(props.onDismissSentNotice ? { onDismissSentNotice: props.onDismissSentNotice } : {})}
       {...(props.onReadAllSentNotices ? { onReadAllSentNotices: props.onReadAllSentNotices } : {})}
       {...(props.onReadSentNotice ? { onReadSentNotice: props.onReadSentNotice } : {})}
       {...(props.automationStops ? { automationStops: props.automationStops } : {})}
-      {...(props.onDismissAutomationStops ? { onDismissAutomationStops: props.onDismissAutomationStops } : {})}
+      {...(props.onDismissAutomationStops
+        ? { onDismissAutomationStops: props.onDismissAutomationStops }
+        : {})}
       {...(props.onRunSentNoticeNow ? { onRunSentNoticeNow: props.onRunSentNoticeNow } : {})}
       {...(props.onRetrySentNotice ? { onRetrySentNotice: props.onRetrySentNotice } : {})}
       {...(props.onOpenTarget ? { onOpenTarget: props.onOpenTarget } : {})}
@@ -81,7 +111,10 @@ function renderNotices(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
 }
 
 // Opens a message's Details and copies them, as a person would.
-async function copyDetails(user: { click: (element: Element) => Promise<void> }, message: HTMLElement) {
+async function copyDetails(
+  user: { click: (element: Element) => Promise<void> },
+  message: HTMLElement,
+) {
   await user.click(within(message).getByRole("button", { name: "Details" }));
   await user.click(within(message).getByRole("button", { name: "Copy details" }));
 }
@@ -134,11 +167,20 @@ function declinedStatus(...sharingDeclined: SharingDeclined[]): SyncStatusResult
 }
 
 describe("automation notices", () => {
-
   it("asks once to allow a step that reaches more only because an editor left", async () => {
     const hold = {
-      automationId: "collection:Trip#spend", automationName: "Spend", definitionHash: "0123456789abcdef",
-      step: "0", seq: 4, collection: "Trip", collectionPath: "Projects/Trip", target: "Budget", action: "change" as const, stoppedFor: "bob@dohc.test", fileUnread: false, onServer: false,
+      automationId: "collection:Trip#spend",
+      automationName: "Spend",
+      definitionHash: "0123456789abcdef",
+      step: "0",
+      seq: 4,
+      collection: "Trip",
+      collectionPath: "Projects/Trip",
+      target: "Budget",
+      action: "change" as const,
+      stoppedFor: "bob@dohc.test",
+      fileUnread: false,
+      onServer: false,
     };
     const onAllowAutomationHold = vi.fn();
     renderNotices({ automationHolds: [hold, { ...hold, onServer: true }], onAllowAutomationHold });
@@ -152,7 +194,9 @@ describe("automation notices", () => {
     expect(onAllowAutomationHold).toHaveBeenCalledWith(hold);
     // The same step held on the owner's server is its own row, and says where it waits.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
-    const onServer = await screen.findByTestId("notice-automation-hold-server-collection:Trip#spend-0");
+    const onServer = await screen.findByTestId(
+      "notice-automation-hold-server-collection:Trip#spend-0",
+    );
     expect(onServer.textContent).toContain('Automation "Spend" is waiting on your server');
     await userEvent.click(within(onServer).getByRole("button", { name: "Allow" }));
     expect(onAllowAutomationHold).toHaveBeenLastCalledWith({ ...hold, onServer: true });
@@ -160,10 +204,14 @@ describe("automation notices", () => {
 });
 
 describe("notice center", () => {
-
   it("offers typing kept from a workspace no longer listed until the person dismisses it", async () => {
     const user = userEvent.setup();
-    const kept = { workspaceId: "joined-then-failed", recordId: "a".repeat(64), path: "notes/plan.md", text: "typed while joining" };
+    const kept = {
+      workspaceId: "joined-then-failed",
+      recordId: "a".repeat(64),
+      path: "notes/plan.md",
+      text: "typed while joining",
+    };
     const onDismissKeptTyping = vi.fn(async () => undefined);
     const view = renderNotices({ keptTyping: [kept], onDismissKeptTyping });
     expect(screen.getByTestId("notice-center-toggle").textContent).toContain("1");
@@ -207,7 +255,9 @@ describe("notice center", () => {
         ),
       }),
     );
-    expect(screen.getByTestId("sharing-declined-toast").textContent).toContain("People you share renamed.md with");
+    expect(screen.getByTestId("sharing-declined-toast").textContent).toContain(
+      "People you share renamed.md with",
+    );
     await user.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("notice-sharing-declined-main:object-1")).toBeTruthy();
   });
@@ -287,7 +337,9 @@ describe("notice center", () => {
     const error = {
       id: "shell-error-1",
       message: "Could not refresh history. The engine did not answer.",
-      copy: { report: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal" },
+      copy: {
+        report: "Error: Could not refresh history. The engine did not answer.\nWorkspace: personal",
+      },
       atMs: 1_000,
       canRetry: true,
       canUndo: false,
@@ -310,7 +362,9 @@ describe("notice center", () => {
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
     rerender(noticeElement(barProps(true)));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle")));
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByTestId("notice-center-toggle")),
+    );
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const row = screen.getByTestId("notice-shell-error-1");
@@ -318,7 +372,11 @@ describe("notice center", () => {
     await user.click(within(row).getByRole("button", { name: "Try again" }));
     expect(onRetryWorkspaceError).toHaveBeenCalledWith("shell-error-1");
     await user.click(screen.getByTestId("notice-center-toggle"));
-    await user.click(within(screen.getByTestId("notice-shell-error-1")).getByRole("button", { name: "Dismiss notice" }));
+    await user.click(
+      within(screen.getByTestId("notice-shell-error-1")).getByRole("button", {
+        name: "Dismiss notice",
+      }),
+    );
     expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
   });
 
@@ -326,7 +384,12 @@ describe("notice center", () => {
   const outlastQuietRetry = () => act(() => vi.advanceTimersByTime(15_000));
   const serverUnreachable = {
     state: "sync-failed" as const,
-    syncFailure: { cause: "server-unreachable" as const, detail: "dohc could not reach the server.", sinceMs: 1, attempts: 1 },
+    syncFailure: {
+      cause: "server-unreachable" as const,
+      detail: "dohc could not reach the server.",
+      sinceMs: 1,
+      attempts: 1,
+    },
   };
 
   // Owner live delivery is its own fact. Only "retrying" raises a notice, and
@@ -386,38 +449,46 @@ describe("notice center", () => {
       title: "Live editing can't resume",
       body: "A conflict was resolved in a document in this workspace, so the server can't resume live editing for it. People with its link can still read the last shared version, but your edits in dohc may not reach them. Open Live documents to see which document.",
     },
-  ] as {reason: SyncStatusResult["ownerLiveDeliveryReason"]; title: string; body: string; icon?: string}[])("sends a $reason document to the live documents list", async ({ reason, title, body, icon = "triangle-alert" }) => {
-    const onOpenLiveDocuments = vi.fn();
-    const onRetryLiveDelivery = vi.fn();
-    const user = userEvent.setup();
-    renderNotices({
-      syncStatus: liveDeliveryStatus("retrying", reason),
-      onOpenLiveDocuments,
-      onRetryLiveDelivery,
-    });
+  ] as {
+    reason: SyncStatusResult["ownerLiveDeliveryReason"];
+    title: string;
+    body: string;
+    icon?: string;
+  }[])(
+    "sends a $reason document to the live documents list",
+    async ({ reason, title, body, icon = "triangle-alert" }) => {
+      const onOpenLiveDocuments = vi.fn();
+      const onRetryLiveDelivery = vi.fn();
+      const user = userEvent.setup();
+      renderNotices({
+        syncStatus: liveDeliveryStatus("retrying", reason),
+        onOpenLiveDocuments,
+        onRetryLiveDelivery,
+      });
 
-    const toast = screen.getByTestId("owner-live-delivery-toast");
-    expect(toast.textContent).toContain(`${title}. ${body}`);
-    expect(liveDeliveryIcon(toast)).toBe(icon);
-    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(within(toast).getByRole("button", { name: "Live documents" })).toBeTruthy();
-    await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
-    expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
+      const toast = screen.getByTestId("owner-live-delivery-toast");
+      expect(toast.textContent).toContain(`${title}. ${body}`);
+      expect(liveDeliveryIcon(toast)).toBe(icon);
+      expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(within(toast).getByRole("button", { name: "Live documents" })).toBeTruthy();
+      await user.click(screen.getByTestId("owner-live-delivery-toast-action"));
+      expect(onOpenLiveDocuments).toHaveBeenCalledOnce();
 
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notice = screen.getByTestId("notice-owner-live-delivery");
-    expect(notice.textContent).toContain(title);
-    expect(liveDeliveryIcon(notice)).toBe(icon);
-    expect(notice.textContent).toContain(body);
-    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
-    await copyDetails(user, notice);
-    const copied = await navigator.clipboard.readText();
-    expect(copied).toContain(`Live editing: ${title}`);
-    expect(copied).toContain(`Reason: ${reason}`);
-    await user.click(within(notice).getByRole("button", { name: "Live documents" }));
-    expect(onOpenLiveDocuments).toHaveBeenCalledTimes(2);
-    expect(onRetryLiveDelivery).not.toHaveBeenCalled();
-  });
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      const notice = screen.getByTestId("notice-owner-live-delivery");
+      expect(notice.textContent).toContain(title);
+      expect(liveDeliveryIcon(notice)).toBe(icon);
+      expect(notice.textContent).toContain(body);
+      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+      await copyDetails(user, notice);
+      const copied = await navigator.clipboard.readText();
+      expect(copied).toContain(`Live editing: ${title}`);
+      expect(copied).toContain(`Reason: ${reason}`);
+      await user.click(within(notice).getByRole("button", { name: "Live documents" }));
+      expect(onOpenLiveDocuments).toHaveBeenCalledTimes(2);
+      expect(onRetryLiveDelivery).not.toHaveBeenCalled();
+    },
+  );
 
   // There is no command that restarts the app for the user, so the notice
   // names the step instead of offering a control that cannot run.
@@ -442,9 +513,7 @@ describe("notice center", () => {
     vi.useFakeTimers();
     const { rerender } = renderNotices({ syncStatus: liveDeliveryStatus("retrying") });
     outlastQuietRetry();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Dismiss live editing notice" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss live editing notice" }));
     expect(screen.queryByTestId("owner-live-delivery-toast")).toBeNull();
 
     // The other workspace's retry waits its own 15 s.
@@ -469,7 +538,9 @@ describe("notice center", () => {
   // back, so it never toasts or adds a row.
   it("never announces a live retry that recovers within 15 s of the server coming back", () => {
     vi.useFakeTimers();
-    const { rerender } = renderNotices({ syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable } });
+    const { rerender } = renderNotices({
+      syncStatus: { ...liveDeliveryStatus("retrying"), ...serverUnreachable },
+    });
     act(() => vi.advanceTimersByTime(20_000));
     rerender(noticeElement({ syncStatus: liveDeliveryStatus("retrying") }));
     act(() => vi.advanceTimersByTime(10_000));
@@ -515,9 +586,7 @@ describe("notice center", () => {
 
       await copyDetails(user, screen.getByTestId("owner-live-refusals-toast"));
       const fromToast = await navigator.clipboard.readText();
-      expect(fromToast).toContain(
-        "Live editing: Some shares could not start live editing",
-      );
+      expect(fromToast).toContain("Live editing: Some shares could not start live editing");
       expect(fromToast).toContain("Workspace id: ws-status-test");
 
       await user.click(screen.getByTestId("notice-center-toggle"));
@@ -525,10 +594,13 @@ describe("notice center", () => {
       expect(await navigator.clipboard.readText()).toBe(fromToast);
     });
   });
-
 });
 
-function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: string | null = null): SentNotice {
+function sentRow(
+  noticeId: string,
+  overrides: Partial<NoticeRow> = {},
+  folder: string | null = null,
+): SentNotice {
   return {
     notice: {
       store: "account",
@@ -553,15 +625,20 @@ function sentRow(noticeId: string, overrides: Partial<NoticeRow> = {}, folder: s
 }
 
 describe("failed run notices", () => {
-  const failed = (id: string, target: NoticeRow["target"], postedHere = true) => sentRow(id, {
-    kind: "automation-failed",
-    senderKind: "automation",
-    title: 'Automation "Stamp the finish date" failed',
-    body: "ana@dohc.test cannot edit Budget. It ran on Ice's laptop.",
-    target,
-    postedHere,
-  });
-  const run = { automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml", run: "atc_1" };
+  const failed = (id: string, target: NoticeRow["target"], postedHere = true) =>
+    sentRow(id, {
+      kind: "automation-failed",
+      senderKind: "automation",
+      title: 'Automation "Stamp the finish date" failed',
+      body: "ana@dohc.test cannot edit Budget. It ran on Ice's laptop.",
+      target,
+      postedHere,
+    });
+  const run = {
+    automation: "collection:Tasks#stamp",
+    path: "Tasks/automations.yaml",
+    run: "atc_1",
+  };
 
   it("offers Try again, copy, and Open automation where the run is, and no Try again for a run it cannot name or run", async () => {
     const onRetrySentNotice = vi.fn();
@@ -579,7 +656,10 @@ describe("failed run notices", () => {
     expect(screen.queryByTestId("sent-notice-f-open"), "the row is its own Open").toBeNull();
     expect(screen.getByTestId("sent-notice-f-open-row")).toBeTruthy();
     expect(screen.queryByTestId("sent-notice-c-retry"), "a chain stop cannot run again").toBeNull();
-    expect(screen.queryByTestId("sent-notice-o-retry"), "another computer holds the run").toBeNull();
+    expect(
+      screen.queryByTestId("sent-notice-o-retry"),
+      "another computer holds the run",
+    ).toBeNull();
     expect(screen.getByTestId("sent-notice-o").textContent).toContain("It ran on Ice's laptop.");
     await copyDetails(userEvent, screen.getByTestId("sent-notice-f"));
     expect(await navigator.clipboard.readText()).toContain("Run: atc_1");
@@ -589,12 +669,22 @@ describe("failed run notices", () => {
 });
 
 describe("notices sent to you", () => {
-
   it("keeps a held row read when its store mark arrives and after remount", () => {
-    const held = { id: "held-save", tone: "warning" as const, title: "Held a change to note.md",
-      message: "Saving it would also change parts dohc can't show.", copy: { report: "note.md" }, atMs: 1,
-      canRetry: false, actionLabel: "Open note", seen: false };
-    const props = (seen: boolean, read = seen) => ({ workspaceErrors: [{ ...held, seen, read }], onWorkspaceErrorAction: vi.fn() });
+    const held = {
+      id: "held-save",
+      tone: "warning" as const,
+      title: "Held a change to note.md",
+      message: "Saving it would also change parts dohc can't show.",
+      copy: { report: "note.md" },
+      atMs: 1,
+      canRetry: false,
+      actionLabel: "Open note",
+      seen: false,
+    };
+    const props = (seen: boolean, read = seen) => ({
+      workspaceErrors: [{ ...held, seen, read }],
+      onWorkspaceErrorAction: vi.fn(),
+    });
     const first = renderNotices(props(false));
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(screen.getByTestId("notice-held-save-unread")).toBeTruthy();
@@ -634,7 +724,11 @@ describe("notices sent to you", () => {
 
     it("says it is opening and ignores a second click", async () => {
       const { answers, onOpenSentNotice } = waitingOpen();
-      renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, onDismissSentNotice: vi.fn() });
+      renderNotices({
+        sentNotices: [sentRow("a")],
+        onOpenSentNotice,
+        onDismissSentNotice: vi.fn(),
+      });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
       const open = screen.getByTestId("sent-notice-a-open-row");
@@ -649,20 +743,31 @@ describe("notices sent to you", () => {
       // The row no longer opens, so its Open shows, to try again.
       expect(screen.queryByTestId("sent-notice-a-opening")).toBeNull();
       expect(screen.getByTestId("sent-notice-a-open").textContent).toBe("Open");
-      expect(within(screen.getByTestId("sent-notice-a")).getByRole("status").textContent)
-        .toBe("dohc could not open this share.");
+      expect(within(screen.getByTestId("sent-notice-a")).getByRole("status").textContent).toBe(
+        "dohc could not open this share.",
+      );
       expect(screen.getByTestId("notice-center")).toBeTruthy();
     });
 
     it("stops when another account signs in, and leaves that account's notice free to open", async () => {
       const { answers, signals, onOpenSentNotice } = waitingOpen();
-      const { rerender } = renderNotices({ sentNotices: [sentRow("a")], onOpenSentNotice, sentNoticesAccount: "ana" });
+      const { rerender } = renderNotices({
+        sentNotices: [sentRow("a")],
+        onOpenSentNotice,
+        sentNoticesAccount: "ana",
+      });
       await userEvent.click(screen.getByTestId("notice-center-toggle"));
       await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
       expect(screen.getByTestId("sent-notice-a-opening").textContent).toBe("Opening…");
 
       // Ben's list has a notice with the same id.
-      rerender(noticeElement({ sentNotices: [sentRow("a", { title: "Ben's notice" })], onOpenSentNotice, sentNoticesAccount: "ben" }));
+      rerender(
+        noticeElement({
+          sentNotices: [sentRow("a", { title: "Ben's notice" })],
+          onOpenSentNotice,
+          sentNoticesAccount: "ben",
+        }),
+      );
       expect(signals[0]?.aborted).toBe(true);
       expect(screen.queryByTestId("sent-notice-a-opening")).toBeNull();
       await userEvent.click(screen.getByTestId("sent-notice-a-open-row"));
@@ -713,7 +818,10 @@ describe("notices sent to you", () => {
     // This computer's rows open where they are about, not their own action.
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith({ to: "history" }, expect.any(AbortSignal));
+    expect(onOpenTarget).toHaveBeenCalledExactlyOnceWith(
+      { to: "history" },
+      expect.any(AbortSignal),
+    );
     expect(onOpenHistory).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByTestId("notice-center-toggle"));
@@ -726,13 +834,28 @@ describe("notices sent to you", () => {
 describe("Details", () => {
   const MESSAGE = "dohc could not save Trip/day-2.md.";
   const REPORT = `Error: ${MESSAGE}\nFile: Trip/day-2.md\nTime: 2026-11-07T09:00:00.000Z`;
-  const failure = (copy: NoticeCopy | undefined, extra: Partial<WorkspaceErrorNotice> = {}): WorkspaceErrorNotice => ({
-    id: "e1", message: MESSAGE, ...(copy ? { copy } : {}), atMs: 1, canRetry: true, seen: false, ...extra,
+  const failure = (
+    copy: NoticeCopy | undefined,
+    extra: Partial<WorkspaceErrorNotice> = {},
+  ): WorkspaceErrorNotice => ({
+    id: "e1",
+    message: MESSAGE,
+    ...(copy ? { copy } : {}),
+    atMs: 1,
+    canRetry: true,
+    seen: false,
+    ...extra,
   });
 
   it("opens the report under the message, keeps focus on Details, and the next Tab reaches its Copy", async () => {
     const user = userEvent.setup();
-    render(<WorkspaceErrorToast error={failure({ report: REPORT })} onRetry={vi.fn()} onHide={vi.fn()} />);
+    render(
+      <WorkspaceErrorToast
+        error={failure({ report: REPORT })}
+        onRetry={vi.fn()}
+        onHide={vi.fn()}
+      />,
+    );
     const details = screen.getByRole("button", { name: "Details" });
     expect(details.getAttribute("aria-expanded")).toBe("false");
     expect(document.getElementById(details.getAttribute("aria-controls") ?? "")).toBeNull();

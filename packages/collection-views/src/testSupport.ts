@@ -60,10 +60,7 @@ export function makeGroup(
   return { value, records };
 }
 
-export function makeRecord(
-  id: string,
-  values: CollectionIndexedValue[] = [],
-): CollectionRecord {
+export function makeRecord(id: string, values: CollectionIndexedValue[] = []): CollectionRecord {
   return { id, path: `tasks/${id}.md`, conflicted: false, values };
 }
 

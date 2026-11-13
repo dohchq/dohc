@@ -2,18 +2,75 @@ import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 
 const id = (n: number) => `b0010000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 export const loadDefinition: DatasetDefinition = {
-  formatVersion: 1, datasetId: id(1), name: "Load proof requests", schemaPath: "fundraiser/schema.sql", operationsPath: "fundraiser/backend.ts",
-  tables: [{tableId: id(2), name: "Requests", sqlName: "requests", primaryKey: "id", fields: [
-    {fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true},
-    {fieldId: id(4), name: "Receipt", sqlColumn: "receipt", type: "attachment", required: true, unique: false},
-  ]}], operations: [
-    {operationId: id(5), name: "availability", label: "Availability", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: []},
-    {operationId: id(6), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)]},
-    {operationId: id(7), name: "status", label: "Status", tableId: id(2), kind: "read", access: "link", readOnly: true, fieldIds: [id(3)]},
-    {operationId: id(8), name: "list", label: "List", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)]},
+  formatVersion: 1,
+  datasetId: id(1),
+  name: "Load proof requests",
+  schemaPath: "fundraiser/schema.sql",
+  operationsPath: "fundraiser/backend.ts",
+  tables: [
+    {
+      tableId: id(2),
+      name: "Requests",
+      sqlName: "requests",
+      primaryKey: "id",
+      fields: [
+        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        {
+          fieldId: id(4),
+          name: "Receipt",
+          sqlColumn: "receipt",
+          type: "attachment",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: id(5),
+      name: "availability",
+      label: "Availability",
+      tableId: id(2),
+      kind: "read",
+      access: "link",
+      readOnly: true,
+      fieldIds: [],
+    },
+    {
+      operationId: id(6),
+      name: "submit",
+      label: "Submit",
+      tableId: id(2),
+      kind: "create",
+      access: "link",
+      readOnly: false,
+      fieldIds: [id(4)],
+    },
+    {
+      operationId: id(7),
+      name: "status",
+      label: "Status",
+      tableId: id(2),
+      kind: "read",
+      access: "link",
+      readOnly: true,
+      fieldIds: [id(3)],
+    },
+    {
+      operationId: id(8),
+      name: "list",
+      label: "List",
+      tableId: id(2),
+      kind: "read",
+      access: "helper",
+      readOnly: true,
+      fieldIds: [id(3), id(4)],
+    },
   ],
 };
-export const loadSchema = "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,receipt TEXT NOT NULL,token TEXT NOT NULL UNIQUE);";
+export const loadSchema =
+  "CREATE TABLE requests(id TEXT PRIMARY KEY NOT NULL,receipt TEXT NOT NULL,token TEXT NOT NULL UNIQUE);";
 export const loadOperations = `globalThis.operations={
   availability(){return {available:true};},
   submit(ctx,input){ctx.files.attach(input.fileId);ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.fileId,ctx.secret]);return {id:ctx.requestId,statusToken:ctx.secret};},

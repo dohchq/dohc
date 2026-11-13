@@ -1,12 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { type Browser } from "@playwright/test";
-import {
-  expect,
-  ownerHeaders,
-  seedShare,
-  type SeededShare,
-  test,
-} from "./harness";
+import { expect, ownerHeaders, seedShare, type SeededShare, test } from "./harness";
 
 async function refusalCopy(browser: Browser, stackUrl: string, secret: string): Promise<string> {
   const context = await browser.newContext();
@@ -73,9 +67,7 @@ test("opens a real accountless share without exposing its bearer secret", async 
   expect(await exchangeResponse.json()).toEqual({ ok: true, session });
   const setCookie = await exchangeResponse.headerValue("set-cookie");
   expect(setCookie).not.toBeNull();
-  expect(setCookie).toMatch(
-    new RegExp(`^dohc_share_${session}=[A-Za-z0-9_-]+;`, "u"),
-  );
+  expect(setCookie).toMatch(new RegExp(`^dohc_share_${session}=[A-Za-z0-9_-]+;`, "u"));
   expect(setCookie).toMatch(/;\s*Path=\/(?:;|$)/iu);
   expect(setCookie).toMatch(/;\s*Secure(?:;|$)/iu);
   expect(setCookie).toMatch(/;\s*HttpOnly(?:;|$)/iu);

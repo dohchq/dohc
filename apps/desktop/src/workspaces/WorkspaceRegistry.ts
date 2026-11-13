@@ -98,7 +98,10 @@ export async function setWorkspaceRemote(
   store().setRemote(workspaceId, remote);
 }
 
-export function pauseWorkspaceRemote(workspaceId: string, syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause): void {
+export function pauseWorkspaceRemote(
+  workspaceId: string,
+  syncPause?: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPause,
+): void {
   store().pauseRemote(workspaceId, syncPause);
 }
 
@@ -122,7 +125,10 @@ export function acknowledgeWorkspaceShareSkips(
 
 // The relay's latest answer for which computer runs the workspace's
 // schedules. See registryStore.setAutomationHost.
-export function setWorkspaceAutomationHost(workspaceId: string, host: RelayAutomationHost | null): void {
+export function setWorkspaceAutomationHost(
+  workspaceId: string,
+  host: RelayAutomationHost | null,
+): void {
   store().setAutomationHost(workspaceId, host);
 }
 
@@ -170,8 +176,12 @@ export function updateWorkspaceSharedChannels(
   workspaceId: string,
   update: (current: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
 ): Promise<void> {
-  return updateReceived(workspaceId, entry => entry.sharedChannels ?? [], update,
-    next => store().setSharedChannels(workspaceId, next));
+  return updateReceived(
+    workspaceId,
+    (entry) => entry.sharedChannels ?? [],
+    update,
+    (next) => store().setSharedChannels(workspaceId, next),
+  );
 }
 
 // Share mounts: change the workspace's mounted shares. See updateReceived.
@@ -179,8 +189,9 @@ export function updateWorkspaceShareMounts(
   workspaceId: string,
   update: (current: readonly ShareMountRecord[]) => readonly ShareMountRecord[],
 ): Promise<void> {
-  return updateReceived(workspaceId, storedShareMounts, update,
-    next => store().setShareMounts(workspaceId, next));
+  return updateReceived(workspaceId, storedShareMounts, update, (next) =>
+    store().setShareMounts(workspaceId, next),
+  );
 }
 
 // The folder keeps that a share came in before the registry does, so leaving

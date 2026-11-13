@@ -3,7 +3,11 @@ import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import type { Agent } from "../settings/userSettings";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
 import { chatRunnerDeclaration, type ChatRunnerRefusal } from "./chatRunnerDeclaration";
-import { ChatRunnerLedgerUnreadableError, type ChatRunnerLedger, type ChatRunnerLedgerEntry } from "./chatRunnerLedger";
+import {
+  ChatRunnerLedgerUnreadableError,
+  type ChatRunnerLedger,
+  type ChatRunnerLedgerEntry,
+} from "./chatRunnerLedger";
 import type { ChatWakeSession } from "./chatWakeLifetime";
 
 // Tells the server which of this computer's agents each of the account's
@@ -83,25 +87,33 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     return result;
   };
   // What the server last confirmed for each account, install, and workspace, and when, by the wall clock.
-  const sent = new Map<string, { account: string; installId: string; body: string; atMs: number }>();
+  const sent = new Map<
+    string,
+    { account: string; installId: string; body: string; atMs: number }
+  >();
   // The refusal each workspace's row shows.
   const rows = new Map<string, string>();
   let pending: { session: ChatWakeSession; done: Promise<void> } | null = null;
   // The one session owed a retry, its failures in a row, and its backoff while it sleeps. Another session's
   // failure replaces it and starts its count again, so an old session's backoff never stands in for a current one.
-  let owed: { session: ChatWakeSession; failures: number; sleep: AbortController | null } | null = null;
+  let owed: { session: ChatWakeSession; failures: number; sleep: AbortController | null } | null =
+    null;
   // The session that publishes now: the last one a pass ran for, until it is withdrawn.
   let current: ChatWakeSession | null = null;
   let checking = false;
 
-  const keyOf = (entry: ChatRunnerLedgerEntry) => JSON.stringify([entry.account, entry.installId, entry.workspaceId]);
+  const keyOf = (entry: ChatRunnerLedgerEntry) =>
+    JSON.stringify([entry.account, entry.installId, entry.workspaceId]);
   // A confirmation from a clock that has since moved back is due, so a corrected clock can't outlast the relay's lease.
   const fresh = (confirmed: { atMs: number }) => {
     const ageMs = deps.nowMs() - confirmed.atMs;
     return ageMs >= 0 && ageMs < CHAT_RUNNER_REFRESH_MS;
   };
-  const withdrawal = (session: ChatWakeSession, computerLabel: string): ChatRunnerDeclaration =>
-    ({ installId: session.account.installId, computerLabel, runners: [] });
+  const withdrawal = (session: ChatWakeSession, computerLabel: string): ChatRunnerDeclaration => ({
+    installId: session.account.installId,
+    computerLabel,
+    runners: [],
+  });
 
   function show(workspaceId: string, refusal: ChatRunnerRefusal | null): void {
     const shown = rows.get(workspaceId);
@@ -120,8 +132,11 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
 
   // Sends one declaration and keeps the ledger true to it. Answers whether the step is settled.
   async function put(
-    session: ChatWakeSession, client: ChatWakeClient, entry: ChatRunnerLedgerEntry,
-    declaration: ChatRunnerDeclaration, signal: AbortSignal,
+    session: ChatWakeSession,
+    client: ChatWakeClient,
+    entry: ChatRunnerLedgerEntry,
+    declaration: ChatRunnerDeclaration,
+    signal: AbortSignal,
   ): Promise<boolean> {
     const key = keyOf(entry);
     const body = JSON.stringify(declaration);
@@ -164,7 +179,8 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
   function due(session: ChatWakeSession): boolean {
     const { scope: account, installId } = session.account;
     for (const confirmed of sent.values()) {
-      if (confirmed.account === account && confirmed.installId === installId && !fresh(confirmed)) return true;
+      if (confirmed.account === account && confirmed.installId === installId && !fresh(confirmed))
+        return true;
     }
     return false;
   }
@@ -187,15 +203,19 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     else deps.log(error);
   }
   function report(work: () => void): void {
-    try { work(); }
-    catch (error) { deps.log(error); }
+    try {
+      work();
+    } catch (error) {
+      deps.log(error);
+    }
   }
 
   async function publish(session: ChatWakeSession): Promise<void> {
     if (abort.signal.aborted || !session.isCurrent()) return;
     let settled: boolean;
-    try { settled = await pass(session); }
-    catch (error) {
+    try {
+      settled = await pass(session);
+    } catch (error) {
       failed(error);
       settled = false;
     }
@@ -214,10 +234,17 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     const { scope: account, installId } = session.account;
     const client = deps.client(session);
     const computerLabel = deps.computerLabel();
-    const declared = chatRunnerDeclaration({ installId, computerLabel, agents: await deps.agents() });
+    const declared = chatRunnerDeclaration({
+      installId,
+      computerLabel,
+      agents: await deps.agents(),
+    });
     const wanted = new Set(deps.workspaces(session));
-    const ledgered = new Set((await deps.ledger.list())
-      .filter((entry) => entry.account === account && entry.installId === installId).map((entry) => entry.workspaceId));
+    const ledgered = new Set(
+      (await deps.ledger.list())
+        .filter((entry) => entry.account === account && entry.installId === installId)
+        .map((entry) => entry.workspaceId),
+    );
     report(() => deps.clearLedgerUnreadable());
     let settled = true;
     // A workspace with a refusal row is checked too, so its row goes when it stops syncing here.
@@ -225,7 +252,10 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
       if (abort.signal.aborted || !session.isCurrent()) return settled;
       const entry = { account, installId, workspaceId };
       // Refused: nothing of this computer's stays declared there, so no old list wakes an agent it no longer has.
-      const declaration = wanted.has(workspaceId) && declared.ok ? declared.declaration : withdrawal(session, computerLabel);
+      const declaration =
+        wanted.has(workspaceId) && declared.ok
+          ? declared.declaration
+          : withdrawal(session, computerLabel);
       if (wanted.has(workspaceId)) show(workspaceId, declared.ok ? null : declared);
       else show(workspaceId, null);
       // Nothing declared and nothing to take back.
@@ -249,12 +279,14 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     const sleep = new AbortController();
     const mine: NonNullable<typeof owed> = { session, failures, sleep };
     owed = mine;
-    void deps.sleep(deps.backoffMs(failures), AbortSignal.any([abort.signal, sleep.signal])).then(() => {
-      // Replaced by another session's retry, or settled meanwhile.
-      if (owed !== mine || sleep.signal.aborted) return;
-      mine.sleep = null;
-      if (!abort.signal.aborted && session.isCurrent()) void roster.reconcile(session);
-    });
+    void deps
+      .sleep(deps.backoffMs(failures), AbortSignal.any([abort.signal, sleep.signal]))
+      .then(() => {
+        // Replaced by another session's retry, or settled meanwhile.
+        if (owed !== mine || sleep.signal.aborted) return;
+        mine.sleep = null;
+        if (!abort.signal.aborted && session.isCurrent()) void roster.reconcile(session);
+      });
   }
 
   const roster: ChatRunnerRoster = {
@@ -290,7 +322,11 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
           // Whatever this answers, the server may no longer hold what was last sent.
           sent.delete(keyOf(entry));
           try {
-            await client.replaceRunners(entry.workspaceId, withdrawal(session, computerLabel), signal);
+            await client.replaceRunners(
+              entry.workspaceId,
+              withdrawal(session, computerLabel),
+              signal,
+            );
           } catch (error) {
             // Kept for the next time this account signs in here, unless the server holds nothing there.
             if (!(error instanceof ChatWakeMissingError)) continue;
@@ -301,7 +337,8 @@ export function createChatRunnerRoster(deps: ChatRunnerRosterDeps): ChatRunnerRo
     },
     check() {
       const session = current;
-      if (abort.signal.aborted || session === null || !session.isCurrent() || !due(session)) return Promise.resolve();
+      if (abort.signal.aborted || session === null || !session.isCurrent() || !due(session))
+        return Promise.resolve();
       return roster.reconcile(session);
     },
     async stop() {

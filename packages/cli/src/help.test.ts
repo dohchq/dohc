@@ -17,16 +17,25 @@ const flat = (text: string) => text.replace(/\s+/g, " ");
 
 /** Whether a path such as entries[].schema.revisionHash names a field of the schema. */
 function hasPath(schema: z.ZodType, path: readonly string[]): boolean {
-  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable) return hasPath(schema.unwrap() as z.ZodType, path);
-  if (schema instanceof z.ZodUnion) return schema.options.some((option) => hasPath(option as z.ZodType, path));
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable)
+    return hasPath(schema.unwrap() as z.ZodType, path);
+  if (schema instanceof z.ZodUnion)
+    return schema.options.some((option) => hasPath(option as z.ZodType, path));
   const [step, ...rest] = path;
   if (step === undefined) return true;
-  if (step === "[]") return schema instanceof z.ZodArray && hasPath(schema.element as z.ZodType, rest);
-  return schema instanceof z.ZodObject && Object.hasOwn(schema.shape, step) && hasPath(schema.shape[step] as z.ZodType, rest);
+  if (step === "[]")
+    return schema instanceof z.ZodArray && hasPath(schema.element as z.ZodType, rest);
+  return (
+    schema instanceof z.ZodObject &&
+    Object.hasOwn(schema.shape, step) &&
+    hasPath(schema.shape[step] as z.ZodType, rest)
+  );
 }
 
 function resultOf(schema: z.ZodDiscriminatedUnion, kind: string): z.ZodType {
-  const option = schema.options.find((candidate) => candidate instanceof z.ZodObject && candidate.shape.kind?.value === kind);
+  const option = schema.options.find(
+    (candidate) => candidate instanceof z.ZodObject && candidate.shape.kind?.value === kind,
+  );
   if (!option) throw new Error(`no result kind ${kind}`);
   return option as z.ZodType;
 }
@@ -40,7 +49,10 @@ const RESULTS: Record<string, Record<string, z.ZodType>> = {
     prepareRecovery: resultOf(DatasetResult, "recovery-prepared"),
   },
   app: {
-    createLink: z.union([resultOf(OwnerAppPublicationResult, "linkCreated"), resultOf(OwnerAppPublicationResult, "urlUnavailable")]),
+    createLink: z.union([
+      resultOf(OwnerAppPublicationResult, "linkCreated"),
+      resultOf(OwnerAppPublicationResult, "urlUnavailable"),
+    ]),
     prepare: resultOf(OwnerAppPublicationResult, "prepared"),
     list: resultOf(OwnerAppPublicationResult, "listed"),
   },
@@ -55,7 +67,8 @@ describe("CLI help", () => {
       "held-change-conflict: Resolve the conflict before reviewing and dropping again.",
       "held-change-undo-stale: Do not retry undo; recover the waiting text from History.",
       "held-change-shared-owner: Drop and undo are unavailable for adopted shared notes; leave the held work intact.",
-    ]) expect(text).toContain(words);
+    ])
+      expect(text).toContain(words);
     expect(text).not.toContain("Edit anyway");
   });
   it("gives every dispatched verb a line in help and its own flags", async () => {
@@ -73,7 +86,9 @@ describe("CLI help", () => {
           expect(verbText).toMatch(new RegExp(`^  ${flag.name} `, "m"));
         }
         for (const field of Object.keys(verb.fields ?? {}).filter((name) => name !== "action")) {
-          expect(flat(verbText)).toMatch(new RegExp(`(Fields|Optional fields): (\\w+, )*${field}\\b`));
+          expect(flat(verbText)).toMatch(
+            new RegExp(`(Fields|Optional fields): (\\w+, )*${field}\\b`),
+          );
         }
       }
     }
@@ -88,13 +103,17 @@ describe("CLI help", () => {
           expect(Object.keys(verb.fields ?? {}), label).toContain(source.field);
           const result = RESULTS[commandName]?.[source.from];
           expect(result, label).toBeDefined();
-          expect(hasPath(result!, source.path.replace(/\[\]/g, ".[]").split(".")), label).toBe(true);
+          expect(hasPath(result!, source.path.replace(/\[\]/g, ".[]").split(".")), label).toBe(
+            true,
+          );
           sources += 1;
         }
       }
     }
     expect(sources).toBeGreaterThan(0);
-    expect(flat(await help("dataset", "delete", "--help"))).toContain("Set expected to cursor from deletePreview.");
+    expect(flat(await help("dataset", "delete", "--help"))).toContain(
+      "Set expected to cursor from deletePreview.",
+    );
   });
 
   it("answers bare commands with help and keeps lines readable", async () => {
@@ -102,18 +121,25 @@ describe("CLI help", () => {
     expect(await help("chat")).toBe(await help("chat", "-h"));
     expect(await help("chat", "--help", "post")).toBe(await help("chat", "post", "--help"));
     for (const argv of [["--help"], ["dataset", "--help"], ["chat", "grep", "--help"]]) {
-      for (const line of (await help(...argv)).split("\n")) expect(line.length, line).toBeLessThanOrEqual(80);
+      for (const line of (await help(...argv)).split("\n"))
+        expect(line.length, line).toBeLessThanOrEqual(80);
     }
   });
 
   it("tells people where workspaceId and agent identity come from", async () => {
-    expect(flat(await help("dataset", "list", "--help"))).toContain("Find workspaceId in .dohc/manifest.json");
+    expect(flat(await help("dataset", "list", "--help"))).toContain(
+      "Find workspaceId in .dohc/manifest.json",
+    );
     expect(flat(await help("app", "--help"))).toContain("Find workspaceId in .dohc/manifest.json");
     expect(await help("chat", "--help")).toContain("DOHC_CHAT_ACTOR=agent");
-    expect(await help("chat", "reply", "--help")).toMatch(/^ {2}--resolve <message> +Resolve this open decision/m);
+    expect(await help("chat", "reply", "--help")).toMatch(
+      /^ {2}--resolve <message> +Resolve this open decision/m,
+    );
     const dashRule = "Put options first, then --, then text that starts with a dash.";
-    for (const verb of ["post", "reply", "grep"]) expect(flat(await help("chat", verb, "--help"))).toContain(dashRule);
-    for (const verb of ["show", "export"]) expect(flat(await help("chat", verb, "--help"))).not.toContain(dashRule);
+    for (const verb of ["post", "reply", "grep"])
+      expect(flat(await help("chat", verb, "--help"))).toContain(dashRule);
+    for (const verb of ["show", "export"])
+      expect(flat(await help("chat", verb, "--help"))).not.toContain(dashRule);
     expect(flat(await help("dataset", "list", "--help"))).not.toContain(dashRule);
   });
 
@@ -122,16 +148,37 @@ describe("CLI help", () => {
       [["site"], "dohc: unknown command 'site'; run dohc --help\n"],
       [["chat", "channels"], "dohc: unknown chat verb 'channels'; run dohc chat --help\n"],
       [["chat", "constructor"], "dohc: unknown chat verb 'constructor'; run dohc chat --help\n"],
-      [["dataset", "list"], "dohc: dataset list requires one JSON object; run dohc dataset list --help\n"],
+      [
+        ["dataset", "list"],
+        "dohc: dataset list requires one JSON object; run dohc dataset list --help\n",
+      ],
       [["chta", "post"], "dohc: unknown command 'chta'; did you mean 'chat'? Run dohc --help\n"],
       // Two edits from share: too far for a five-letter name, close enough for an eight-letter one.
       [["state"], "dohc: unknown command 'state'; run dohc --help\n"],
-      [["autmaton", "list"], "dohc: unknown command 'autmaton'; did you mean 'automation'? Run dohc --help\n"],
-      [["chat", "psot", "general", "hi"], "dohc: unknown chat verb 'psot'; did you mean 'post'? Run dohc chat --help\n"],
-      [["chat", "createGroup", "Design"], "dohc: unknown chat verb 'createGroup'; did you mean 'create-group'? Run dohc chat --help\n"],
-      [["dataset", "delete-preview"], "dohc: unknown dataset verb 'delete-preview'; did you mean 'deletePreview'? Run dohc dataset --help\n"],
-      [["chat", "show", "th_1", "--peak"], "dohc: unknown chat show option '--peak'; did you mean '--peek'?\n"],
-      [["chat", "show", "th_1", "--jsno"], "dohc: unknown chat show option '--jsno'; did you mean '--json'?\n"],
+      [
+        ["autmaton", "list"],
+        "dohc: unknown command 'autmaton'; did you mean 'automation'? Run dohc --help\n",
+      ],
+      [
+        ["chat", "psot", "general", "hi"],
+        "dohc: unknown chat verb 'psot'; did you mean 'post'? Run dohc chat --help\n",
+      ],
+      [
+        ["chat", "createGroup", "Design"],
+        "dohc: unknown chat verb 'createGroup'; did you mean 'create-group'? Run dohc chat --help\n",
+      ],
+      [
+        ["dataset", "delete-preview"],
+        "dohc: unknown dataset verb 'delete-preview'; did you mean 'deletePreview'? Run dohc dataset --help\n",
+      ],
+      [
+        ["chat", "show", "th_1", "--peak"],
+        "dohc: unknown chat show option '--peak'; did you mean '--peek'?\n",
+      ],
+      [
+        ["chat", "show", "th_1", "--jsno"],
+        "dohc: unknown chat show option '--jsno'; did you mean '--json'?\n",
+      ],
       [
         ["chat", "post", "general", "--titel", "Plan", "hi"],
         "dohc: unknown chat post option '--titel'; did you mean '--title'? Otherwise put options first, then --, then text that starts with a dash\n",
@@ -142,7 +189,11 @@ describe("CLI help", () => {
       ],
     ] as const) {
       const send = vi.fn();
-      expect(await executeCli({ argv, env: {}, request: send })).toEqual({ exitCode: 1, stdout: "", stderr });
+      expect(await executeCli({ argv, env: {}, request: send })).toEqual({
+        exitCode: 1,
+        stdout: "",
+        stderr,
+      });
       expect(send).not.toHaveBeenCalled();
     }
   });

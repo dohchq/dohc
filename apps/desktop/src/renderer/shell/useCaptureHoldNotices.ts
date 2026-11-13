@@ -19,37 +19,59 @@ export function useCaptureHoldNotices(input: {
   const latest = useRef(input);
   latest.current = input;
   const requests = useRequestSequence([input.workspaceId]);
-  const retry = useCallback(async (path: string) => {
-    const workspaceId = input.workspaceId;
-    const token = requests.current();
-    const current = () => requests.isCurrent(token) && latest.current.workspaceId === workspaceId;
-    try {
-      const result = await bridge().retryHeldCapture({ workspaceId, path });
-      if (!current()) return;
-      if (result.degraded) {
-        latest.current.reportShellError("dohc could not record outside edits. Reopen the workspace.", undefined, () => void retry(path));
-      } else if (result.heldFiles.some(file => file.path === path && file.workspaceId === workspaceId) &&
-        latest.current.heldFiles?.some(file => file.path === path && file.workspaceId === workspaceId)) {
-        reportHeld(path);
+  const retry = useCallback(
+    async (path: string) => {
+      const workspaceId = input.workspaceId;
+      const token = requests.current();
+      const current = () => requests.isCurrent(token) && latest.current.workspaceId === workspaceId;
+      try {
+        const result = await bridge().retryHeldCapture({ workspaceId, path });
+        if (!current()) return;
+        if (result.degraded) {
+          latest.current.reportShellError(
+            "dohc could not record outside edits. Reopen the workspace.",
+            undefined,
+            () => void retry(path),
+          );
+        } else if (
+          result.heldFiles.some((file) => file.path === path && file.workspaceId === workspaceId) &&
+          latest.current.heldFiles?.some(
+            (file) => file.path === path && file.workspaceId === workspaceId,
+          )
+        ) {
+          reportHeld(path);
+        }
+      } catch (error) {
+        if (!current()) return;
+        reportHeld(path, error);
       }
-    } catch (error) {
-      if (!current()) return;
-      reportHeld(path, error);
-    }
-  }, [input.workspaceId, requests]);
+    },
+    [input.workspaceId, requests],
+  );
 
   function reportHeld(path: string, cause?: unknown) {
-    latest.current.reportShellFailure({ title: "Outside edit not recorded", tone: "warning",
-      message: captureHoldMessage(path), cause, details: [["File", path, path.length]],
-      retry: () => void retry(path), kind: "capture-held", identity: `capture-held:${path}` });
+    latest.current.reportShellFailure({
+      title: "Outside edit not recorded",
+      tone: "warning",
+      message: captureHoldMessage(path),
+      cause,
+      details: [["File", path, path.length]],
+      retry: () => void retry(path),
+      kind: "capture-held",
+      identity: `capture-held:${path}`,
+    });
   }
 
   function publish(files: readonly CaptureFileHold[]) {
-    latest.current.show(files.filter(file => file.workspaceId === input.workspaceId).map(file => ({
-      path: file.path,
-      message: captureHoldMessage(file.path),
-      retry: () => void retry(file.path),
-    })));
+    latest.current.show(
+      files
+        .filter((file) => file.workspaceId === input.workspaceId)
+        .map((file) => ({
+          path: file.path,
+          message: captureHoldMessage(file.path),
+          retry: () => void retry(file.path),
+        })),
+    );
   }
   useEffect(() => {
     if (input.heldFiles === undefined) return;

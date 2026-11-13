@@ -64,22 +64,40 @@ function noticeWaitGroup(userId: string): string {
  * query until something wakes it or its time ends. Past a sign-in's, an
  * account's, or the server's waits, `wait` answers null and parks nothing.
  */
-export function createNoticeWaits(storage: object, hub: Pick<DiscussionActivityHub, "wait" | "wake">) {
+export function createNoticeWaits(
+  storage: object,
+  hub: Pick<DiscussionActivityHub, "wait" | "wake">,
+) {
   const accounts = new Map<string, Map<string, number>>();
   let total = 0;
   const closing = new AbortController();
-  const stopObserving = observeNoticeChanges(storage, (userId) => hub.wake(noticeWaitGroup(userId)));
+  const stopObserving = observeNoticeChanges(storage, (userId) =>
+    hub.wake(noticeWaitGroup(userId)),
+  );
 
   return {
-    wait(input: { userId: string; sessionId: string; holdMs: number; signal: AbortSignal; shouldPark(): boolean }): Promise<void> | null {
+    wait(input: {
+      userId: string;
+      sessionId: string;
+      holdMs: number;
+      signal: AbortSignal;
+      shouldPark(): boolean;
+    }): Promise<void> | null {
       const sessions = accounts.get(input.userId) ?? new Map<string, number>();
       const held = [...sessions.values()].reduce((sum, count) => sum + count, 0);
-      if (closing.signal.aborted || total >= NOTICE_WAITS_TOTAL || held >= NOTICE_WAITS_PER_ACCOUNT ||
-        (sessions.get(input.sessionId) ?? 0) >= NOTICE_WAITS_PER_SESSION) return null;
+      if (
+        closing.signal.aborted ||
+        total >= NOTICE_WAITS_TOTAL ||
+        held >= NOTICE_WAITS_PER_ACCOUNT ||
+        (sessions.get(input.sessionId) ?? 0) >= NOTICE_WAITS_PER_SESSION
+      )
+        return null;
       let parked: Promise<void>;
       try {
         parked = hub.wait(noticeWaitGroup(input.userId), `notices:${input.sessionId}`, {
-          holdMs: input.holdMs, signal: AbortSignal.any([input.signal, closing.signal]), shouldPark: input.shouldPark,
+          holdMs: input.holdMs,
+          signal: AbortSignal.any([input.signal, closing.signal]),
+          shouldPark: input.shouldPark,
         });
       } catch (error) {
         if (error instanceof DiscussionActivityCapacityError) return null;
@@ -149,7 +167,10 @@ export function createNoticeRoutes(
     const session = () => bearerAccountSession(storage, resolveAccountSession, request);
     const caller = await session();
     if (!account.limiter.allow(caller.sessionId, nowMs())) {
-      throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
+      throw new RelayError(
+        "server_busy",
+        "This sign-in is asking faster than your server answers. Try again shortly.",
+      );
     }
     const userId = caller.userId;
     const deadlineAtMs = Date.now() + waitMs;
@@ -157,14 +178,31 @@ export function createNoticeRoutes(
       await deliverPendingShareNotices(userId);
       const current = await session();
       if (current.sessionId !== caller.sessionId || current.userId !== userId) throw notFound();
-      const page = storage.readNoticeChanges({ recipientUserId: userId, cursor, limit, nowMs: nowMs(), ...(scope ? { scope } : {}) });
-      const caughtUpAt = cursor !== null && cursor.snapshotHead === null && !page.replace && page.nextCursor === String(cursor.seq)
-        ? cursor.seq : null;
-      const holdMs = deadlineAtMs - Date.now();
-      const parked = caughtUpAt === null || holdMs <= 0 || request.signal.aborted ? null : account.waits.wait({
-        userId, sessionId: caller.sessionId, holdMs, signal: request.signal,
-        shouldPark: () => storage.noticeHead(userId) === caughtUpAt,
+      const page = storage.readNoticeChanges({
+        recipientUserId: userId,
+        cursor,
+        limit,
+        nowMs: nowMs(),
+        ...(scope ? { scope } : {}),
       });
+      const caughtUpAt =
+        cursor !== null &&
+        cursor.snapshotHead === null &&
+        !page.replace &&
+        page.nextCursor === String(cursor.seq)
+          ? cursor.seq
+          : null;
+      const holdMs = deadlineAtMs - Date.now();
+      const parked =
+        caughtUpAt === null || holdMs <= 0 || request.signal.aborted
+          ? null
+          : account.waits.wait({
+              userId,
+              sessionId: caller.sessionId,
+              holdMs,
+              signal: request.signal,
+              shouldPark: () => storage.noticeHead(userId) === caughtUpAt,
+            });
       if (parked === null) return jsonResponse({ ok: true, ...page }, 200);
       await parked;
       // Closing: the held page is caught up, so it carries no row, and storage may already be gone.
@@ -179,7 +217,8 @@ export function createNoticeRoutes(
   ): Promise<Response> {
     if (route.route === "notices" && request.method === "GET") {
       const url = new URL(request.url);
-      if (url.searchParams.has("scope") || url.searchParams.has("wait")) return await readForAccount(request, url);
+      if (url.searchParams.has("scope") || url.searchParams.has("wait"))
+        return await readForAccount(request, url);
       const userId = await caller();
       await deliverPendingShareNotices(userId);
       const page = storage.readNoticeChanges({
@@ -201,8 +240,10 @@ export function createNoticeRoutes(
       if (recipientUserId === undefined) throw relayError("notice_refused");
       const notice = { ...posted, recipientUserId };
       // Only this server posts as the server, in process.
-      if (notice.originInstallId === AUTOMATION_SERVER_INSTALL_ID) throw badRequest("originInstallId is reserved for the server");
-      if (notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX)) throw badRequest("noticeId is reserved for the server");
+      if (notice.originInstallId === AUTOMATION_SERVER_INSTALL_ID)
+        throw badRequest("originInstallId is reserved for the server");
+      if (notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX))
+        throw badRequest("noticeId is reserved for the server");
       if (notice.recipientUserId === userId) {
         if (notice.noticeId.startsWith(NOTICE_FROM_PREFIX)) {
           throw badRequest(`noticeId must not start with ${NOTICE_FROM_PREFIX}`);
@@ -223,7 +264,8 @@ export function createNoticeRoutes(
     if (route.route === "notice-marks" && request.method === "POST") {
       const userId = await caller();
       const body = await readJsonObject(request);
-      if (body.installId !== undefined && !isNoticeLine(body.installId, 256)) throw badRequest("installId is invalid");
+      if (body.installId !== undefined && !isNoticeLine(body.installId, 256))
+        throw badRequest("installId is invalid");
       const dismissed = storage.markNotices({
         recipientUserId: userId,
         marks: parseMarks(body.marks),
@@ -236,30 +278,47 @@ export function createNoticeRoutes(
   };
 }
 
-type PostedNotice = Omit<PostNoticeInput, "senderUserId" | "senderLabel" | "nowMs" | "recipientUserId"> &
-  ({ recipientUserId: string; toWorkspaceOwner: false } | { recipientUserId?: undefined; toWorkspaceOwner: true });
+type PostedNotice = Omit<
+  PostNoticeInput,
+  "senderUserId" | "senderLabel" | "nowMs" | "recipientUserId"
+> &
+  (
+    | { recipientUserId: string; toWorkspaceOwner: false }
+    | { recipientUserId?: undefined; toWorkspaceOwner: true }
+  );
 
 /** A posted notice as the route accepts it; the server's own automations post through this too. */
 export function parsePostNotice(body: Record<string, unknown>): PostedNotice {
   if (
-    typeof body.kind !== "string" || !Object.hasOwn(NOTICE_KINDS, body.kind) ||
+    typeof body.kind !== "string" ||
+    !Object.hasOwn(NOTICE_KINDS, body.kind) ||
     NOTICE_KINDS[body.kind as NoticeKind].recipients === "relay"
   ) {
     throw badRequest("kind is not a notice kind anyone may post");
   }
-  if (!isNoticeLine(body.noticeId, NOTICE_POSTED_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
-  if (body.noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) throw badRequest("noticeId is reserved for agent wakes");
+  if (!isNoticeLine(body.noticeId, NOTICE_POSTED_ID_MAX_CHARS))
+    throw badRequest("noticeId is invalid");
+  if (body.noticeId.startsWith(AUTOMATION_WAKE_PREFIX))
+    throw badRequest("noticeId is reserved for agent wakes");
   if (!isNoticeLine(body.title, NOTICE_TITLE_MAX_CHARS)) throw badRequest("title is invalid");
   if (!isNoticeBody(body.body)) throw badRequest("body is invalid");
   if (!isNoticeTarget(body.target)) throw badRequest("target is invalid");
   const reach = parseReach(body);
-  if (body.toWorkspaceOwner !== undefined && (body.toWorkspaceOwner !== true || body.recipientUserId !== undefined || reach.shareId === undefined)) {
+  if (
+    body.toWorkspaceOwner !== undefined &&
+    (body.toWorkspaceOwner !== true ||
+      body.recipientUserId !== undefined ||
+      reach.shareId === undefined)
+  ) {
     throw badRequest("toWorkspaceOwner takes a shareId and no recipientUserId");
   }
   return {
     ...(body.toWorkspaceOwner === true
       ? { toWorkspaceOwner: true as const }
-      : { toWorkspaceOwner: false as const, recipientUserId: parseString(body.recipientUserId, "recipientUserId", MAX_USER_ID_CHARS) }),
+      : {
+          toWorkspaceOwner: false as const,
+          recipientUserId: parseString(body.recipientUserId, "recipientUserId", MAX_USER_ID_CHARS),
+        }),
     noticeId: body.noticeId,
     reach,
     kind: body.kind as PostableNoticeKind,
@@ -276,7 +335,11 @@ function parseReach(body: Record<string, unknown>): NoticeReach {
   }
   if (body.workspaceId !== undefined) return { workspaceId: parseWorkspaceId(body.workspaceId) };
   const shareId = body.shareId;
-  if (typeof shareId !== "string" || shareId.length > MAX_SHARE_ID_CHARS || !/^[a-z0-9][a-z0-9-]*$/u.test(shareId)) {
+  if (
+    typeof shareId !== "string" ||
+    shareId.length > MAX_SHARE_ID_CHARS ||
+    !/^[a-z0-9][a-z0-9-]*$/u.test(shareId)
+  ) {
     throw badRequest("shareId is invalid");
   }
   return { shareId };
@@ -287,13 +350,18 @@ function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark; withd
     throw badRequest(`marks must list 1 to ${NOTICE_MARKS_PER_REQUEST} notices`);
   }
   return value.map((entry: unknown) => {
-    const mark = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+    const mark = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
     if (mark.mark !== "read" && mark.mark !== "dismissed") {
       throw badRequest("mark must be read or dismissed");
     }
     if (!isNoticeLine(mark.noticeId, NOTICE_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
-    if (mark.withdraw !== undefined && (mark.withdraw !== true || mark.mark !== "dismissed")) throw badRequest("withdraw requires a dismissal");
-    return { noticeId: mark.noticeId, mark: mark.mark, ...(mark.withdraw ? { withdraw: true as const } : {}) };
+    if (mark.withdraw !== undefined && (mark.withdraw !== true || mark.mark !== "dismissed"))
+      throw badRequest("withdraw requires a dismissal");
+    return {
+      noticeId: mark.noticeId,
+      mark: mark.mark,
+      ...(mark.withdraw ? { withdraw: true as const } : {}),
+    };
   });
 }
 

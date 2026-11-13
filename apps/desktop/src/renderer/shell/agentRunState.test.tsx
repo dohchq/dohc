@@ -31,9 +31,10 @@ function stubDesktop() {
         await Promise.resolve();
       });
     },
-    push: (event: AgentRunStateEvent) => act(() => {
-      for (const listener of [...listeners]) listener(event);
-    }),
+    push: (event: AgentRunStateEvent) =>
+      act(() => {
+        for (const listener of [...listeners]) listener(event);
+      }),
   };
 }
 

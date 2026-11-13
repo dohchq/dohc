@@ -7,7 +7,9 @@ vi.hoisted(() => {
     observe() {}
     unobserve() {}
     disconnect() {}
-    takeRecords(): never[] { return []; }
+    takeRecords(): never[] {
+      return [];
+    }
   }
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
@@ -15,7 +17,12 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { DohcDesktopBridge } from "../../ipc/bridgeContract";
-import { WORKSPACE, STORED_STATE, makeBridge, renderShell } from "../DesktopWorkspaceShell.testHarness";
+import {
+  WORKSPACE,
+  STORED_STATE,
+  makeBridge,
+  renderShell,
+} from "../DesktopWorkspaceShell.testHarness";
 
 describe("About rail (right side)", () => {
   it("exposes the About resize separator to keyboard users", async () => {
@@ -52,25 +59,63 @@ describe("About rail (right side)", () => {
   it("opens a chat that links to the file at its message, in the thread About had open", async () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(STORED_STATE)), {
       listChatMessages: vi.fn<DohcDesktopBridge["listChatMessages"]>(),
-      listChatReactions: vi.fn<DohcDesktopBridge["listChatReactions"]>(async () => ({ reactions: [], viewerAuthorId: "Reader" })),
-      markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({ lastReadSequence: 300, revision: 1 })),
+      listChatReactions: vi.fn<DohcDesktopBridge["listChatReactions"]>(async () => ({
+        reactions: [],
+        viewerAuthorId: "Reader",
+      })),
+      markChatThreadRead: vi.fn<DohcDesktopBridge["markChatThreadRead"]>(async () => ({
+        lastReadSequence: 300,
+        revision: 1,
+      })),
       chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
     });
-    const thread = { id: "file-thread", title: "Long file conversation", createdAtMs: 1, updatedAtMs: 1 };
+    const thread = {
+      id: "file-thread",
+      title: "Long file conversation",
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    };
     const messages = Array.from({ length: 300 }, (_, index) => ({
-      id: `file-message-${index}`, threadId: thread.id,
+      id: `file-message-${index}`,
+      threadId: thread.id,
       presentation: { group: "fixture", hue: null, self: false },
-      authorKind: "human" as const, authorDisplayName: "Reader",
-      body: `File message ${index}`, createdAtMs: index + 1,
+      authorKind: "human" as const,
+      authorDisplayName: "Reader",
+      body: `File message ${index}`,
+      createdAtMs: index + 1,
     }));
     bridge.listFileChats.mockResolvedValue({ fileObjectId: "object-b", threads: [thread] });
     vi.mocked(bridge.listChatMessages).mockResolvedValue({ messages });
-    bridge.chatFileMentionsPage.mockResolvedValue({ versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false, mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null, entries: [{
-      thread, message: { id: messages[0]!.id, preview: messages[0]!.body, authorDisplayName: "Reader", createdAtMs: 1 },
-      attachment: { attachmentId: "file-attachment", threadId: thread.id,
-        messageId: messages[0]!.id, targetKind: "file", objectId: "object-b",
-        pathHint: "b.md", createdAtMs: 1 },
-    }] });
+    bridge.chatFileMentionsPage.mockResolvedValue({
+      versionId: "main",
+      subject: null,
+      unchecked: [],
+      complete: true,
+      indexBuilding: false,
+      mountsCovered: true,
+      sharedChannelRowsUncovered: 0,
+      nextCursor: null,
+      entries: [
+        {
+          thread,
+          message: {
+            id: messages[0]!.id,
+            preview: messages[0]!.body,
+            authorDisplayName: "Reader",
+            createdAtMs: 1,
+          },
+          attachment: {
+            attachmentId: "file-attachment",
+            threadId: thread.id,
+            messageId: messages[0]!.id,
+            targetKind: "file",
+            objectId: "object-b",
+            pathHint: "b.md",
+            createdAtMs: 1,
+          },
+        },
+      ],
+    });
     const scrolled: Array<string | null> = [];
     vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (this: Element) {
       scrolled.push(this.getAttribute("data-message-id"));
@@ -87,7 +132,10 @@ describe("About rail (right side)", () => {
     await user.click(await within(links).findByTestId("chat-file-mention"));
     await waitFor(() => expect(scrolled).toContain("file-message-0"));
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
-    expect(bridge.chatFileMentionsPage).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, subject: { path: "b.md" } });
+    expect(bridge.chatFileMentionsPage).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      subject: { path: "b.md" },
+    });
   });
 
   it("opens a chat search hit on another file in About once", async () => {
@@ -105,10 +153,19 @@ describe("About rail (right side)", () => {
     act(() => {
       bridge.emitSearchResults({
         searchId,
-        entries: [{
-          path: "other.md", line: 1, column: 1, preview: "pricing questions", matchStart: 0, matchEnd: 7,
-          surface: "chat", threadId: "thread-pricing", title: "Pricing questions",
-        }],
+        entries: [
+          {
+            path: "other.md",
+            line: 1,
+            column: 1,
+            preview: "pricing questions",
+            matchStart: 0,
+            matchEnd: 7,
+            surface: "chat",
+            threadId: "thread-pricing",
+            title: "Pricing questions",
+          },
+        ],
         done: true,
         limitHit: false,
       });
@@ -116,7 +173,9 @@ describe("About rail (right side)", () => {
     await user.click(await screen.findByTestId("search-result-row"));
 
     const rail = await screen.findByTestId("about-rail");
-    expect((await within(rail).findByTestId("linked-chat-title")).textContent).toBe("Pricing questions");
+    expect((await within(rail).findByTestId("linked-chat-title")).textContent).toBe(
+      "Pricing questions",
+    );
     // The editor stays on b.md: the hit opens in About, not as a tab.
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
 
@@ -130,7 +189,13 @@ describe("About rail (right side)", () => {
 
   it("restores a layout saved with the old right-panel fields with About closed", async () => {
     const { aboutVisible: _visible, aboutWidth: _width, ...rest } = STORED_STATE;
-    const bridge = makeBridge(Promise.resolve({ ...rest, chatsVisible: true, chatsWidth: 444 } as unknown as typeof STORED_STATE));
+    const bridge = makeBridge(
+      Promise.resolve({
+        ...rest,
+        chatsVisible: true,
+        chatsWidth: 444,
+      } as unknown as typeof STORED_STATE),
+    );
     renderShell(bridge);
 
     expect((await screen.findByTestId("tab-b.md")).dataset.active).toBe("true");

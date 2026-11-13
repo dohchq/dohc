@@ -1,16 +1,9 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildSyncCode,
-  canonicalRelayUrl,
-  parseSyncCode,
-  relayUrlsMatch,
-} from "./syncCode";
+import { buildSyncCode, canonicalRelayUrl, parseSyncCode, relayUrlsMatch } from "./syncCode";
 
 describe("syncCode", () => {
   it("exports the one canonical relay identity function", () => {
-    expect(canonicalRelayUrl("https://Relay.Test///")).toBe(
-      "https://relay.test",
-    );
+    expect(canonicalRelayUrl("https://Relay.Test///")).toBe("https://relay.test");
     expect(canonicalRelayUrl("https://relay.test?token=secret")).toBeNull();
   });
 

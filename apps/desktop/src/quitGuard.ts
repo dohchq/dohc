@@ -113,8 +113,7 @@ export function createExitRounds<Participant>(options: {
   // a decision that predates its work.
   let forcedParticipants: readonly Participant[] = [];
 
-  const silent = (round: Round) =>
-    [...round.members.keys()].filter((id) => !round.replies.has(id));
+  const silent = (round: Round) => [...round.members.keys()].filter((id) => !round.replies.has(id));
   const allClear = (round: Round) =>
     [...round.members.keys()].every((id) => round.replies.get(id) === "clear");
 
@@ -295,7 +294,9 @@ export function createExitRounds<Participant>(options: {
     answer(senderId: number, roundId: number, decision: ExitRoundDecision): boolean {
       const round = current;
       if (!round || round.id !== roundId || !round.members.has(senderId)) {
-        const member = proceeded?.members.some((participant) => options.participantId(participant) === senderId);
+        const member = proceeded?.members.some(
+          (participant) => options.participantId(participant) === senderId,
+        );
         if (decision !== "cancel" || proceeded?.id !== roundId || !member) return false;
         retract(roundId);
         return true;

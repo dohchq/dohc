@@ -34,7 +34,9 @@ export function saveAgentColor(
 ): SaveAgentColor {
   const save: SaveAgentColor = (group, hue) => {
     api.setAgentColor({ workspaceId, group, hue }).catch((error: unknown) => {
-      report("dohc could not save this agent's color.", new Error(ipcErrorMessage(error)), () => save(group, hue));
+      report("dohc could not save this agent's color.", new Error(ipcErrorMessage(error)), () =>
+        save(group, hue),
+      );
     });
   };
   return save;
@@ -67,9 +69,12 @@ export function AgentColorScope(props: {
   const save = useContext(AgentColorContext);
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement | null>(null);
-  if (!save || props.kind !== "agent" || !canChooseAgentColor(props.presentation)) return <>{props.children}</>;
+  if (!save || props.kind !== "agent" || !canChooseAgentColor(props.presentation))
+    return <>{props.children}</>;
   return (
-    <ScopeContext.Provider value={{ name: props.name, presentation: props.presentation, open, setOpen, trigger }}>
+    <ScopeContext.Provider
+      value={{ name: props.name, presentation: props.presentation, open, setOpen, trigger }}
+    >
       {props.children}
     </ScopeContext.Provider>
   );
@@ -118,9 +123,19 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
   const { scope } = props;
   const save = useContext(AgentColorContext);
   const container = useRef<HTMLDivElement | null>(null);
-  const [place, setPlace] = useState<{ left: number; top?: number; bottom?: number; above: boolean } | null>(null);
+  const [place, setPlace] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    above: boolean;
+  } | null>(null);
   const value = useSyncExternalStore(subscribePresentation, () => agentChoice(scope.presentation));
-  useDismiss({ open: true, container, trigger: scope.trigger, onClose: () => scope.setOpen(false) });
+  useDismiss({
+    open: true,
+    container,
+    trigger: scope.trigger,
+    onClose: () => scope.setOpen(false),
+  });
 
   useLayoutEffect(() => {
     const box = scope.trigger.current?.getBoundingClientRect();
@@ -129,13 +144,22 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
     // transformed rows would otherwise hold a fixed box under the next row.
     popover?.showPopover?.();
     if (box && popover) {
-      const left = Math.max(EDGE_PX, Math.min(box.left, window.innerWidth - EDGE_PX - popover.offsetWidth));
-      const above = window.innerHeight - box.bottom - GAP_PX - EDGE_PX < popover.offsetHeight && box.top > window.innerHeight - box.bottom;
-      setPlace(above
-        ? { left, bottom: window.innerHeight - box.top + GAP_PX, above }
-        : { left, top: box.bottom + GAP_PX, above });
+      const left = Math.max(
+        EDGE_PX,
+        Math.min(box.left, window.innerWidth - EDGE_PX - popover.offsetWidth),
+      );
+      const above =
+        window.innerHeight - box.bottom - GAP_PX - EDGE_PX < popover.offsetHeight &&
+        box.top > window.innerHeight - box.bottom;
+      setPlace(
+        above
+          ? { left, bottom: window.innerHeight - box.top + GAP_PX, above }
+          : { left, top: box.bottom + GAP_PX, above },
+      );
     }
-    popover?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]')?.focus({ preventScroll: true });
+    popover
+      ?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]')
+      ?.focus({ preventScroll: true });
   }, [scope.trigger]);
 
   // Placed once, so it closes when its chat scrolls or the window resizes.
@@ -174,12 +198,19 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
           setOpen(false);
         }
       }}
-      style={{
-        inset: "auto",
-        ...(place
-          ? { left: place.left, top: place.top, bottom: place.bottom, ...menuEnterFrom(place.above ? "above" : "below") }
-          : { left: 0, top: 0 }),
-      } as CSSProperties}
+      style={
+        {
+          inset: "auto",
+          ...(place
+            ? {
+                left: place.left,
+                top: place.top,
+                bottom: place.bottom,
+                ...menuEnterFrom(place.above ? "above" : "below"),
+              }
+            : { left: 0, top: 0 }),
+        } as CSSProperties
+      }
       className={`fixed m-0 overflow-visible border-0 bg-transparent p-0 ${place ? MENU_ENTER : ""}`}
     >
       <AgentColorSwatches
@@ -196,12 +227,21 @@ function AgentColorPopover(props: { scope: Scope; label: string }) {
 }
 
 /** The popover's frame and swatches, olive first. Olive is no color chosen, so it stores nothing. */
-export function AgentColorSwatches(props: { label: string; value: IdentityHue | null; onChange: (hue: IdentityHue | null) => void }) {
+export function AgentColorSwatches(props: {
+  label: string;
+  value: IdentityHue | null;
+  onChange: (hue: IdentityHue | null) => void;
+}) {
   return (
     <div className={MENU_FRAME}>
       <div className="p-1">
-        <HueControl label={props.label} shape="agent" value={props.value ?? "olive"} arrowsMoveFocus
-          onChange={(hue) => props.onChange(hue === "olive" ? null : hue)} />
+        <HueControl
+          label={props.label}
+          shape="agent"
+          value={props.value ?? "olive"}
+          arrowsMoveFocus
+          onChange={(hue) => props.onChange(hue === "olive" ? null : hue)}
+        />
       </div>
     </div>
   );

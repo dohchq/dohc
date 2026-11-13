@@ -2,11 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MenuItemConstructorOptions } from "electron";
 import { buildMenuTemplate } from "./applicationMenu";
 
-function build(
-  isDev = false,
-  platform: NodeJS.Platform = "linux",
-  canInstallUpdate = false,
-) {
+function build(isDev = false, platform: NodeJS.Platform = "linux", canInstallUpdate = false) {
   const sendCommand = vi.fn();
   const stepZoom = vi.fn();
   const openRecentWorkspace = vi.fn();
@@ -40,13 +36,7 @@ function items(template: MenuItemConstructorOptions[], label: string) {
 describe("application menu template", () => {
   it("has the File/Edit/View/Go/Help structure", () => {
     const { template } = build();
-    expect(template.map((entry) => entry.label)).toEqual([
-      "File",
-      "Edit",
-      "View",
-      "Go",
-      "Help",
-    ]);
+    expect(template.map((entry) => entry.label)).toEqual(["File", "Edit", "View", "Go", "Help"]);
   });
 
   it("clicking a custom item sends its MenuCommand to the clicked window", () => {
@@ -61,16 +51,11 @@ describe("application menu template", () => {
     const { template, sendCommand } = build();
     const fileItems = items(template, "File");
     const importFiles = fileItems.find((entry) => entry.label === "Import files");
-    const exportWorkspace = fileItems.find(
-      (entry) => entry.label === "Export workspace as zip",
-    );
+    const exportWorkspace = fileItems.find((entry) => entry.label === "Export workspace as zip");
     const fakeWindow = { id: 4 };
 
     (importFiles?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
-    (exportWorkspace?.click as (a: unknown, b: unknown) => void)(
-      undefined,
-      fakeWindow,
-    );
+    (exportWorkspace?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
 
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "import-files");
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "export-workspace");
@@ -84,14 +69,8 @@ describe("application menu template", () => {
     expect(recentItems?.[0]?.sublabel).toBe("/Users/sam/work/personal");
 
     const fakeWindow = { id: 2 };
-    (recentItems[0]?.click as (a: unknown, b: unknown) => void)(
-      undefined,
-      fakeWindow,
-    );
-    expect(openRecentWorkspace).toHaveBeenCalledWith(
-      fakeWindow,
-      recentWorkspaces[0],
-    );
+    (recentItems[0]?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(openRecentWorkspace).toHaveBeenCalledWith(fakeWindow, recentWorkspaces[0]);
   });
 
   it("Open recent has a disabled empty state when no workspaces are known", () => {
@@ -134,14 +113,8 @@ describe("application menu template", () => {
     const moveToGroup = items(template, "View").find(
       (entry) => entry.label === "New editor group right",
     );
-    (moveToGroup?.click as (a: unknown, b: unknown) => void)(
-      undefined,
-      fakeWindow,
-    );
-    expect(sendCommand).toHaveBeenCalledWith(
-      fakeWindow,
-      "new-editor-group-right",
-    );
+    (moveToGroup?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "new-editor-group-right");
   });
 
   it.each([
@@ -152,10 +125,7 @@ describe("application menu template", () => {
     const fakeWindow = { id: 6 };
     const entry = items(template, "View").find((item) => item.label === label);
     expect(entry?.accelerator).toBe(accelerator);
-    (entry?.click as (a: unknown, b: unknown) => void)(
-      undefined,
-      fakeWindow,
-    );
+    (entry?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, id);
   });
 
@@ -216,47 +186,76 @@ describe("application menu template", () => {
     ]);
   });
 
-  it.each(["win32", "linux"] as const)("%s shows the tab commands beside Close tab, with Ctrl+PageDown kept as an alternate", (platform) => {
-    const { template, sendCommand } = build(false, platform);
-    const file = items(template, "File");
-    const quit = platform === "linux" ? 2 : 0;
-    expect(file.map((entry) => entry.label ?? entry.role).slice(-6 - quit, file.length - quit)).toEqual([
-      "Show next tab", "Show next tab (alternate)",
-      "Show previous tab", "Show previous tab (alternate)",
-      "Close tab", "Close window",
-    ]);
-    for (const [label, accelerator, hidden] of [
-      ["Show next tab", "Ctrl+Tab", false],
-      ["Show next tab (alternate)", "Ctrl+PageDown", true],
-      ["Show previous tab", "Ctrl+Shift+Tab", false],
-      ["Show previous tab (alternate)", "Ctrl+PageUp", true],
-    ] as const) {
-      const entry = file.find((item) => item.label === label);
-      expect(entry, label).toMatchObject({ accelerator, registerAccelerator: false });
-      expect(entry?.visible === false, label).toBe(hidden);
-    }
-    const fakeWindow = { id: 11 };
-    (file.find((item) => item.label === "Show previous tab")?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
-    expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "previous-tab");
-  });
+  it.each(["win32", "linux"] as const)(
+    "%s shows the tab commands beside Close tab, with Ctrl+PageDown kept as an alternate",
+    (platform) => {
+      const { template, sendCommand } = build(false, platform);
+      const file = items(template, "File");
+      const quit = platform === "linux" ? 2 : 0;
+      expect(
+        file.map((entry) => entry.label ?? entry.role).slice(-6 - quit, file.length - quit),
+      ).toEqual([
+        "Show next tab",
+        "Show next tab (alternate)",
+        "Show previous tab",
+        "Show previous tab (alternate)",
+        "Close tab",
+        "Close window",
+      ]);
+      for (const [label, accelerator, hidden] of [
+        ["Show next tab", "Ctrl+Tab", false],
+        ["Show next tab (alternate)", "Ctrl+PageDown", true],
+        ["Show previous tab", "Ctrl+Shift+Tab", false],
+        ["Show previous tab (alternate)", "Ctrl+PageUp", true],
+      ] as const) {
+        const entry = file.find((item) => item.label === label);
+        expect(entry, label).toMatchObject({ accelerator, registerAccelerator: false });
+        expect(entry?.visible === false, label).toBe(hidden);
+      }
+      const fakeWindow = { id: 11 };
+      (
+        file.find((item) => item.label === "Show previous tab")?.click as (
+          a: unknown,
+          b: unknown,
+        ) => void
+      )(undefined, fakeWindow);
+      expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "previous-tab");
+    },
+  );
 
   it("darwin: the Window menu holds Show next tab and Show previous tab, as in Safari", () => {
     const { template, sendCommand } = build(false, "darwin");
     const windowMenu = template.find((entry) => entry.role === "windowMenu")!;
     const entries = windowMenu.submenu as MenuItemConstructorOptions[];
     expect(entries.map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
-      "minimize", "zoom", "separator",
-      "Show next tab", "Show next tab (alternate)",
-      "Show previous tab", "Show previous tab (alternate)",
-      "separator", "front",
+      "minimize",
+      "zoom",
+      "separator",
+      "Show next tab",
+      "Show next tab (alternate)",
+      "Show previous tab",
+      "Show previous tab (alternate)",
+      "separator",
+      "front",
     ]);
-    expect(entries.filter((entry) => entry.label?.startsWith("Show")).map((entry) => [entry.accelerator, entry.visible !== false])).toEqual([
-      ["Ctrl+Tab", true], ["CommandOrControl+Shift+]", false],
-      ["Ctrl+Shift+Tab", true], ["CommandOrControl+Shift+[", false],
+    expect(
+      entries
+        .filter((entry) => entry.label?.startsWith("Show"))
+        .map((entry) => [entry.accelerator, entry.visible !== false]),
+    ).toEqual([
+      ["Ctrl+Tab", true],
+      ["CommandOrControl+Shift+]", false],
+      ["Ctrl+Shift+Tab", true],
+      ["CommandOrControl+Shift+[", false],
     ]);
     expect(items(template, "File").some((entry) => entry.label?.startsWith("Show"))).toBe(false);
     const fakeWindow = { id: 12 };
-    (entries.find((entry) => entry.label === "Show next tab (alternate)")?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    (
+      entries.find((entry) => entry.label === "Show next tab (alternate)")?.click as (
+        a: unknown,
+        b: unknown,
+      ) => void
+    )(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "next-tab");
   });
 
@@ -270,18 +269,30 @@ describe("application menu template", () => {
 
   it("linux: File ends with Quit on Ctrl+Q, the way Linux apps quit; Windows keeps Close window last", () => {
     const linuxFile = items(build(false, "linux").template, "File");
-    expect(linuxFile.slice(-3).map((i) => i.role ?? i.type)).toEqual(["close", "separator", "quit"]);
-    expect(linuxFile.at(-1)).toMatchObject({ role: "quit", label: "Quit", accelerator: "CommandOrControl+Q" });
+    expect(linuxFile.slice(-3).map((i) => i.role ?? i.type)).toEqual([
+      "close",
+      "separator",
+      "quit",
+    ]);
+    expect(linuxFile.at(-1)).toMatchObject({
+      role: "quit",
+      label: "Quit",
+      accelerator: "CommandOrControl+Q",
+    });
     const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
-      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
+      entries.flatMap((entry) => [
+        entry,
+        ...(Array.isArray(entry.submenu) ? all(entry.submenu) : []),
+      ]);
     expect(all(build(false, "win32").template).some((entry) => entry.role === "quit")).toBe(false);
     const macQuit = all(build(false, "darwin").template).filter((entry) => entry.role === "quit");
-    expect(macQuit).toEqual([{ role: "quit", label: "Quit dohc", accelerator: "CommandOrControl+Q" }]);
+    expect(macQuit).toEqual([
+      { role: "quit", label: "Quit dohc", accelerator: "CommandOrControl+Q" },
+    ]);
   });
 
   it("devtools is present in dev and absent in packaged builds", () => {
-    const roles = (isDev: boolean) =>
-      items(build(isDev).template, "View").map((i) => i.role);
+    const roles = (isDev: boolean) => items(build(isDev).template, "View").map((i) => i.role);
     expect(roles(true)).toContain("toggleDevTools");
     expect(roles(false)).not.toContain("toggleDevTools");
   });
@@ -298,7 +309,11 @@ describe("application menu template", () => {
     ]);
     const appMenu = template[0]!;
     expect(appMenu.role).toBe("appMenu");
-    expect((appMenu.submenu as MenuItemConstructorOptions[]).map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
+    expect(
+      (appMenu.submenu as MenuItemConstructorOptions[]).map(
+        (entry) => entry.role ?? entry.label ?? entry.type,
+      ),
+    ).toEqual([
       "about",
       "Check for updates",
       "Restart to update",
@@ -313,15 +328,22 @@ describe("application menu template", () => {
       "separator",
       "quit",
     ]);
-    const settings = (appMenu.submenu as MenuItemConstructorOptions[]).find((entry) => entry.label === "Settings…");
+    const settings = (appMenu.submenu as MenuItemConstructorOptions[]).find(
+      (entry) => entry.label === "Settings…",
+    );
     expect(settings?.accelerator).toBe("CommandOrControl+,");
   });
 
   it("darwin: one About, the native panel, and no Go menu", () => {
     const { template, sendCommand } = build(false, "darwin");
     const all = (entries: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] =>
-      entries.flatMap((entry) => [entry, ...(Array.isArray(entry.submenu) ? all(entry.submenu) : [])]);
-    const abouts = all(template).filter((entry) => entry.role === "about" || entry.label === "About dohc");
+      entries.flatMap((entry) => [
+        entry,
+        ...(Array.isArray(entry.submenu) ? all(entry.submenu) : []),
+      ]);
+    const abouts = all(template).filter(
+      (entry) => entry.role === "about" || entry.label === "About dohc",
+    );
     expect(abouts).toEqual([{ role: "about", label: "About dohc" }]);
     expect(template.some((entry) => entry.label === "Go")).toBe(false);
     const settings = all(template).filter((entry) => entry.label?.startsWith("Settings"));
@@ -336,16 +358,30 @@ describe("application menu template", () => {
     // Electron's editMenu role, with Find before Substitutions as in TextEdit.
     const edit = items(template, "Edit");
     expect(edit.map((entry) => entry.role ?? entry.label ?? entry.type)).toEqual([
-      "undo", "redo", "separator",
-      "cut", "copy", "paste", "pasteAndMatchStyle", "delete", "selectAll", "separator",
-      "Find", "Substitutions", "Speech",
+      "undo",
+      "redo",
+      "separator",
+      "cut",
+      "copy",
+      "paste",
+      "pasteAndMatchStyle",
+      "delete",
+      "selectAll",
+      "separator",
+      "Find",
+      "Substitutions",
+      "Speech",
     ]);
     expect(edit.find((entry) => entry.label === "Substitutions")?.submenu).toEqual([
-      { role: "showSubstitutions" }, { type: "separator" },
-      { role: "toggleSmartQuotes" }, { role: "toggleSmartDashes" }, { role: "toggleTextReplacement" },
+      { role: "showSubstitutions" },
+      { type: "separator" },
+      { role: "toggleSmartQuotes" },
+      { role: "toggleSmartDashes" },
+      { role: "toggleTextReplacement" },
     ]);
     expect(edit.find((entry) => entry.label === "Speech")?.submenu).toEqual([
-      { role: "startSpeaking" }, { role: "stopSpeaking" },
+      { role: "startSpeaking" },
+      { role: "stopSpeaking" },
     ]);
     const view = items(template, "View");
     expect(view.at(-1)).toEqual({ role: "togglefullscreen" });
@@ -353,7 +389,9 @@ describe("application menu template", () => {
     expect(help).toMatchObject({ label: "Help", role: "help" });
     const helpItems = help.submenu as MenuItemConstructorOptions[];
     // View registers the palette's keys; a second copy would register them again.
-    expect(helpItems).toEqual([{ label: "Command palette", enabled: true, click: expect.any(Function) }]);
+    expect(helpItems).toEqual([
+      { label: "Command palette", enabled: true, click: expect.any(Function) },
+    ]);
     const fakeWindow = { id: 10 };
     (helpItems[0]?.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand).toHaveBeenCalledWith(fakeWindow, "command-palette");
@@ -363,14 +401,42 @@ describe("application menu template", () => {
     const { template, sendCommand } = build(false, "darwin");
     const find = items(template, "Edit").find((entry) => entry.label === "Find");
     const entries = find?.submenu as MenuItemConstructorOptions[];
-    expect(entries.map(({ label, accelerator, registerAccelerator, enabled }) => ({ label, accelerator, registerAccelerator, enabled }))).toEqual([
-      { label: "Find…", accelerator: "CommandOrControl+F", registerAccelerator: false, enabled: true },
-      { label: "Find and replace…", accelerator: "CommandOrControl+Alt+F", registerAccelerator: false, enabled: true },
-      { label: "Find next", accelerator: "CommandOrControl+G", registerAccelerator: false, enabled: true },
-      { label: "Find previous", accelerator: "CommandOrControl+Shift+G", registerAccelerator: false, enabled: true },
+    expect(
+      entries.map(({ label, accelerator, registerAccelerator, enabled }) => ({
+        label,
+        accelerator,
+        registerAccelerator,
+        enabled,
+      })),
+    ).toEqual([
+      {
+        label: "Find…",
+        accelerator: "CommandOrControl+F",
+        registerAccelerator: false,
+        enabled: true,
+      },
+      {
+        label: "Find and replace…",
+        accelerator: "CommandOrControl+Alt+F",
+        registerAccelerator: false,
+        enabled: true,
+      },
+      {
+        label: "Find next",
+        accelerator: "CommandOrControl+G",
+        registerAccelerator: false,
+        enabled: true,
+      },
+      {
+        label: "Find previous",
+        accelerator: "CommandOrControl+Shift+G",
+        registerAccelerator: false,
+        enabled: true,
+      },
     ]);
     const fakeWindow = { id: 13 };
-    for (const entry of entries) (entry.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
+    for (const entry of entries)
+      (entry.click as (a: unknown, b: unknown) => void)(undefined, fakeWindow);
     expect(sendCommand.mock.calls).toEqual([
       [fakeWindow, "editor-find"],
       [fakeWindow, "editor-replace"],
@@ -379,18 +445,32 @@ describe("application menu template", () => {
     ]);
   });
 
-  it.each(["win32", "linux"] as const)("%s keeps Edit, Go, and Help as they were, without macOS items", (platform) => {
-    const { template } = build(false, platform);
-    expect(template.map((entry) => entry.label)).toEqual(["File", "Edit", "View", "Go", "Help"]);
-    expect(items(template, "Edit").map((entry) => entry.role ?? entry.type)).toEqual([
-      "undo", "redo", "separator", "cut", "copy", "paste", "selectAll",
-    ]);
-    expect(template.at(-1)?.role).toBe("help");
-    expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
-      "Check for updates", "Restart to update", "separator", "About dohc",
-    ]);
-    expect(items(template, "View").some((entry) => entry.role === "togglefullscreen")).toBe(false);
-  });
+  it.each(["win32", "linux"] as const)(
+    "%s keeps Edit, Go, and Help as they were, without macOS items",
+    (platform) => {
+      const { template } = build(false, platform);
+      expect(template.map((entry) => entry.label)).toEqual(["File", "Edit", "View", "Go", "Help"]);
+      expect(items(template, "Edit").map((entry) => entry.role ?? entry.type)).toEqual([
+        "undo",
+        "redo",
+        "separator",
+        "cut",
+        "copy",
+        "paste",
+        "selectAll",
+      ]);
+      expect(template.at(-1)?.role).toBe("help");
+      expect(items(template, "Help").map((entry) => entry.label ?? entry.type)).toEqual([
+        "Check for updates",
+        "Restart to update",
+        "separator",
+        "About dohc",
+      ]);
+      expect(items(template, "View").some((entry) => entry.role === "togglefullscreen")).toBe(
+        false,
+      );
+    },
+  );
 
   it("About is a Help click-through, not a command", () => {
     const { template, showAbout, sendCommand } = build();
@@ -416,9 +496,7 @@ describe("application menu template", () => {
 
   it("disables Help restart when no update is installable", () => {
     const { template } = build();
-    const install = items(template, "Help").find(
-      (i) => i.label === "Restart to update",
-    );
+    const install = items(template, "Help").find((i) => i.label === "Restart to update");
 
     expect(install?.enabled).toBe(false);
   });

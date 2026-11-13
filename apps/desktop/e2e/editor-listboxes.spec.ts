@@ -16,12 +16,17 @@ import {
 // needs real layout, so it lives in e2e. Each list is also captured in both
 // themes, into the test's output folder.
 
-const PAGES = Array.from({ length: 14 }, (_, index) => `page-${String(index + 1).padStart(2, "0")}.md`);
+const PAGES = Array.from(
+  { length: 14 },
+  (_, index) => `page-${String(index + 1).padStart(2, "0")}.md`,
+);
 
 async function inView(row: Locator, list: Locator): Promise<boolean> {
   const [rowBox, listBox] = await Promise.all([row.boundingBox(), list.boundingBox()]);
   if (!rowBox || !listBox) return false;
-  return rowBox.y >= listBox.y - 0.5 && rowBox.y + rowBox.height <= listBox.y + listBox.height + 0.5;
+  return (
+    rowBox.y >= listBox.y - 0.5 && rowBox.y + rowBox.height <= listBox.y + listBox.height + 0.5
+  );
 }
 
 async function scrolls(list: Locator): Promise<boolean> {
@@ -42,7 +47,12 @@ async function capture(page: Page, list: Locator, name: string): Promise<void> {
     await setTheme(page, theme);
     await page.screenshot({
       path: test.info().outputPath(`${name}-${theme}.png`),
-      clip: { x: Math.max(0, box.x - 24), y: Math.max(0, box.y - 24), width: box.width + 48, height: box.height + 48 },
+      clip: {
+        x: Math.max(0, box.x - 24),
+        y: Math.max(0, box.y - 24),
+        width: box.width + 48,
+        height: box.height + 48,
+      },
     });
   }
   await setTheme(page, "light");
@@ -71,7 +81,9 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1300, 850));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.setSize(1300, 850),
+    );
     await page.emulateMedia({ reducedMotion: "reduce" });
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, PAGES.at(-1)!);
@@ -166,7 +178,11 @@ test("the page-link and emoji pickers leave keys to the IME while it composes", 
 
     const cdp = await page.context().newCDPSession(page);
     const compose = (text: string) =>
-      cdp.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+      cdp.send("Input.imeSetComposition", {
+        text,
+        selectionStart: text.length,
+        selectionEnd: text.length,
+      });
     const commit = (text: string) => cdp.send("Input.insertText", { text });
     // The editor records each key that reaches it while composing, and
     // whether anything consumed it on the way.
@@ -181,8 +197,18 @@ test("the page-link and emoji pickers leave keys to the IME while it composes", 
     async function pressComposing(keys: string[]): Promise<void> {
       await editor.evaluate((element) => (element as Recording).composingKeys.splice(0));
       for (const key of keys) {
-        await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code: key, windowsVirtualKeyCode: 229 });
-        await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: 229 });
+        await cdp.send("Input.dispatchKeyEvent", {
+          type: "rawKeyDown",
+          key,
+          code: key,
+          windowsVirtualKeyCode: 229,
+        });
+        await cdp.send("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          key,
+          code: key,
+          windowsVirtualKeyCode: 229,
+        });
       }
       expect(await editor.evaluate((element) => (element as Recording).composingKeys)).toEqual(
         keys.map((key) => `${key} 229 false`),
@@ -229,7 +255,10 @@ test("the chat mention list keeps the option Enter acts on in view as the arrows
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(temp, PAGES.map((path) => ({ path, contents: `# ${path}\n` })));
+    await writeWorkspaceFiles(
+      temp,
+      PAGES.map((path) => ({ path, contents: `# ${path}\n` })),
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await page.emulateMedia({ reducedMotion: "reduce" });

@@ -30,9 +30,7 @@ describe("slugifyBaseName", () => {
   });
   it("lowercases, dashes non-alphanumerics, and drops the extension", () => {
     expect(slugifyBaseName("My Photo.PNG")).toBe("my-photo");
-    expect(slugifyBaseName("Screen Shot 2026-07-11.jpeg")).toBe(
-      "screen-shot-2026-07-11",
-    );
+    expect(slugifyBaseName("Screen Shot 2026-07-11.jpeg")).toBe("screen-shot-2026-07-11");
   });
 
   it("falls back to 'image' for an empty slug", () => {
@@ -65,11 +63,7 @@ describe("imageExtension", () => {
 
 describe("generateAssetFilename", () => {
   it("produces <slug>-<hash>.<ext>", () => {
-    const name = generateAssetFilename(
-      "My Photo.png",
-      "image/png",
-      new Uint8Array([1, 2, 3, 4]),
-    );
+    const name = generateAssetFilename("My Photo.png", "image/png", new Uint8Array([1, 2, 3, 4]));
     expect(name).toMatch(/^my-photo-[0-9a-z]+\.png$/);
   });
 });
@@ -212,12 +206,7 @@ describe("sanitizeAttachmentFolderName", () => {
 
 // jsdom's File does not implement arrayBuffer() in this environment, so tests
 // use a minimal File-like carrying the fields the paste path reads.
-function fakeImageFile(
-  name: string,
-  type: string,
-  bytes: Uint8Array,
-  sizeOverride?: number,
-): File {
+function fakeImageFile(name: string, type: string, bytes: Uint8Array, sizeOverride?: number): File {
   return {
     name,
     type,
@@ -280,11 +269,7 @@ function makeMockView(docSize = 8, coordsPos: number | null = 5) {
 describe("insertImageAtPosition", () => {
   it("dispatches an image insert and returns the position after it", () => {
     const { view, dispatched } = makeMockView();
-    const next = insertImageAtPosition(
-      view as never,
-      { src: "assets/pic.png", alt: "" },
-      3,
-    );
+    const next = insertImageAtPosition(view as never, { src: "assets/pic.png", alt: "" }, 3);
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]!.pos).toBe(3);
     expect(dispatched[0]!.node.attrs).toEqual({ src: "assets/pic.png", alt: "" });
@@ -322,16 +307,8 @@ describe("insertImageAtPosition", () => {
       },
     };
 
-    let pos = insertImageAtPosition(
-      view as never,
-      { src: "one.png", alt: "" },
-      2,
-    );
-    pos = insertImageAtPosition(
-      view as never,
-      { src: "two.png", alt: "" },
-      pos,
-    );
+    let pos = insertImageAtPosition(view as never, { src: "one.png", alt: "" }, 2);
+    pos = insertImageAtPosition(view as never, { src: "two.png", alt: "" }, pos);
 
     expect(state.doc.child(1).toJSON()).toMatchObject({
       type: "paragraph",
@@ -376,11 +353,9 @@ describe("insertImageAtPosition", () => {
         schema.node("plain", null, schema.text("After")),
       ]),
     });
-    const dispatch = vi.fn(
-      (transaction: Parameters<typeof state.apply>[0]) => {
-        state = state.apply(transaction);
-      },
-    );
+    const dispatch = vi.fn((transaction: Parameters<typeof state.apply>[0]) => {
+      state = state.apply(transaction);
+    });
     const view = {
       get state() {
         return state;
@@ -388,11 +363,7 @@ describe("insertImageAtPosition", () => {
       dispatch,
     };
 
-    const next = insertImageAtPosition(
-      view as never,
-      { src: "assets/pic.png", alt: "" },
-      2,
-    );
+    const next = insertImageAtPosition(view as never, { src: "assets/pic.png", alt: "" }, 2);
 
     expect(next).toBe(2);
     expect(dispatch).not.toHaveBeenCalled();
@@ -422,8 +393,7 @@ describe("documentReplacementMap", () => {
       emphasis: {},
     },
   });
-  const paragraph = (text: string) =>
-    schema.node("paragraph", null, schema.text(text));
+  const paragraph = (text: string) => schema.node("paragraph", null, schema.text(text));
   const fiftySubstitutedParagraphs = () => {
     const beforeParagraphs = Array.from({ length: 100 }, (_, index) =>
       paragraph(`before-${index.toString().padStart(3, "0")}`),
@@ -486,10 +456,7 @@ describe("documentReplacementMap", () => {
     const strong = schema.mark("strong");
     const emphasis = schema.mark("emphasis");
     const before = schema.node("doc", null, [
-      schema.node("paragraph", null, [
-        schema.text("AA", [strong]),
-        schema.text("BB", [emphasis]),
-      ]),
+      schema.node("paragraph", null, [schema.text("AA", [strong]), schema.text("BB", [emphasis])]),
     ]);
     const after = schema.node("doc", null, [
       schema.node("paragraph", null, [
@@ -524,44 +491,30 @@ describe("documentReplacementMap", () => {
   });
 
   it("preserves unchanged blocks after the child diff budget expires", () => {
-    const { beforeParagraphs, afterParagraphs } =
-      fiftySubstitutedParagraphs();
+    const { beforeParagraphs, afterParagraphs } = fiftySubstitutedParagraphs();
     const before = schema.node("doc", null, beforeParagraphs);
     const after = schema.node("doc", null, afterParagraphs);
     const mapping = documentReplacementMap(before, after);
     const positionInParagraph80 =
-      beforeParagraphs
-        .slice(0, 80)
-        .reduce((position, node) => position + node.nodeSize, 1) + 3;
+      beforeParagraphs.slice(0, 80).reduce((position, node) => position + node.nodeSize, 1) + 3;
     const expectedPosition =
-      afterParagraphs
-        .slice(0, 80)
-        .reduce((position, node) => position + node.nodeSize, 1) + 3;
+      afterParagraphs.slice(0, 80).reduce((position, node) => position + node.nodeSize, 1) + 3;
 
-    expect(changedRanges(mapping)).not.toEqual([
-      0,
-      before.content.size,
-      after.content.size,
-    ]);
+    expect(changedRanges(mapping)).not.toEqual([0, before.content.size, after.content.size]);
     expect(mapping.map(positionInParagraph80, 1)).toBe(expectedPosition);
   });
 
   it("preserves unchanged nested blocks after the shared budget expires", () => {
-    const { beforeParagraphs, afterParagraphs } =
-      fiftySubstitutedParagraphs();
+    const { beforeParagraphs, afterParagraphs } = fiftySubstitutedParagraphs();
     const beforeQuote = schema.node("blockquote", null, beforeParagraphs);
     const afterQuote = schema.node("blockquote", null, afterParagraphs);
     const before = schema.node("doc", null, [beforeQuote]);
     const after = schema.node("doc", null, [afterQuote]);
     const mapping = documentReplacementMap(before, after);
     const positionInParagraph80 =
-      beforeParagraphs
-        .slice(0, 80)
-        .reduce((position, node) => position + node.nodeSize, 2) + 3;
+      beforeParagraphs.slice(0, 80).reduce((position, node) => position + node.nodeSize, 2) + 3;
     const expectedPosition =
-      afterParagraphs
-        .slice(0, 80)
-        .reduce((position, node) => position + node.nodeSize, 2) + 3;
+      afterParagraphs.slice(0, 80).reduce((position, node) => position + node.nodeSize, 2) + 3;
 
     expect(changedRanges(mapping)).not.toEqual([
       1,
@@ -589,8 +542,9 @@ describe("documentReplacementMap", () => {
   });
 
   it("keeps precise ranges for 32 independent ordinary edits", () => {
-    const beforeText = Array.from({ length: 32 }, (_, index) =>
-      `a${index.toString().padStart(2, "0")}-`,
+    const beforeText = Array.from(
+      { length: 32 },
+      (_, index) => `a${index.toString().padStart(2, "0")}-`,
     ).join("");
     const afterText = beforeText.replaceAll("a", "b");
     const before = schema.node("doc", null, [paragraph(beforeText)]);
@@ -648,10 +602,7 @@ describe("placeImageFiles", () => {
         writeAsset: async () => {
           state = EditorState.create({
             schema,
-            doc: schema.node("doc", null, [
-              paragraph("Peer"),
-              paragraph("Target"),
-            ]),
+            doc: schema.node("doc", null, [paragraph("Peer"), paragraph("Target")]),
           });
         },
       },
@@ -694,11 +645,9 @@ describe("placeImageFiles", () => {
       ]),
     });
     const startPos = 2;
-    const dispatch = vi.fn(
-      (transaction: Parameters<typeof state.apply>[0]) => {
-        state = state.apply(transaction);
-      },
-    );
+    const dispatch = vi.fn((transaction: Parameters<typeof state.apply>[0]) => {
+      state = state.apply(transaction);
+    });
     const view = {
       get state() {
         return state;
@@ -758,8 +707,7 @@ describe("placeImageFiles", () => {
         },
       },
     });
-    const paragraph = () =>
-      schema.node("paragraph", null, schema.text("same"));
+    const paragraph = () => schema.node("paragraph", null, schema.text("same"));
     let state = EditorState.create({
       schema,
       doc: schema.node("doc", null, [paragraph(), paragraph(), paragraph()]),
@@ -814,15 +762,10 @@ describe("placeImageFiles", () => {
         },
       },
     });
-    const paragraph = (text: string) =>
-      schema.node("paragraph", null, schema.text(text));
+    const paragraph = (text: string) => schema.node("paragraph", null, schema.text(text));
     let state = EditorState.create({
       schema,
-      doc: schema.node("doc", null, [
-        paragraph("Before"),
-        paragraph("Target"),
-        paragraph("After"),
-      ]),
+      doc: schema.node("doc", null, [paragraph("Before"), paragraph("Target"), paragraph("After")]),
     });
     const view = {
       get state() {
@@ -883,14 +826,11 @@ describe("placeImageFiles", () => {
         },
       },
     });
-    const paragraph = (text: string) =>
-      schema.node("paragraph", null, schema.text(text));
+    const paragraph = (text: string) => schema.node("paragraph", null, schema.text(text));
     const stable = " stable ";
     let state = EditorState.create({
       schema,
-      doc: schema.node("doc", null, [
-        paragraph(`${"a".repeat(96)}${stable}${"b".repeat(96)}`),
-      ]),
+      doc: schema.node("doc", null, [paragraph(`${"a".repeat(96)}${stable}${"b".repeat(96)}`)]),
     });
     const view = {
       get state() {
@@ -947,8 +887,7 @@ describe("placeImageFiles", () => {
         },
       },
     });
-    const paragraph = (text: string) =>
-      schema.node("paragraph", null, schema.text(text));
+    const paragraph = (text: string) => schema.node("paragraph", null, schema.text(text));
     let state = EditorState.create({
       schema,
       doc: schema.node("doc", null, [paragraph("Target")]),
@@ -978,10 +917,7 @@ describe("placeImageFiles", () => {
         readAttachments: async () => {
           state = EditorState.create({
             schema,
-            doc: schema.node("doc", null, [
-              paragraph("Peer"),
-              paragraph("Target"),
-            ]),
+            doc: schema.node("doc", null, [paragraph("Peer"), paragraph("Target")]),
           });
           return { location: "per-document", folderName: "assets" };
         },
@@ -1015,11 +951,7 @@ describe("handleImagePaste", () => {
   it("writes the image next to the doc and inserts a relative-src node", async () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn().mockResolvedValue(undefined);
-    const file = fakeImageFile(
-      "My Photo.png",
-      "image/png",
-      new Uint8Array([1, 2, 3, 4]),
-    );
+    const file = fakeImageFile("My Photo.png", "image/png", new Uint8Array([1, 2, 3, 4]));
     const preventDefault = vi.fn();
     const event = {
       clipboardData: { files: [file] },
@@ -1042,9 +974,7 @@ describe("handleImagePaste", () => {
 
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
     expect(dispatched[0]!.node.attrs).toMatchObject({ alt: "" });
-    expect(dispatched[0]!.node.attrs.src).toMatch(
-      /^assets\/my-photo-[0-9a-z]+\.png$/,
-    );
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^assets\/my-photo-[0-9a-z]+\.png$/);
   });
 
   it("writes to a global root folder and inserts an upward-relative src", async () => {
@@ -1072,9 +1002,7 @@ describe("handleImagePaste", () => {
     expect(writePath).toMatch(/^attachments\/shot-[0-9a-z]+\.png$/);
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
     // ...and the node src climbs to it from the nested doc's folder.
-    expect(dispatched[0]!.node.attrs.src).toMatch(
-      /^\.\.\/attachments\/shot-[0-9a-z]+\.png$/,
-    );
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^\.\.\/attachments\/shot-[0-9a-z]+\.png$/);
   });
 
   it("skips an oversized image without writing it", async () => {
@@ -1147,23 +1075,17 @@ describe("handleImageDrop", () => {
     expect(handled).toBe(true);
     expect(preventDefault).toHaveBeenCalled();
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
-    expect(writeAsset.mock.calls[0]![0]).toMatch(
-      /^notes\/assets\/dropped-shot-[0-9a-z]+\.png$/,
-    );
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\/dropped-shot-[0-9a-z]+\.png$/);
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
     // Inserted where the cursor was, not at the selection.
     expect(dispatched[0]!.pos).toBe(5);
-    expect(dispatched[0]!.node.attrs.src).toMatch(
-      /^assets\/dropped-shot-[0-9a-z]+\.png$/,
-    );
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^assets\/dropped-shot-[0-9a-z]+\.png$/);
   });
 
   it("honors the attachment setting for the src it inserts", async () => {
     const { view, dispatched } = makeMockView(8, 5);
     const writeAsset = vi.fn().mockResolvedValue(undefined);
-    const { event } = makeDragEvent([
-      fakeImageFile("shot.png", "image/png", new Uint8Array([7])),
-    ]);
+    const { event } = makeDragEvent([fakeImageFile("shot.png", "image/png", new Uint8Array([7]))]);
 
     handleImageDrop(view as never, event, {
       workspaceId: "ws1",
@@ -1176,13 +1098,9 @@ describe("handleImageDrop", () => {
     });
 
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
-    expect(writeAsset.mock.calls[0]![0]).toMatch(
-      /^attachments\/shot-[0-9a-z]+\.png$/,
-    );
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^attachments\/shot-[0-9a-z]+\.png$/);
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
-    expect(dispatched[0]!.node.attrs.src).toMatch(
-      /^\.\.\/attachments\/shot-[0-9a-z]+\.png$/,
-    );
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^\.\.\/attachments\/shot-[0-9a-z]+\.png$/);
   });
 
   it("leaves an in-editor drag (a slice, no files) to ProseMirror", () => {
@@ -1254,9 +1172,7 @@ describe("handlePaneImageDrop", () => {
     expect(handled).toBe(true);
     expect(preventDefault).toHaveBeenCalled();
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
-    expect(writeAsset.mock.calls[0]![0]).toMatch(
-      /^notes\/assets\/title-drop-[0-9a-z]+\.png$/,
-    );
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\/title-drop-[0-9a-z]+\.png$/);
     await vi.waitFor(() => expect(dispatched).toHaveLength(1));
     expect(dispatched[0]!.pos).toBe(8); // end of the document
   });
@@ -1266,16 +1182,17 @@ describe("handlePaneImageDrop", () => {
     const writeAsset = vi.fn();
     // ProseMirror's handleDrop preventDefaults the drops it takes; the pane
     // listener sits on an ancestor and must skip those.
-    const { event } = makeDragEvent(
-      [fakeImageFile("a.png", "image/png", new Uint8Array([1]))],
-      { defaultPrevented: true },
-    );
+    const { event } = makeDragEvent([fakeImageFile("a.png", "image/png", new Uint8Array([1]))], {
+      defaultPrevented: true,
+    });
 
-    expect(handlePaneImageDrop(view as never, event, {
-      workspaceId: "ws1",
-      docPath: "notes/plan.md",
-      writeAsset,
-    })).toBe(false);
+    expect(
+      handlePaneImageDrop(view as never, event, {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset,
+      }),
+    ).toBe(false);
     expect(writeAsset).not.toHaveBeenCalled();
     expect(dispatched).toHaveLength(0);
   });
@@ -1287,11 +1204,13 @@ describe("handlePaneImageDrop", () => {
       fakeImageFile("notes.txt", "text/plain", new Uint8Array([1])),
     ]);
 
-    expect(handlePaneImageDrop(view as never, event, {
-      workspaceId: "ws1",
-      docPath: "notes/plan.md",
-      writeAsset,
-    })).toBe(false);
+    expect(
+      handlePaneImageDrop(view as never, event, {
+        workspaceId: "ws1",
+        docPath: "notes/plan.md",
+        writeAsset,
+      }),
+    ).toBe(false);
     expect(writeAsset).not.toHaveBeenCalled();
   });
 });
@@ -1306,9 +1225,7 @@ describe("pickAndInsertImages", () => {
   it("writes and inserts each image returned by the native picker", async () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn().mockResolvedValue(undefined);
-    const pickImages = vi
-      .fn()
-      .mockResolvedValue([picked("Diagram.png", [5, 6, 7])]);
+    const pickImages = vi.fn().mockResolvedValue([picked("Diagram.png", [5, 6, 7])]);
 
     await pickAndInsertImages(view as never, 3, {
       workspaceId: "ws1",
@@ -1321,14 +1238,10 @@ describe("pickAndInsertImages", () => {
     expect(writeAsset).toHaveBeenCalledTimes(1);
     // The picker's bytes travel the same write path paste/drop use, so the
     // attachment-location logic applies unchanged.
-    expect(writeAsset.mock.calls[0]![0]).toMatch(
-      /^notes\/assets\/diagram-[0-9a-z]+\.png$/,
-    );
+    expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\/diagram-[0-9a-z]+\.png$/);
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]!.pos).toBe(3);
-    expect(dispatched[0]!.node.attrs.src).toMatch(
-      /^assets\/diagram-[0-9a-z]+\.png$/,
-    );
+    expect(dispatched[0]!.node.attrs.src).toMatch(/^assets\/diagram-[0-9a-z]+\.png$/);
   });
 
   it("applies the attachment setting to picked images too", async () => {
@@ -1354,9 +1267,7 @@ describe("pickAndInsertImages", () => {
   it("inserts every picked image, in order", async () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn().mockResolvedValue(undefined);
-    const pickImages = vi
-      .fn()
-      .mockResolvedValue([picked("a.png", [1]), picked("b.png", [2])]);
+    const pickImages = vi.fn().mockResolvedValue([picked("a.png", [1]), picked("b.png", [2])]);
 
     await pickAndInsertImages(view as never, 3, {
       workspaceId: "ws1",
@@ -1383,8 +1294,7 @@ describe("pickAndInsertImages", () => {
         },
       },
     });
-    const paragraph = (text: string) =>
-      schema.node("paragraph", null, schema.text(text));
+    const paragraph = (text: string) => schema.node("paragraph", null, schema.text(text));
     let state = EditorState.create({
       schema,
       doc: schema.node("doc", null, [paragraph("Target")]),
@@ -1406,10 +1316,7 @@ describe("pickAndInsertImages", () => {
       pickImages: async () => {
         state = EditorState.create({
           schema,
-          doc: schema.node("doc", null, [
-            paragraph("Peer"),
-            paragraph("Target"),
-          ]),
+          doc: schema.node("doc", null, [paragraph("Peer"), paragraph("Target")]),
         });
         return [picked("photo.png", [1])];
       },
@@ -1551,5 +1458,7 @@ it("preserves scripts and NFC in pasted image names within the byte limit", () =
   expect(slugifyBaseName("Cafe\u0301.png")).toBe("café");
   expect(slugifyBaseName("界".repeat(80) + ".png")).toBe("界".repeat(13));
   expect(slugifyBaseName("CON.png")).toBe("name-con");
-  expect(generateAssetFilename("会议.png", "image/png", new Uint8Array([1]))).toMatch(/^会议-[a-z0-9]+\.png$/u);
+  expect(generateAssetFilename("会议.png", "image/png", new Uint8Array([1]))).toMatch(
+    /^会议-[a-z0-9]+\.png$/u,
+  );
 });

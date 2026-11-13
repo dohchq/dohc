@@ -58,7 +58,9 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
 // The Explorer's own menu, which a Collection that can't open must never open
 // beside its Show in Files.
 function explorerMenu() {
-  return vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [{ kind: "item", label: "Rename", id: "rename" }]);
+  return vi.fn(async (_input: unknown): Promise<ExplorerMenuEntry[]> => [
+    { kind: "item", label: "Rename", id: "rename" },
+  ]);
 }
 
 function treeRow(path: string): HTMLElement {
@@ -70,17 +72,36 @@ function treeRow(path: string): HTMLElement {
 }
 
 describe("Explorer collection folders", () => {
-  it("uses the human table label for open data Collections and a neutral loading label",()=>{
-    const path=transactionalCollectionTabPath("data/dataset.json","00000000-0000-4000-8000-000000000002");
-    expect(editorTitle(path,"Registrations")).toBe("Registrations");expect(editorTitle(path)).toBe("Collection");
+  it("uses the human table label for open data Collections and a neutral loading label", () => {
+    const path = transactionalCollectionTabPath(
+      "data/dataset.json",
+      "00000000-0000-4000-8000-000000000002",
+    );
+    expect(editorTitle(path, "Registrations")).toBe("Registrations");
+    expect(editorTitle(path)).toBe("Collection");
   });
   it("offers recovery before the workspace has any data Collections", () => {
     const onRestoreCollection = vi.fn();
-    const view = render(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection })} />);
-    fireEvent.click(within(screen.getByRole("region", { name: "Collections" })).getByRole("button", { name: "Collections actions" }));
+    const view = render(
+      <Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection })} />,
+    );
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Collections" })).getByRole("button", {
+        name: "Collections actions",
+      }),
+    );
     fireEvent.click(screen.getByRole("menuitem", { name: "Restore from recovery file…" }));
     expect(onRestoreCollection).toHaveBeenCalledOnce();
-    view.rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], onRestoreCollection, shareView: { granterEmail: "owner@example.test" } })} />);
+    view.rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          dataCollections: [],
+          onRestoreCollection,
+          shareView: { granterEmail: "owner@example.test" },
+        })}
+      />,
+    );
     expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
   });
   it("names why a Collection can't open, and shows the files to fix in Files", async () => {
@@ -88,14 +109,41 @@ describe("Explorer collection folders", () => {
     const readExplorerMenu = explorerMenu();
     vi.stubGlobal("dohcDesktop", { readExplorerMenu });
     const tableId = "00000000-0000-4000-8000-000000000002";
-    const props = explorerProps({ mode: "home", onOpenDataCollection, dataCollections: [
-      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
-      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
-      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId, name: "Volunteers" },
-    ] });
+    const props = explorerProps({
+      mode: "home",
+      onOpenDataCollection,
+      dataCollections: [
+        {
+          datasetId: "d1",
+          datasetPath: null,
+          datasetAddressStatus: "unreadable",
+          datasetPaths: ["guests/dataset.json"],
+          tableId,
+          name: "Guests",
+        },
+        {
+          datasetId: "d2",
+          datasetPath: null,
+          datasetAddressStatus: "ambiguous",
+          datasetPaths: ["copy/dataset.json", "rooms/dataset.json"],
+          tableId,
+          name: "Rooms",
+        },
+        {
+          datasetId: "d3",
+          datasetPath: null,
+          datasetAddressStatus: "missing",
+          tableId,
+          name: "Volunteers",
+        },
+      ],
+    });
     const view = render(<Explorer {...props} />);
     try {
-      const unreadable = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
+      const unreadable = screen.getByRole("button", {
+        description:
+          "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+      });
       expect(unreadable.textContent).toContain("Can't read dataset.json");
       expect(unreadable.hasAttribute("aria-disabled")).toBe(false);
       fireEvent.click(unreadable);
@@ -103,7 +151,10 @@ describe("Explorer collection folders", () => {
       expect(props.onModeChange).toHaveBeenLastCalledWith("files");
       expect(props.onSetFolderExpanded).toHaveBeenCalledWith("guests", true);
 
-      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      const share = screen.getByRole("button", {
+        description:
+          "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+      });
       expect(share.textContent).toContain("Not in this share");
       expect(share.getAttribute("aria-disabled")).toBe("true");
       vi.mocked(props.onModeChange).mockClear();
@@ -113,7 +164,10 @@ describe("Explorer collection folders", () => {
       expect(props.onModeChange).not.toHaveBeenCalled();
       expect(screen.queryByRole("menu")).toBeNull();
 
-      const ambiguous = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      const ambiguous = screen.getByRole("button", {
+        description:
+          "Several dataset.json files name this Collection. Keep one and remove the others.",
+      });
       expect(ambiguous.textContent).toContain("2 dataset.json files");
       fireEvent.contextMenu(ambiguous);
       await act(async () => {});
@@ -121,23 +175,59 @@ describe("Explorer collection folders", () => {
       fireEvent.click(screen.getByRole("menuitem", { name: "Show in Files" }));
       expect(readExplorerMenu).not.toHaveBeenCalled();
       expect(props.onModeChange).toHaveBeenLastCalledWith("files");
-      view.rerender(<Explorer {...props} mode="files" expandedFolders={["copy", "rooms"]} folders={[...props.folders, "copy", "rooms"]}
-        files={[...props.files, { path: "copy/dataset.json", kind: "file" }, { path: "rooms/dataset.json", kind: "file" }]} />);
+      view.rerender(
+        <Explorer
+          {...props}
+          mode="files"
+          expandedFolders={["copy", "rooms"]}
+          folders={[...props.folders, "copy", "rooms"]}
+          files={[
+            ...props.files,
+            { path: "copy/dataset.json", kind: "file" },
+            { path: "rooms/dataset.json", kind: "file" },
+          ]}
+        />,
+      );
       expect(treeRow("copy/dataset.json").getAttribute("aria-selected")).toBe("true");
       expect(treeRow("rooms/dataset.json").getAttribute("aria-selected")).toBe("true");
-    } finally { vi.unstubAllGlobals(); }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
   it("gives focus back to the row when its menu closes, so the arrows and Enter still work", () => {
     vi.stubGlobal("dohcDesktop", { readExplorerMenu: explorerMenu() });
     const tableId = "00000000-0000-4000-8000-000000000002";
-    const props = explorerProps({ mode: "home", dataCollections: [
-      { datasetId: "d1", datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["guests/dataset.json"], tableId, name: "Guests" },
-      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId, name: "Rooms" },
-    ] });
+    const props = explorerProps({
+      mode: "home",
+      dataCollections: [
+        {
+          datasetId: "d1",
+          datasetPath: null,
+          datasetAddressStatus: "unreadable",
+          datasetPaths: ["guests/dataset.json"],
+          tableId,
+          name: "Guests",
+        },
+        {
+          datasetId: "d2",
+          datasetPath: null,
+          datasetAddressStatus: "ambiguous",
+          datasetPaths: ["copy/dataset.json", "rooms/dataset.json"],
+          tableId,
+          name: "Rooms",
+        },
+      ],
+    });
     render(<Explorer {...props} />);
     try {
-      const guests = screen.getByRole("button", { description: "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History." });
-      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      const guests = screen.getByRole("button", {
+        description:
+          "dohc can't read this Collection's dataset.json. Fix the file, or restore it from History.",
+      });
+      const rooms = screen.getByRole("button", {
+        description:
+          "Several dataset.json files name this Collection. Keep one and remove the others.",
+      });
       rooms.focus();
       fireEvent.contextMenu(rooms);
       expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Show in Files" }));
@@ -151,16 +241,35 @@ describe("Explorer collection folders", () => {
       fireEvent.keyDown(rooms, { key: "Enter" });
       expect(props.onModeChange).toHaveBeenLastCalledWith("files");
       expect(props.onSetFolderExpanded).toHaveBeenCalledWith("rooms", true);
-    } finally { vi.unstubAllGlobals(); }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
   it("opens only a broken Collection's own menu from the Menu key and Shift+F10, with its row marked", async () => {
     const readExplorerMenu = explorerMenu();
     vi.stubGlobal("dohcDesktop", { readExplorerMenu });
-    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
-      { datasetId: "d2", datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "rooms/dataset.json"], tableId: "00000000-0000-4000-8000-000000000002", name: "Rooms" },
-    ] })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          dataCollections: [
+            {
+              datasetId: "d2",
+              datasetPath: null,
+              datasetAddressStatus: "ambiguous",
+              datasetPaths: ["copy/dataset.json", "rooms/dataset.json"],
+              tableId: "00000000-0000-4000-8000-000000000002",
+              name: "Rooms",
+            },
+          ],
+        })}
+      />,
+    );
     try {
-      const rooms = screen.getByRole("button", { description: "Several dataset.json files name this Collection. Keep one and remove the others." });
+      const rooms = screen.getByRole("button", {
+        description:
+          "Several dataset.json files name this Collection. Keep one and remove the others.",
+      });
       for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
         rooms.focus();
         fireEvent.keyDown(rooms, key);
@@ -176,16 +285,34 @@ describe("Explorer collection folders", () => {
         expect(document.activeElement).toBe(rooms);
       }
       expect(readExplorerMenu).not.toHaveBeenCalled();
-    } finally { vi.unstubAllGlobals(); }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
   it("opens no menu from the Menu key or Shift+F10 on a Collection a share leaves out", async () => {
     const readExplorerMenu = explorerMenu();
     vi.stubGlobal("dohcDesktop", { readExplorerMenu });
-    render(<Explorer {...explorerProps({ mode: "home", dataCollections: [
-      { datasetId: "d3", datasetPath: null, datasetAddressStatus: "missing", tableId: "00000000-0000-4000-8000-000000000002", name: "Volunteers" },
-    ] })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          dataCollections: [
+            {
+              datasetId: "d3",
+              datasetPath: null,
+              datasetAddressStatus: "missing",
+              tableId: "00000000-0000-4000-8000-000000000002",
+              name: "Volunteers",
+            },
+          ],
+        })}
+      />,
+    );
     try {
-      const share = screen.getByRole("button", { description: "This share doesn't include the Collection's dataset.json. Ask the owner to include it." });
+      const share = screen.getByRole("button", {
+        description:
+          "This share doesn't include the Collection's dataset.json. Ask the owner to include it.",
+      });
       for (const key of [{ key: "ContextMenu" }, { key: "F10", shiftKey: true }]) {
         share.focus();
         fireEvent.keyDown(share, key);
@@ -195,7 +322,9 @@ describe("Explorer collection folders", () => {
         expect(document.activeElement).toBe(share);
       }
       expect(readExplorerMenu).not.toHaveBeenCalled();
-    } finally { vi.unstubAllGlobals(); }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
   it("opens the collection on a row click instead of toggling the folder", () => {
     const props = explorerProps();
@@ -221,23 +350,20 @@ describe("Explorer collection folders", () => {
   it.each([
     ["Enter", "Enter"],
     ["Space", " "],
-  ])(
-    "opens the collection with %s instead of toggling the folder",
-    (_label, key) => {
-      const props = explorerProps();
-      render(<Explorer {...props} />);
-      const row = treeRow("tasks");
+  ])("opens the collection with %s instead of toggling the folder", (_label, key) => {
+    const props = explorerProps();
+    render(<Explorer {...props} />);
+    const row = treeRow("tasks");
 
-      // The click gives the row the tree's internal focus; clear its open so
-      // the assertions below measure keyboard activation only.
-      fireEvent.click(row);
-      vi.mocked(props.onOpenCollection).mockClear();
-      fireEvent.keyDown(row, { key });
+    // The click gives the row the tree's internal focus; clear its open so
+    // the assertions below measure keyboard activation only.
+    fireEvent.click(row);
+    vi.mocked(props.onOpenCollection).mockClear();
+    fireEvent.keyDown(row, { key });
 
-      expect(props.onOpenCollection).toHaveBeenCalledExactlyOnceWith("tasks");
-      expect(props.onToggleFolder).not.toHaveBeenCalled();
-    },
-  );
+    expect(props.onOpenCollection).toHaveBeenCalledExactlyOnceWith("tasks");
+    expect(props.onToggleFolder).not.toHaveBeenCalled();
+  });
 
   it("keeps plain folders toggling on a row click", () => {
     const props = explorerProps();
@@ -250,9 +376,7 @@ describe("Explorer collection folders", () => {
   });
 
   it("titles a collection tab with the folder leaf", () => {
-    expect(editorTitle(collectionTabPath("projects/road trips"))).toBe(
-      "road trips",
-    );
+    expect(editorTitle(collectionTabPath("projects/road trips"))).toBe("road trips");
   });
 });
 
@@ -277,30 +401,76 @@ function expectTooltip(trigger: HTMLElement, words: string) {
 
 describe("Collections this computer cannot use", () => {
   it("says where they are in a few words, and offers to keep Collections no computer keeps here", () => {
-    const onKeepCollections = vi.fn(), onRetryCollections = vi.fn();
-    const words = "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
-    const { rerender } = render(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "unclaimed", words }, onKeepCollections, onRetryCollections,
-      dataCollections: [], onRestoreCollection: vi.fn() })} />);
+    const onKeepCollections = vi.fn(),
+      onRetryCollections = vi.fn();
+    const words =
+      "dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose Use this computer in dohc.";
+    const { rerender } = render(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          collectionsRefusal: { kind: "unclaimed", words },
+          onKeepCollections,
+          onRetryCollections,
+          dataCollections: [],
+          onRestoreCollection: vi.fn(),
+        })}
+      />,
+    );
     const section = screen.getByRole("region", { name: "Collections" });
-    expect(within(section).getByTestId("collections-refusal").textContent).toBe("Which computer keeps these Collections?Use this computer");
+    expect(within(section).getByTestId("collections-refusal").textContent).toBe(
+      "Which computer keeps these Collections?Use this computer",
+    );
     expect(within(section).queryByRole("button", { name: "Collections actions" })).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     expect(within(section).queryByRole("button", { name: "Try again" })).toBeNull();
-    const elsewhere = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    rerender(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: "Laptop" }, onKeepCollections, onRetryCollections })} />);
+    const elsewhere =
+      "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: "Laptop" },
+          onKeepCollections,
+          onRetryCollections,
+        })}
+      />,
+    );
     expectTooltip(screen.getByText("On Laptop"), elsewhere);
     // Main named no computer: the row says the whole sentence, and still offers both steps.
-    rerender(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: null }, onKeepCollections, onRetryCollections })} />);
-    expect(screen.getByTestId("collections-refusal").textContent).toBe(`${elsewhere}Use this computerTry again`);
+    rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          collectionsRefusal: { kind: "elsewhere", words: elsewhere, computer: null },
+          onKeepCollections,
+          onRetryCollections,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("collections-refusal").textContent).toBe(
+      `${elsewhere}Use this computerTry again`,
+    );
     expect(screen.getByText(elsewhere).tabIndex).toBe(-1);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(onRetryCollections).toHaveBeenCalledOnce();
     // Behind main's question, which names the other computer.
     fireEvent.click(screen.getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledTimes(2);
-    rerender(<Explorer {...explorerProps({ mode: "home", collectionsRefusal: { kind: "replaced", words: "Another copy replaced it." }, onKeepCollections, onRetryCollections })} />);
-    expect(screen.getByTestId("collections-refusal").textContent).toContain("Another copy replaced it.");
+    rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          collectionsRefusal: { kind: "replaced", words: "Another copy replaced it." },
+          onKeepCollections,
+          onRetryCollections,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("collections-refusal").textContent).toContain(
+      "Another copy replaced it.",
+    );
     expect(screen.queryByRole("button", { name: "Use this computer" })).toBeNull();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
@@ -309,14 +479,34 @@ describe("Collections this computer cannot use", () => {
 describe("Collections on this computer's server, where another computer keeps the workspace's own", () => {
   it("lists them as rows and names the computer that keeps the others, without offering recovery here", () => {
     const onKeepCollections = vi.fn();
-    const rows = [{ datasetId: "00000000-0000-4000-8000-000000000001", datasetPath: "registrations/dataset.json", tableId: "00000000-0000-4000-8000-000000000002", name: "Registrations" }];
-    const words = "Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    const { rerender } = render(<Explorer {...explorerProps({ mode: "home", dataCollections: rows, collectionsElsewhere: { computer: "Laptop", others: true, words }, onKeepCollections,
-      onIncludeArchivedCollections: vi.fn(), onRestoreCollection: vi.fn() })} />);
+    const rows = [
+      {
+        datasetId: "00000000-0000-4000-8000-000000000001",
+        datasetPath: "registrations/dataset.json",
+        tableId: "00000000-0000-4000-8000-000000000002",
+        name: "Registrations",
+      },
+    ];
+    const words =
+      "Other Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    const { rerender } = render(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          dataCollections: rows,
+          collectionsElsewhere: { computer: "Laptop", others: true, words },
+          onKeepCollections,
+          onIncludeArchivedCollections: vi.fn(),
+          onRestoreCollection: vi.fn(),
+        })}
+      />,
+    );
     const section = screen.getByRole("region", { name: "Collections" });
     expect(within(section).getByRole("button", { name: "Registrations" })).toBeTruthy();
     expectTooltip(within(section).getByText("Others on Laptop"), words);
-    expect(within(section).getByTestId("collections-elsewhere").textContent).toBe(`Others on Laptop${words}Use this computer`);
+    expect(within(section).getByTestId("collections-elsewhere").textContent).toBe(
+      `Others on Laptop${words}Use this computer`,
+    );
     expect(within(section).queryByTestId("collections-refusal")).toBeNull();
     fireEvent.click(within(section).getByRole("button", { name: "Collections actions" }));
     expect(screen.getByRole("menuitemradio", { name: "Show archived Collections" })).toBeTruthy();
@@ -326,15 +516,37 @@ describe("Collections on this computer's server, where another computer keeps th
     fireEvent.click(within(section).getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledOnce();
     // The server didn't answer: no rows, the line, and Keep.
-    const offline = "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
-    rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], collectionsElsewhere: { computer: "Laptop", others: false, words: offline }, onKeepCollections, onRestoreCollection: vi.fn() })} />);
+    const offline =
+      "These Collections are on Laptop. Open this workspace there to use them, or to move them to a server.";
+    rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          dataCollections: [],
+          collectionsElsewhere: { computer: "Laptop", others: false, words: offline },
+          onKeepCollections,
+          onRestoreCollection: vi.fn(),
+        })}
+      />,
+    );
     expectTooltip(screen.getByText("On Laptop"), offline);
     expect(screen.queryByRole("button", { name: "Registrations" })).toBeNull();
     expect(screen.getByRole("button", { name: "Use this computer" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Collections actions" })).toBeNull();
     // Main named no computer: the row says the whole sentence, with the same step.
-    rerender(<Explorer {...explorerProps({ mode: "home", dataCollections: [], collectionsElsewhere: { computer: null, others: false, words: offline }, onKeepCollections })} />);
-    expect(screen.getByTestId("collections-elsewhere").textContent).toBe(`${offline}Use this computer`);
+    rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          dataCollections: [],
+          collectionsElsewhere: { computer: null, others: false, words: offline },
+          onKeepCollections,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("collections-elsewhere").textContent).toBe(
+      `${offline}Use this computer`,
+    );
     expect(screen.queryByRole("tooltip", { hidden: true })).toBeNull();
   });
 });

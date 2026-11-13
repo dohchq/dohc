@@ -2,7 +2,12 @@ import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+  seedWorkspaceManifest,
+} from "./helpers/workspace";
 
 test("posts and Home keep a bounded list while preserving focus and older pages", async () => {
   test.setTimeout(120_000);
@@ -16,13 +21,26 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     await openWorkspaceFromFirstRun(page, temp);
     const order = await page.evaluate(async (workspaceId) => {
       const bridge = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
-      const { channel } = await bridge.createChatChannel({ workspaceId, name: "List regression", type: "posts" });
+      const { channel } = await bridge.createChatChannel({
+        workspaceId,
+        name: "List regression",
+        type: "posts",
+      });
       for (let index = 0; index < 120; index += 1) {
-        await bridge.startChannelThread({ workspaceId, channelId: channel.id,
-          body: `Post ${index}\n${"A varied card body. ".repeat(1 + index % 7)}` });
+        await bridge.startChannelThread({
+          workspaceId,
+          channelId: channel.id,
+          body: `Post ${index}\n${"A varied card body. ".repeat(1 + (index % 7))}`,
+        });
       }
-      await bridge.setChatFollow({ workspaceId, target: { kind: "channel", channelId: channel.id }, state: "following" });
-      return (await bridge.listChannelThreads({ workspaceId, channelId: channel.id })).threads.map((thread) => thread.id);
+      await bridge.setChatFollow({
+        workspaceId,
+        target: { kind: "channel", channelId: channel.id },
+        state: "following",
+      });
+      return (await bridge.listChannelThreads({ workspaceId, channelId: channel.id })).threads.map(
+        (thread) => thread.id,
+      );
     }, workspaceId);
     // Chats toggles the side panel, so the second press hides the navigator.
     await page.getByTestId(activityPin("chats")).click();
@@ -36,15 +54,23 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     await expect.poll(() => cards.count()).toBeLessThan(30);
     const like = first.getByTestId("chats-post-like");
     await like.focus();
-    await list.evaluate((element) => { element.scrollTop = element.scrollHeight / 2; });
+    await list.evaluate((element) => {
+      element.scrollTop = element.scrollHeight / 2;
+    });
     await expect(like).toBeFocused();
     // The next card must follow data order even while Legend's pooled DOM
     // containers still reflect a recently scrolled viewport.
     await first.getByTestId("chats-post-bookmark").focus();
     await page.keyboard.press("Tab");
-    await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order[1]}"]`)).toBeFocused();
-    await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await expect(view.locator(`[data-testid="chats-post-card"][data-thread-id="${order.at(-1)}"]`)).toBeVisible();
+    await expect(
+      view.locator(`[data-testid="chats-post-card"][data-thread-id="${order[1]}"]`),
+    ).toBeFocused();
+    await list.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    await expect(
+      view.locator(`[data-testid="chats-post-card"][data-thread-id="${order.at(-1)}"]`),
+    ).toBeVisible();
     await page.getByTestId(activityPin("chats")).click();
     await page.getByTestId(desktopPins.sidePanel).getByTestId("chats-feed-link").click();
     await page.getByTestId(activityPin("chats")).click();
@@ -53,11 +79,16 @@ test("posts and Home keep a bounded list while preserving focus and older pages"
     await expect(home.locator('[role="listitem"]').first()).toHaveAttribute("aria-setsize", "30");
     for (const total of [60, 90, 120]) {
       await home.getByTestId("chats-feed-more").click();
-      await expect(home.locator('[role="listitem"]').first()).toHaveAttribute("aria-setsize", String(total));
+      await expect(home.locator('[role="listitem"]').first()).toHaveAttribute(
+        "aria-setsize",
+        String(total),
+      );
     }
     await expect(home.getByTestId("chats-feed-more")).toHaveCount(0);
     await expect.poll(() => home.getByTestId("chats-feed-item").count()).toBeLessThan(30);
-    await home.getByRole("list").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await home.getByRole("list").evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
     await expect(home.locator('[role="listitem"][aria-posinset="120"]')).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

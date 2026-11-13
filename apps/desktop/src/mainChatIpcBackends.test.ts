@@ -1,7 +1,4 @@
-import {
-  type Request,
-  type Response,
-} from "@dohc/workspace-engine-client";
+import { type Request, type Response } from "@dohc/workspace-engine-client";
 import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { describe, expect, it, vi } from "vitest";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -16,8 +13,7 @@ function loopbackClient(engine: ChatsLoopbackEngine) {
     async sendRequest(request: Request): Promise<Response> {
       requests.push(request);
       if (request.method === "workspace.open") {
-        const workspaceId = (request.params as { workspaceId: string })
-          .workspaceId;
+        const workspaceId = (request.params as { workspaceId: string }).workspaceId;
         return { id: request.id, result: { workspace: workspaceId } };
       }
       if (request.method === "workspace.close") {
@@ -29,7 +25,6 @@ function loopbackClient(engine: ChatsLoopbackEngine) {
 }
 
 describe("desktop linked chat factory", () => {
-
   it("bounds_file_thread_path_hint_enrichment_requests", async () => {
     const rootPath = await createTestScratch("dohc-live-chat-hint-bound-");
     const workspace = {
@@ -49,16 +44,10 @@ describe("desktop linked chat factory", () => {
     const client = {
       close: () => baseClient.close(),
       async sendRequest(request: Request): Promise<Response> {
-        if (
-          delayFileReads &&
-          request.method === "chats.threads.listForFile"
-        ) {
+        if (delayFileReads && request.method === "chats.threads.listForFile") {
           startedFileReads += 1;
           activeFileReads += 1;
-          maxActiveFileReads = Math.max(
-            maxActiveFileReads,
-            activeFileReads,
-          );
+          maxActiveFileReads = Math.max(maxActiveFileReads, activeFileReads);
           await fileReadGate;
           try {
             return await baseClient.sendRequest(request);
@@ -162,15 +151,14 @@ describe("desktop linked chat factory", () => {
       });
       failRead = true;
 
-      await expect(
-        store.listChannels({ workspaceId: workspace.workspaceId }),
-      ).resolves.toEqual([
+      await expect(store.listChannels({ workspaceId: workspace.workspaceId })).resolves.toEqual([
         expect.objectContaining({ id: channel.id, name: "Recovered" }),
       ]);
       expect(failedReadAttempts).toBe(1);
-      expect(
-        replacementClient.requests.map((request) => request.method),
-      ).toEqual(["workspace.open", "chats.channels.list"]);
+      expect(replacementClient.requests.map((request) => request.method)).toEqual([
+        "workspace.open",
+        "chats.channels.list",
+      ]);
     } finally {
       await store.close();
     }

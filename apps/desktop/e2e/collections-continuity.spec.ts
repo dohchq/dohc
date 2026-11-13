@@ -52,9 +52,7 @@ test("a collection saves edits, follows its folder rename, and closes on deletio
     await expect(folder).toHaveAttribute("data-collection", "true");
     await folder.click();
     await expect(page.getByTestId(editorTabTestId("tab://collection/tasks"))).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Open Launch plan" }),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Open Launch plan" })).toBeVisible();
     await page.getByTestId("collection-page").getByRole("checkbox").click();
     // A person may open the record while the edit saves. The edit still saves.
     // The record opens in the panel beside the table, with its live document as its body.
@@ -107,7 +105,10 @@ test("a field edit saves while its record is open in another editor group", asyn
     await expect(group(2).getByTestId(editorTabTestId("tasks/plan.md"))).toBeVisible();
     await group(1).getByTestId(editorTabTestId("tab://collection/tasks")).click();
     await expect(group(1).getByTestId("collection-page")).toBeVisible();
-    await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
+    await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute(
+      "contenteditable",
+      "true",
+    );
     // The Collection's tab kept its open record, so the same record shows in group 1's panel and in group 2's tab.
     const record = group(1).getByTestId("collection-record-panel");
     await expect(record.getByRole("heading", { name: "Launch plan", level: 2 })).toBeVisible();
@@ -118,7 +119,10 @@ test("a field edit saves while its record is open in another editor group", asyn
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
       .toMatch(/^Completed: true$/m);
     await expect(page.getByTestId("collection-write-failures")).toHaveCount(0);
-    await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute("contenteditable", "true");
+    await expect(group(2).getByTestId("markdown-editor")).toHaveAttribute(
+      "contenteditable",
+      "true",
+    );
     // The table's cell follows the panel's field.
     await record.getByRole("button", { name: "Close record" }).click();
     await expect(group(1).getByRole("grid").getByRole("checkbox")).toBeChecked();

@@ -1,6 +1,11 @@
 import type { NoticeRecipient } from "@dohc/workspace-contracts/relay";
 import { NoticeNotSentError } from "./automationChat";
-import { automationFailedElsewhereBody, automationFailedNotice, type AutomationFailedNotice, type FailureComputer } from "./automationFailedNotice";
+import {
+  automationFailedElsewhereBody,
+  automationFailedNotice,
+  type AutomationFailedNotice,
+  type FailureComputer,
+} from "./automationFailedNotice";
 import type { AutomationFailureReport } from "./collectionAutomations";
 
 /** Both hosts use the Notice post boundary to check each recipient's current access. */
@@ -18,7 +23,11 @@ export async function reportAutomationFailure(
   workspaceId: string,
   report: AutomationFailureReport,
 ): Promise<void> {
-  const notice = automationFailedNotice({ workspaceId, computer: dependencies.computer, ...report });
+  const notice = automationFailedNotice({
+    workspaceId,
+    computer: dependencies.computer,
+    ...report,
+  });
   await dependencies.post({ ...notice, ...dependencies.primary });
   await dependencies.withdraw();
   let lastChangedBy: string | null = null;
@@ -27,15 +36,22 @@ export async function reportAutomationFailure(
   } catch (error) {
     dependencies.onError("read who changed the automation last", error);
   }
-  const people = new Set([report.startedBy, lastChangedBy].filter((person): person is string => person !== null));
-  if (dependencies.primary?.recipientUserId !== undefined) people.delete(dependencies.primary.recipientUserId);
+  const people = new Set(
+    [report.startedBy, lastChangedBy].filter((person): person is string => person !== null),
+  );
+  if (dependencies.primary?.recipientUserId !== undefined)
+    people.delete(dependencies.primary.recipientUserId);
   if (dependencies.primaryUserId) people.delete(dependencies.primaryUserId);
   const recipients: NoticeRecipient[] = [
     ...(dependencies.throughShare ? [{ toWorkspaceOwner: true as const }] : []),
     ...[...people].map((recipientUserId) => ({ recipientUserId })),
   ];
   const { run: _run, ...target } = notice.target;
-  const copy = { ...notice, body: automationFailedElsewhereBody(report.failure, report.name, report.ownerSwitchesOnly), target };
+  const copy = {
+    ...notice,
+    body: automationFailedElsewhereBody(report.failure, report.name, report.ownerSwitchesOnly),
+    target,
+  };
   for (const recipient of recipients) {
     try {
       await dependencies.post({ ...copy, ...recipient });

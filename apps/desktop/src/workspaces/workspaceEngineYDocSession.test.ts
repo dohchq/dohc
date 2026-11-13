@@ -3,11 +3,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { VERSIONED_METHOD, YDOC_METHOD, openEngineYdocProviderSession, type EngineTransport, type Event, type JsonValue, type Request, type Response } from "@dohc/workspace-engine-client";
 import {
-  VersionedLoopbackEngine,
-  YdocLoopbackEngine,
-} from "@dohc/workspace-engine-client/testing";
+  VERSIONED_METHOD,
+  YDOC_METHOD,
+  openEngineYdocProviderSession,
+  type EngineTransport,
+  type Event,
+  type JsonValue,
+  type Request,
+  type Response,
+} from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine, YdocLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -31,16 +37,17 @@ import { createTestScratch } from "./testTemp";
 import { createEngineYDocSessionIpc, DOCUMENT_EDIT_SHARED_WARNING } from "./engineYDocSessionIpc";
 import { CHANNELS } from "../ipc/channels";
 import { documentEditUpdate, documentMarkdown } from "@dohc/ydoc-projection";
-import {
-  createFakeDaemonCapture,
-  type FakeDaemonCapture,
-} from "../testing/fakeDaemonCapture";
+import { createFakeDaemonCapture, type FakeDaemonCapture } from "../testing/fakeDaemonCapture";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
 import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
-import { bindEngineYDoc, EngineYDocDeliveryRefusedError, type EngineYDocTransport } from "../renderer/collab/engineYDocProvider";
+import {
+  bindEngineYDoc,
+  EngineYDocDeliveryRefusedError,
+  type EngineYDocTransport,
+} from "../renderer/collab/engineYDocProvider";
 import { flushTypingCheckpoints } from "./outageTypingRecovery";
 import { openedLocalState } from "../testing/preparedLocalState";
 
@@ -49,14 +56,19 @@ const ATTACHMENT_ID = Symbol("test-workspace-attachment");
 const PATH = "notes/solo.md";
 const INITIAL_MARKDOWN = "# Solo\n\nStart here.\n";
 
-vi.mock("node:fs", async importOriginal => {
+vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, createReadStream: vi.fn(fs.createReadStream) };
 });
-const lstatGate = vi.hoisted(() => ({ held: null as { path: string; entered: () => void; release: Promise<void> } | null }));
-vi.mock("node:fs/promises", async importOriginal => {
+const lstatGate = vi.hoisted(() => ({
+  held: null as { path: string; entered: () => void; release: Promise<void> } | null,
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs/promises")>();
-  const lstat: typeof fs.lstat = (async (path: Parameters<typeof fs.lstat>[0], ...rest: unknown[]) => {
+  const lstat: typeof fs.lstat = (async (
+    path: Parameters<typeof fs.lstat>[0],
+    ...rest: unknown[]
+  ) => {
     const held = lstatGate.held;
     const answer = (fs.lstat as (...args: unknown[]) => ReturnType<typeof fs.lstat>)(path, ...rest);
     if (held && String(path) === held.path) {
@@ -147,8 +159,11 @@ function daemonSessions(): EngineWorkspaceSessions {
       const params = request.params as Record<string, JsonValue | undefined>;
       // The packaged daemon refuses a second owner. The generic loopback
       // also supports replica tests, so enforce that rule for record writes.
-      if (enforceRecordOwner && request.method === YDOC_METHOD.open &&
-          [...daemon.leases.values()].includes(String(params.path))) {
+      if (
+        enforceRecordOwner &&
+        request.method === YDOC_METHOD.open &&
+        [...daemon.leases.values()].includes(String(params.path))
+      ) {
         throw wireRefusal("ydoc-session-busy");
       }
       if (request.method === "workspace.open") {
@@ -168,7 +183,12 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
       }
-      if (claimedLineage && request.method === YDOC_METHOD.close && params.settle === true && settleRefusal !== null) {
+      if (
+        claimedLineage &&
+        request.method === YDOC_METHOD.close &&
+        params.settle === true &&
+        settleRefusal !== null
+      ) {
         throw settleRefusal;
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
@@ -183,10 +203,7 @@ function daemonSessions(): EngineWorkspaceSessions {
         busyRecordAttempts -= 1;
         throw wireRefusal("engine-store-busy", "OVERLOADED");
       }
-      if (
-        request.method === YDOC_METHOD.recordUpdate &&
-        nextRecordRefusal !== null
-      ) {
+      if (request.method === YDOC_METHOD.recordUpdate && nextRecordRefusal !== null) {
         const refusal = nextRecordRefusal;
         nextRecordRefusal = null;
         throw refusal;
@@ -204,18 +221,16 @@ function daemonSessions(): EngineWorkspaceSessions {
         await ydoc.sendRequest(request);
         throw transportLost();
       }
-      if (
-        recordUpdateDelayMs > 0 &&
-        request.method === YDOC_METHOD.recordUpdate
-      ) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, recordUpdateDelayMs),
-        );
+      if (recordUpdateDelayMs > 0 && request.method === YDOC_METHOD.recordUpdate) {
+        await new Promise((resolve) => setTimeout(resolve, recordUpdateDelayMs));
       }
       // A claimed lineage is this fixture's; the loopback keeps no claims. It
       // refuses an edit made against any other claim, as the engine does.
-      if (claimedLineage && request.method === YDOC_METHOD.recordUpdate &&
-          params.expectedLineageClaimId !== servedClaim) {
+      if (
+        claimedLineage &&
+        request.method === YDOC_METHOD.recordUpdate &&
+        params.expectedLineageClaimId !== servedClaim
+      ) {
         throw wireRefusal("ydoc-lineage-stale");
       }
       const answered = await daemon.sendRequest(
@@ -224,12 +239,26 @@ function daemonSessions(): EngineWorkspaceSessions {
           : request,
       );
       if (answered) {
-        if (claimedLineage && (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync || request.method === YDOC_METHOD.recordUpdate)) {
-          return { ...answered, result: { ...(answered.result as Record<string, JsonValue>),
-            lineageClaimId: servedClaim, lineageOriginatedHere: true } };
+        if (
+          claimedLineage &&
+          (request.method === YDOC_METHOD.open ||
+            request.method === YDOC_METHOD.resync ||
+            request.method === YDOC_METHOD.recordUpdate)
+        ) {
+          return {
+            ...answered,
+            result: {
+              ...(answered.result as Record<string, JsonValue>),
+              lineageClaimId: servedClaim,
+              lineageOriginatedHere: true,
+            },
+          };
         }
         if (request.method === YDOC_METHOD.settle && blockedMaterialization) {
-          return { ...answered, result: { ...(answered.result as Record<string, JsonValue>), materialized: false } };
+          return {
+            ...answered,
+            result: { ...(answered.result as Record<string, JsonValue>), materialized: false },
+          };
         }
         return answered;
       }
@@ -251,9 +280,7 @@ function seedYdoc(versionId: string, content = INITIAL_MARKDOWN): void {
   });
 }
 
-function mirrorEditor(
-  session: Awaited<ReturnType<typeof capture.openYDocSession>>,
-): Y.Doc {
+function mirrorEditor(session: Awaited<ReturnType<typeof capture.openYDocSession>>): Y.Doc {
   const doc = new Y.Doc();
   const remoteOrigin = Symbol("renderer-remote");
   Y.applyUpdate(doc, session.initialUpdate, remoteOrigin);
@@ -281,9 +308,8 @@ function methodCount(method: string): number {
 // Writes the daemon's own capture made into its store. They never cross the
 // desktop transport, so `requests` cannot see them.
 function daemonWriteCount(): number {
-  return versioned.requests.filter(
-    (request) => request.method === VERSIONED_METHOD.textWrite,
-  ).length;
+  return versioned.requests.filter((request) => request.method === VERSIONED_METHOD.textWrite)
+    .length;
 }
 
 // The envelope EngineClient rejects a refused request with. DaemonLiveAdapter
@@ -333,7 +359,7 @@ beforeEach(async () => {
   // else. A loopback that reports `materialized: true` while writing
   // nothing would leave every file below unchanged, so it materializes too.
   ydoc = new YdocLoopbackEngine({
-    projectRichdoc: doc => documentMarkdown(Y.encodeStateAsUpdate(doc)),
+    projectRichdoc: (doc) => documentMarkdown(Y.encodeStateAsUpdate(doc)),
     materialize: ({ path, content }) => {
       if (!blockedMaterialization) writeFileSync(join(root, path), content, "utf8");
     },
@@ -363,39 +389,52 @@ afterEach(async () => {
 });
 
 const recordAutomation = {
-  kind: "automation", automationId: "collection:tasks#finish", onBehalfOf: "person", depth: 1,
+  kind: "automation",
+  automationId: "collection:tasks#finish",
+  onBehalfOf: "person",
+  depth: 1,
   run: { claimId: "finish-run", automationName: "Finish" },
 } as const;
 
 // Main's record edit context for the person main read when the write was requested.
 function recordContext(personId = "person") {
   return desktopRecordEditContext({
-    capture, workspaceRoot: root, signal: new AbortController().signal,
+    capture,
+    workspaceRoot: root,
+    signal: new AbortController().signal,
     person: { kind: "human", humanId: personId },
-    withAdapter: async () => null, onCaptureSettled: () => () => undefined,
+    withAdapter: async () => null,
+    onCaptureSettled: () => () => undefined,
   });
 }
 
 function writeFinished(expectedBefore: Record<string, unknown> = { "Finished on": null }) {
   enforceRecordOwner = true;
   return setCollectionRecordFields(recordContext(), {
-    recordPath: PATH, fields: { "Finished on": "2026-10-01" },
-    expectedBefore, author: recordAutomation, idempotencyKeyPrefix: "finish-run/set",
+    recordPath: PATH,
+    fields: { "Finished on": "2026-10-01" },
+    expectedBefore,
+    author: recordAutomation,
+    idempotencyKeyPrefix: "finish-run/set",
   });
 }
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
 async function openRecordEditor(assertRecordWritable?: () => void) {
   const editor = new Y.Doc();
   const remoteOrigin = Symbol("record-remote");
-  const owner = await capture.openYDocSession({ path: PATH, contentKind: "richdoc",
+  const owner = await capture.openYDocSession({
+    path: PATH,
+    contentKind: "richdoc",
     assertRecordWritable,
-    onRemoteUpdate: update => Y.applyUpdate(editor, update, remoteOrigin),
+    onRemoteUpdate: (update) => Y.applyUpdate(editor, update, remoteOrigin),
   });
   Y.applyUpdate(editor, owner.initialUpdate, remoteOrigin);
   editor.on("update", (update: Uint8Array, origin: unknown) => {
@@ -404,60 +443,109 @@ async function openRecordEditor(assertRecordWritable?: () => void) {
   return { owner, editor };
 }
 
-it.each(["borrowed"])("names the person who asked for a %s record write, and an automation's run person", async mode => {
-  const opened = mode === "borrowed" ? await openRecordEditor() : null;
-  const context = recordContext("account-alice");
-  await expect(setCollectionRecordFields(context, {
-    recordPath: PATH, fields: { Owner: "Alice" }, author: createLocalChangeAuthor("Alice"),
-  })).resolves.toMatchObject({ replaced: { Owner: null } });
-  // A run Bob's synced edit started works for Bob, whoever is signed in here.
-  await expect(setCollectionRecordFields(context, {
-    recordPath: PATH, fields: { "Finished on": "2026-10-01" }, author: { ...recordAutomation, onBehalfOf: "bob" },
-  })).resolves.toMatchObject({ replaced: { "Finished on": null } });
-  // A closed record reopens with a seed, which names nobody, before each write.
-  const fieldWrites = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
-    (request.params as { seed?: boolean }).seed !== true).slice(-2);
-  // A generated key still names each write, so a refusal reaches only its caller.
-  for (const request of fieldWrites) expect(request.idempotencyKey).toEqual(expect.any(String));
-  const params = (request: Request) => request.params as { actorOriginId?: string; attribution?: unknown };
-  expect(fieldWrites.map(request => ({ actorOriginId: params(request).actorOriginId, attribution: params(request).attribution }))).toEqual([
-    { actorOriginId: "account-alice", attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 } },
-    { actorOriginId: recordAutomation.automationId,
-      attribution: { actorKind: "automation", onBehalfOf: "bob", depth: 1, run: recordAutomation.run } },
-  ]);
-  if (opened) {
-    expect(opened.editor.getMap("frontmatter").get("Owner")).toBe("Alice");
-    await opened.owner.close();
-    opened.editor.destroy();
-  }
-});
+it.each(["borrowed"])(
+  "names the person who asked for a %s record write, and an automation's run person",
+  async (mode) => {
+    const opened = mode === "borrowed" ? await openRecordEditor() : null;
+    const context = recordContext("account-alice");
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: PATH,
+        fields: { Owner: "Alice" },
+        author: createLocalChangeAuthor("Alice"),
+      }),
+    ).resolves.toMatchObject({ replaced: { Owner: null } });
+    // A run Bob's synced edit started works for Bob, whoever is signed in here.
+    await expect(
+      setCollectionRecordFields(context, {
+        recordPath: PATH,
+        fields: { "Finished on": "2026-10-01" },
+        author: { ...recordAutomation, onBehalfOf: "bob" },
+      }),
+    ).resolves.toMatchObject({ replaced: { "Finished on": null } });
+    // A closed record reopens with a seed, which names nobody, before each write.
+    const fieldWrites = requests
+      .filter(
+        (request) =>
+          request.method === YDOC_METHOD.recordUpdate &&
+          (request.params as { seed?: boolean }).seed !== true,
+      )
+      .slice(-2);
+    // A generated key still names each write, so a refusal reaches only its caller.
+    for (const request of fieldWrites) expect(request.idempotencyKey).toEqual(expect.any(String));
+    const params = (request: Request) =>
+      request.params as { actorOriginId?: string; attribution?: unknown };
+    expect(
+      fieldWrites.map((request) => ({
+        actorOriginId: params(request).actorOriginId,
+        attribution: params(request).attribution,
+      })),
+    ).toEqual([
+      {
+        actorOriginId: "account-alice",
+        attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 },
+      },
+      {
+        actorOriginId: recordAutomation.automationId,
+        attribution: {
+          actorKind: "automation",
+          onBehalfOf: "bob",
+          depth: 1,
+          run: recordAutomation.run,
+        },
+      },
+    ]);
+    if (opened) {
+      expect(opened.editor.getMap("frontmatter").get("Owner")).toBe("Alice");
+      await opened.owner.close();
+      opened.editor.destroy();
+    }
+  },
+);
 
-it.each(["update-too-large"])("refuses an unkeyed agent write without losing queued typing (%s)", async refusal => {
-  const { owner, editor } = await openRecordEditor();
-  const entered = deferred();
-  const release = deferred();
-  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
-  nextRecordRefusal = wireRefusal(refusal);
-  const write = setCollectionRecordFields(recordContext(), { recordPath: PATH, fields: { "Finished on": "2026-10-01" },
-    author: { kind: "agent", agentId: "cli-agent", onBehalfOf: "person", depth: 1 } });
-  const refused = expect(write).rejects.toThrow(refusal);
-  await entered.promise;
-  typeIntoBody(editor, "Typing queued behind the refused agent write.");
-  release.resolve();
-  await refused;
-  await owner.settleNow();
-  expect(editor.getMap("frontmatter").get("Finished on")).toBeUndefined();
-  expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain("Typing queued behind the refused agent write.");
-  expect(captureErrors).toEqual([]);
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Typing queued behind the refused agent write.");
-  await owner.close(); editor.destroy();
-});
+it.each(["update-too-large"])(
+  "refuses an unkeyed agent write without losing queued typing (%s)",
+  async (refusal) => {
+    const { owner, editor } = await openRecordEditor();
+    const entered = deferred();
+    const release = deferred();
+    beforeRecordUpdate = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    nextRecordRefusal = wireRefusal(refusal);
+    const write = setCollectionRecordFields(recordContext(), {
+      recordPath: PATH,
+      fields: { "Finished on": "2026-10-01" },
+      author: { kind: "agent", agentId: "cli-agent", onBehalfOf: "person", depth: 1 },
+    });
+    const refused = expect(write).rejects.toThrow(refusal);
+    await entered.promise;
+    typeIntoBody(editor, "Typing queued behind the refused agent write.");
+    release.resolve();
+    await refused;
+    await owner.settleNow();
+    expect(editor.getMap("frontmatter").get("Finished on")).toBeUndefined();
+    expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain(
+      "Typing queued behind the refused agent write.",
+    );
+    expect(captureErrors).toEqual([]);
+    expect(await readFile(join(root, PATH), "utf8")).toContain(
+      "Typing queued behind the refused agent write.",
+    );
+    await owner.close();
+    editor.destroy();
+  },
+);
 
 it("keeps typing concurrent with an automation write and waits before owner teardown", async () => {
   const { owner, editor } = await openRecordEditor();
   const entered = deferred();
   const release = deferred();
-  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  beforeRecordUpdate = async () => {
+    entered.resolve();
+    await release.promise;
+  };
   const write = writeFinished();
   await entered.promise;
   typeIntoBody(editor, "Typed during the field write.");
@@ -470,7 +558,7 @@ it("keeps typing concurrent with an automation write and waits before owner tear
   expect(markdown).toContain("2026-10-01");
   expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
   expect(ydoc.recordedUpdates).toHaveLength(3);
-  const typing = requests.filter(request => request.method === YDOC_METHOD.recordUpdate).at(-1);
+  const typing = requests.filter((request) => request.method === YDOC_METHOD.recordUpdate).at(-1);
   expect(typing?.params).not.toHaveProperty("actorOriginId");
   expect(typing?.params).not.toHaveProperty("attribution");
   editor.destroy();
@@ -480,7 +568,10 @@ it("keeps typing and attribution when a borrowed keyed write meets a busy store"
   const { owner, editor } = await openRecordEditor();
   const entered = deferred();
   const release = deferred();
-  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
+  beforeRecordUpdate = async () => {
+    entered.resolve();
+    await release.promise;
+  };
   nextRecordRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
   const write = writeFinished();
   await entered.promise;
@@ -489,17 +580,29 @@ it("keeps typing and attribution when a borrowed keyed write meets a busy store"
   await write;
   await owner.settleNow();
   expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-10-01");
-  expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain("Typed while the keyed write recovered.");
-  const fieldWrites = requests.filter(request => request.idempotencyKey === "finish-run/set/Finished on");
+  expect(documentMarkdown(Y.encodeStateAsUpdate(owner.doc))).toContain(
+    "Typed while the keyed write recovered.",
+  );
+  const fieldWrites = requests.filter(
+    (request) => request.idempotencyKey === "finish-run/set/Finished on",
+  );
   expect(fieldWrites.length).toBeGreaterThan(1);
   for (const request of fieldWrites) {
-    expect(request.params).toMatchObject({ actorOriginId: recordAutomation.automationId,
-      attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run },
+    expect(request.params).toMatchObject({
+      actorOriginId: recordAutomation.automationId,
+      attribution: {
+        actorKind: "automation",
+        onBehalfOf: "person",
+        depth: 1,
+        run: recordAutomation.run,
+      },
     });
   }
   expect(ydoc.recordedUpdates).toHaveLength(3);
   await owner.close();
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Typed while the keyed write recovered.");
+  expect(await readFile(join(root, PATH), "utf8")).toContain(
+    "Typed while the keyed write recovered.",
+  );
   editor.destroy();
 });
 
@@ -508,7 +611,9 @@ it("keeps the open editor's changes when a borrowed write's key is refused", asy
   await writeFinished();
   editor.getMap("frontmatter").set("Finished on", "2026-09-30");
   typeIntoBody(editor, "Kept after the key refusal.");
-  await expect(writeFinished({ "Finished on": "2026-09-30" })).rejects.toThrow("idempotency-key-reuse-mismatch");
+  await expect(writeFinished({ "Finished on": "2026-09-30" })).rejects.toThrow(
+    "idempotency-key-reuse-mismatch",
+  );
   expect(owner.doc.getMap("frontmatter").get("Finished on")).toBe("2026-09-30");
   expect(editor.getMap("frontmatter").get("Finished on")).toBe("2026-09-30");
   expect(ydoc.recordedUpdates).toHaveLength(4);
@@ -523,7 +628,11 @@ it("keeps the open editor's changes when a borrowed write's key is refused", asy
 });
 
 it("checks expected-before against the open session instead of the settled artifact", async () => {
-  const owner = await capture.openYDocSession({ path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  const owner = await capture.openYDocSession({
+    path: PATH,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+  });
   const editor = mirrorEditor(owner);
   editor.getMap("frontmatter").set("Finished on", "2026-09-30");
   const result = await writeFinished();
@@ -540,33 +649,59 @@ it("settles an open record before a person's delete and credits the person in Hi
   typeIntoBody(editor, "Typed before the delete.");
   let trashedText = "";
   const trashed: Array<{ target: string; requestsBefore: number }> = [];
-  await expect(deleteWorkspacePathByHand(
-    { workspace: { workspaceId: "record-delete", rootPath: root }, assertCurrent: () => undefined }, PATH,
-    { kind: "human", humanId: "person" },
-    { capture, requestId: "hand-delete", markDeleted: () => undefined,
-      trashItem: async target => {
-        trashed.push({ target, requestsBefore: requests.length });
-        trashedText = await readFile(target, "utf8");
-        await rm(target);
-      } },
-  )).resolves.toMatchObject({ trashed: true, operationId: expect.stringMatching(/^dohc-operation:/), undo: { available: true } });
+  await expect(
+    deleteWorkspacePathByHand(
+      {
+        workspace: { workspaceId: "record-delete", rootPath: root },
+        assertCurrent: () => undefined,
+      },
+      PATH,
+      { kind: "human", humanId: "person" },
+      {
+        capture,
+        requestId: "hand-delete",
+        markDeleted: () => undefined,
+        trashItem: async (target) => {
+          trashed.push({ target, requestsBefore: requests.length });
+          trashedText = await readFile(target, "utf8");
+          await rm(target);
+        },
+      },
+    ),
+  ).resolves.toMatchObject({
+    trashed: true,
+    operationId: expect.stringMatching(/^dohc-operation:/),
+    undo: { available: true },
+  });
   // The system trash takes it from its own place, so its Restore returns it there.
-  expect(trashed.map(entry => entry.target)).toEqual([join(root, PATH)]);
-  const methods = requests.map(request => request.method);
+  expect(trashed.map((entry) => entry.target)).toEqual([join(root, PATH)]);
+  const methods = requests.map((request) => request.method);
   // Settled and closed, then trashed, then recorded as deleted.
   expect(methods.lastIndexOf(YDOC_METHOD.close)).toBeLessThan(trashed[0]!.requestsBefore);
-  expect(methods.indexOf(VERSIONED_METHOD.textDelete)).toBeGreaterThanOrEqual(trashed[0]!.requestsBefore);
+  expect(methods.indexOf(VERSIONED_METHOD.textDelete)).toBeGreaterThanOrEqual(
+    trashed[0]!.requestsBefore,
+  );
   // The trash holds the settled document, not the artifact from before the typing.
   expect(trashedText).toContain("Typed before the delete.");
-  const deleted = (await capture.listMoments()).moments.filter(row => row.operation === "delete" && row.path === PATH);
-  expect(deleted).toMatchObject([{ metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "person" }] }]);
+  const deleted = (await capture.listMoments()).moments.filter(
+    (row) => row.operation === "delete" && row.path === PATH,
+  );
+  expect(deleted).toMatchObject([
+    { metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "person" }] },
+  ]);
   editor.destroy();
 });
 
 it("settles live edits into Markdown before stopping sync and permits local editing afterward", async () => {
   const remote = { serverUrl: "https://server.test", ownerUserId: "owner" };
   const registry = createRegistryStore(join(root, "registry.json"));
-  registry.register({ workspaceId: WORKSPACE_ID, rootPath: root, kind: "personal", mode: "local-first", remote });
+  registry.register({
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    kind: "personal",
+    mode: "local-first",
+    remote,
+  });
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typed immediately before stopping sync.");
@@ -577,29 +712,64 @@ it("settles live edits into Markdown before stopping sync and permits local edit
     seedYdoc("main", settledMarkdown);
     expect(daemon.leases.size).toBe(0);
     expect(registry.find(WORKSPACE_ID)?.remote).toBeUndefined();
-    await sessions.closeWorkspace({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID });
+    await sessions.closeWorkspace({
+      workspaceId: WORKSPACE_ID,
+      rootPath: root,
+      attachmentId: ATTACHMENT_ID,
+    });
   });
   const stop = createWorkspaceSyncStop({
-    person: async () => ({ kind: "person", personId: "local" }), cleanupFailed: vi.fn(), reopenFailed: vi.fn(),
-    pauseStatus: pause => workspaceSyncPauseStatus(pause, "local"),
-    withOwnerHostPaused: work => work(), prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(), resume: async () => {},
-    pauseRemote: (id, pause) => registry.pauseRemote(id, pause), closeActivity: async () => {
-      await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
+    person: async () => ({ kind: "person", personId: "local" }),
+    cleanupFailed: vi.fn(),
+    reopenFailed: vi.fn(),
+    pauseStatus: (pause) => workspaceSyncPauseStatus(pause, "local"),
+    withOwnerHostPaused: (work) => work(),
+    prepare: () => capture.settleAndCloseLiveSessionsForSyncPause(),
+    resume: async () => {},
+    pauseRemote: (id, pause) => registry.pauseRemote(id, pause),
+    closeActivity: async () => {
+      await expect(
+        capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined }),
+      ).rejects.toThrow();
       await capture.settleAndCloseAllLiveSessions();
       await capture.stop();
-    }, closeRelay,
+    },
+    closeRelay,
     openActivity: async () => {
-      capture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath: root,
-        attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions, onError: context => captureErrors.push(context) });
-    }, collectionsWaiting: async () => false, notify: () => {},
-    status: () => ({ state: "synced", pendingChangeCount: 0, lastSyncedAtMs: null,
-      historyRecordingUnavailable: false, historyShareView: false, liveSessionsGeneration: 1,
-      ...(registry.find(WORKSPACE_ID)?.syncPause ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") } : {}) }),
+      capture = createWorkspaceEngineCapture({
+        workspaceId: WORKSPACE_ID,
+        rootPath: root,
+        attachmentId: ATTACHMENT_ID,
+        rustEngineSessions: sessions,
+        onError: (context) => captureErrors.push(context),
+      });
+    },
+    collectionsWaiting: async () => false,
+    notify: () => {},
+    status: () => ({
+      state: "synced",
+      pendingChangeCount: 0,
+      lastSyncedAtMs: null,
+      historyRecordingUnavailable: false,
+      historyShareView: false,
+      liveSessionsGeneration: 1,
+      ...(registry.find(WORKSPACE_ID)?.syncPause
+        ? { syncPause: workspaceSyncPauseStatus(registry.find(WORKSPACE_ID)!.syncPause!, "local") }
+        : {}),
+    }),
   });
-  await expect(stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} })).resolves.toMatchObject({ workspaceSynced: false, syncPause: { author: { kind: "person", personId: "local", self: true } } });
-  expect(registry.find(WORKSPACE_ID)?.syncPause?.author).toEqual({ kind: "person", personId: "local" });
+  await expect(
+    stop({ workspace: registry.find(WORKSPACE_ID)!, assertCurrent: () => {} }),
+  ).resolves.toMatchObject({
+    workspaceSynced: false,
+    syncPause: { author: { kind: "person", personId: "local", self: true } },
+  });
+  expect(registry.find(WORKSPACE_ID)?.syncPause?.author).toEqual({
+    kind: "person",
+    personId: "local",
+  });
   expect(closeRelay).toHaveBeenCalledOnce();
-  const methods = requests.map(request => request.method);
+  const methods = requests.map((request) => request.method);
   expect(methods.indexOf(YDOC_METHOD.settle)).toBeLessThan(methods.indexOf(YDOC_METHOD.close));
   const local = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   const localEditor = mirrorEditor(local);
@@ -608,7 +778,9 @@ it("settles live edits into Markdown before stopping sync and permits local edit
   const localText = await readFile(join(root, PATH), "utf8");
   expect(localText).toContain("Edited after stopping sync.");
   expect(localText).toContain("Typed immediately before stopping sync.");
-  await local.close(); editor.destroy(); localEditor.destroy();
+  await local.close();
+  editor.destroy();
+  localEditor.destroy();
 });
 
 it("keeps unsettled live edits available when stopping sync cannot settle them", async () => {
@@ -621,10 +793,13 @@ it("keeps unsettled live edits available when stopping sync cannot settle them",
   settleRefusal = null;
   const resumeAdmission = await capture.settleAndCloseLiveSessionsForSyncPause();
   expect(await readFile(join(root, PATH), "utf8")).toContain("Do not drop this unsettled edit.");
-  await expect(capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined })).rejects.toThrow();
+  await expect(
+    capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined }),
+  ).rejects.toThrow();
   resumeAdmission();
   const local = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
-  await local.close(); editor.destroy();
+  await local.close();
+  editor.destroy();
 });
 
 it("refuses a new live session before it can recreate a path inside a removal window", async () => {
@@ -730,9 +905,7 @@ it("settles and closes the Rust Y.Doc session before a version switch", async ()
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
 
   await capture.switchVersion(draft.activeVersionId);
-  expect(await readFile(join(root, PATH), "utf8")).toContain(
-    "Unsaved draft edit.",
-  );
+  expect(await readFile(join(root, PATH), "utf8")).toContain("Unsaved draft edit.");
   await session.close();
 });
 
@@ -741,8 +914,12 @@ it("releases a verified synced document and reports changed-on-disk after a term
   const states: string[] = [];
   const tokens: number[] = [];
   const session = await capture.openYDocSession({
-    path: PATH, onRemoteUpdate: () => undefined,
-    onSaveState: (state, token) => { states.push(state); tokens.push(token); },
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state, token) => {
+      states.push(state);
+      tokens.push(token);
+    },
   });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Typed in dohc.");
@@ -754,17 +931,23 @@ it("releases a verified synced document and reports changed-on-disk after a term
   const outside = "# Solo\n\nEdited in another app.\n";
   await writeFile(join(root, PATH), outside, "utf8");
   // Daemon capture can move the durable head while the desktop lease is live.
-  await versioned.sendRequest({ id: 5_000_001, workspace: WORKSPACE_ID, method: VERSIONED_METHOD.textWrite,
-    params: { versionId: "main", path: PATH, text: outside, origin: "local-file" } });
+  await versioned.sendRequest({
+    id: 5_000_001,
+    workspace: WORKSPACE_ID,
+    method: VERSIONED_METHOD.textWrite,
+    params: { versionId: "main", path: PATH, text: outside, origin: "local-file" },
+  });
   settleRefusal = wireRefusal("conflict-stale-target");
   await expect(session.close()).resolves.toBeUndefined();
   expect(states).toEqual(["settling", "error", "changed-on-disk"]);
   expect(tokens[0]).toBeGreaterThan(0);
   expect(tokens).toEqual([tokens[0], tokens[0], tokens[0]]);
   expect(methodCount(YDOC_METHOD.settle)).toBe(2);
-  expect(requests.filter(request => request.method === YDOC_METHOD.close).map(request => request.params)).toEqual([
-    expect.objectContaining({ settle: false }),
-  ]);
+  expect(
+    requests
+      .filter((request) => request.method === YDOC_METHOD.close)
+      .map((request) => request.params),
+  ).toEqual([expect.objectContaining({ settle: false })]);
   expect(ydoc.activeSessionIds()).toHaveLength(0);
   expect(daemon.leases.size).toBe(0);
   expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
@@ -783,9 +966,15 @@ async function captureKeepingDrafts(): Promise<string[]> {
   const drafts: string[] = [];
   await capture.stop();
   capture = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
     onError: (context) => captureErrors.push(context),
-    preserveUnsentState: async ({ doc }) => { drafts.push(documentMarkdown(Y.encodeStateAsUpdate(doc))); return "draft"; },
+    preserveUnsentState: async ({ doc }) => {
+      drafts.push(documentMarkdown(Y.encodeStateAsUpdate(doc)));
+      return "draft";
+    },
     discardUnsentState: async () => undefined,
   });
   return drafts;
@@ -796,7 +985,9 @@ it("keeps a synced document's edit made while its close checks the deleted file"
   const drafts = await captureKeepingDrafts();
   const states: string[] = [];
   const session = await capture.openYDocSession({
-    path: PATH, onRemoteUpdate: () => undefined, onSaveState: state => states.push(state),
+    path: PATH,
+    onRemoteUpdate: () => undefined,
+    onSaveState: (state) => states.push(state),
   });
   ydoc.markSessionReplicated(ydoc.activeSessionIds()[0]!);
   const editor = mirrorEditor(session);
@@ -813,7 +1004,9 @@ it("keeps a synced document's edit made while its close checks the deleted file"
   await expect(closing).rejects.toThrow(/released, but its pre-close settle failed/);
   expect(states).toEqual(["settling", "error"]);
   expect(methodCount(YDOC_METHOD.settle)).toBe(1);
-  await vi.waitFor(() => expect(drafts).toEqual([expect.stringContaining("Typed during the close.")]));
+  await vi.waitFor(() =>
+    expect(drafts).toEqual([expect.stringContaining("Typed during the close.")]),
+  );
   editor.destroy();
 });
 
@@ -837,9 +1030,7 @@ it("still throws when an ordinary settle failure fails the close", async () => {
   await expect(session.settleNow()).rejects.toThrow("persist-failed");
   states.length = 0;
   captureErrors = [];
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   expect(states.at(-1)).toBe("error");
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
@@ -873,14 +1064,19 @@ it("reports file-locked, not error, for a lock refusal", async () => {
   await session.close({ settle: false });
 });
 
-async function expectBusyBudgetFailure(operation: () => Promise<unknown>, message: string | RegExp = "engine-store-busy") {
+async function expectBusyBudgetFailure(
+  operation: () => Promise<unknown>,
+  message: string | RegExp = "engine-store-busy",
+) {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   vi.setTimerTickMode("nextTimerAsync");
   try {
     const startedAt = Date.now();
     await expect(operation()).rejects.toThrow(message);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(10_000);
-  } finally { vi.useRealTimers(); }
+  } finally {
+    vi.useRealTimers();
+  }
 }
 
 // The other busy thing needs the other answer. A busy engine database
@@ -937,9 +1133,7 @@ it("keeps the close loud when the file still holds this document's bytes", async
   await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
   states.length = 0;
   captureErrors = [];
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
+  await expect(session.close()).rejects.toThrow(/released, but its pre-close settle failed/);
 
   expect(states).toEqual(["settling", "error"]);
 });
@@ -1017,9 +1211,7 @@ it("never reports a save seq the settled file does not back", async () => {
   // And the last one covers the whole document — the indicator does reach
   // "Saved" rather than staying honest by never clearing.
   expect(vouched.at(-1)?.seq).toBe(EDITS);
-  expect(await readFile(join(root, PATH), "utf8")).toContain(
-    `EDIT-${EDITS}.`,
-  );
+  expect(await readFile(join(root, PATH), "utf8")).toContain(`EDIT-${EDITS}.`);
   await honest.stop().catch(() => undefined);
 });
 // The absent-head contract stated on WorkspaceEngineCapture.openYDocSession.
@@ -1068,13 +1260,19 @@ it("duplicates the latest queued edit from a settled new page", async () => {
   const release = deferred();
   let holdJournal = false;
   capture = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID,
-    rustEngineSessions: sessions, onError: context => captureErrors.push(context),
-    openRustYDocProviderSession: async options => {
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    onError: (context) => captureErrors.push(context),
+    openRustYDocProviderSession: async (options) => {
       const provider = await openEngineYdocProviderSession(options);
       const apply = provider.applyLocalUpdate.bind(provider);
       provider.applyLocalUpdate = async (update, applyOptions) => {
-        if (holdJournal) { entered.resolve(); await release.promise; }
+        if (holdJournal) {
+          entered.resolve();
+          await release.promise;
+        }
         await apply(update, applyOptions);
       };
       return provider;
@@ -1083,7 +1281,11 @@ it("duplicates the latest queued edit from a settled new page", async () => {
   const path = "Reading notes.md";
   const destination = "Reading notes copy.md";
   await writeFile(join(root, path), "", "utf8");
-  const session = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+  const session = await capture.openYDocSession({
+    path,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+  });
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "hello");
   await session.settleNow();
@@ -1091,18 +1293,25 @@ it("duplicates the latest queued edit from a settled new page", async () => {
   typeIntoBody(editor, "world");
   await entered.promise;
   const checksBefore = methodCount(VERSIONED_METHOD.textCheckMove);
-  const duplicate = capture.changePathsAs([path], {
-    operation: "duplicate",
-    operationId: "dohc-operation:22222222-2222-4222-8222-222222222222",
-    author: { kind: "human", humanId: "person" },
-  }, async held => {
-    await held.recordDisk(path, [path]);
-    await copyFile(join(root, path), join(root, destination));
-  }, () => []);
+  const duplicate = capture.changePathsAs(
+    [path],
+    {
+      operation: "duplicate",
+      operationId: "dohc-operation:22222222-2222-4222-8222-222222222222",
+      author: { kind: "human", humanId: "person" },
+    },
+    async (held) => {
+      await held.recordDisk(path, [path]);
+      await copyFile(join(root, path), join(root, destination));
+    },
+    () => [],
+  );
   try {
-    await expect.poll(() => methodCount(VERSIONED_METHOD.textCheckMove)).toBeGreaterThan(checksBefore);
+    await expect
+      .poll(() => methodCount(VERSIONED_METHOD.textCheckMove))
+      .toBeGreaterThan(checksBefore);
     // Drain the duplicate preflight's microtasks before releasing the journal.
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
   } finally {
     release.resolve();
   }
@@ -1144,8 +1353,13 @@ async function retainLineage(
   options: { path?: string; settle?: boolean } = {},
 ): Promise<void> {
   const previous = await openEngineYdocProviderSession({
-    transport: ydoc, workspace: WORKSPACE_ID, versionId: "main", path: options.path ?? PATH,
-    contentKind: "richdoc", onRemoteUpdate: () => undefined, scheduleSettle: () => () => undefined,
+    transport: ydoc,
+    workspace: WORKSPACE_ID,
+    versionId: "main",
+    path: options.path ?? PATH,
+    contentKind: "richdoc",
+    onRemoteUpdate: () => undefined,
+    scheduleSettle: () => () => undefined,
   });
   const editor = new Y.Doc();
   Y.applyUpdate(editor, previous.initialUpdate);
@@ -1164,16 +1378,21 @@ async function openRecordingStates(path = PATH) {
   const saveSeq = createEngineYDocSaveSeqState();
   const events: Array<{ state: string; token: number; event: string }> = [];
   let reportSaved!: () => void;
-  const saved = new Promise<void>((resolve) => { reportSaved = resolve; });
-  const opened = await capture.openYDocSession({path, onRemoteUpdate: () => undefined,
+  const saved = new Promise<void>((resolve) => {
+    reportSaved = resolve;
+  });
+  const opened = await capture.openYDocSession({
+    path,
+    onRemoteUpdate: () => undefined,
     onSaveState: (state, token, event) => {
       states.push(state);
       events.push({ state, token, event });
       if (event === "start") noteSettleStart(saveSeq, token);
       else if (event === "outcome") noteSettleOutcome(saveSeq, token);
       if (state === "saved") reportSaved();
-    }});
-  return {opened, states, saved, saveSeq, events};
+    },
+  });
+  return { opened, states, saved, saveSeq, events };
 }
 
 // A release that writes nothing, queued behind anything the open armed on the
@@ -1189,7 +1408,7 @@ it("writes nothing and reports the error when a retained document reopens over a
   await retainLineage("Retained human edit.");
   await writeFile(join(root, PATH), "Outside edit.\n");
   const settlesBeforeOpen = methodCount("ydoc.settle");
-  const {opened, states} = await openRecordingStates();
+  const { opened, states } = await openRecordingStates();
   expect(states).toEqual(["error"]);
   expect(opened.doc.getXmlFragment("body").toString()).toContain("Retained human edit.");
   await releaseWithoutSettling(opened);
@@ -1200,7 +1419,7 @@ it("writes nothing and reports the error when a retained document reopens over a
 it("writes a retained edit when its document reopens, and says Saving… before the open returns", async () => {
   await retainLineage("Typed before the crash.");
   expect(await readFile(join(root, PATH), "utf8")).toBe(INITIAL_MARKDOWN);
-  const {states, saved, saveSeq, events} = await openRecordingStates();
+  const { states, saved, saveSeq, events } = await openRecordingStates();
   // Reported on the open's own task, so main queues it ahead of the open's
   // answer and the editor never shows Saved first.
   expect(states[0]).toBe("settling");
@@ -1223,8 +1442,12 @@ describe("a crash-kept draft of a file capture never recorded", () => {
   const DRAFT = "notes/draft.md";
   beforeEach(async () => {
     ydoc.seedFile({
-      workspace: WORKSPACE_ID, versionId: "main", path: DRAFT, content: "",
-      contentKind: "richdoc", head: "absent",
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: DRAFT,
+      content: "",
+      contentKind: "richdoc",
+      head: "absent",
     });
     // New File leaves an empty file behind.
     await writeFile(join(root, DRAFT), "");
@@ -1234,7 +1457,7 @@ describe("a crash-kept draft of a file capture never recorded", () => {
   it("says the draft is unsaved when its file is gone, and does not recreate it", async () => {
     await rm(join(root, DRAFT));
     const settlesBeforeOpen = methodCount("ydoc.settle");
-    const {opened, states} = await openRecordingStates(DRAFT);
+    const { opened, states } = await openRecordingStates(DRAFT);
     expect(opened.doc.getXmlFragment("body").toString()).toContain("Typed into the new file.");
     await releaseWithoutSettling(opened);
     expect(states).toEqual(["error"]);
@@ -1274,9 +1497,7 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
   Y.applyUpdate(crashEditor, crashed.initialUpdate);
   const beforeTyping = Y.encodeStateVector(crashEditor);
   typeIntoBody(crashEditor, "Typed before the crash.");
-  await crashed.applyLocalUpdate(
-    Y.encodeStateAsUpdate(crashEditor, beforeTyping),
-  );
+  await crashed.applyLocalUpdate(Y.encodeStateAsUpdate(crashEditor, beforeTyping));
   const crashMarker = new Y.Doc();
   crashMarker.getMap("meta").set("crash-orphaned", true);
   await crashed.applyLocalUpdate(Y.encodeStateAsUpdate(crashMarker));
@@ -1290,9 +1511,7 @@ it("opens a crash-orphaned draft the daemon resurrects, head absent and all", as
 
   const recovered = new Y.Doc();
   Y.applyUpdate(recovered, session.initialUpdate);
-  expect(recovered.getXmlFragment("body").toString()).toContain(
-    "Typed before the crash.",
-  );
+  expect(recovered.getXmlFragment("body").toString()).toContain("Typed before the crash.");
   await session.close({ settle: false });
 });
 
@@ -1311,16 +1530,29 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
   const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
   const ipc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
-    sessionFor: () => ({ workspaceId: WORKSPACE_ID, attachmentId: ATTACHMENT_ID, generation: 1, isCurrent: () => true }),
+    sessionFor: () => ({
+      workspaceId: WORKSPACE_ID,
+      attachmentId: ATTACHMENT_ID,
+      generation: 1,
+      isCurrent: () => true,
+    }),
     authorities: { isCurrentAttachment: () => true },
-    acquireWorkspace: () => ({ workspace, assertCurrent: () => undefined, release: () => undefined }),
+    acquireWorkspace: () => ({
+      workspace,
+      assertCurrent: () => undefined,
+      release: () => undefined,
+    }),
     captureFor: () => capture,
     ensureCaptureFor: async () => undefined,
     isSharedView: () => false,
     resolveDocumentPath: async (_workspace, path) => path,
     onError: (message) => captureErrors.push(message),
   });
-  const opened = await ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "editor", path: PATH });
+  const opened = await ipc.open(sender, {
+    workspaceId: WORKSPACE_ID,
+    sessionId: "editor",
+    path: PATH,
+  });
   if (!opened.available) throw new Error("The editor session did not open.");
   const editor = new Y.Doc();
   Y.applyUpdate(editor, opened.initialUpdate!);
@@ -1337,19 +1569,40 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
 
   // The agent edits that paragraph and adds a section, computed against the
   // provider's state, which does not have the typing yet.
-  const origin = { actorOriginId: "claude-code", attribution: { actorKind: "agent" as const, onBehalfOf: "local", depth: 0, agentRunId: "run-1" } };
-  await expect(ipc.editDocument({
-    workspaceId: WORKSPACE_ID,
-    path: PATH,
-    origin,
-    assertEditable: async () => undefined,
-    change: async (state, options) =>
-      documentEditUpdate(state, { find: "Start here.", replacement: "Start over here.\n\n## Added" }, options),
-  })).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
+  const origin = {
+    actorOriginId: "claude-code",
+    attribution: {
+      actorKind: "agent" as const,
+      onBehalfOf: "local",
+      depth: 0,
+      agentRunId: "run-1",
+    },
+  };
+  await expect(
+    ipc.editDocument({
+      workspaceId: WORKSPACE_ID,
+      path: PATH,
+      origin,
+      assertEditable: async () => undefined,
+      change: async (state, options) =>
+        documentEditUpdate(
+          state,
+          { find: "Start here.", replacement: "Start over here.\n\n## Added" },
+          options,
+        ),
+    }),
+  ).resolves.toEqual({ path: PATH, changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING });
 
   // Now the editor sends its typing and takes the agent's edit.
-  expect(ipc.applyUpdate(sender, { sessionId: "editor", update: typed!, seq: 1, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111" }))
-    .toEqual({ accepted: true });
+  expect(
+    ipc.applyUpdate(sender, {
+      sessionId: "editor",
+      update: typed!,
+      seq: 1,
+      lineageGeneration: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
+    }),
+  ).toEqual({ accepted: true });
   for (const { channel, payload } of sent) {
     if (channel === CHANNELS.engineYDocRemoteUpdate) {
       Y.applyUpdate(editor, (payload as { update: Uint8Array }).update);
@@ -1358,18 +1611,28 @@ it("merges an agent's edit with typing the editor had not sent yet, through a re
 
   const expected = "# Solo\n\nStart over here. PERSON\n\n## Added\n";
   expect(documentMarkdown(Y.encodeStateAsUpdate(editor))).toBe(expected);
-  await expect.poll(async () => {
-    const read = await ipc.readDocument({ workspaceId: WORKSPACE_ID, path: PATH });
-    return documentMarkdown(read.state!);
-  }).toBe(expected);
+  await expect
+    .poll(async () => {
+      const read = await ipc.readDocument({ workspaceId: WORKSPACE_ID, path: PATH });
+      return documentMarkdown(read.state!);
+    })
+    .toBe(expected);
   await ipc.close(sender, { sessionId: "editor" });
   expect(await readFile(join(root, PATH), "utf8")).toContain("Start over here. PERSON");
   // The engine journaled the agent's update under the agent's name and run.
-  expect(requests.some((request) => {
-    const params = request.params as { actorOriginId?: string; attribution?: { agentRunId?: string } };
-    return request.method === YDOC_METHOD.recordUpdate && params.actorOriginId === "claude-code" &&
-      params.attribution?.agentRunId === "run-1";
-  })).toBe(true);
+  expect(
+    requests.some((request) => {
+      const params = request.params as {
+        actorOriginId?: string;
+        attribution?: { agentRunId?: string };
+      };
+      return (
+        request.method === YDOC_METHOD.recordUpdate &&
+        params.actorOriginId === "claude-code" &&
+        params.attribution?.agentRunId === "run-1"
+      );
+    }),
+  ).toBe(true);
 });
 
 function keyedWrite(
@@ -1409,9 +1672,7 @@ it("refuses a reused idempotency key with other content, and none of that conten
   await session.settleNow();
 
   await Promise.all([
-    expect(keyedWrite(session, "Changed retry.")).rejects.toThrow(
-      "idempotency-key-reuse-mismatch",
-    ),
+    expect(keyedWrite(session, "Changed retry.")).rejects.toThrow("idempotency-key-reuse-mismatch"),
     session.settleNow(),
   ]);
 
@@ -1423,13 +1684,15 @@ it("refuses a reused idempotency key with other content, and none of that conten
   expect(replacements).not.toHaveBeenCalled();
 
   // The session still takes ordinary writes, and they land beside the first.
-  session.applyLocalUpdate((() => {
-    const scratch = new Y.Doc();
-    Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
-    const before = Y.encodeStateVector(scratch);
-    typeIntoBody(scratch, "Next edit.");
-    return Y.encodeStateAsUpdate(scratch, before);
-  })());
+  session.applyLocalUpdate(
+    (() => {
+      const scratch = new Y.Doc();
+      Y.applyUpdate(scratch, Y.encodeStateAsUpdate(session.doc));
+      const before = Y.encodeStateVector(scratch);
+      typeIntoBody(scratch, "Next edit.");
+      return Y.encodeStateAsUpdate(scratch, before);
+    })(),
+  );
   await session.settleNow();
   const settled = await readFile(join(root, PATH), "utf8");
   expect(settled).toContain("First attempt.");
@@ -1452,11 +1715,13 @@ it("retries a lost keyed acknowledgement with the original record and no second 
   expect(methodCount(YDOC_METHOD.open)).toBe(opensBefore + 1);
   const keyed = requests.filter(
     (request) =>
-      request.method === YDOC_METHOD.recordUpdate &&
-      request.idempotencyKey === "claim/1/0",
+      request.method === YDOC_METHOD.recordUpdate && request.idempotencyKey === "claim/1/0",
   );
   expect(keyed).toHaveLength(2);
-  expect(keyed[1]?.params).toMatchObject({ ...(keyed[0]?.params as Record<string, JsonValue>), sessionId: expect.any(String) });
+  expect(keyed[1]?.params).toMatchObject({
+    ...(keyed[0]?.params as Record<string, JsonValue>),
+    sessionId: expect.any(String),
+  });
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Recorded once.");
   await session.settleNow();
   expect(await readFile(join(root, PATH), "utf8")).toContain("Recorded once.");
@@ -1466,9 +1731,11 @@ it("retries a lost keyed acknowledgement with the original record and no second 
 it("drops a definitively refused caller-confirmed original so later typing can settle", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
   nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
-  await expect(keyedWrite(session, "Refused write.")).rejects.toThrow("attribution depth exceeds the supported chain bound");
+  await expect(keyedWrite(session, "Refused write.")).rejects.toThrow(
+    "attribution depth exceeds the supported chain bound",
+  );
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused write.");
-  expect(requests.filter(request => request.idempotencyKey === "claim/1/0")).toHaveLength(1);
+  expect(requests.filter((request) => request.idempotencyKey === "claim/1/0")).toHaveLength(1);
 
   const editor = mirrorEditor(session);
   typeIntoBody(editor, "Later typing.");
@@ -1485,12 +1752,20 @@ it("retires a busy refusal's typing checkpoint once the engine records the resen
   const written: string[] = [];
   const retire = vi.fn(async (_checkpoint: { text: string }) => undefined);
   capture = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
-    openRustYDocProviderSession: async options =>
-      ({ ...await openEngineYdocProviderSession(options), objectId: "checkpoint-object", versionId: "main" }),
-    writeTypingCheckpoint: async checkpoint => { written.push(checkpoint.text); },
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => ({
+      ...(await openEngineYdocProviderSession(options)),
+      objectId: "checkpoint-object",
+      versionId: "main",
+    }),
+    writeTypingCheckpoint: async (checkpoint) => {
+      written.push(checkpoint.text);
+    },
     retireTypingCheckpoint: retire,
-    onError: context => captureErrors.push(context),
+    onError: (context) => captureErrors.push(context),
   });
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
   const editor = mirrorEditor(session);
@@ -1509,39 +1784,59 @@ it("retires a busy refusal's typing checkpoint once the engine records the resen
   }
 });
 
-it.each(["quit"] as readonly ("quit" | "renderer retirement")[])("%s releases a refused settle without pruning the durable typing", async mode => {
-  const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Typing that must survive quit.");
-  const outside = "# Outside\n\nAnother app wrote this.\n";
-  await writeFile(join(root, PATH), outside);
-  settleRefusal = wireRefusal("conflict-stale-target");
-  closeRefusal = wireRefusal("ydoc-unsettled-close");
-  await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
-  const closeEntered = Promise.withResolvers<void>();
-  const finishClose = Promise.withResolvers<void>();
-  beforeClose = async () => { closeEntered.resolve(); await finishClose.promise; };
-  const closing = session.close(mode === "quit" ? { shuttingDown: true } : undefined);
-  await closeEntered.promise;
-  capture.beginShutdown();
-  sessions.beginShutdown();
-  finishClose.resolve();
-  try {
-    await expect(closing).resolves.toBeUndefined();
-    expect(methodCount(YDOC_METHOD.evict)).toBe(1);
-    expect(daemon.leases.size).toBe(0);
-    await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
-    expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
-    settleRefusal = null;
-    closeRefusal = null;
-    const reopened = await openEngineYdocProviderSession({ transport: ydoc, workspace: WORKSPACE_ID, versionId: "main", path: PATH, contentKind: "richdoc", onRemoteUpdate: () => undefined });
-    const recovered = new Y.Doc();
+it.each(["quit"] as readonly ("quit" | "renderer retirement")[])(
+  "%s releases a refused settle without pruning the durable typing",
+  async (mode) => {
+    const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
+    const editor = mirrorEditor(session);
+    typeIntoBody(editor, "Typing that must survive quit.");
+    const outside = "# Outside\n\nAnother app wrote this.\n";
+    await writeFile(join(root, PATH), outside);
+    settleRefusal = wireRefusal("conflict-stale-target");
+    closeRefusal = wireRefusal("ydoc-unsettled-close");
+    await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
+    const closeEntered = Promise.withResolvers<void>();
+    const finishClose = Promise.withResolvers<void>();
+    beforeClose = async () => {
+      closeEntered.resolve();
+      await finishClose.promise;
+    };
+    const closing = session.close(mode === "quit" ? { shuttingDown: true } : undefined);
+    await closeEntered.promise;
+    capture.beginShutdown();
+    sessions.beginShutdown();
+    finishClose.resolve();
     try {
-      Y.applyUpdate(recovered, reopened.initialUpdate);
-      expect(documentMarkdown(Y.encodeStateAsUpdate(recovered))).toContain("Typing that must survive quit.");
-    } finally { recovered.destroy(); await reopened.close(); }
-  } finally { editor.destroy(); }
-});
+      await expect(closing).resolves.toBeUndefined();
+      expect(methodCount(YDOC_METHOD.evict)).toBe(1);
+      expect(daemon.leases.size).toBe(0);
+      await expect(capture.settleAndCloseAllLiveSessions()).resolves.toBeUndefined();
+      expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
+      settleRefusal = null;
+      closeRefusal = null;
+      const reopened = await openEngineYdocProviderSession({
+        transport: ydoc,
+        workspace: WORKSPACE_ID,
+        versionId: "main",
+        path: PATH,
+        contentKind: "richdoc",
+        onRemoteUpdate: () => undefined,
+      });
+      const recovered = new Y.Doc();
+      try {
+        Y.applyUpdate(recovered, reopened.initialUpdate);
+        expect(documentMarkdown(Y.encodeStateAsUpdate(recovered))).toContain(
+          "Typing that must survive quit.",
+        );
+      } finally {
+        recovered.destroy();
+        await reopened.close();
+      }
+    } finally {
+      editor.destroy();
+    }
+  },
+);
 
 it("retries only eviction after a transient quit release failure", async () => {
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate: () => undefined });
@@ -1552,8 +1847,9 @@ it("retries only eviction after a transient quit release failure", async () => {
   closeRefusal = wireRefusal("ydoc-unsettled-close");
   const send = ydoc.sendRequest.bind(ydoc);
   let blockEvict = true;
-  vi.spyOn(ydoc, "sendRequest").mockImplementation(async request => {
-    if (blockEvict && request.method === YDOC_METHOD.evict) throw wireRefusal("engine-store-busy", "OVERLOADED");
+  vi.spyOn(ydoc, "sendRequest").mockImplementation(async (request) => {
+    if (blockEvict && request.method === YDOC_METHOD.evict)
+      throw wireRefusal("engine-store-busy", "OVERLOADED");
     return send(request);
   });
   await expect(session.settleNow()).rejects.toThrow("conflict-stale-target");
@@ -1571,7 +1867,9 @@ it("retries only eviction after a transient quit release failure", async () => {
     expect(methodCount(YDOC_METHOD.evict)).toBe(2);
     expect(daemon.leases.size).toBe(0);
     expect(await readFile(join(root, PATH), "utf8")).toBe("Outside bytes.");
-  } finally { editor.destroy(); }
+  } finally {
+    editor.destroy();
+  }
 });
 
 it("quit waits for typing still unacknowledged when close starts before eviction", async () => {
@@ -1580,7 +1878,10 @@ it("quit waits for typing still unacknowledged when close starts before eviction
   const acknowledgedBefore = ydoc.recordedUpdates.length;
   const recording = Promise.withResolvers<void>();
   const acknowledge = Promise.withResolvers<void>();
-  beforeRecordUpdate = async () => { recording.resolve(); await acknowledge.promise; };
+  beforeRecordUpdate = async () => {
+    recording.resolve();
+    await acknowledge.promise;
+  };
   typeIntoBody(editor, "Unacknowledged when quit starts.");
   typeIntoBody(editor, "Queued behind the unacknowledged write.");
   await recording.promise;
@@ -1599,113 +1900,167 @@ it("quit waits for typing still unacknowledged when close starts before eviction
     expect(() => session.applyLocalUpdate(new Uint8Array())).toThrow("closed");
     settleRefusal = null;
     closeRefusal = null;
-    const reopened = await openEngineYdocProviderSession({ transport: ydoc, workspace: WORKSPACE_ID,
-      versionId: "main", path: PATH, contentKind: "richdoc", onRemoteUpdate() {} });
+    const reopened = await openEngineYdocProviderSession({
+      transport: ydoc,
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: PATH,
+      contentKind: "richdoc",
+      onRemoteUpdate() {},
+    });
     expect(documentMarkdown(reopened.initialUpdate)).toContain("Unacknowledged when quit starts.");
-    expect(documentMarkdown(reopened.initialUpdate)).toContain("Queued behind the unacknowledged write.");
+    expect(documentMarkdown(reopened.initialUpdate)).toContain(
+      "Queued behind the unacknowledged write.",
+    );
     await reopened.close();
-  } finally { acknowledge.resolve(); await closing.catch(() => undefined); editor.destroy(); }
+  } finally {
+    acknowledge.resolve();
+    await closing.catch(() => undefined);
+    editor.destroy();
+  }
 });
 
 // A restore gave the open document another history while edits were on their
 // way. Each refused write reaches the renderer as that history, never as a
 // generic reconnect, and the renderer sets the refused typing aside first.
-it.each([false, true])("hands refused renderer typing to the renderer as the replaced history (lost resync answer: %s)", async lostResync => {
-  claimedLineage = true;
-  type Replacement = Parameters<Parameters<EngineYDocTransport["onLineageReplacement"]>[0]>[0];
-  let deliverReplacement: ((input: Replacement) => void | Promise<void>) | null = null;
-  const announced: Replacement[] = [];
-  const sender = {
-    id: 1, isDestroyed: () => false, once() { return this; },
-    send: (channel: string, payload: unknown) => {
-      if (channel !== CHANNELS.engineYDocLineageReplacement) return;
-      announced.push(payload as Replacement);
-      queueMicrotask(() => void deliverReplacement?.(payload as Replacement));
-    },
-  };
-  const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
-  let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
-  const ipc = createEngineYDocSessionIpc({
-    localPersonId: () => "person-local",
-    sessionFor: () => ({ workspaceId: WORKSPACE_ID, attachmentId: ATTACHMENT_ID, generation: 1, isCurrent: () => true }),
-    authorities: { isCurrentAttachment: () => true },
-    acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
-    captureFor: () => ({ openYDocSession: async input => provider = await capture.openYDocSession(input) }),
-    ensureCaptureFor: async () => undefined, isSharedView: () => false,
-    resolveDocumentPath: async (_workspace, path) => path, onError() {},
-  });
-  let seq = 0;
-  const transport: EngineYDocTransport = {
-    open: () => ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "editor", path: PATH }),
-    stageLocalUpdate: () => ++seq,
-    async applyLocalUpdate(update, staged, lineageGeneration, requestId) {
-      const result = ipc.applyUpdate(sender, { sessionId: "editor", update, seq: staged, lineageGeneration, requestId });
-      if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
-    },
-    onRemoteUpdate: () => () => undefined,
-    onLineageReplacement(listener) {
-      deliverReplacement = listener;
-      return () => { deliverReplacement = null; };
-    },
-    async acknowledgeLineageReplacement(lineageGeneration) {
-      const result = ipc.acknowledgeLineageReplacement(sender, { sessionId: "editor", lineageGeneration });
-      if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
-      return result.updates;
-    },
-    close: async () => { await ipc.close(sender, { sessionId: "editor" }); },
-  };
-  const setAside: string[] = [];
-  const installed = Promise.withResolvers<Y.Doc>();
-  const binding = await bindEngineYDoc(transport, undefined, {
-    onDocumentReplacing: retired => { setAside.push(documentMarkdown(Y.encodeStateAsUpdate(retired))); },
-  });
-  binding.onDocumentReplaced(doc => installed.resolve(doc));
-  const losingDoc = binding.doc!;
-  typeIntoBody(losingDoc, "Typed before the restore.");
-  await binding.flushPendingLocalUpdates();
-  await provider.settleNow();
+it.each([false, true])(
+  "hands refused renderer typing to the renderer as the replaced history (lost resync answer: %s)",
+  async (lostResync) => {
+    claimedLineage = true;
+    type Replacement = Parameters<Parameters<EngineYDocTransport["onLineageReplacement"]>[0]>[0];
+    let deliverReplacement: ((input: Replacement) => void | Promise<void>) | null = null;
+    const announced: Replacement[] = [];
+    const sender = {
+      id: 1,
+      isDestroyed: () => false,
+      once() {
+        return this;
+      },
+      send: (channel: string, payload: unknown) => {
+        if (channel !== CHANNELS.engineYDocLineageReplacement) return;
+        announced.push(payload as Replacement);
+        queueMicrotask(() => void deliverReplacement?.(payload as Replacement));
+      },
+    };
+    const workspace = { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID };
+    let provider!: Awaited<ReturnType<typeof capture.openYDocSession>>;
+    const ipc = createEngineYDocSessionIpc({
+      localPersonId: () => "person-local",
+      sessionFor: () => ({
+        workspaceId: WORKSPACE_ID,
+        attachmentId: ATTACHMENT_ID,
+        generation: 1,
+        isCurrent: () => true,
+      }),
+      authorities: { isCurrentAttachment: () => true },
+      acquireWorkspace: () => ({ workspace, assertCurrent() {}, release() {} }),
+      captureFor: () => ({
+        openYDocSession: async (input) => (provider = await capture.openYDocSession(input)),
+      }),
+      ensureCaptureFor: async () => undefined,
+      isSharedView: () => false,
+      resolveDocumentPath: async (_workspace, path) => path,
+      onError() {},
+    });
+    let seq = 0;
+    const transport: EngineYDocTransport = {
+      open: () => ipc.open(sender, { workspaceId: WORKSPACE_ID, sessionId: "editor", path: PATH }),
+      stageLocalUpdate: () => ++seq,
+      async applyLocalUpdate(update, staged, lineageGeneration, requestId) {
+        const result = ipc.applyUpdate(sender, {
+          sessionId: "editor",
+          update,
+          seq: staged,
+          lineageGeneration,
+          requestId,
+        });
+        if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
+      },
+      onRemoteUpdate: () => () => undefined,
+      onLineageReplacement(listener) {
+        deliverReplacement = listener;
+        return () => {
+          deliverReplacement = null;
+        };
+      },
+      async acknowledgeLineageReplacement(lineageGeneration) {
+        const result = ipc.acknowledgeLineageReplacement(sender, {
+          sessionId: "editor",
+          lineageGeneration,
+        });
+        if (!result.accepted) throw new EngineYDocDeliveryRefusedError(result.reason);
+        return result.updates;
+      },
+      close: async () => {
+        await ipc.close(sender, { sessionId: "editor" });
+      },
+    };
+    const setAside: string[] = [];
+    const installed = Promise.withResolvers<Y.Doc>();
+    const binding = await bindEngineYDoc(transport, undefined, {
+      onDocumentReplacing: (retired) => {
+        setAside.push(documentMarkdown(Y.encodeStateAsUpdate(retired)));
+      },
+    });
+    binding.onDocumentReplaced((doc) => installed.resolve(doc));
+    const losingDoc = binding.doc!;
+    typeIntoBody(losingDoc, "Typed before the restore.");
+    await binding.flushPendingLocalUpdates();
+    await provider.settleNow();
 
-  servedClaim = "restored-claim";
-  resyncCount = 0;
-  // The first resync after the restore is the record's own recovery, which
-  // finds the new claim. The second carries the replacement and its recovered
-  // paths.
-  if (lostResync) lostResyncs = new Set([2]);
-  // Typing continues while the first refused edit is on its way.
-  const entered = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
-  typeIntoBody(losingDoc, "Typed against the old history.");
-  await entered.promise;
-  typeIntoBody(losingDoc, "Typed during the refusal.");
-  await binding.flushPendingLocalUpdates();
-  release.resolve();
-  // A lost answer leaves the replacement to the next settle's resync.
-  if (lostResync) await provider.settleNow().catch(() => undefined);
-  const winner = await installed.promise;
+    servedClaim = "restored-claim";
+    resyncCount = 0;
+    // The first resync after the restore is the record's own recovery, which
+    // finds the new claim. The second carries the replacement and its recovered
+    // paths.
+    if (lostResync) lostResyncs = new Set([2]);
+    // Typing continues while the first refused edit is on its way.
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    beforeRecordUpdate = async () => {
+      entered.resolve();
+      await release.promise;
+    };
+    typeIntoBody(losingDoc, "Typed against the old history.");
+    await entered.promise;
+    typeIntoBody(losingDoc, "Typed during the refusal.");
+    await binding.flushPendingLocalUpdates();
+    release.resolve();
+    // A lost answer leaves the replacement to the next settle's resync.
+    if (lostResync) await provider.settleNow().catch(() => undefined);
+    const winner = await installed.promise;
 
-  expect(binding.doc).toBe(winner);
-  expect(announced.map(replacement => replacement.recoveredPaths)).toEqual([[]]);
-  const winnerText = documentMarkdown(Y.encodeStateAsUpdate(winner));
-  expect(winnerText).toContain("Typed before the restore.");
-  for (const refused of ["Written against the old history.", "Typed against the old history.", "Typed during the refusal."]) {
-    expect(winnerText).not.toContain(refused);
-    expect(journalMarkdown()).not.toContain(refused);
-  }
-  expect(setAside).toHaveLength(1);
-  expect(setAside[0]).toContain("Typed against the old history.");
-  expect(setAside[0]).toContain("Typed during the refusal.");
-  // Neither a reconnect nor a refused-edit notice: the replacement is the answer.
-  expect(captureErrors.filter(context => context.startsWith("Y.Doc local update") || context.startsWith("Y.Doc rebind"))).toEqual([]);
+    expect(binding.doc).toBe(winner);
+    expect(announced.map((replacement) => replacement.recoveredPaths)).toEqual([[]]);
+    const winnerText = documentMarkdown(Y.encodeStateAsUpdate(winner));
+    expect(winnerText).toContain("Typed before the restore.");
+    for (const refused of [
+      "Written against the old history.",
+      "Typed against the old history.",
+      "Typed during the refusal.",
+    ]) {
+      expect(winnerText).not.toContain(refused);
+      expect(journalMarkdown()).not.toContain(refused);
+    }
+    expect(setAside).toHaveLength(1);
+    expect(setAside[0]).toContain("Typed against the old history.");
+    expect(setAside[0]).toContain("Typed during the refusal.");
+    // Neither a reconnect nor a refused-edit notice: the replacement is the answer.
+    expect(
+      captureErrors.filter(
+        (context) => context.startsWith("Y.Doc local update") || context.startsWith("Y.Doc rebind"),
+      ),
+    ).toEqual([]);
 
-  typeIntoBody(winner, "Typed on the restored history.");
-  await binding.flushPendingLocalUpdates();
-  await provider.settleNow();
-  expect(journalMarkdown()).toContain("Typed on the restored history.");
-  expect(await readFile(join(root, PATH), "utf8")).toContain("Typed on the restored history.");
-  await binding.destroy();
-  await ipc.shutdown();
-});
+    typeIntoBody(winner, "Typed on the restored history.");
+    await binding.flushPendingLocalUpdates();
+    await provider.settleNow();
+    expect(journalMarkdown()).toContain("Typed on the restored history.");
+    expect(await readFile(join(root, PATH), "utf8")).toContain("Typed on the restored history.");
+    await binding.destroy();
+    await ipc.shutdown();
+  },
+);
 
 it("quit eviction waits for the active typing checkpoint writer and its queued retirement", async () => {
   await capture.stop();
@@ -1714,22 +2069,38 @@ it("quit eviction waits for the active typing checkpoint writer and its queued r
   const retiring = Promise.withResolvers<void>();
   const finishRetirement = Promise.withResolvers<void>();
   let notifyDeath!: (error: unknown) => void;
-  const writeCheckpoint = vi.fn(async () => { writing.resolve(); await finishWrite.promise; });
+  const writeCheckpoint = vi.fn(async () => {
+    writing.resolve();
+    await finishWrite.promise;
+  });
   capture = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
-    openRustYDocProviderSession: async options => {
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
       notifyDeath = options.onSessionError!;
-      return { ...await openEngineYdocProviderSession(options), objectId: "checkpoint-object", versionId: "main" };
+      return {
+        ...(await openEngineYdocProviderSession(options)),
+        objectId: "checkpoint-object",
+        versionId: "main",
+      };
     },
     writeTypingCheckpoint: writeCheckpoint,
-    retireTypingCheckpoint: async () => { retiring.resolve(); await finishRetirement.promise; },
-    onError: context => captureErrors.push(context),
+    retireTypingCheckpoint: async () => {
+      retiring.resolve();
+      await finishRetirement.promise;
+    },
+    onError: (context) => captureErrors.push(context),
   });
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
   const editor = mirrorEditor(session);
   const recording = Promise.withResolvers<void>();
   const acknowledge = Promise.withResolvers<void>();
-  beforeRecordUpdate = async () => { recording.resolve(); await acknowledge.promise; };
+  beforeRecordUpdate = async () => {
+    recording.resolve();
+    await acknowledge.promise;
+  };
   typeIntoBody(editor, "Checkpoint typing acknowledged before quit.");
   await recording.promise;
   notifyDeath(transportLost());
@@ -1742,11 +2113,13 @@ it("quit eviction waits for the active typing checkpoint writer and its queued r
   capture.beginShutdown();
   sessions.beginShutdown();
   let completed = false;
-  const closing = session.close({ shuttingDown: true }).then(() => { completed = true; });
+  const closing = session.close({ shuttingDown: true }).then(() => {
+    completed = true;
+  });
   try {
     await expect.poll(() => methodCount(YDOC_METHOD.evict)).toBe(1);
     // The event-loop turn drains the close continuations while disk stays gated.
-    await new Promise<void>(resolve => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(completed).toBe(false);
     finishWrite.resolve();
     await retiring.promise;
@@ -1756,7 +2129,9 @@ it("quit eviction waits for the active typing checkpoint writer and its queued r
     expect(ydoc.recordedUpdates).toHaveLength(acknowledged);
     await flushTypingCheckpoints(WORKSPACE_ID);
   } finally {
-    acknowledge.resolve(); finishWrite.resolve(); finishRetirement.resolve();
+    acknowledge.resolve();
+    finishWrite.resolve();
+    finishRetirement.resolve();
     await closing;
     editor.destroy();
   }
@@ -1785,11 +2160,22 @@ it("a later quit caller journals missing typing after transient resend refusals"
     expect(methodCount(YDOC_METHOD.settle)).toBe(settles);
     expect(methodCount(YDOC_METHOD.evict)).toBe(1);
     expect(daemon.leases.size).toBe(0);
-    const reopened = await openEngineYdocProviderSession({ transport: ydoc, workspace: WORKSPACE_ID,
-      versionId: "main", path: PATH, contentKind: "richdoc", onRemoteUpdate() {} });
-    expect(documentMarkdown(reopened.initialUpdate)).toContain("Only main holds this typing until quit retries.");
+    const reopened = await openEngineYdocProviderSession({
+      transport: ydoc,
+      workspace: WORKSPACE_ID,
+      versionId: "main",
+      path: PATH,
+      contentKind: "richdoc",
+      onRemoteUpdate() {},
+    });
+    expect(documentMarkdown(reopened.initialUpdate)).toContain(
+      "Only main holds this typing until quit retries.",
+    );
     await reopened.close();
-  } finally { busyRecordAttempts = 0; editor.destroy(); }
+  } finally {
+    busyRecordAttempts = 0;
+    editor.destroy();
+  }
 });
 
 it("successful eviction stays closed when checkpoint retirement fails", async () => {
@@ -1798,22 +2184,37 @@ it("successful eviction stays closed when checkpoint retirement fails", async ()
   const finishWrite = Promise.withResolvers<void>();
   let notifyDeath!: (error: unknown) => void;
   let failRetirement = true;
-  const retire = vi.fn(async () => { if (failRetirement) throw new Error("checkpoint disk failure"); });
+  const retire = vi.fn(async () => {
+    if (failRetirement) throw new Error("checkpoint disk failure");
+  });
   capture = createWorkspaceEngineCapture({
-    workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: ATTACHMENT_ID, rustEngineSessions: sessions,
-    openRustYDocProviderSession: async options => {
+    workspaceId: WORKSPACE_ID,
+    rootPath: root,
+    attachmentId: ATTACHMENT_ID,
+    rustEngineSessions: sessions,
+    openRustYDocProviderSession: async (options) => {
       notifyDeath = options.onSessionError!;
-      return { ...await openEngineYdocProviderSession(options), objectId: "checkpoint-object", versionId: "main" };
+      return {
+        ...(await openEngineYdocProviderSession(options)),
+        objectId: "checkpoint-object",
+        versionId: "main",
+      };
     },
-    writeTypingCheckpoint: async () => { writing.resolve(); await finishWrite.promise; },
+    writeTypingCheckpoint: async () => {
+      writing.resolve();
+      await finishWrite.promise;
+    },
     retireTypingCheckpoint: retire,
-    onError: context => captureErrors.push(context),
+    onError: (context) => captureErrors.push(context),
   });
   const session = await capture.openYDocSession({ path: PATH, onRemoteUpdate() {} });
   const editor = mirrorEditor(session);
   const recording = Promise.withResolvers<void>();
   const acknowledge = Promise.withResolvers<void>();
-  beforeRecordUpdate = async () => { recording.resolve(); await acknowledge.promise; };
+  beforeRecordUpdate = async () => {
+    recording.resolve();
+    await acknowledge.promise;
+  };
   typeIntoBody(editor, "Typing durable before checkpoint retirement fails.");
   await recording.promise;
   notifyDeath(transportLost());
@@ -1840,7 +2241,9 @@ it("successful eviction stays closed when checkpoint retirement fails", async ()
     await flushTypingCheckpoints(WORKSPACE_ID);
     expect(retire.mock.calls.length).toBeGreaterThan(attempts);
   } finally {
-    acknowledge.resolve(); finishWrite.resolve(); failRetirement = false;
+    acknowledge.resolve();
+    finishWrite.resolve();
+    failRetirement = false;
     await closing.catch(() => undefined);
     await flushTypingCheckpoints(WORKSPACE_ID);
     editor.destroy();

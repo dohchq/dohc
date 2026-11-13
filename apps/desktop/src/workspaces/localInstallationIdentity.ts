@@ -1,12 +1,24 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { atomicReplaceFileSync } from "../atomicReplaceFile";
 import { dirname } from "node:path";
 
-const errorCode = (error: unknown) => (error instanceof Error && "code" in error ? error.code : undefined);
+const errorCode = (error: unknown) =>
+  error instanceof Error && "code" in error ? error.code : undefined;
 
 const validId = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0 && value.length <= 1024 && !/[\u0000-\u001f\u007f]/u.test(value);
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.length <= 1024 &&
+  !/[\u0000-\u001f\u007f]/u.test(value);
 
 /**
  * This installation's signed-out subject: a stable opaque id, never the
@@ -16,25 +28,35 @@ const validId = (value: unknown): value is string =>
  * id cannot be read or saved, the caller keeps the returned id for its
  * process; `onError` says why.
  */
-export function readOrCreateLocalInstallationId(file: string, onError: (message: string, error: unknown) => void): string {
+export function readOrCreateLocalInstallationId(
+  file: string,
+  onError: (message: string, error: unknown) => void,
+): string {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
   } catch (error) {
     if (errorCode(error) === "ENOENT") return saveNewId(file, onError);
-    onError("dohc could not read this installation's id. It uses an unsaved one until it restarts.", error);
+    onError(
+      "dohc could not read this installation's id. It uses an unsaved one until it restarts.",
+      error,
+    );
     return `local:${randomUUID()}`;
   }
   try {
     const parsed: unknown = JSON.parse(text);
-    if (typeof parsed === "object" && parsed !== null && "id" in parsed && validId(parsed.id)) return parsed.id;
+    if (typeof parsed === "object" && parsed !== null && "id" in parsed && validId(parsed.id))
+      return parsed.id;
   } catch {
     // Truncated or not JSON. Kept below, like an invalid id.
   }
   try {
     renameSync(file, `${file}.corrupt-${Date.now()}-${randomUUID()}`);
   } catch (error) {
-    onError("dohc could not set aside this installation's unreadable id file. It uses an unsaved id until it restarts.", error);
+    onError(
+      "dohc could not set aside this installation's unreadable id file. It uses an unsaved id until it restarts.",
+      error,
+    );
     return `local:${randomUUID()}`;
   }
   return saveNewId(file, onError);
@@ -56,7 +78,10 @@ function saveNewId(file: string, onError: (message: string, error: unknown) => v
       }
     });
   } catch (error) {
-    onError("dohc could not save this installation's id. It uses an unsaved one until it restarts.", error);
+    onError(
+      "dohc could not save this installation's id. It uses an unsaved one until it restarts.",
+      error,
+    );
   }
   return id;
 }

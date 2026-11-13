@@ -33,8 +33,22 @@ const runId = process.env.DOHC_RUN_ID;
 // (codexRunConfig.ts), and loads no saved command rules (agentToolCatalog.ts).
 // A reply-only run also turns off the shell and view_image.
 const READ_ONLY_DISABLED_FEATURES = [
-  "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "token_budget",
+  "plugins",
+  "remote_plugin",
+  "apps",
+  "computer_use",
+  "browser_use",
+  "browser_use_external",
+  "hooks",
+  "multi_agent",
+  "multi_agent_v2",
+  "memories",
+  "skill_search",
+  "tool_suggest",
+  "skill_mcp_dependency_install",
+  "image_generation",
+  "goals",
+  "token_budget",
 ];
 const REPLY_ONLY_DISABLED_FEATURES = ["shell_tool", "unified_exec", "view_image"];
 const CODEX_TAIL = ["--skip-git-repo-check", "--ephemeral", "-"];
@@ -42,7 +56,14 @@ const CODEX_TAIL = ["--skip-git-repo-check", "--ephemeral", "-"];
 // arguments start (chatRunnerProcess.ts). Codex reads no stdin for it.
 if (profileTool === "codex" && process.argv[3] === "mcp") {
   const args = process.argv.slice(3);
-  const run = ["exec", "--config", "approval_policy=never", ...args.slice(3), "--ignore-rules", ...CODEX_TAIL];
+  const run = [
+    "exec",
+    "--config",
+    "approval_policy=never",
+    ...args.slice(3),
+    "--ignore-rules",
+    ...CODEX_TAIL,
+  ];
   if (args[1] !== "list" || args[2] !== "--json" || !codexReplyServer(run)?.readOnly) {
     console.error("Unexpected Codex server check", args);
     process.exit(2);
@@ -56,7 +77,7 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const prompt = Buffer.concat(chunks).toString("utf8");
 // A runner self-test asks for one reply that carries its marker.
 const selfTestMarker = prompt.includes("This is a dohc runner self-test.")
-  ? /dohc-runner-self-test:[\w-]+/u.exec(prompt)?.[0] ?? null
+  ? (/dohc-runner-self-test:[\w-]+/u.exec(prompt)?.[0] ?? null)
   : null;
 
 if (!runId || prompt.trim().length === 0 || !threadId) {
@@ -86,8 +107,15 @@ if (mode === "hold") {
 // works on (hold-tree) or exits (leave-tree). It writes the pids of its parent,
 // itself and that process to the file named after the mode.
 if (mode === "hold-tree" || mode === "leave-tree") {
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true, detached: true });
-  writeFileSync(process.argv[3], JSON.stringify({ parent: process.ppid, runner: process.pid, child: child.pid }));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    windowsHide: true,
+    detached: true,
+  });
+  writeFileSync(
+    process.argv[3],
+    JSON.stringify({ parent: process.ppid, runner: process.pid, child: child.pid }),
+  );
   if (mode === "leave-tree") process.exit(0);
   setInterval(() => {}, 1000);
   await new Promise(() => {});
@@ -101,15 +129,24 @@ function runCommand(command) {
     process.exit(2);
   }
   const child = spawn(command, {
-    cwd: process.cwd(), env: process.env, stdio: ["ignore", "inherit", "inherit"], windowsHide: true, shell: true,
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: ["ignore", "inherit", "inherit"],
+    windowsHide: true,
+    shell: true,
   });
-  child.on("error", (error) => { console.error(error); process.exit(1); });
+  child.on("error", (error) => {
+    console.error(error);
+    process.exit(1);
+  });
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
 // The values of a TOML string or array of strings in a Codex config entry.
 function tomlStrings(value) {
-  return [...value.matchAll(/'([^']*)'|("(?:[^"\\]|\\.)*")/gu)].map((match) => match[1] ?? JSON.parse(match[2]));
+  return [...value.matchAll(/'([^']*)'|("(?:[^"\\]|\\.)*")/gu)].map(
+    (match) => match[1] ?? JSON.parse(match[2]),
+  );
 }
 
 // The dohc MCP server a Codex launch names, after checking the launch. The
@@ -120,30 +157,76 @@ function tomlStrings(value) {
 // .dohc, and on Windows always gets the unelevated sandbox without MXC.
 // Every name Codex looks the workspace up by is untrusted.
 function codexReplyServer(args) {
-  const config = new Map(args.flatMap((arg, index) => args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : []));
+  const config = new Map(
+    args.flatMap((arg, index) =>
+      args[index - 1] === "--config" ? [arg.split(/=(.*)/su).slice(0, 2)] : [],
+    ),
+  );
   const profile = `dohc_run_${createHash("sha256").update(runId).digest("hex").slice(0, 16)}`;
-  const readOnly = config.get(`permissions.${profile}`) === "{filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}";
-  const disabled = args.flatMap((arg, index) => args[index - 1] === "--disable" ? [arg] : []);
+  const readOnly =
+    config.get(`permissions.${profile}`) ===
+    "{filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}";
+  const disabled = args.flatMap((arg, index) => (args[index - 1] === "--disable" ? [arg] : []));
   const replyOnly = tomlStrings(config.get("mcp_servers.dohc.args") ?? "").includes("--tool");
   const owners = [...config.keys()].filter((key) => /^mcp_servers\.[\w-]+\.enabled$/u.test(key));
   // Without --json, Codex repeats the prompt into the run log (startCodexOutput).
-  const codexTail = args.at(-2) === "--json" ? ["--skip-git-repo-check", "--ephemeral", "--json", "-"] : CODEX_TAIL;
+  const codexTail =
+    args.at(-2) === "--json" ? ["--skip-git-repo-check", "--ephemeral", "--json", "-"] : CODEX_TAIL;
   const tail = readOnly ? ["--ignore-rules", ...codexTail] : codexTail;
-  const sandbox = process.platform === "win32" && (readOnly || config.has("windows.sandbox")) ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])] : [];
-  const keys = ["approval_policy", "mcp_servers.dohc.command", "mcp_servers.dohc.args", "mcp_servers.dohc.cwd", "mcp_servers.dohc.required", "mcp_servers.dohc.env_vars", "mcp_servers.dohc.default_tools_approval_mode", `permissions.${profile}`, "default_permissions", ...(readOnly ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"] : []), "projects", ...sandbox];
-  if (JSON.stringify(disabled) !== JSON.stringify(readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : []) ||
+  const sandbox =
+    process.platform === "win32" && (readOnly || config.has("windows.sandbox"))
+      ? ["windows.sandbox", ...(readOnly ? ["windows.allow_mxc"] : [])]
+      : [];
+  const keys = [
+    "approval_policy",
+    "mcp_servers.dohc.command",
+    "mcp_servers.dohc.args",
+    "mcp_servers.dohc.cwd",
+    "mcp_servers.dohc.required",
+    "mcp_servers.dohc.env_vars",
+    "mcp_servers.dohc.default_tools_approval_mode",
+    `permissions.${profile}`,
+    "default_permissions",
+    ...(readOnly
+      ? [...owners, "web_search", "notify", "agents.enabled", "approvals_reviewer"]
+      : []),
+    "projects",
+    ...sandbox,
+  ];
+  if (
+    JSON.stringify(disabled) !==
+      JSON.stringify(
+        readOnly
+          ? [...READ_ONLY_DISABLED_FEATURES, ...(replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])]
+          : [],
+      ) ||
     owners.some((key) => key === "mcp_servers.dohc.enabled" || config.get(key) !== "false") ||
-    (readOnly && (config.get("web_search") !== "'disabled'" || config.get("notify") !== "[]" || config.get("agents.enabled") !== "false" || config.get("approvals_reviewer") !== "'user'"))) {
+    (readOnly &&
+      (config.get("web_search") !== "'disabled'" ||
+        config.get("notify") !== "[]" ||
+        config.get("agents.enabled") !== "false" ||
+        config.get("approvals_reviewer") !== "'user'"))
+  ) {
     return null;
   }
   const [command] = tomlStrings(config.get("mcp_servers.dohc.command") ?? "");
   const [cwd] = tomlStrings(config.get("mcp_servers.dohc.cwd") ?? "");
-  const trust = [...(config.get("projects") ?? "").matchAll(/('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu)];
+  const trust = [
+    ...(config.get("projects") ?? "").matchAll(
+      /('[^']*'|"(?:[^"\\]|\\.)*")=\{trust_level='untrusted'\}/gu,
+    ),
+  ];
   const root = realpathSync.native(process.cwd());
-  const rootKey = process.platform === "win32" ? root.replace(/[A-Z]/gu, (letter) => letter.toLowerCase()) : root;
-  if (args.length !== 1 + 2 * keys.length + 2 * disabled.length + tail.length ||
-    !command || cwd !== dirname(command) ||
-    (!readOnly && !/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(config.get(`permissions.${profile}`) ?? "")) ||
+  const rootKey =
+    process.platform === "win32" ? root.replace(/[A-Z]/gu, (letter) => letter.toLowerCase()) : root;
+  if (
+    args.length !== 1 + 2 * keys.length + 2 * disabled.length + tail.length ||
+    !command ||
+    cwd !== dirname(command) ||
+    (!readOnly &&
+      !/^\{extends=':workspace',filesystem=\{':workspace_roots'=\{'\.dohc'='read'\}(,':tmpdir'='read')?(,':slash_tmp'='read')?\}(,network=\{enabled=true\})?\}$/u.test(
+        config.get(`permissions.${profile}`) ?? "",
+      )) ||
     config.get("default_permissions") !== `'${profile}'` ||
     config.get("projects") !== `{${trust.map(([entry]) => entry).join(",")}}` ||
     !tomlStrings(trust.map(([, key]) => key).join(",")).includes(rootKey) ||
@@ -151,10 +234,12 @@ function codexReplyServer(args) {
     (sandbox.length > 1 && config.get("windows.allow_mxc") !== "false") ||
     config.get("mcp_servers.dohc.required") !== "true" ||
     config.get("mcp_servers.dohc.env_vars") !== "['DOHC_RUN_SECRET']" ||
-    JSON.stringify(args.slice(0, 3)) !== JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
+    JSON.stringify(args.slice(0, 3)) !==
+      JSON.stringify(["exec", "--config", "approval_policy=never"]) ||
     JSON.stringify(args.slice(-tail.length)) !== JSON.stringify(tail) ||
     JSON.stringify([...config.keys()]) !== JSON.stringify(keys) ||
-    config.get("mcp_servers.dohc.default_tools_approval_mode") !== "'approve'") {
+    config.get("mcp_servers.dohc.default_tools_approval_mode") !== "'approve'"
+  ) {
     return null;
   }
   return { command, args: tomlStrings(config.get("mcp_servers.dohc.args") ?? ""), cwd, readOnly };
@@ -165,9 +250,34 @@ function codexReplyServer(args) {
 function claudeReplyServer(args) {
   const readOnly = args.includes("--strict-mcp-config");
   const tools = readOnly
-    ? ["--strict-mcp-config", "--restricted", "--disable-slash-commands", "--tools", "Read,Grep,Glob", "--allowedTools", "mcp__dohc"]
-    : ["--allowedTools", "Edit(/**)", "mcp__dohc", "--disallowedTools", "Edit(/.dohc/**)", "Edit(/.codex/**)"];
-  const expected = ["-p", "--permission-prompts", "none", "--no-session-persistence", "--setting-sources", "user", "--mcp-config", args[7], ...tools];
+    ? [
+        "--strict-mcp-config",
+        "--restricted",
+        "--disable-slash-commands",
+        "--tools",
+        "Read,Grep,Glob",
+        "--allowedTools",
+        "mcp__dohc",
+      ]
+    : [
+        "--allowedTools",
+        "Edit(/**)",
+        "mcp__dohc",
+        "--disallowedTools",
+        "Edit(/.dohc/**)",
+        "Edit(/.codex/**)",
+      ];
+  const expected = [
+    "-p",
+    "--permission-prompts",
+    "none",
+    "--no-session-persistence",
+    "--setting-sources",
+    "user",
+    "--mcp-config",
+    args[7],
+    ...tools,
+  ];
   if (JSON.stringify(args) !== JSON.stringify(expected) || !existsSync(args[7])) return null;
   const servers = JSON.parse(readFileSync(args[7], "utf8")).mcpServers;
   return Object.keys(servers).join() === "dohc" && servers.dohc.type === "stdio"
@@ -180,8 +290,12 @@ function claudeReplyServer(args) {
 // with --json, one event naming the thread; otherwise a summary on stderr
 // that ends with the prompt.
 function startCodexOutput(args) {
-  if (args.includes("--json")) console.log(JSON.stringify({ type: "thread.started", thread_id: randomUUID() }));
-  else console.error(`OpenAI Codex v0.166.0\n--------\nworkdir: ${process.cwd()}\n--------\nuser\n${prompt}`);
+  if (args.includes("--json"))
+    console.log(JSON.stringify({ type: "thread.started", thread_id: randomUUID() }));
+  else
+    console.error(
+      `OpenAI Codex v0.166.0\n--------\nworkdir: ${process.cwd()}\n--------\nuser\n${prompt}`,
+    );
 }
 
 // Start the dohc MCP server a launch names, outside the runner's environment,
@@ -190,10 +304,19 @@ function startCodexOutput(args) {
 // environment, and Codex the variables the launch names, which
 // codexReplyServer checks. With `printResults`, each result goes to the run's log.
 function callMcpTools(launch, offersTools, calls, printResults = false) {
-  const server = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../packages/mcp/bin/dohc-mcp.js");
+  const server = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../packages/mcp/bin/dohc-mcp.js",
+  );
   const { DOHC_RUN_ID: _runId, DOHC_CHAT_THREAD: _thread, ...env } = process.env;
-  const child = spawn(process.execPath, [server, ...launch.args], { cwd: launch.cwd, env, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
-  const send = (message) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+  const child = spawn(process.execPath, [server, ...launch.args], {
+    cwd: launch.cwd,
+    env,
+    stdio: ["pipe", "pipe", "inherit"],
+    windowsHide: true,
+  });
+  const send = (message) =>
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
   const call = (index) => send({ id: 3 + index, method: "tools/call", params: calls[index] });
   let buffer = "";
   child.stdout.setEncoding("utf8").on("data", (chunk) => {
@@ -225,8 +348,19 @@ function callMcpTools(launch, offersTools, calls, printResults = false) {
       }
     }
   });
-  child.on("exit", (code) => { console.error(`dohc-mcp exited early: ${code}`); process.exit(1); });
-  send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-codex", version: "0" } } });
+  child.on("exit", (code) => {
+    console.error(`dohc-mcp exited early: ${code}`);
+    process.exit(1);
+  });
+  send({
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "fake-codex", version: "0" },
+    },
+  });
 }
 
 // Reply as Claude Code and Codex do, through the dohc MCP server the launch names.
@@ -241,16 +375,25 @@ function replyThroughMcp(args, body) {
   // offers it alone or with every other dohc tool, as its launch says, and
   // only a run with every tool may write.
   const replyOnly = launch.args.includes("--tool");
-  const offersRunTools = (names) => !(selfTestMarker && !replyOnly) && launch.readOnly === replyOnly &&
-    names.includes("dohc_reply_to_chat") && replyOnly === (names.length === 1);
-  callMcpTools(launch, offersRunTools, [{ name: "dohc_reply_to_chat", arguments: { threadId, runId, body } }]);
+  const offersRunTools = (names) =>
+    !(selfTestMarker && !replyOnly) &&
+    launch.readOnly === replyOnly &&
+    names.includes("dohc_reply_to_chat") &&
+    replyOnly === (names.length === 1);
+  callMcpTools(launch, offersRunTools, [
+    { name: "dohc_reply_to_chat", arguments: { threadId, runId, body } },
+  ]);
 }
 
 if (profileTool) {
   const args = process.argv.slice(3);
   const body = selfTestMarker ?? "# Done\n\ndone: checked the exports";
   // A profile's self-test asks for the same reply form as its runs.
-  if (!prompt.includes(`the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``)) {
+  if (
+    !prompt.includes(
+      `the \`dohc_reply_to_chat\` tool of the \`dohc\` MCP server with \`threadId\` \`${threadId}\` and \`runId\` \`${runId}\``,
+    )
+  ) {
     console.error("Unexpected reply form in the prompt");
     process.exit(2);
   }
@@ -261,72 +404,91 @@ if (profileTool) {
   // Leave the run's secret where the test finds it, outside the workspace and
   // dohc's folders. Then write a file and reply as the run, printing each
   // result to the run's log.
-  writeFileSync(process.env.FAKE_RUNNER_RUN_FILE, JSON.stringify({ secret: process.env.DOHC_RUN_SECRET, threadId, runId }));
+  writeFileSync(
+    process.env.FAKE_RUNNER_RUN_FILE,
+    JSON.stringify({ secret: process.env.DOHC_RUN_SECRET, threadId, runId }),
+  );
   callMcpTools(
-    { args: ["--workspace", process.cwd(), "--home", process.env.DOHC_STATE_DIR, "--tool", "dohc_write_file", "--tool", "dohc_reply_to_chat"], cwd: process.cwd() },
+    {
+      args: [
+        "--workspace",
+        process.cwd(),
+        "--home",
+        process.env.DOHC_STATE_DIR,
+        "--tool",
+        "dohc_write_file",
+        "--tool",
+        "dohc_reply_to_chat",
+      ],
+      cwd: process.cwd(),
+    },
     // The server offers these tools and nothing else.
-    (names) => names.length === 2 && names.includes("dohc_write_file") && names.includes("dohc_reply_to_chat"),
+    (names) =>
+      names.length === 2 &&
+      names.includes("dohc_write_file") &&
+      names.includes("dohc_reply_to_chat"),
     [
       { name: "dohc_write_file", arguments: { path: "notes/run.txt", content: "Run notes.\n" } },
-      { name: "dohc_reply_to_chat", arguments: { threadId, runId, body: "done: checked the exports" } },
+      {
+        name: "dohc_reply_to_chat",
+        arguments: { threadId, runId, body: "done: checked the exports" },
+      },
     ],
     true,
   );
 } else {
-
-if (mode !== "report" && mode !== "ask") {
-  console.error(`unknown fake chat runner mode: ${mode ?? "missing"}`);
-  process.exit(2);
-}
-
-// In ask mode the prompt decides: a taken choice renders as "- [x] <choice>"
-// in the thread markdown, so the second run reports it; the first run asks.
-// Asked to name the file, it asks an open question with no choices, and the
-// run after the answer says the name it was given.
-const taken = mode === "ask" ? /^- \[x\] (.+)$/mu.exec(prompt)?.[1] : undefined;
-const named = mode === "ask" ? /Call it (\S+)/u.exec(prompt)?.[1] : undefined;
-const replyArgs =
-  mode === "report"
-    ? ["done: checked the exports"]
-    : taken
-      ? [`going with ${taken}`]
-      : named
-        ? [`calling it ${named}`]
-        : prompt.includes("name the file")
-          ? ["--needs-decision", "What should I call the file?"]
-          : ["--needs-decision", "--option", "Friday", "--option", "Monday", "Which day do we ship?"];
-
-const fixtureDir = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(fixtureDir, "../../../..");
-const cliBin = resolve(repoRoot, "packages/cli/bin/dohc.js");
-const child = spawn(
-  process.execPath,
-  [
-    cliBin,
-    "chat",
-    "reply",
-    threadId,
-    "--as-agent",
-    ...replyArgs.slice(0, -1),
-    "-",
-  ],
-  {
-    cwd: process.cwd(),
-    env: process.env,
-    stdio: ["pipe", "inherit", "inherit"],
-  },
-);
-child.stdin.end(replyArgs.at(-1));
-
-child.once("error", (error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
-child.once("exit", (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
+  if (mode !== "report" && mode !== "ask") {
+    console.error(`unknown fake chat runner mode: ${mode ?? "missing"}`);
+    process.exit(2);
   }
-  process.exit(code ?? 1);
-});
+
+  // In ask mode the prompt decides: a taken choice renders as "- [x] <choice>"
+  // in the thread markdown, so the second run reports it; the first run asks.
+  // Asked to name the file, it asks an open question with no choices, and the
+  // run after the answer says the name it was given.
+  const taken = mode === "ask" ? /^- \[x\] (.+)$/mu.exec(prompt)?.[1] : undefined;
+  const named = mode === "ask" ? /Call it (\S+)/u.exec(prompt)?.[1] : undefined;
+  const replyArgs =
+    mode === "report"
+      ? ["done: checked the exports"]
+      : taken
+        ? [`going with ${taken}`]
+        : named
+          ? [`calling it ${named}`]
+          : prompt.includes("name the file")
+            ? ["--needs-decision", "What should I call the file?"]
+            : [
+                "--needs-decision",
+                "--option",
+                "Friday",
+                "--option",
+                "Monday",
+                "Which day do we ship?",
+              ];
+
+  const fixtureDir = dirname(fileURLToPath(import.meta.url));
+  const repoRoot = resolve(fixtureDir, "../../../..");
+  const cliBin = resolve(repoRoot, "packages/cli/bin/dohc.js");
+  const child = spawn(
+    process.execPath,
+    [cliBin, "chat", "reply", threadId, "--as-agent", ...replyArgs.slice(0, -1), "-"],
+    {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["pipe", "inherit", "inherit"],
+    },
+  );
+  child.stdin.end(replyArgs.at(-1));
+
+  child.once("error", (error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+  child.once("exit", (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 1);
+  });
 }

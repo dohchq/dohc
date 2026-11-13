@@ -13,9 +13,7 @@ export async function bootstrapJoinedWorkspace(input: {
     await enrollWorkspaceKeyEnvelope({
       workspaceId: input.workspaceId,
       dataKey: null,
-      ...(input.passphrase === undefined
-        ? {}
-        : { passphrase: input.passphrase }),
+      ...(input.passphrase === undefined ? {} : { passphrase: input.passphrase }),
       transport: input.transport,
       installDataKey: input.installDataKey,
     });

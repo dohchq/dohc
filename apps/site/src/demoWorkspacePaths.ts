@@ -31,14 +31,8 @@ export function findFileAncestor(
   return null;
 }
 
-export function rewritePathPrefix(
-  path: string,
-  fromPath: string,
-  toPath: string,
-): string {
-  return isPathAtOrBelow(path, fromPath)
-    ? `${toPath}${path.slice(fromPath.length)}`
-    : path;
+export function rewritePathPrefix(path: string, fromPath: string, toPath: string): string {
+  return isPathAtOrBelow(path, fromPath) ? `${toPath}${path.slice(fromPath.length)}` : path;
 }
 
 export function planDemoPathMove(

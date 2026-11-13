@@ -17,19 +17,14 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { parse as parseHtml } from "parse5";
-import type {
-  ListWorkspaceFilesResult,
-  WorkspaceFileEntry,
-} from "../ipc/bridgeContract";
+import type { ListWorkspaceFilesResult, WorkspaceFileEntry } from "../ipc/bridgeContract";
 import {
   assertLoopbackOnlyDevServerCommand,
   isPathAllowedForAuthority,
   splitCommandLine,
 } from "./siteRunner";
 
-export type SiteAuthority =
-  | { kind: "workspace" }
-  | { kind: "share"; mountRoot: string };
+export type SiteAuthority = { kind: "workspace" } | { kind: "share"; mountRoot: string };
 
 export interface SitePackageInfo {
   root: string;
@@ -129,9 +124,7 @@ export function shareMountRootForSite(root: string): string | null {
 
 function pathRelativeToArtifact(artifactRoot: string, path: string): string | null {
   if (artifactRoot === ".") return path;
-  return path.startsWith(`${artifactRoot}/`)
-    ? path.slice(artifactRoot.length + 1)
-    : null;
+  return path.startsWith(`${artifactRoot}/`) ? path.slice(artifactRoot.length + 1) : null;
 }
 
 // The core join both resolveArtifactRelativePath (an ordinary reference) and
@@ -174,12 +167,8 @@ function resolveArtifactRelativePath(
   // the way it would in a real browser instead of naming a literal
   // backslash-containing filename that never exists on disk.
   const raw = rawReference.trim().split(/[?#]/, 1)[0]?.trim().replaceAll("\\", "/") ?? "";
-  if (
-    !raw ||
-    raw.startsWith("#") ||
-    raw.startsWith("//") ||
-    URI_SCHEME_PATTERN.test(raw)
-  ) return null;
+  if (!raw || raw.startsWith("#") || raw.startsWith("//") || URI_SCHEME_PATTERN.test(raw))
+    return null;
   let decoded: string;
   try {
     decoded = decodeURIComponent(raw);
@@ -192,10 +181,7 @@ function resolveArtifactRelativePath(
     decoded,
     base.kind === "local" ? base.directory : posix.dirname(fromPath),
   );
-  if (
-    !pathRelativeToArtifact(artifactRoot, candidate) ||
-    hasIgnoredSegment(candidate)
-  ) return null;
+  if (!pathRelativeToArtifact(artifactRoot, candidate) || hasIgnoredSegment(candidate)) return null;
   return candidate;
 }
 
@@ -233,7 +219,9 @@ interface Html5Node {
   content?: { childNodes: Html5Node[] };
 }
 
-function isHtml5Element(node: Html5Node): node is Html5Node & { tagName: string; attrs: Html5Attribute[] } {
+function isHtml5Element(
+  node: Html5Node,
+): node is Html5Node & { tagName: string; attrs: Html5Attribute[] } {
   return typeof node.tagName === "string";
 }
 
@@ -390,9 +378,13 @@ function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<Cs
   for (const content of cspPolicyContents) {
     const directives = parseCspDirectives(content);
     for (const cspClass of Object.keys(CSP_DIRECTIVE_FOR_CLASS) as CspClass[]) {
-      const sourceList = directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
+      const sourceList =
+        directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
       if (!sourceList) continue;
-      if (sourceList.length === 0 || (sourceList.length === 1 && sourceList[0]?.toLowerCase() === "'none'")) {
+      if (
+        sourceList.length === 0 ||
+        (sourceList.length === 1 && sourceList[0]?.toLowerCase() === "'none'")
+      ) {
         blocked.add(cspClass);
       }
     }
@@ -477,17 +469,21 @@ function isInlineBlockPermitted(
     // (`script-src 'unsafe-inline'; script-src-attr 'none'`).
     const specificDirective = `${CSP_DIRECTIVE_FOR_CLASS[cspClass]}-${isAttribute ? "attr" : "elem"}`;
     const sourceList =
-      directives.get(specificDirective) ?? directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ?? directives.get("default-src");
+      directives.get(specificDirective) ??
+      directives.get(CSP_DIRECTIVE_FOR_CLASS[cspClass]) ??
+      directives.get("default-src");
     if (!sourceList) continue;
     const hasNonceOrHashSource = sourceList.some(
       (token) => NONCE_SOURCE_PATTERN.test(token) || HASH_SOURCE_PATTERN.test(token),
     );
-    const permittedByNonce = !isAttribute && nonce !== undefined && nonceSourceMatches(sourceList, nonce);
+    const permittedByNonce =
+      !isAttribute && nonce !== undefined && nonceSourceMatches(sourceList, nonce);
     const permittedByHash =
       (!isAttribute || sourceList.some((token) => token.toLowerCase() === "'unsafe-hashes'")) &&
       hashSourceMatches(sourceList, text);
     const permittedByUnsafeInline =
-      !hasNonceOrHashSource && sourceList.some((token) => token.toLowerCase() === "'unsafe-inline'");
+      !hasNonceOrHashSource &&
+      sourceList.some((token) => token.toLowerCase() === "'unsafe-inline'");
     if (!permittedByNonce && !permittedByHash && !permittedByUnsafeInline) return false;
   }
   return true;
@@ -497,17 +493,7 @@ function isInlineBlockPermitted(
 // the HTML spec — the same list every attribute-reference consumer below
 // shares, so a `<div data="...">` (data means nothing there) can't mint one.
 const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
-  src: new Set([
-    "script",
-    "img",
-    "audio",
-    "video",
-    "iframe",
-    "source",
-    "track",
-    "embed",
-    "input",
-  ]),
+  src: new Set(["script", "img", "audio", "video", "iframe", "source", "track", "embed", "input"]),
   srcset: new Set(["img", "source"]),
   // "image" and "use" also cover the SVG-namespace elements — parse5
   // exposes an xlink:href attribute with name "href" and a separate
@@ -544,17 +530,41 @@ const LINK_REL_RESOURCE_TOKENS = new Set([
 const LINK_REL_TOKENS_REQUIRING_AS = new Set(["preload"]);
 // The LINK_REL_RESOURCE_TOKENS entries a real browser fetches as an
 // image (img-src) rather than a stylesheet/manifest/script/prefetch.
-const ICON_LINK_REL_TOKENS = ["icon", "shortcut", "apple-touch-icon", "apple-touch-icon-precomposed", "mask-icon"];
+const ICON_LINK_REL_TOKENS = [
+  "icon",
+  "shortcut",
+  "apple-touch-icon",
+  "apple-touch-icon-precomposed",
+  "mask-icon",
+];
 
 // Fetch's request-destination keywords — the only valid `as` values for
 // rel="preload". An invalid, unrecognized, or empty `as` gets no
 // destination state at all: the browser aborts preload processing and
 // makes no request, so the mere PRESENCE of the attribute isn't enough.
 const PRELOAD_AS_DESTINATIONS = new Set([
-  "audio", "audioworklet", "document", "embed", "fencedframe", "fetch",
-  "font", "frame", "iframe", "image", "manifest", "object", "paintworklet",
-  "report", "script", "sharedworker", "style", "track", "video",
-  "webidentity", "worker", "xslt",
+  "audio",
+  "audioworklet",
+  "document",
+  "embed",
+  "fencedframe",
+  "fetch",
+  "font",
+  "frame",
+  "iframe",
+  "image",
+  "manifest",
+  "object",
+  "paintworklet",
+  "report",
+  "script",
+  "sharedworker",
+  "style",
+  "track",
+  "video",
+  "webidentity",
+  "worker",
+  "xslt",
 ]);
 
 // The bounded CSP classes (see blockedCspClasses) a validated preload
@@ -570,7 +580,10 @@ const PRELOAD_AS_DESTINATION_CSP_CLASS: Readonly<Record<string, CspClass>> = {
   sharedworker: "worker",
 };
 
-function isResourceConsumingLinkRel(relValue: string | undefined, asValue: string | undefined): boolean {
+function isResourceConsumingLinkRel(
+  relValue: string | undefined,
+  asValue: string | undefined,
+): boolean {
   if (!relValue) return false;
   const hasValidAs = !!asValue && PRELOAD_AS_DESTINATIONS.has(asValue.trim().toLowerCase());
   for (const token of relValue.toLowerCase().split(/\s+/).filter(Boolean)) {
@@ -629,10 +642,7 @@ function htmlBaseDirectoryFromDocument(
   // "//" on the raw, unnormalized href would instead let it fall through
   // to the root-relative branch below and resolve as a local directory.
   const href = rawHref.replaceAll("\\", "/");
-  if (
-    href.startsWith("//") ||
-    URI_SCHEME_PATTERN.test(href)
-  ) return { kind: "external" };
+  if (href.startsWith("//") || URI_SCHEME_PATTERN.test(href)) return { kind: "external" };
   if (contextBase.kind === "external") return { kind: "external" };
   let decoded: string;
   try {
@@ -647,14 +657,15 @@ function htmlBaseDirectoryFromDocument(
     contextBase.kind === "local" ? contextBase.directory : posix.dirname(fromPath),
   );
   const directory = decoded.endsWith("/") ? resolved : posix.dirname(resolved);
-  return (directory === artifactRoot ||
-    pathRelativeToArtifact(artifactRoot, directory) !== null) &&
+  return (directory === artifactRoot || pathRelativeToArtifact(artifactRoot, directory) !== null) &&
     !hasIgnoredSegment(directory)
     ? { kind: "local", directory }
     : { kind: "external" };
 }
 
-function referencesFromWebManifest(text: string): Array<{ value: string; documentDestination: boolean }> {
+function referencesFromWebManifest(
+  text: string,
+): Array<{ value: string; documentDestination: boolean }> {
   let manifest: unknown;
   try {
     manifest = JSON.parse(text);
@@ -952,7 +963,8 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
     // @import's own url(...) call is handled by the @import pass below,
     // with the correct style-src classification — matching it again here
     // would mint a second, wrongly-classified reference for the same span.
-    if (cssImportSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd)) continue;
+    if (cssImportSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd))
+      continue;
     // A bare url() inside an @font-face block's own src is font-src, not
     // img-src — font-src isn't in this scan's bounded CSP set (see
     // blockedCspClasses), so it's left unclassified rather than
@@ -960,7 +972,9 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
     // wrongly remove a font a real browser is still allowed to fetch.
     // Everywhere else a bare url() is img-src, the more common case and
     // the one of the two actually in the bounded set.
-    const inFontFace = fontFaceSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd);
+    const inFontFace = fontFaceSpans.some(
+      ([spanStart, spanEnd]) => start >= spanStart && start < spanEnd,
+    );
     references.push({
       value,
       documentRelative: false,
@@ -971,7 +985,13 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
   for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5])?.trim();
     // @import pulls in a whole further stylesheet — style-src, not img-src.
-    if (value) references.push({ value, documentRelative: false, appliesAsStylesheet: true, cspClass: "style" });
+    if (value)
+      references.push({
+        value,
+        documentRelative: false,
+        appliesAsStylesheet: true,
+        cspClass: "style",
+      });
   }
   return references;
 }
@@ -982,7 +1002,11 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
 type AstNode = Record<string, unknown> & { type: string };
 
 function isAstNode(value: unknown): value is AstNode {
-  return !!value && typeof value === "object" && typeof (value as Record<string, unknown>).type === "string";
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>).type === "string"
+  );
 }
 
 function astString(node: AstNode, key: string): string | undefined {
@@ -1008,7 +1032,8 @@ function walkAst(node: unknown, visit: (node: AstNode) => void): void {
   const record = node as Record<string, unknown>;
   if (typeof record.type === "string") visit(record as AstNode);
   for (const [key, value] of Object.entries(record)) {
-    if (key === "type" || key === "loc" || key === "range" || key === "start" || key === "end") continue;
+    if (key === "type" || key === "loc" || key === "range" || key === "start" || key === "end")
+      continue;
     if (Array.isArray(value)) {
       for (const item of value) walkAst(item, visit);
     } else if (value && typeof value === "object") {
@@ -1046,7 +1071,9 @@ function isImportMetaUrl(node: unknown): boolean {
   const object = astChild(node, "object");
   const property = astChild(node, "property");
   if (!isAstNode(object) || object.type !== "MetaProperty") return false;
-  return isAstNode(property) && property.type === "Identifier" && astString(property, "name") === "url";
+  return (
+    isAstNode(property) && property.type === "Identifier" && astString(property, "name") === "url"
+  );
 }
 
 // A property assignment (`X.src = lit`) or
@@ -1153,13 +1180,21 @@ function collectShadowedGlobalNames(program: AstNode): Set<string> {
  * (`fake.document`, `app.serviceWorker`) proves nothing about the real
  * browser global. Every step (the global object and the final identifier)
  * must be unshadowed. */
-function isGlobalReceiver(node: unknown, name: string, shadowedGlobals: ReadonlySet<string>): boolean {
+function isGlobalReceiver(
+  node: unknown,
+  name: string,
+  shadowedGlobals: ReadonlySet<string>,
+): boolean {
   if (shadowedGlobals.has(name) || !isAstNode(node)) return false;
   if (node.type === "Identifier") return astString(node, "name") === name;
   if (node.type === "MemberExpression") {
     const object = astChild(node, "object");
     const property = astChild(node, "property");
-    if (!isAstNode(property) || property.type !== "Identifier" || astString(property, "name") !== name) {
+    if (
+      !isAstNode(property) ||
+      property.type !== "Identifier" ||
+      astString(property, "name") !== name
+    ) {
       return false;
     }
     if (!isAstNode(object) || object.type !== "Identifier") return false;
@@ -1210,7 +1245,8 @@ function domProducingTag(
       !isDocumentReceiver(object, shadowedGlobals) ||
       !isAstNode(property) ||
       property.type !== "Identifier"
-    ) return undefined;
+    )
+      return undefined;
     const methodName = astString(property, "name");
     if (methodName === "createElement") {
       const tag = stringLiteralValue(astChildren(node, "arguments")[0]);
@@ -1226,7 +1262,8 @@ function domProducingTag(
       !isDocumentReceiver(object, shadowedGlobals) ||
       !isAstNode(property) ||
       property.type !== "Identifier"
-    ) return undefined;
+    )
+      return undefined;
     const name = astString(property, "name");
     // document.documentElement (the <html> root) is exactly as always-
     // attached as document.body/document.head — an insertion proof check
@@ -1421,7 +1458,10 @@ function collectInsertedIdentifierNames(
     const callee = astChild(node, "callee");
     if (!isAstNode(callee) || callee.type !== "MemberExpression") return;
     const property = astChild(callee, "property");
-    const methodName = isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
+    const methodName =
+      isAstNode(property) && property.type === "Identifier"
+        ? astString(property, "name")
+        : undefined;
     if (!methodName || !DOM_INSERTION_METHOD_NAMES.has(methodName)) return;
     const receiver = astChild(callee, "object");
     if (domProducingTag(receiver, provenTags, shadowedGlobals) === undefined) return;
@@ -1459,7 +1499,11 @@ function isProvenUrlReceiver(
   shadowedGlobals: ReadonlySet<string>,
 ): boolean {
   const tag = domProducingTag(object, provenTags, shadowedGlobals);
-  if (tag === undefined || tag === "unknown" || !(URL_ATTRIBUTE_ELEMENTS[propertyName]?.has(tag) ?? false)) {
+  if (
+    tag === undefined ||
+    tag === "unknown" ||
+    !(URL_ATTRIBUTE_ELEMENTS[propertyName]?.has(tag) ?? false)
+  ) {
     return false;
   }
   if (URL_FETCH_WITHOUT_INSERTION_TAGS.has(tag)) return true;
@@ -1567,7 +1611,10 @@ function mergeSpecifierMaps(
   // stays fixed to its original target regardless of which reason came
   // first.
   const claimed = (key: string) =>
-    imports.has(key) || urlLikeImports.has(key) || externalUrlLikeKeys.has(key) || lockedKeys.has(key);
+    imports.has(key) ||
+    urlLikeImports.has(key) ||
+    externalUrlLikeKeys.has(key) ||
+    lockedKeys.has(key);
   for (const [key, value] of next.imports) if (!claimed(key)) imports.set(key, value);
   for (const [key, value] of next.urlLikeImports) if (!claimed(key)) urlLikeImports.set(key, value);
   for (const key of next.externalUrlLikeKeys) if (!claimed(key)) externalUrlLikeKeys.add(key);
@@ -1777,7 +1824,11 @@ function parseImportMap(text: string): ImportMapResolution | undefined {
   const scopes = new Map<string, ResolvedSpecifierMap>();
   if (scopesField && typeof scopesField === "object" && !Array.isArray(scopesField)) {
     for (const [scopeKey, scopeValue] of Object.entries(scopesField as Record<string, unknown>)) {
-      scopes.set(scopeKey, { imports: rawSpecifierMap(scopeValue), urlLikeImports: new Map(), externalUrlLikeKeys: new Set() });
+      scopes.set(scopeKey, {
+        imports: rawSpecifierMap(scopeValue),
+        urlLikeImports: new Map(),
+        externalUrlLikeKeys: new Set(),
+      });
     }
   }
   return { imports, urlLikeImports: new Map(), externalUrlLikeKeys: new Set(), scopes };
@@ -1807,7 +1858,10 @@ function newUrlLiteral(node: unknown, shadowedGlobals: ReadonlySet<string>): str
  * import.meta.url)` — a one-hop pass (not real lexical scoping), the same
  * technique collectDomProducingTags uses: `const u = new URL(lit,
  * import.meta.url); fetch(u);` still counts once `u` reaches a consumer. */
-function collectUrlLiteralNames(program: AstNode, shadowedGlobals: ReadonlySet<string>): Map<string, string> {
+function collectUrlLiteralNames(
+  program: AstNode,
+  shadowedGlobals: ReadonlySet<string>,
+): Map<string, string> {
   return collectProvenBindings(program, (source) => newUrlLiteral(source, shadowedGlobals));
 }
 
@@ -1826,7 +1880,10 @@ function isNewXhrExpression(node: unknown, shadowedGlobals: ReadonlySet<string>)
  * conservative-kill shape as collectDomProducingTags/collectUrlLiteralNames:
  * a function parameter's value is never provable, and a name later bound
  * to something else anywhere in the file is untrustworthy everywhere. */
-function collectXhrInstanceNames(program: AstNode, shadowedGlobals: ReadonlySet<string>): Set<string> {
+function collectXhrInstanceNames(
+  program: AstNode,
+  shadowedGlobals: ReadonlySet<string>,
+): Set<string> {
   return new Set(
     collectProvenBindings(program, (source) =>
       isNewXhrExpression(source, shadowedGlobals) ? true : undefined,
@@ -1864,7 +1921,9 @@ function workerScriptKind(optionsNode: unknown): ScriptKind | undefined {
     // both name the same option — Acorn represents the quoted form as a
     // string Literal key, not an Identifier.
     const keyName =
-      isAstNode(key) && key.type === "Identifier" ? astString(key, "name") : stringLiteralValue(key);
+      isAstNode(key) && key.type === "Identifier"
+        ? astString(key, "name")
+        : stringLiteralValue(key);
     if (keyName !== "type") continue;
     return stringLiteralValue(astChild(prop, "value")) === "module" ? "module" : undefined;
   }
@@ -1884,7 +1943,11 @@ function jsReferencesFromCode(
   if (!program) return [];
   const shadowedGlobals = collectShadowedGlobalNames(program);
   const provenDomTags = collectDomProducingTags(program, shadowedGlobals);
-  const insertedIdentifierNames = collectInsertedIdentifierNames(program, provenDomTags, shadowedGlobals);
+  const insertedIdentifierNames = collectInsertedIdentifierNames(
+    program,
+    provenDomTags,
+    shadowedGlobals,
+  );
   const urlLiteralNames = collectUrlLiteralNames(program, shadowedGlobals);
   const provenXhrNames = collectXhrInstanceNames(program, shadowedGlobals);
   // XMLHttpRequest.open(method, url, ...) only initializes a request — no
@@ -1913,7 +1976,10 @@ function jsReferencesFromCode(
   // worse than a conservative miss here.
   const xhrOpenTargets = new Map<string, { value: string | undefined; scriptRelative: boolean }>();
   const xhrDistinctOpenTargets = new Map<string, Set<string>>();
-  const xhrSendCaptures: Array<{ name: string; target: { value: string | undefined; scriptRelative: boolean } | undefined }> = [];
+  const xhrSendCaptures: Array<{
+    name: string;
+    target: { value: string | undefined; scriptRelative: boolean } | undefined;
+  }> = [];
   const references: BrowserTextReference[] = [];
   const addReference = (
     value: string | undefined,
@@ -1967,11 +2033,22 @@ function jsReferencesFromCode(
       : { value: stringLiteralValue(node), scriptRelative: false };
   };
   const addUrlAttributeReference = (object: unknown, propertyName: string, valueNode: unknown) => {
-    if (!isProvenUrlReceiver(object, propertyName, provenDomTags, insertedIdentifierNames, shadowedGlobals)) return;
+    if (
+      !isProvenUrlReceiver(
+        object,
+        propertyName,
+        provenDomTags,
+        insertedIdentifierNames,
+        shadowedGlobals,
+      )
+    )
+      return;
     const { value, scriptRelative } = consumedValue(valueNode);
     if (propertyName === "srcset") {
       const trimmed = value?.trim();
-      if (trimmed) for (const srcsetValue of referencesFromSrcset(trimmed)) addReference(srcsetValue, !scriptRelative);
+      if (trimmed)
+        for (const srcsetValue of referencesFromSrcset(trimmed))
+          addReference(srcsetValue, !scriptRelative);
       return;
     }
     addReference(value, !scriptRelative);
@@ -2011,18 +2088,25 @@ function jsReferencesFromCode(
           if (calleeName === "fetch") {
             const { value, scriptRelative } = consumedValue(args[0]);
             addReference(value, !scriptRelative, false, undefined, "connect");
-          } else if (calleeName === "importScripts" && context === "worker" && scriptKind === "classic") {
+          } else if (
+            calleeName === "importScripts" &&
+            context === "worker" &&
+            scriptKind === "classic"
+          ) {
             // importScripts() only exists on a classic worker's global scope. A
             // module worker or module service worker has no such global — the
             // call throws before any network request is made, so a module
             // worker's importScripts(...) arguments are never fetched.
-            for (const argument of args) addReference(stringLiteralValue(argument), false, false, "classic", "script");
+            for (const argument of args)
+              addReference(stringLiteralValue(argument), false, false, "classic", "script");
           }
         } else if (callee.type === "MemberExpression") {
           const property = astChild(callee, "property");
           const object = astChild(callee, "object");
           const propertyName =
-            isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
+            isAstNode(property) && property.type === "Identifier"
+              ? astString(property, "name")
+              : undefined;
           if (propertyName === "register" && isServiceWorkerReceiver(object, shadowedGlobals)) {
             // A registered service worker runs in its own global scope with
             // its own script URL, same as Worker/SharedWorker — including
@@ -2093,7 +2177,9 @@ function jsReferencesFromCode(
         const property = astChild(left, "property");
         const object = astChild(left, "object");
         const propertyName =
-          isAstNode(property) && property.type === "Identifier" ? astString(property, "name") : undefined;
+          isAstNode(property) && property.type === "Identifier"
+            ? astString(property, "name")
+            : undefined;
         if (propertyName) {
           addUrlAttributeReference(object, propertyName, astChild(node, "right"));
         }
@@ -2182,12 +2268,24 @@ function resolveSpecifierMap(
   const resolvedUrlLike = new Map<string, string>();
   const externalUrlLikeKeys = new Set<string>();
   const normalizedKeyOf = (key: string): string | null => {
-    const normalizedKey = resolveArtifactRelativePath(key, documentPath, artifactRoot, documentBase);
-    const normalizedKeyRelative = normalizedKey ? pathRelativeToArtifact(artifactRoot, normalizedKey) : null;
+    const normalizedKey = resolveArtifactRelativePath(
+      key,
+      documentPath,
+      artifactRoot,
+      documentBase,
+    );
+    const normalizedKeyRelative = normalizedKey
+      ? pathRelativeToArtifact(artifactRoot, normalizedKey)
+      : null;
     return normalizedKeyRelative === null ? null : `/${normalizedKeyRelative}`;
   };
   for (const [key, rawAddress] of rawMap) {
-    const candidate = resolveArtifactRelativePath(rawAddress, documentPath, artifactRoot, documentBase);
+    const candidate = resolveArtifactRelativePath(
+      rawAddress,
+      documentPath,
+      artifactRoot,
+      documentBase,
+    );
     // candidate is already artifact-relative (it includes artifactRoot's own
     // prefix, e.g. "dist/assets/main.js"). The "/"-prefix convention below
     // means "resolve against the artifact root", which re-adds that same
@@ -2240,8 +2338,15 @@ function resolveImportMapAddresses(
     // path later. resolveArtifactRelativePath preserves a trailing "/" (a
     // scope key is written that way to mark a directory boundary), so
     // "/feature/" can never also match an importer under "/feature-other/".
-    const normalizedScopeKey = resolveArtifactRelativePath(scopeKey, documentPath, artifactRoot, documentBase);
-    const normalizedScopeRelative = normalizedScopeKey ? pathRelativeToArtifact(artifactRoot, normalizedScopeKey) : null;
+    const normalizedScopeKey = resolveArtifactRelativePath(
+      scopeKey,
+      documentPath,
+      artifactRoot,
+      documentBase,
+    );
+    const normalizedScopeRelative = normalizedScopeKey
+      ? pathRelativeToArtifact(artifactRoot, normalizedScopeKey)
+      : null;
     if (normalizedScopeRelative === null) continue;
     scopes.set(
       `/${normalizedScopeRelative}`,
@@ -2330,7 +2435,10 @@ function htmlReferencesFromDocument(
       // its own (isAttribute: true, nonce: undefined) — only 'unsafe-
       // inline', or a hash of its OWN value alongside 'unsafe-hashes',
       // can permit it.
-      if (styleAttribute && isInlineBlockPermitted(cspPolicyContentsSoFar, "style", undefined, styleAttribute, true)) {
+      if (
+        styleAttribute &&
+        isInlineBlockPermitted(cspPolicyContentsSoFar, "style", undefined, styleAttribute, true)
+      ) {
         deferredTexts.push({ kind: "css", text: styleAttribute, blocked: blockedSoFar });
       }
       for (const attribute of node.attrs) {
@@ -2355,7 +2463,12 @@ function htmlReferencesFromDocument(
           )) {
             lockedSpecifierKeys.add(key);
           }
-          deferredTexts.push({ kind: "handler", text: attribute.value, blocked: blockedSoFar, importMap: activeImportMap });
+          deferredTexts.push({
+            kind: "handler",
+            text: attribute.value,
+            blocked: blockedSoFar,
+            importMap: activeImportMap,
+          });
         }
       }
       // A browser parses `srcdoc` as a nested HTML document; nothing else
@@ -2368,7 +2481,12 @@ function htmlReferencesFromDocument(
         // relative to the EMBEDDING document's base — its "fallback base" —
         // and if it declares none, it falls back to that same base
         // directly (not the outer document's raw file path).
-        const nestedBase = htmlBaseDirectoryFromDocument(nestedDocument, documentPath, artifactRoot, documentBase);
+        const nestedBase = htmlBaseDirectoryFromDocument(
+          nestedDocument,
+          documentPath,
+          artifactRoot,
+          documentBase,
+        );
         const effectiveBase = nestedBase.kind === "none" ? documentBase : nestedBase;
         const nestedResult = htmlReferencesFromDocument(
           nestedDocument,
@@ -2384,11 +2502,18 @@ function htmlReferencesFromDocument(
           // own base. Resolve now, against effectiveBase, and carry the
           // result as an already-artifact-root-relative value the outer
           // scan's own base can't second-guess.
-          const resolvedPath = resolveArtifactRelativePath(reference.value, documentPath, artifactRoot, effectiveBase);
+          const resolvedPath = resolveArtifactRelativePath(
+            reference.value,
+            documentPath,
+            artifactRoot,
+            effectiveBase,
+          );
           // Same "/"-prefix convention as resolveImportMapAddresses: strip
           // artifactRoot's own prefix back off before re-adding the leading
           // "/", or the next resolution pass joins artifactRoot onto itself.
-          const artifactRelative = resolvedPath ? pathRelativeToArtifact(artifactRoot, resolvedPath) : null;
+          const artifactRelative = resolvedPath
+            ? pathRelativeToArtifact(artifactRoot, resolvedPath)
+            : null;
           if (artifactRelative !== null) {
             pushNestedReference({
               ...reference,
@@ -2410,10 +2535,17 @@ function htmlReferencesFromDocument(
         // for its own stylesheets/scripts/images, so a refreshed page's
         // dependencies never make it into the share manifest.
         if (refreshTarget) {
-          pushAttributeReference({ value: refreshTarget, documentRelative: true, documentDestination: true });
+          pushAttributeReference({
+            value: refreshTarget,
+            documentRelative: true,
+            documentDestination: true,
+          });
         }
       }
-      if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "content-security-policy") {
+      if (
+        tagName === "meta" &&
+        attrs.get("http-equiv")?.toLowerCase() === "content-security-policy"
+      ) {
         const policyContent = attrs.get("content");
         if (policyContent) {
           cspPolicyContents.push(policyContent);
@@ -2433,7 +2565,8 @@ function htmlReferencesFromDocument(
       // classic instead of module — so a real static import/export in it
       // fails to parse as a syntax error and its dependencies are
       // silently dropped from the shared artifact.
-      const scriptKind: ScriptKind = attrs.get("type")?.trim().toLowerCase() === "module" ? "module" : "classic";
+      const scriptKind: ScriptKind =
+        attrs.get("type")?.trim().toLowerCase() === "module" ? "module" : "classic";
       for (const attribute of node.attrs) {
         const attributeName = attribute.name;
         if (!URL_ATTRIBUTE_ELEMENTS[attributeName]?.has(tagName)) continue;
@@ -2444,7 +2577,8 @@ function htmlReferencesFromDocument(
             isSubmitControlElement(tagName, attrs) &&
             (insideForm || (attrs.get("form") !== undefined && formIds.has(attrs.get("form")!)))
           )
-        ) continue;
+        )
+          continue;
         // <source src> only fires a request inside <audio>/<video> — a
         // <picture><source> uses srcset instead (src there is inert), and a
         // detached/otherwise-parented <source> performs no request at all.
@@ -2453,18 +2587,21 @@ function htmlReferencesFromDocument(
           tagName === "source" &&
           parentTagName !== "audio" &&
           parentTagName !== "video"
-        ) continue;
+        )
+          continue;
         // The complementary case: <source srcset> only has meaning under
         // <picture> — an <audio>/<video> child's srcset is inert, the same
         // way its own src is inert under <picture>.
-        if (attributeName === "srcset" && tagName === "source" && parentTagName !== "picture") continue;
+        if (attributeName === "srcset" && tagName === "source" && parentTagName !== "picture")
+          continue;
         // With `srcdoc` present, the browser never fetches an iframe's own
         // `src` at all — srcdoc wins outright, it isn't a fallback.
         if (attributeName === "src" && tagName === "iframe" && srcdoc !== undefined) continue;
         // A data-block script (a non-JS type, e.g. type="application/json")
         // is never fetched — src only fires a request for a classic or
         // module script.
-        if (attributeName === "src" && tagName === "script" && !isExecutableScriptType(attrs)) continue;
+        if (attributeName === "src" && tagName === "script" && !isExecutableScriptType(attrs))
+          continue;
         // Electron's Chromium always supports module scripts, so a classic
         // script marked nomodule is skipped — never fetched.
         if (
@@ -2472,27 +2609,35 @@ function htmlReferencesFromDocument(
           tagName === "script" &&
           attrs.has("nomodule") &&
           scriptKind === "classic"
-        ) continue;
+        )
+          continue;
         if (
           attributeName === "href" &&
           tagName === "link" &&
           !isResourceConsumingLinkRel(attrs.get("rel"), attrs.get("as"))
-        ) continue;
+        )
+          continue;
         // A manifest linked as plain "manifest.json" is still a web app
         // manifest to the browser — the extension gate in the scan queue
         // must yield to this, not require a ".webmanifest" spelling.
         const isManifest =
-          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("manifest");
+          attributeName === "href" &&
+          tagName === "link" &&
+          (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("manifest");
         // A modulepreload target is always fetched and parsed as a module —
         // it has no <script> element of its own to carry that kind, so the
         // reference has to name it directly.
         const isModulePreload =
-          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("modulepreload");
+          attributeName === "href" &&
+          tagName === "link" &&
+          (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("modulepreload");
         // A <link rel="stylesheet"> href is the one LINK_REL_RESOURCE_TOKENS
         // case the browser actually parses and applies as CSS — icon,
         // manifest, prefetch, and modulepreload targets are all just fetched.
         const isStylesheet =
-          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("stylesheet");
+          attributeName === "href" &&
+          tagName === "link" &&
+          (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("stylesheet");
         // <object data>/<embed src>/<iframe src> load their target AS A
         // NESTED DOCUMENT (a plugin/browsing context), and <a href>/
         // <area href> navigate the browser there — an SVG or HTML page
@@ -2519,13 +2664,17 @@ function htmlReferencesFromDocument(
         const isIconLink =
           attributeName === "href" &&
           tagName === "link" &&
-          ICON_LINK_REL_TOKENS.some((token) => (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes(token));
+          ICON_LINK_REL_TOKENS.some((token) =>
+            (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes(token),
+          );
         // A validated rel="preload" as="..." destination carries its own
         // CSP class the same way a real request from that destination
         // would — isResourceConsumingLinkRel already proved `as` names a
         // real destination before this reference is even reached.
         const preloadCspClass: CspClass | undefined =
-          attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("preload")
+          attributeName === "href" &&
+          tagName === "link" &&
+          (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("preload")
             ? PRELOAD_AS_DESTINATION_CSP_CLASS[(attrs.get("as") ?? "").trim().toLowerCase()]
             : undefined;
         const cspClass: CspClass | undefined =
@@ -2548,8 +2697,12 @@ function htmlReferencesFromDocument(
             appliesAsStylesheet: isStylesheet,
             documentDestination: isDocumentDestination,
             cspClass,
-            ...(attributeName === "src" && tagName === "script" ? { scriptKind, importMap: activeImportMap } : {}),
-            ...(isModulePreload ? { scriptKind: "module" as const, importMap: activeImportMap } : {}),
+            ...(attributeName === "src" && tagName === "script"
+              ? { scriptKind, importMap: activeImportMap }
+              : {}),
+            ...(isModulePreload
+              ? { scriptKind: "module" as const, importMap: activeImportMap }
+              : {}),
           });
           continue;
         }
@@ -2571,9 +2724,19 @@ function htmlReferencesFromDocument(
           // locks its own natural resolution against this one too.
           const rawImportMap = parseImportMap(html5TextContent(node));
           if (rawImportMap) {
-            const resolved = resolveImportMapAddresses(rawImportMap, documentPath, documentBase, artifactRoot);
+            const resolved = resolveImportMapAddresses(
+              rawImportMap,
+              documentPath,
+              documentBase,
+              artifactRoot,
+            );
             activeImportMap = mergeImportMapResolutions(
-              activeImportMap ?? { imports: new Map(), urlLikeImports: new Map(), externalUrlLikeKeys: new Set(), scopes: new Map() },
+              activeImportMap ?? {
+                imports: new Map(),
+                urlLikeImports: new Map(),
+                externalUrlLikeKeys: new Set(),
+                scopes: new Map(),
+              },
               resolved,
               lockedSpecifierKeys,
             );
@@ -2590,7 +2753,15 @@ function htmlReferencesFromDocument(
           const scriptText = html5TextContent(node);
           // isAttribute: false — a <script> element carries its own nonce
           // attribute, unlike a style=""/on* attribute.
-          if (isInlineBlockPermitted(cspPolicyContentsSoFar, "script", attrs.get("nonce"), scriptText, false)) {
+          if (
+            isInlineBlockPermitted(
+              cspPolicyContentsSoFar,
+              "script",
+              attrs.get("nonce"),
+              scriptText,
+              false,
+            )
+          ) {
             for (const key of lockedModuleSpecifierKeys(
               scriptText,
               scriptKind,
@@ -2613,7 +2784,15 @@ function htmlReferencesFromDocument(
       }
       if (tagName === "style") {
         const styleText = html5TextContent(node);
-        if (isInlineBlockPermitted(cspPolicyContentsSoFar, "style", attrs.get("nonce"), styleText, false)) {
+        if (
+          isInlineBlockPermitted(
+            cspPolicyContentsSoFar,
+            "style",
+            attrs.get("nonce"),
+            styleText,
+            false,
+          )
+        ) {
           deferredTexts.push({ kind: "css", text: styleText, blocked: blockedSoFar });
         }
         return;
@@ -2636,8 +2815,13 @@ function htmlReferencesFromDocument(
   // document order; blockedClasses (the final, whole-document state) is
   // used only as what this document hands forward to files it references.
   const blockedClasses = blockedCspClasses(cspPolicyContents);
-  const filterByBlock = <T extends BrowserTextReference>(refs: T[], blocked: ReadonlySet<CspClass>): T[] =>
-    blocked.size === 0 ? refs : refs.filter((reference) => !reference.cspClass || !blocked.has(reference.cspClass));
+  const filterByBlock = <T extends BrowserTextReference>(
+    refs: T[],
+    blocked: ReadonlySet<CspClass>,
+  ): T[] =>
+    blocked.size === 0
+      ? refs
+      : refs.filter((reference) => !reference.cspClass || !blocked.has(reference.cspClass));
   // Each <script> element parses on its own — the same way a browser runs
   // each script tag independently — so a syntax error in one script never
   // discards a later, syntactically valid script's own references. Each
@@ -2715,7 +2899,15 @@ function referencesFromNonHtmlFile(
     // — the file still shares as an asset (the caller already added it to
     // `approved`), it just contributes no further references of its own.
     if (!executesAsCode) return [];
-    return jsReferencesFromCode(text, scriptKind, context, sourcePath, ownBase, artifactRoot, importMap);
+    return jsReferencesFromCode(
+      text,
+      scriptKind,
+      context,
+      sourcePath,
+      ownBase,
+      artifactRoot,
+      importMap,
+    );
   }
   return [];
 }
@@ -2913,7 +3105,8 @@ async function shareManifestForSite(
     if (
       scanned.has(scanKey) ||
       (!isManifest && !isSvgDocument && !/\.(?:html?|css|js|mjs|webmanifest)$/i.test(current))
-    ) continue;
+    )
+      continue;
     scanned.add(scanKey);
     try {
       const info = await stat(join(rootPath, current));
@@ -2961,7 +3154,9 @@ async function shareManifestForSite(
         ? htmlReferencesFromDocument(htmlDocument, context, documentBase, current, artifactRoot)
         : null;
       const documentImportMap = htmlResult ? htmlResult.importMap : inheritedImportMap;
-      const documentBlockedCspClasses = htmlResult ? htmlResult.blockedCspClasses : inheritedBlockedCspClasses;
+      const documentBlockedCspClasses = htmlResult
+        ? htmlResult.blockedCspClasses
+        : inheritedBlockedCspClasses;
       const references = htmlResult
         ? // Already filtered internally against its own document-order CSP
           // state (see htmlReferencesFromDocument) — filtering it again
@@ -2987,7 +3182,8 @@ async function shareManifestForSite(
             return documentBlockedCspClasses.size === 0
               ? nonHtmlReferences
               : nonHtmlReferences.filter(
-                  (reference) => !reference.cspClass || !documentBlockedCspClasses.has(reference.cspClass),
+                  (reference) =>
+                    !reference.cspClass || !documentBlockedCspClasses.has(reference.cspClass),
                 );
           })();
       for (const reference of references) {
@@ -3014,7 +3210,8 @@ async function shareManifestForSite(
             documentBase: propagatedDocumentBase,
             context: propagatedContext,
             scriptKind: reference.scriptKind ?? "classic",
-            executesAsCode: reference.scriptKind !== undefined || reference.entersOwnContext === true,
+            executesAsCode:
+              reference.scriptKind !== undefined || reference.entersOwnContext === true,
             appliesAsStylesheet: reference.appliesAsStylesheet === true,
             isManifest: reference.isManifest ?? false,
             documentDestination: reference.documentDestination === true,
@@ -3171,7 +3368,10 @@ async function mapWorkspaceSite(
   const entryPath = entryPathFor(root, site.entry);
   const shareMountRoot = shareMountRootForSite(root);
   const packagePath = packagePathFor(root, sourceFiles);
-  const { scripts, diagnostics: scriptDiagnostics } = await packageScriptsForSite(rootPath, packagePath);
+  const { scripts, diagnostics: scriptDiagnostics } = await packageScriptsForSite(
+    rootPath,
+    packagePath,
+  );
   const packageInfo: Omit<SitePackageInfo, "shareManifest"> = {
     root,
     title: site.title,
@@ -3251,7 +3451,8 @@ async function packageScriptsForSite(
           path: packagePath,
           severity: "warning",
           code: "script-name-empty",
-          message: "package.json has a script with an empty name, which the bridge contract requires at least one character for, and was dropped.",
+          message:
+            "package.json has a script with an empty name, which the bridge contract requires at least one character for, and was dropped.",
         });
         continue;
       }
@@ -3272,7 +3473,10 @@ async function packageScriptsForSite(
   }
 }
 
-async function configuredScriptsForSite(rootPath: string, site: WorkspaceSite): Promise<SiteScripts> {
+async function configuredScriptsForSite(
+  rootPath: string,
+  site: WorkspaceSite,
+): Promise<SiteScripts> {
   if (!site.configPath || !site.configPath.endsWith("dohc.json")) return {};
   if (
     hasTraversalSegment(site.configPath) ||
@@ -3318,12 +3522,18 @@ function hasTraversalSegment(relativePath: string): boolean {
 // would be machinery without a matching cost to bound.
 const MAX_METADATA_FILE_BYTES = 1024 * 1024;
 
-export async function sourceForFile(rootPath: string, path: string, metadata?: () => Promise<{ size: number; read(): Promise<string> }>): Promise<string | WorkspaceSiteSource> {
+export async function sourceForFile(
+  rootPath: string,
+  path: string,
+  metadata?: () => Promise<{ size: number; read(): Promise<string> }>,
+): Promise<string | WorkspaceSiteSource> {
   const name = posix.basename(path);
   if (name !== "package.json" && name !== "dohc.json") return path;
   const absolute = join(rootPath, path);
   try {
-    const info = metadata ? await metadata() : { size: (await stat(absolute)).size, read: () => readFile(absolute, "utf8") };
+    const info = metadata
+      ? await metadata()
+      : { size: (await stat(absolute)).size, read: () => readFile(absolute, "utf8") };
     if (info.size > MAX_METADATA_FILE_BYTES) {
       return {
         path,
@@ -3366,9 +3576,17 @@ export async function listSitePackages(
 }
 
 export async function getDetectedSitePackage(
-  rootPath: string, site: WorkspaceSite, files: WorkspaceFileEntry[], effectiveMode?: SitePackageInfo["configuredPreviewMode"],
+  rootPath: string,
+  site: WorkspaceSite,
+  files: WorkspaceFileEntry[],
+  effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SitePackageInfo> {
-  const mapped = await mapWorkspaceSite(rootPath, site, files, await configuredScriptsForSite(rootPath, site));
+  const mapped = await mapWorkspaceSite(
+    rootPath,
+    site,
+    files,
+    await configuredScriptsForSite(rootPath, site),
+  );
   if (effectiveMode === undefined) return mapped;
   const { shareManifest: _previous, ...info } = mapped;
   return { ...mapped, shareManifest: await shareManifestForSite(rootPath, info, effectiveMode) };
@@ -3394,9 +3612,7 @@ export function requireExactSiteRoot(
   return site;
 }
 
-function entryRelativeToSite(
-  site: Pick<SitePackageInfo, "root" | "entryPath">,
-): string | null {
+function entryRelativeToSite(site: Pick<SitePackageInfo, "root" | "entryPath">): string | null {
   if (!site.entryPath) return null;
   if (site.root === ".") return site.entryPath;
   return site.entryPath.startsWith(`${site.root}/`)
@@ -3415,9 +3631,10 @@ function entryRelativeToSite(
  * (shareManifestForSite) must agree on this root; they call this one
  * function instead of computing it twice.
  */
-function ownedStaticEntryTarget(
-  site: Pick<SitePackageInfo, "root" | "entryPath">,
-): { root: string; entry: string | null } {
+function ownedStaticEntryTarget(site: Pick<SitePackageInfo, "root" | "entryPath">): {
+  root: string;
+  entry: string | null;
+} {
   const entry = entryRelativeToSite(site);
   if (!entry) return { root: site.root, entry: null };
   const directory = posix.dirname(entry);
@@ -3427,9 +3644,6 @@ function ownedStaticEntryTarget(
   };
 }
 
-export function buildOutputSiteRoot(
-  site: Pick<SitePackageInfo, "root">,
-  output: string,
-): string {
+export function buildOutputSiteRoot(site: Pick<SitePackageInfo, "root">, output: string): string {
   return joinSitePath(site.root, output);
 }

@@ -14,7 +14,9 @@ export async function diskSpelling(root: string, path: string): Promise<string |
   // looked-up leaf unless it is itself a symlink; resolve its parent only.
   const entry = await lstat(path).catch(absentAsNull);
   if (entry === null) return null;
-  const resolved = await realpath(entry.isSymbolicLink() ? path : dirname(path)).catch(absentAsNull);
+  const resolved = await realpath(entry.isSymbolicLink() ? path : dirname(path)).catch(
+    absentAsNull,
+  );
   if (resolved === null) return null;
   const file = entry.isSymbolicLink() ? resolved : join(resolved, basename(path));
   if (!isInside(realRoot, file)) return null;
@@ -80,7 +82,9 @@ export function lookAlikeSpelling(name: string): string {
 }
 
 function swapAsciiCase(name: string): string {
-  return name.replace(/[A-Za-z]/gu, letter => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase());
+  return name.replace(/[A-Za-z]/gu, (letter) =>
+    letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase(),
+  );
 }
 
 export function absentAsNull(error: unknown): null {

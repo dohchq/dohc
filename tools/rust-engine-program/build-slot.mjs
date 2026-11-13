@@ -59,7 +59,8 @@ export function resolveBuildBudget(env = process.env, host = {}) {
   const ci = env.CI && !["false", "0"].includes(env.CI.toLowerCase());
   const mac = os === "darwin" && !ci ? macSlotRoot(host.home) : null;
   const root =
-    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : mac && existsSync(mac) ? mac : null);
+    env.DOHC_BUILD_SLOT_ROOT ||
+    (os === "win32" && !ci ? "C:\\w\\_locks" : mac && existsSync(mac) ? mac : null);
   if (!root) return null;
   const slots = 4;
   const cores = host.cores ?? availableParallelism();
@@ -74,14 +75,20 @@ export function resolveBuildBudget(env = process.env, host = {}) {
 
 /** Clamp inherited compiler and test settings to this lane's host budget. */
 export function capBuildParallelism(source, maxJobs) {
-  if (!Number.isInteger(maxJobs) || maxJobs < 1) throw new Error("Build parallelism must be a positive integer.");
+  if (!Number.isInteger(maxJobs) || maxJobs < 1)
+    throw new Error("Build parallelism must be a positive integer.");
   const env = { ...source };
   for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) {
-    const matching = Object.keys(env).filter(key => key.toUpperCase() === name);
-    const value = env[name] ?? env[matching[0]] ?? (name === "NEXTEST_TEST_THREADS" ? env.RUST_TEST_THREADS : undefined);
+    const matching = Object.keys(env).filter((key) => key.toUpperCase() === name);
+    const value =
+      env[name] ??
+      env[matching[0]] ??
+      (name === "NEXTEST_TEST_THREADS" ? env.RUST_TEST_THREADS : undefined);
     for (const key of matching) delete env[key];
     const requested = Number(value);
-    env[name] = String(Number.isInteger(requested) && requested > 0 ? Math.min(requested, maxJobs) : maxJobs);
+    env[name] = String(
+      Number.isInteger(requested) && requested > 0 ? Math.min(requested, maxJobs) : maxJobs,
+    );
   }
   return env;
 }
@@ -116,8 +123,16 @@ const lookupDirectory = process.env.SystemRoot;
 
 function creationQuery(pid, os) {
   if (os === "win32") {
-    return ["pwsh.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-      `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`]];
+    return [
+      "pwsh.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+      ],
+    ];
   }
   return null;
 }
@@ -130,7 +145,8 @@ function linuxCreation(pid) {
   return /^\d+$/u.test(start) && boot ? `${boot}/${start}` : null;
 }
 
-const creationOutput = output => /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/u.test(output.trim()) ? output.trim() : null;
+const creationOutput = (output) =>
+  /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/u.test(output.trim()) ? output.trim() : null;
 
 export function processCreation(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
@@ -138,9 +154,15 @@ export function processCreation(pid) {
     if (platform() === "linux") return linuxCreation(pid);
     const query = creationQuery(pid, platform());
     if (!query) return null;
-    return creationOutput(execFileSync(query[0], query[1], {
-      encoding: "utf8", windowsHide: true, timeout: 30_000, stdio: ["ignore", "pipe", "ignore"], cwd: lookupDirectory,
-    }));
+    return creationOutput(
+      execFileSync(query[0], query[1], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 30_000,
+        stdio: ["ignore", "pipe", "ignore"],
+        cwd: lookupDirectory,
+      }),
+    );
   } catch {
     return null;
   }
@@ -154,29 +176,48 @@ let ownCreation;
 let ownCreationValue = null;
 function linuxOwnCreation() {
   if (platform() !== "linux") return null;
-  try { return ownCreationValue ??= linuxCreation(process.pid); } catch { return null; }
+  try {
+    return (ownCreationValue ??= linuxCreation(process.pid));
+  } catch {
+    return null;
+  }
 }
 function resolveOwnCreation() {
   if (ownCreation) return ownCreation;
   const query = creationQuery(process.pid, platform());
-  if (!query) return ownCreation = Promise.resolve(linuxOwnCreation());
-  return ownCreation = new Promise(done => {
-    const finish = value => { ownCreationValue = value; done(value); };
+  if (!query) return (ownCreation = Promise.resolve(linuxOwnCreation()));
+  return (ownCreation = new Promise((done) => {
+    const finish = (value) => {
+      ownCreationValue = value;
+      done(value);
+    };
     try {
-      const child = spawn(query[0], query[1], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"], cwd: lookupDirectory });
+      const child = spawn(query[0], query[1], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+        cwd: lookupDirectory,
+      });
       let output = "";
       child.stdout.setEncoding("utf8");
-      child.stdout.on("data", chunk => { output += chunk; });
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+      });
       const timer = setTimeout(() => child.kill(), 30_000);
       timer.unref();
-      child.once("error", () => { clearTimeout(timer); finish(null); });
-      child.once("close", code => { clearTimeout(timer); finish(code === 0 ? creationOutput(output) : null); });
+      child.once("error", () => {
+        clearTimeout(timer);
+        finish(null);
+      });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        finish(code === 0 ? creationOutput(output) : null);
+      });
       child.unref();
       child.stdout.unref();
     } catch {
       finish(null);
     }
-  });
+  }));
 }
 
 function logEvent(root, line) {
@@ -228,12 +269,16 @@ function holders(root, slots, kind) {
     try {
       const owner = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
       const status = readStatus(dir, owner);
-      const detail = [status.purpose, status.checkout, status.commit?.slice(0, 12), status.phase].filter(Boolean).join(", ");
+      const detail = [status.purpose, status.checkout, status.commit?.slice(0, 12), status.phase]
+        .filter(Boolean)
+        .join(", ");
       const elapsed = Math.max(0, Date.now() - Date.parse(owner.start));
       const heartbeat = Math.max(0, Date.now() - statSync(join(dir, "owner.json")).mtimeMs);
       // Without an identity, a reused pid keeps the slot until that other process exits.
-      held.push(`${kind}-${i}: pid ${owner.pid}${owner.created ? "" : " (no process identity)"} since ${owner.start}, ` +
-        `elapsed ${Math.round(elapsed / 1000)}s, last heartbeat ${Math.round(heartbeat / 1000)}s ago${detail ? ` (${detail})` : ""}`);
+      held.push(
+        `${kind}-${i}: pid ${owner.pid}${owner.created ? "" : " (no process identity)"} since ${owner.start}, ` +
+          `elapsed ${Math.round(elapsed / 1000)}s, last heartbeat ${Math.round(heartbeat / 1000)}s ago${detail ? ` (${detail})` : ""}`,
+      );
     } catch {
       if (existsSync(dir)) held.push(`${kind}-${i}: owner unreadable`);
     }
@@ -242,20 +287,33 @@ function holders(root, slots, kind) {
 }
 
 function metadataFields(metadata = {}) {
-  return Object.fromEntries(["purpose", "checkout", "commit", "phase"].flatMap(name =>
-    typeof metadata[name] === "string" ? [[name, metadata[name].replace(/[\r\n]/gu, " ").slice(0, 300)]] : []));
+  return Object.fromEntries(
+    ["purpose", "checkout", "commit", "phase"].flatMap((name) =>
+      typeof metadata[name] === "string"
+        ? [[name, metadata[name].replace(/[\r\n]/gu, " ").slice(0, 300)]]
+        : [],
+    ),
+  );
 }
 
 function readStatus(dir, owner) {
   try {
     const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
     return status.owner === JSON.stringify(owner) ? metadataFields(status) : {};
-  } catch { return metadataFields(owner); }
+  } catch {
+    return metadataFields(owner);
+  }
 }
 
 function historyEvent(root, event) {
-  try { appendFileSync(join(root, "admission-history.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); }
-  catch { /* History informs estimates; it never controls admission. */ }
+  try {
+    appendFileSync(
+      join(root, "admission-history.jsonl"),
+      JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n",
+    );
+  } catch {
+    /* History informs estimates; it never controls admission. */
+  }
 }
 
 function serviceHistory(root, kind) {
@@ -269,18 +327,36 @@ function serviceHistory(root, kind) {
     readSync(fd, buffer, 0, buffer.length, start);
     const lines = buffer.toString("utf8").split("\n");
     if (start) lines.shift();
-    return lines.flatMap(line => {
-      try {
-        const event = JSON.parse(line);
-        return event.kind === kind && event.event === "release" && Number.isFinite(event.elapsedMs) && event.elapsedMs > 0 ? [event.elapsedMs] : [];
-      } catch { return []; }
-    }).slice(-20);
-  } catch { return []; }
-  finally { if (fd !== undefined) closeSync(fd); }
+    return lines
+      .flatMap((line) => {
+        try {
+          const event = JSON.parse(line);
+          return event.kind === kind &&
+            event.event === "release" &&
+            Number.isFinite(event.elapsedMs) &&
+            event.elapsedMs > 0
+            ? [event.elapsedMs]
+            : [];
+        } catch {
+          return [];
+        }
+      })
+      .slice(-20);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** Read-only status. An estimate is based on completed runs, never an admission rule. */
-export function buildQueueStatus({ root, slots, kind = "build-slot", ticketName, now = Date.now() }) {
+export function buildQueueStatus({
+  root,
+  slots,
+  kind = "build-slot",
+  ticketName,
+  now = Date.now(),
+}) {
   const queue = queueTickets(root, kind);
   const position = ticketName ? queue.indexOf(ticketName) + 1 : null;
   const owners = [];
@@ -289,14 +365,27 @@ export function buildQueueStatus({ root, slots, kind = "build-slot", ticketName,
     if (!existsSync(dir)) continue;
     try {
       const owner = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
-      owners.push({ name: `${kind}-${i}`, purpose: "unknown", ...owner, ...readStatus(dir, owner), elapsedMs: Math.max(0, now - Date.parse(owner.start)) });
-    } catch { owners.push({ name: `${kind}-${i}`, phase: "owner unreadable" }); }
+      owners.push({
+        name: `${kind}-${i}`,
+        purpose: "unknown",
+        ...owner,
+        ...readStatus(dir, owner),
+        elapsedMs: Math.max(0, now - Date.parse(owner.start)),
+      });
+    } catch {
+      owners.push({ name: `${kind}-${i}`, phase: "owner unreadable" });
+    }
   }
   const samples = serviceHistory(root, kind).sort((a, b) => a - b);
   const serviceMs = samples.length ? samples[Math.floor(samples.length / 2)] : null;
-  const estimateWait = position => {
-    if (serviceMs === null || position < 1 || !owners.every(owner => Number.isFinite(owner.elapsedMs))) return null;
-    const remaining = owners.map(owner => Math.max(0, serviceMs - owner.elapsedMs));
+  const estimateWait = (position) => {
+    if (
+      serviceMs === null ||
+      position < 1 ||
+      !owners.every((owner) => Number.isFinite(owner.elapsedMs))
+    )
+      return null;
+    const remaining = owners.map((owner) => Math.max(0, serviceMs - owner.elapsedMs));
     while (remaining.length < slots) remaining.push(0);
     for (let i = 1; i < position; i += 1) {
       remaining.sort((a, b) => a - b);
@@ -308,10 +397,29 @@ export function buildQueueStatus({ root, slots, kind = "build-slot", ticketName,
   const waiters = queue.map((name, index) => {
     try {
       const record = JSON.parse(readFileSync(join(root, `${kind}-queue`, name), "utf8"));
-      return { ticket: name, position: index + 1, pid: record.pid, purpose: "unknown", ...metadataFields(record), elapsedMs: Math.max(0, now - Date.parse(record.start)), estimatedWaitMs: estimateWait(index + 1) };
-    } catch { return { ticket: name, position: index + 1, purpose: "unknown", phase: "ticket unreadable" }; }
+      return {
+        ticket: name,
+        position: index + 1,
+        pid: record.pid,
+        purpose: "unknown",
+        ...metadataFields(record),
+        elapsedMs: Math.max(0, now - Date.parse(record.start)),
+        estimatedWaitMs: estimateWait(index + 1),
+      };
+    } catch {
+      return { ticket: name, position: index + 1, purpose: "unknown", phase: "ticket unreadable" };
+    }
   });
-  return { root, kind, slots, owners, waiters, queued: queue.length, position, estimate: { waitMs: estimatedWaitMs, serviceMs, samples: samples.length } };
+  return {
+    root,
+    kind,
+    slots,
+    owners,
+    waiters,
+    queued: queue.length,
+    position,
+    estimate: { waitMs: estimatedWaitMs, serviceMs, samples: samples.length },
+  };
 }
 
 function withSweepLock(root, sweep) {
@@ -343,11 +451,9 @@ function withSweepLock(root, sweep) {
     if (Date.now() - observedMtime < 5 * 60_000) return null;
     const bucket = Math.floor(Date.now() / (5 * 60_000));
     try {
-      writeFileSync(
-        `${sweepLock}.claim-${Math.round(observedMtime)}-${bucket}`,
-        "",
-        { flag: "wx" },
-      );
+      writeFileSync(`${sweepLock}.claim-${Math.round(observedMtime)}-${bucket}`, "", {
+        flag: "wx",
+      });
     } catch (claimError) {
       if (claimError.code === "EEXIST") return null; // Lost the takeover.
       throw claimError;
@@ -372,8 +478,11 @@ function withSweepLock(root, sweep) {
   const token = randomBytes(8).toString("hex");
   const ownerPath = join(sweepLock, "owner");
   const owns = () => {
-    try { return readFileSync(ownerPath, "utf8") === token; }
-    catch { return false; }
+    try {
+      return readFileSync(ownerPath, "utf8") === token;
+    } catch {
+      return false;
+    }
   };
   try {
     writeFileSync(ownerPath, token, { flag: "wx" });
@@ -395,18 +504,27 @@ function withSweepLock(root, sweep) {
       const moved = `${sweepLock}.release-${randomBytes(4).toString("hex")}`;
       let renamed = false;
       for (let attempt = 0; attempt < 5 && !renamed; attempt += 1) {
-        try { renameSync(sweepLock, moved); renamed = true; }
-        catch (error) {
+        try {
+          renameSync(sweepLock, moved);
+          renamed = true;
+        } catch (error) {
           // A scanner briefly holding the owner file open blocks a directory rename on Windows.
           if (!["EPERM", "EBUSY", "EACCES"].includes(error.code)) break;
           Atomics.wait(releaseWait, 0, 0, 50 * (attempt + 1));
         }
       }
-      if (!renamed) logEvent(root, "sweep lock release failed; the next sweeper takes it over after 5 minutes");
+      if (!renamed)
+        logEvent(root, "sweep lock release failed; the next sweeper takes it over after 5 minutes");
       else if (readOwner(moved) === token) rmSync(moved, { recursive: true, force: true });
       else {
-        try { renameSync(moved, sweepLock); }
-        catch { logEvent(root, `a successor's sweep lock could not be restored (${moved}); its sweep stops`); }
+        try {
+          renameSync(moved, sweepLock);
+        } catch {
+          logEvent(
+            root,
+            `a successor's sweep lock could not be restored (${moved}); its sweep stops`,
+          );
+        }
       }
     }
   }
@@ -414,8 +532,11 @@ function withSweepLock(root, sweep) {
 
 const releaseWait = new Int32Array(new SharedArrayBuffer(4));
 function readOwner(lock) {
-  try { return readFileSync(join(lock, "owner"), "utf8"); }
-  catch { return null; }
+  try {
+    return readFileSync(join(lock, "owner"), "utf8");
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -441,12 +562,22 @@ function readOwner(lock) {
  * is removed after 5 minutes. Returns how many slots were freed.
  * `ownTicket` names the sweeping waiter's ticket, which is never stale.
  */
-export function reclaimStaleSlots({ root, slots, staleMs, kind = "build-slot", goneMs = 2 * defaultHeartbeatMs, identify = processCreation, ownTicket }) {
+export function reclaimStaleSlots({
+  root,
+  slots,
+  staleMs,
+  kind = "build-slot",
+  goneMs = 2 * defaultHeartbeatMs,
+  identify = processCreation,
+  ownTicket,
+}) {
   try {
-    return withSweepLock(root, owns => {
-      reclaimStaleTickets({ root, kind, owns, ownTicket });
-      return reclaimSlots({ root, slots, kind, staleMs, goneMs, identify, owns });
-    }) ?? 0;
+    return (
+      withSweepLock(root, (owns) => {
+        reclaimStaleTickets({ root, kind, owns, ownTicket });
+        return reclaimSlots({ root, slots, kind, staleMs, goneMs, identify, owns });
+      }) ?? 0
+    );
   } catch (error) {
     if (!transientFilesystemError(error, root, kind)) throw error;
     return 0;
@@ -465,11 +596,21 @@ function confirmsOwner(pid, created, identify) {
 }
 
 function heartbeatOf(dir) {
-  return statSync(join(dir, "owner.json"), { throwIfNoEntry: false })?.mtimeMs
-    ?? statSync(dir, { throwIfNoEntry: false })?.mtimeMs;
+  return (
+    statSync(join(dir, "owner.json"), { throwIfNoEntry: false })?.mtimeMs ??
+    statSync(dir, { throwIfNoEntry: false })?.mtimeMs
+  );
 }
 
-function reclaimSlots({ root, slots, staleMs, goneMs = 2 * defaultHeartbeatMs, kind, identify = processCreation, owns = () => true }) {
+function reclaimSlots({
+  root,
+  slots,
+  staleMs,
+  goneMs = 2 * defaultHeartbeatMs,
+  kind,
+  identify = processCreation,
+  owns = () => true,
+}) {
   const deadAfter = Math.min(staleMs, goneMs);
   const reusedAfter = Math.max(deadAfter, 2 * defaultHeartbeatMs);
   let reclaimed = 0;
@@ -582,7 +723,9 @@ function queueEntries(root, kind) {
 }
 
 function queueTickets(root, kind) {
-  return queueEntries(root, kind).filter((name) => name.endsWith(".json")).sort();
+  return queueEntries(root, kind)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
 }
 
 // Waiters have no running build to protect. A dead pid or stale heartbeat
@@ -607,7 +750,8 @@ function reclaimStaleTickets({ root, kind, owns = () => true, ownTicket }) {
       try {
         const record = JSON.parse(readFileSync(path, "utf8"));
         pid = record?.pid;
-        if (Number.isFinite(record?.heartbeatMs) && record.heartbeatMs > 0) heartbeatMs = record.heartbeatMs;
+        if (Number.isFinite(record?.heartbeatMs) && record.heartbeatMs > 0)
+          heartbeatMs = record.heartbeatMs;
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error;
         // A torn ticket has no readable owner.
@@ -617,7 +761,10 @@ function reclaimStaleTickets({ root, kind, owns = () => true, ownTicket }) {
       const dead = !temporary && readable && !pidAlive(pid);
       if (!dead && !stale) continue;
       rmSync(path, { force: true });
-      logEvent(root, `reclaimed ${kind} ticket ${name}: ${dead ? `pid ${pid} dead` : "heartbeat stale"}`);
+      logEvent(
+        root,
+        `reclaimed ${kind} ticket ${name}: ${dead ? `pid ${pid} dead` : "heartbeat stale"}`,
+      );
     } catch (error) {
       if (!transientFilesystemError(error, root, kind)) throw error;
       if (error.code !== "ENOENT") logEvent(root, `ticket reclaim failed: ${name}: ${error.code}`);
@@ -644,11 +791,11 @@ function ticketSlots(root, kind, name, legacySlots) {
  * so an older verifier waiting for slot 1 never idles slot 2.
  */
 export function admissionSlot(free, counts, position) {
-  const floor = Math.min(...counts.filter(count => count > 0));
+  const floor = Math.min(...counts.filter((count) => count > 0));
   const left = [...free];
   for (let k = 0; k <= position; k += 1) {
-    const usable = left.filter(i => i <= counts[k]);
-    const slot = (counts[k] > floor ? usable.find(i => i > floor) : undefined) ?? usable[0];
+    const usable = left.filter((i) => i <= counts[k]);
+    const slot = (counts[k] > floor ? usable.find((i) => i > floor) : undefined) ?? usable[0];
     if (k === position) return slot;
     if (slot !== undefined) left.splice(left.indexOf(slot), 1);
   }
@@ -664,7 +811,17 @@ function createTicket(root, kind, heartbeatMs, metadata, slots) {
   const path = join(queueDir, name);
   const temporary = `${path}.tmp`;
   try {
-    writeFileSync(temporary, JSON.stringify({ pid: process.pid, start: new Date().toISOString(), heartbeatMs, slots, ...metadataFields(metadata) }), { flag: "wx" });
+    writeFileSync(
+      temporary,
+      JSON.stringify({
+        pid: process.pid,
+        start: new Date().toISOString(),
+        heartbeatMs,
+        slots,
+        ...metadataFields(metadata),
+      }),
+      { flag: "wx" },
+    );
     renameSync(temporary, path);
   } finally {
     try {
@@ -695,7 +852,17 @@ function createTicket(root, kind, heartbeatMs, metadata, slots) {
   return { name, path, remove };
 }
 
-function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs = defaultIdentityDelayMs) {
+function claimSlot(
+  dir,
+  name,
+  heartbeatMs,
+  cooperativeCancellation,
+  removeTicket,
+  root,
+  kind,
+  metadata,
+  identityDelayMs = defaultIdentityDelayMs,
+) {
   const ownerPath = join(dir, "owner.json");
   let ownerRecord = JSON.stringify({
     pid: process.pid,
@@ -724,31 +891,45 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   beat.unref();
   let released = false;
   const startedAt = Date.now();
-  const update = fields => {
+  const update = (fields) => {
     if (released) return;
     try {
       if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
       metadata = { ...metadataFields(metadata), ...metadataFields(fields) };
-      writeFileSync(join(dir, "status.json"), JSON.stringify({ owner: ownerRecord, ...metadata, updatedAt: new Date().toISOString() }));
-    } catch { /* Status writes must not lose an acquired slot or its release handle. */ }
+      writeFileSync(
+        join(dir, "status.json"),
+        JSON.stringify({ owner: ownerRecord, ...metadata, updatedAt: new Date().toISOString() }),
+      );
+    } catch {
+      /* Status writes must not lose an acquired slot or its release handle. */
+    }
   };
   update(metadata);
   // Only a held slot needs an identity; claims released within seconds never
   // pay the lookup. A sweep that read the identity-less record sees new bytes
   // and backs off.
-  const identify = identityDelayMs !== null && JSON.parse(ownerRecord).created === null ? setTimeout(() => resolveOwnCreation().then(created => {
-    if (released || created === null) return;
-    try {
-      if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
-      const record = JSON.stringify({ ...JSON.parse(ownerRecord), created });
-      // Rename, so a failed write leaves the old record and release still matches it.
-      const temporary = `${ownerPath}.${randomBytes(4).toString("hex")}.tmp`;
-      writeFileSync(temporary, record);
-      renameSync(temporary, ownerPath);
-      ownerRecord = record;
-      update({});
-    } catch { /* The slot keeps its pid-only record. */ }
-  }), identityDelayMs) : null;
+  const identify =
+    identityDelayMs !== null && JSON.parse(ownerRecord).created === null
+      ? setTimeout(
+          () =>
+            resolveOwnCreation().then((created) => {
+              if (released || created === null) return;
+              try {
+                if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
+                const record = JSON.stringify({ ...JSON.parse(ownerRecord), created });
+                // Rename, so a failed write leaves the old record and release still matches it.
+                const temporary = `${ownerPath}.${randomBytes(4).toString("hex")}.tmp`;
+                writeFileSync(temporary, record);
+                renameSync(temporary, ownerPath);
+                ownerRecord = record;
+                update({});
+              } catch {
+                /* The slot keeps its pid-only record. */
+              }
+            }),
+          identityDelayMs,
+        )
+      : null;
   identify?.unref();
   historyEvent(root, { event: "admit", kind, name, pid: process.pid, ...metadataFields(metadata) });
   const release = () => {
@@ -767,7 +948,14 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
       // lane's slot and re-free its name.
       if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
       rmSync(dir, { recursive: true, force: true });
-      historyEvent(root, { event: "release", kind, name, pid: process.pid, elapsedMs: Date.now() - startedAt, ...metadataFields(metadata) });
+      historyEvent(root, {
+        event: "release",
+        kind,
+        name,
+        pid: process.pid,
+        elapsedMs: Date.now() - startedAt,
+        ...metadataFields(metadata),
+      });
     } catch {
       // Unreadable means nothing of ours is left at the path. A slot that
       // cannot be removed is reclaimed by the next waiter once this
@@ -799,7 +987,14 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
     removeTicket();
-    historyEvent(root, { event: "abandon", kind, name, pid: process.pid, elapsedMs: Date.now() - startedAt, ...metadataFields(metadata) });
+    historyEvent(root, {
+      event: "abandon",
+      kind,
+      name,
+      pid: process.pid,
+      elapsedMs: Date.now() - startedAt,
+      ...metadataFields(metadata),
+    });
   };
   process.once("exit", release);
   // Standalone gates release before exiting. Cooperative callers retain the
@@ -822,37 +1017,73 @@ export function acquireBuildSlot(options) {
  * The run also takes a cargo lane for its build.
  */
 export function acquireLinuxSlot({ root, metadata, signal, waitMs = 2 * 60 * 60_000 }) {
-  return acquireSlot({ root, slots: 1, kind: "linux-slot", lanes: "Linux runs", metadata, signal, waitMs, cooperativeCancellation: true });
+  return acquireSlot({
+    root,
+    slots: 1,
+    kind: "linux-slot",
+    lanes: "Linux runs",
+    metadata,
+    signal,
+    waitMs,
+    cooperativeCancellation: true,
+  });
 }
 
 /** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
-export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true, identityDelayMs = defaultIdentityDelayMs }) {
+export function acquireExclusiveSlot({
+  root,
+  kind,
+  metadata,
+  cooperativeCancellation = true,
+  identityDelayMs = defaultIdentityDelayMs,
+}) {
   mkdirSync(root, { recursive: true });
   const dir = slotDir(root, 1, kind);
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    try { mkdirSync(dir); }
-    catch (error) {
+    try {
+      mkdirSync(dir);
+    } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      if (attempt) throw new Error(`Another run owns ${dir}: ${holders(root, 1, kind) || "owner unavailable"}.`);
+      if (attempt)
+        throw new Error(
+          `Another run owns ${dir}: ${holders(root, 1, kind) || "owner unavailable"}.`,
+        );
       let staleMs = 30 * 60_000;
       try {
         const { pid } = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
         // Live PIDs remain protected by the existing reclaimer. Incomplete
         // claims keep its grace period across the mkdir/write window.
         if (Number.isInteger(pid) && pid > 0) staleMs = -1;
-      } catch { /* Preserve a recent incomplete claim. */ }
+      } catch {
+        /* Preserve a recent incomplete claim. */
+      }
       reclaimStaleSlots({ root, slots: 1, kind, staleMs });
       continue;
     }
-    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata, identityDelayMs);
+    return claimSlot(
+      dir,
+      `${kind}-1`,
+      defaultHeartbeatMs,
+      cooperativeCancellation,
+      () => {},
+      root,
+      kind,
+      metadata,
+      identityDelayMs,
+    );
   }
 }
 
-const canonical = path => {
-  try { return realpathSync(path).toLowerCase(); }
-  catch { return resolve(path).toLowerCase(); }
+const canonical = (path) => {
+  try {
+    return realpathSync(path).toLowerCase();
+  } catch {
+    return resolve(path).toLowerCase();
+  }
 };
-const verifierEntry = fileURLToPath(new URL("../../scripts/verification/verify.mjs", import.meta.url));
+const verifierEntry = fileURLToPath(
+  new URL("../../scripts/verification/verify.mjs", import.meta.url),
+);
 
 export const maxVerificationLanes = 4;
 
@@ -863,8 +1094,14 @@ export const maxVerificationLanes = 4;
 export function verificationLanes(env = process.env) {
   const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
   const cargoRoot = resolveBuildBudget(env)?.root;
-  if (trialRoot && (env.DOHC_VERIFICATION_TRIAL !== "1" || cargoRoot && canonical(trialRoot) === canonical(cargoRoot))) {
-    throw new Error("A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.");
+  if (
+    trialRoot &&
+    (env.DOHC_VERIFICATION_TRIAL !== "1" ||
+      (cargoRoot && canonical(trialRoot) === canonical(cargoRoot)))
+  ) {
+    throw new Error(
+      "A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.",
+    );
   }
   const root = trialRoot ?? cargoRoot;
   return root ? readVerificationLanes(root) : 1;
@@ -874,16 +1111,23 @@ export function verificationLanes(env = process.env) {
 export function readVerificationLanes(root) {
   const path = join(root, "verification-lanes");
   let setting;
-  try { setting = readFileSync(path, "utf8").trim(); }
-  catch (error) { if (error.code === "ENOENT") return 1; throw error; }
+  try {
+    setting = readFileSync(path, "utf8").trim();
+  } catch (error) {
+    if (error.code === "ENOENT") return 1;
+    throw error;
+  }
   const count = /^\d+$/u.test(setting) ? Number(setting) : 0;
-  if (count < 1 || count > maxVerificationLanes) throw new Error(`${path} must contain a lane count from 1 to ${maxVerificationLanes}.`);
+  if (count < 1 || count > maxVerificationLanes)
+    throw new Error(`${path} must contain a lane count from 1 to ${maxVerificationLanes}.`);
   return count;
 }
 
 /** The verification slots held in `root`, by number, including slots above a lowered or unreadable setting. */
-export const heldVerificationSlots = root => Array.from({ length: maxVerificationLanes }, (_, index) => index + 1)
-  .filter(slot => existsSync(slotDir(root, slot, "verification-slot")));
+export const heldVerificationSlots = (root) =>
+  Array.from({ length: maxVerificationLanes }, (_, index) => index + 1).filter((slot) =>
+    existsSync(slotDir(root, slot, "verification-slot")),
+  );
 
 /**
  * Hold one of the host's verification lanes for a whole PR gate, so gates
@@ -894,9 +1138,22 @@ export const heldVerificationSlots = root => Array.from({ length: maxVerificatio
  * queue service: it returns the current lane count each time admission is checked.
  * `hold()` returns why the caller must not take a lane now, such as a paused queue, or null.
  */
-export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 6 * 60 * 60_000, observeTicket, entry = process.argv[1], signal, lanes, hold } = {}) {
+export function acquireVerificationSlot(
+  env = process.env,
+  {
+    metadata,
+    waitMs = 6 * 60 * 60_000,
+    observeTicket,
+    entry = process.argv[1],
+    signal,
+    lanes,
+    hold,
+  } = {},
+) {
   if (!entry || canonical(entry) !== canonical(verifierEntry)) {
-    throw new Error(`Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`);
+    throw new Error(
+      `Only the PR verifier (${verifierEntry}) may hold a verification lane. Run pnpm verify:pr, or take a build slot for other Cargo work.`,
+    );
   }
   const current = lanes ?? (() => verificationLanes(env));
   const slots = current();
@@ -904,11 +1161,31 @@ export function acquireVerificationSlot(env = process.env, { metadata, waitMs = 
   if (!budget) return null;
   // A lowered count also holds back runs already waiting; an unreadable one keeps the last count read.
   let last = slots;
-  const limit = () => { try { last = current(); } catch { /* Keep the last count. */ } return last; };
+  const limit = () => {
+    try {
+      last = current();
+    } catch {
+      /* Keep the last count. */
+    }
+    return last;
+  };
   // Verifiers older than the lane setting used one slot and record no count.
-  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots, maxSlots: maxVerificationLanes, limit, legacySlots: 1,
-    kind: "verification-slot", lanes: "verification runs", metadata,
-    waitMs, pollMs: 60_000, cooperativeCancellation: true, observeTicket, signal, hold });
+  return acquireSlot({
+    root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root,
+    slots,
+    maxSlots: maxVerificationLanes,
+    limit,
+    legacySlots: 1,
+    kind: "verification-slot",
+    lanes: "verification runs",
+    metadata,
+    waitMs,
+    pollMs: 60_000,
+    cooperativeCancellation: true,
+    observeTicket,
+    signal,
+    hold,
+  });
 }
 
 /** A ticket observer failed, so acquisition stopped before admission instead of retrying. */
@@ -961,14 +1238,19 @@ async function acquireSlot({
   const cancellation = new AbortController();
   const cancel = (signal, code) => {
     process.exitCode = code;
-    cancellation.abort(new Error(`${label[0].toUpperCase()}${label.slice(1)} acquisition cancelled by ${signal}.`));
+    cancellation.abort(
+      new Error(`${label[0].toUpperCase()}${label.slice(1)} acquisition cancelled by ${signal}.`),
+    );
     removeTicket();
     if (!cooperativeCancellation) process.exit(code);
   };
   const onSigint = () => cancel("SIGINT", 130);
   const onSigterm = () => cancel("SIGTERM", 143);
   // A caller's signal stops the wait without touching the process's exit code.
-  const onAbort = () => { cancellation.abort(signal.reason ?? new Error(`${label} acquisition stopped.`)); removeTicket(); };
+  const onAbort = () => {
+    cancellation.abort(signal.reason ?? new Error(`${label} acquisition stopped.`));
+    removeTicket();
+  };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) onAbort();
   const observe = ({ name, path }) => {
@@ -977,122 +1259,173 @@ async function acquireSlot({
       const result = observeTicket({ root, kind, name, path });
       if (typeof result?.then !== "function") return;
       result.then(undefined, () => {});
-    } catch (error) { throw new TicketEvidenceError(`Ticket evidence capture failed for ${name}: ${error?.message}`, { cause: error }); }
+    } catch (error) {
+      throw new TicketEvidenceError(
+        `Ticket evidence capture failed for ${name}: ${error?.message}`,
+        { cause: error },
+      );
+    }
     throw new TicketEvidenceError(`Ticket evidence capture for ${name} must finish synchronously.`);
   };
   process.on("exit", removeTicket);
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
-  try { for (;;) {
-    cancellation.signal.throwIfAborted();
-    const held = hold?.();
-    if (held) {
-      removeTicket();
-      ticket = undefined;
-      if (!holding) console.log(`  ${held}`);
-      holding = true;
-      deadline = Date.now() + waitMs;
-      await sleep(Math.min(pollMs, 1000), undefined, { signal: cancellation.signal });
-      continue;
-    }
-    holding = false;
-    let ahead = -1;
-    let free = [];
-    let slot;
-    const refreshQueue = () => {
-      const tickets = queueTickets(root, kind);
-      ahead = tickets.indexOf(ticket.name);
-      free = [];
-      let held = 0;
-      for (let i = 1; i <= maxSlots; i += 1) {
-        if (existsSync(slotDir(root, i, kind))) held += 1;
-        else if (i <= slots) free.push(i);
-      }
-      // Every held slot counts against the current limit, so lowering it admits nothing until the runs in flight fall under it.
-      free = free.slice(0, Math.max(0, limit() - held));
-      // Waiting code can use fewer slots than this one only when older code may be waiting too.
-      const counts = slots === legacySlots ? tickets.map(() => slots) : tickets.map(name => name === ticket.name ? slots : ticketSlots(root, kind, name, legacySlots));
-      slot = ahead < 0 ? undefined : admissionSlot(free, counts, ahead);
-    };
-    try {
-      if (ticket && !existsSync(ticket.path)) {
-        ticket.remove();
+  try {
+    for (;;) {
+      cancellation.signal.throwIfAborted();
+      const held = hold?.();
+      if (held) {
+        removeTicket();
         ticket = undefined;
+        if (!holding) console.log(`  ${held}`);
+        holding = true;
+        deadline = Date.now() + waitMs;
+        await sleep(Math.min(pollMs, 1000), undefined, { signal: cancellation.signal });
+        continue;
       }
-      if (!ticket) {
-        ticket = createTicket(root, kind, heartbeatMs, metadata, slots);
-        if (observeTicket) observe(ticket);
-      }
-      refreshQueue();
-      const reserved = ahead > 0 && free.length > 0 && slot === undefined;
-      const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
-      if (Date.now() - lastSweepAt >= sweepMs) {
-        lastSweepAt = Date.now();
-        reclaimStaleSlots({ root, slots: maxSlots, staleMs, goneMs, kind, ownTicket: ticket.name });
+      holding = false;
+      let ahead = -1;
+      let free = [];
+      let slot;
+      const refreshQueue = () => {
+        const tickets = queueTickets(root, kind);
+        ahead = tickets.indexOf(ticket.name);
+        free = [];
+        let held = 0;
+        for (let i = 1; i <= maxSlots; i += 1) {
+          if (existsSync(slotDir(root, i, kind))) held += 1;
+          else if (i <= slots) free.push(i);
+        }
+        // Every held slot counts against the current limit, so lowering it admits nothing until the runs in flight fall under it.
+        free = free.slice(0, Math.max(0, limit() - held));
+        // Waiting code can use fewer slots than this one only when older code may be waiting too.
+        const counts =
+          slots === legacySlots
+            ? tickets.map(() => slots)
+            : tickets.map((name) =>
+                name === ticket.name ? slots : ticketSlots(root, kind, name, legacySlots),
+              );
+        slot = ahead < 0 ? undefined : admissionSlot(free, counts, ahead);
+      };
+      try {
+        if (ticket && !existsSync(ticket.path)) {
+          ticket.remove();
+          ticket = undefined;
+        }
+        if (!ticket) {
+          ticket = createTicket(root, kind, heartbeatMs, metadata, slots);
+          if (observeTicket) observe(ticket);
+        }
         refreshQueue();
+        const reserved = ahead > 0 && free.length > 0 && slot === undefined;
+        const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
+        if (Date.now() - lastSweepAt >= sweepMs) {
+          lastSweepAt = Date.now();
+          reclaimStaleSlots({
+            root,
+            slots: maxSlots,
+            staleMs,
+            goneMs,
+            kind,
+            ownTicket: ticket.name,
+          });
+          refreshQueue();
+        }
+        if (ahead < 0) {
+          ticket.remove();
+          ticket = undefined;
+        }
+        if (slot !== undefined) {
+          // Tickets ahead keep the free slots they can claim. Atomic mkdir arbitrates
+          // changing snapshots and old-code holders without blocking on a sweep.
+          const i = slot;
+          const dir = slotDir(root, i, kind);
+          let created = false;
+          try {
+            mkdirSync(dir);
+            created = true;
+          } catch (error) {
+            if (error.code !== "EEXIST") throw error;
+          }
+          if (created) {
+            // A hold that began during this pass gets the slot back before anything runs in it, and so does a hold that throws.
+            let held;
+            try {
+              held = hold?.();
+            } catch (error) {
+              rmSync(dir, { recursive: true, force: true });
+              throw error;
+            }
+            if (held) {
+              rmSync(dir, { recursive: true, force: true });
+              continue;
+            }
+            return claimSlot(
+              dir,
+              `${kind}-${i}`,
+              heartbeatMs,
+              cooperativeCancellation,
+              removeTicket,
+              root,
+              kind,
+              metadata,
+              identityDelayMs,
+            );
+          }
+        }
+      } catch (error) {
+        if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind))
+          throw error;
+        ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
+        slot = undefined;
       }
-      if (ahead < 0) {
-        ticket.remove();
-        ticket = undefined;
+      if (!denied) {
+        // A waiter has time to learn its identity before it claims.
+        resolveOwnCreation();
+        denied = true;
+        logEvent(
+          root,
+          free.length === 0
+            ? `denied: pid ${process.pid} found all ${slots} slots held`
+            : `denied: pid ${process.pid} waiting at queue position ${ahead + 1}`,
+        );
       }
-      if (slot !== undefined) {
-        // Tickets ahead keep the free slots they can claim. Atomic mkdir arbitrates
-        // changing snapshots and old-code holders without blocking on a sweep.
-        const i = slot;
-        const dir = slotDir(root, i, kind);
-        let created = false;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `no ${label} freed within ${Math.round(waitMs / 60_000)} minutes: ` +
+            `the concurrency budget is ${slots} concurrent ${lanes} ` +
+            `at ${root} ${
+              free.length === 0
+                ? `and all ${slots} slots are held — ${holders(root, slots, kind)}`
+                : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`
+            }. Wait for a lane to finish and ` +
+            `rerun; a slot is reclaimed automatically ` +
+            `${Math.round(Math.min(staleMs, goneMs ?? 2 * defaultHeartbeatMs) / 60_000)} minutes after its holder's last ` +
+            `heartbeat once its process exits, or once its pid passes to another process and the holder recorded its identity.`,
+        );
+      }
+      if (Date.now() >= nextMessageAt) {
+        const position = ahead < 0 ? "unavailable" : ahead + 1;
+        let status;
         try {
-          mkdirSync(dir);
-          created = true;
-        } catch (error) {
-          if (error.code !== "EEXIST") throw error;
+          status = buildQueueStatus({ root, slots, kind, ticketName: ticket?.name });
+        } catch {
+          status = { estimate: { waitMs: null } };
         }
-        if (created) {
-          // A hold that began during this pass gets the slot back before anything runs in it, and so does a hold that throws.
-          let held;
-          try { held = hold?.(); }
-          catch (error) { rmSync(dir, { recursive: true, force: true }); throw error; }
-          if (held) { rmSync(dir, { recursive: true, force: true }); continue; }
-          return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata, identityDelayMs);
-        }
+        const estimate =
+          status.estimate.waitMs === null
+            ? "wait estimate unavailable (no comparable completed runs)"
+            : `estimated wait ${Math.round(status.estimate.waitMs / 1000)}s from ${status.estimate.samples} completed runs`;
+        console.log(
+          `  waiting for a ${label}: ${holders(root, slots, kind) || "no current holder"}; ${estimate}; queue position ${position}`,
+        );
+        nextMessageAt = Date.now() + pollMs;
       }
-    } catch (error) {
-      if (error instanceof TicketEvidenceError || !transientFilesystemError(error, root, kind)) throw error;
-      ahead = -1; // This snapshot cannot grant admission; retry after the sleep.
-      slot = undefined;
+      await sleep(Math.min(pollMs, 1000, Math.max(1, deadline - Date.now())), undefined, {
+        signal: cancellation.signal,
+      });
     }
-    if (!denied) {
-      // A waiter has time to learn its identity before it claims.
-      resolveOwnCreation();
-      denied = true;
-      logEvent(root, free.length === 0
-        ? `denied: pid ${process.pid} found all ${slots} slots held`
-        : `denied: pid ${process.pid} waiting at queue position ${ahead + 1}`);
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `no ${label} freed within ${Math.round(waitMs / 60_000)} minutes: ` +
-          `the concurrency budget is ${slots} concurrent ${lanes} ` +
-          `at ${root} ${free.length === 0
-            ? `and all ${slots} slots are held — ${holders(root, slots, kind)}`
-            : `with ${ahead < 0 ? "queue position unavailable" : `queue position ${ahead + 1} behind older waiters`}; ${holders(root, slots, kind) || "no current holder"}`}. Wait for a lane to finish and ` +
-          `rerun; a slot is reclaimed automatically ` +
-          `${Math.round(Math.min(staleMs, goneMs ?? 2 * defaultHeartbeatMs) / 60_000)} minutes after its holder's last ` +
-          `heartbeat once its process exits, or once its pid passes to another process and the holder recorded its identity.`,
-      );
-    }
-    if (Date.now() >= nextMessageAt) {
-      const position = ahead < 0 ? "unavailable" : ahead + 1;
-      let status;
-      try { status = buildQueueStatus({ root, slots, kind, ticketName: ticket?.name }); }
-      catch { status = {estimate: {waitMs: null}}; }
-      const estimate = status.estimate.waitMs === null ? "wait estimate unavailable (no comparable completed runs)"
-        : `estimated wait ${Math.round(status.estimate.waitMs / 1000)}s from ${status.estimate.samples} completed runs`;
-      console.log(`  waiting for a ${label}: ${holders(root, slots, kind) || "no current holder"}; ${estimate}; queue position ${position}`);
-      nextMessageAt = Date.now() + pollMs;
-    }
-    await sleep(Math.min(pollMs, 1000, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
-  } } finally {
+  } finally {
     removeTicket();
     signal?.removeEventListener("abort", onAbort);
     process.off("exit", removeTicket);
@@ -1102,24 +1435,54 @@ async function acquireSlot({
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const {values} = parseArgs({ options: {status: {type: "boolean"}, root: {type: "string"}} });
-  if (!values.status) throw new Error("Use --status [--root <directory>] to inspect queues without acquiring a slot.");
+  const { values } = parseArgs({
+    options: { status: { type: "boolean" }, root: { type: "string" } },
+  });
+  if (!values.status)
+    throw new Error(
+      "Use --status [--root <directory>] to inspect queues without acquiring a slot.",
+    );
   const budget = resolveBuildBudget();
   const cargoRoot = values.root ?? budget?.root;
   const verificationRoot = values.root ?? process.env.DOHC_VERIFICATION_SLOT_ROOT ?? budget?.root;
   let verificationSlots = 1;
   let verificationConfigurationError = null;
-  try { verificationSlots = verificationLanes(); }
-  catch (error) { verificationConfigurationError = error.message; }
+  try {
+    verificationSlots = verificationLanes();
+  } catch (error) {
+    verificationConfigurationError = error.message;
+  }
   // Show every held lane, including lanes above a lowered or unreadable setting.
-  const inspectedVerificationSlots = Math.max(verificationSlots, ...(verificationRoot ? heldVerificationSlots(verificationRoot) : []));
+  const inspectedVerificationSlots = Math.max(
+    verificationSlots,
+    ...(verificationRoot ? heldVerificationSlots(verificationRoot) : []),
+  );
   const lanes = [
-    ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
-    ...(verificationRoot ? [
-      buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: inspectedVerificationSlots}),
-    ] : []),
-    ...(cargoRoot && existsSync(join(cargoRoot, "verification-linux")) ? [buildQueueStatus({root: cargoRoot, kind: "linux-slot", slots: 1})] : []),
+    ...(cargoRoot ? [buildQueueStatus({ root: cargoRoot, slots: budget?.slots ?? 4 })] : []),
+    ...(verificationRoot
+      ? [
+          buildQueueStatus({
+            root: verificationRoot,
+            kind: "verification-slot",
+            slots: inspectedVerificationSlots,
+          }),
+        ]
+      : []),
+    ...(cargoRoot && existsSync(join(cargoRoot, "verification-linux"))
+      ? [buildQueueStatus({ root: cargoRoot, kind: "linux-slot", slots: 1 })]
+      : []),
   ];
-  console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null,
-    verificationSlots: verificationConfigurationError ? null : verificationSlots, verificationConfigurationError, lanes}, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        cargoRoot: cargoRoot ?? null,
+        verificationRoot: verificationRoot ?? null,
+        verificationSlots: verificationConfigurationError ? null : verificationSlots,
+        verificationConfigurationError,
+        lanes,
+      },
+      null,
+      2,
+    ),
+  );
 }

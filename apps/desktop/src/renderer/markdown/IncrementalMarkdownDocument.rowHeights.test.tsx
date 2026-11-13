@@ -30,7 +30,8 @@ function editorRows(markdown: string): Rows {
   const heights: string[] = [];
   body.descendants((node) => {
     const height: unknown = node.attrs.height;
-    if (node.type.name === "tableRow") heights.push(typeof height === "number" ? `${height}px` : "");
+    if (node.type.name === "tableRow")
+      heights.push(typeof height === "number" ? `${height}px` : "");
   });
   return { heights, comment: body.textContent.includes("dohc:table") };
 }
@@ -59,25 +60,37 @@ const CASES: [string, boolean, string][] = [
   ["a blank line holding a space", false, lines(COMMENT, " ", TABLE)],
   ["a blank line holding a tab", false, lines(COMMENT, "\t", TABLE)],
   ["spaces after the comment", true, lines(`${COMMENT}   `, TABLE)],
-  ["a space and a tab after the comment, then a blank line", true, lines(`${COMMENT} \t`, "", TABLE)],
+  [
+    "a space and a tab after the comment, then a blank line",
+    true,
+    lines(`${COMMENT} \t`, "", TABLE),
+  ],
   ["several empty blank lines", true, lines(COMMENT, "", "", "", TABLE)],
   ["several blank lines, one holding spaces", false, lines(COMMENT, "", "  ", "", TABLE)],
   ["Windows line endings", true, lines(COMMENT, "", TABLE).replaceAll("\n", "\r\n")],
   ["an indented comment", false, lines(` ${COMMENT}`, TABLE)],
   ["an indented table", true, lines(COMMENT, "", `   ${TABLE[0]}`, TABLE.slice(1))],
   ["a paragraph between", false, lines(COMMENT, "Text.", TABLE)],
-  [
-    "the reviewer's input",
-    false,
-    "<!-- dohc:table row-heights=1:84 -->\n \n| A |\n| --- |\n| a |",
-  ],
+  ["the reviewer's input", false, "<!-- dohc:table row-heights=1:84 -->\n \n| A |\n| --- |\n| a |"],
 
   ["a quote", true, lines(`> ${COMMENT}`, prefixed("> ", TABLE))],
   ["a quote's empty blank line", true, lines(`> ${COMMENT}`, ">", prefixed("> ", TABLE))],
-  ["a quote's blank line holding its one space", true, lines(`> ${COMMENT}`, "> ", prefixed("> ", TABLE))],
-  ["a quote's blank line holding two spaces", false, lines(`> ${COMMENT}`, ">  ", prefixed("> ", TABLE))],
+  [
+    "a quote's blank line holding its one space",
+    true,
+    lines(`> ${COMMENT}`, "> ", prefixed("> ", TABLE)),
+  ],
+  [
+    "a quote's blank line holding two spaces",
+    false,
+    lines(`> ${COMMENT}`, ">  ", prefixed("> ", TABLE)),
+  ],
   ["a quote's blank line holding a tab", true, lines(`> ${COMMENT}`, ">\t", prefixed("> ", TABLE))],
-  ["a quote's blank line holding a space and a tab", false, lines(`> ${COMMENT}`, "> \t", prefixed("> ", TABLE))],
+  [
+    "a quote's blank line holding a space and a tab",
+    false,
+    lines(`> ${COMMENT}`, "> \t", prefixed("> ", TABLE)),
+  ],
   ["several quote blank lines", true, lines(`> ${COMMENT}`, ">", "> ", prefixed("> ", TABLE))],
   ["a tab after a quote's comment", true, lines(`> ${COMMENT}\t`, prefixed("> ", TABLE))],
   ["a quote's comment after two spaces", false, lines(`>  ${COMMENT}`, prefixed("> ", TABLE))],
@@ -85,17 +98,53 @@ const CASES: [string, boolean, string][] = [
 
   ["a list item", true, lines(`- ${COMMENT}`, prefixed("  ", TABLE))],
   ["a list item's empty blank line", true, lines(`- ${COMMENT}`, "", prefixed("  ", TABLE))],
-  ["a list item's blank line holding its indent", true, lines(`- ${COMMENT}`, "  ", prefixed("  ", TABLE))],
-  ["a list item's blank line holding one space more", false, lines(`- ${COMMENT}`, "   ", prefixed("  ", TABLE))],
-  ["a list item's blank line holding a tab", false, lines(`- ${COMMENT}`, "\t", prefixed("  ", TABLE))],
-  ["an ordered item's blank line holding its indent", true, lines(`1. ${COMMENT}`, "   ", prefixed("   ", TABLE))],
-  ["a list item's comment after a tab", true, lines(`-\t${COMMENT}`, "    ", prefixed("    ", TABLE))],
-  ["a comment later in a list item", true, lines("- Text.", "", `  ${COMMENT}`, "  ", prefixed("  ", TABLE))],
-  ["a comment indented past its list item's indent", false, lines("- Text.", "", `   ${COMMENT}`, prefixed("  ", TABLE))],
+  [
+    "a list item's blank line holding its indent",
+    true,
+    lines(`- ${COMMENT}`, "  ", prefixed("  ", TABLE)),
+  ],
+  [
+    "a list item's blank line holding one space more",
+    false,
+    lines(`- ${COMMENT}`, "   ", prefixed("  ", TABLE)),
+  ],
+  [
+    "a list item's blank line holding a tab",
+    false,
+    lines(`- ${COMMENT}`, "\t", prefixed("  ", TABLE)),
+  ],
+  [
+    "an ordered item's blank line holding its indent",
+    true,
+    lines(`1. ${COMMENT}`, "   ", prefixed("   ", TABLE)),
+  ],
+  [
+    "a list item's comment after a tab",
+    true,
+    lines(`-\t${COMMENT}`, "    ", prefixed("    ", TABLE)),
+  ],
+  [
+    "a comment later in a list item",
+    true,
+    lines("- Text.", "", `  ${COMMENT}`, "  ", prefixed("  ", TABLE)),
+  ],
+  [
+    "a comment indented past its list item's indent",
+    false,
+    lines("- Text.", "", `   ${COMMENT}`, prefixed("  ", TABLE)),
+  ],
 
   ["a tab after a list item's comment", false, lines(`- ${COMMENT}\t`, prefixed("  ", TABLE))],
-  ["a tab after a nested list item's comment", false, lines("- Text.", `  - ${COMMENT}\t`, prefixed("    ", TABLE))],
-  ["a tab after a later comment in a list item", false, lines("- Text.", "", `  ${COMMENT}\t`, prefixed("  ", TABLE))],
+  [
+    "a tab after a nested list item's comment",
+    false,
+    lines("- Text.", `  - ${COMMENT}\t`, prefixed("    ", TABLE)),
+  ],
+  [
+    "a tab after a later comment in a list item",
+    false,
+    lines("- Text.", "", `  ${COMMENT}\t`, prefixed("  ", TABLE)),
+  ],
   ["an ordered item's comment after a tab", true, lines(`1.\t${COMMENT}`, prefixed("    ", TABLE))],
   [
     "a tab after a list item's comment, with Windows line endings",
@@ -104,16 +153,40 @@ const CASES: [string, boolean, string][] = [
   ],
 
   ["a list in a quote", true, lines(`> - ${COMMENT}`, ">", prefixed(">   ", TABLE))],
-  ["a list in a quote, its blank line holding spaces", false, lines(`> - ${COMMENT}`, ">    ", prefixed(">   ", TABLE))],
+  [
+    "a list in a quote, its blank line holding spaces",
+    false,
+    lines(`> - ${COMMENT}`, ">    ", prefixed(">   ", TABLE)),
+  ],
   ["a quote in a list", true, lines(`- > ${COMMENT}`, "  >", prefixed("  > ", TABLE))],
-  ["a quote in a list, its blank line holding spaces", false, lines(`- > ${COMMENT}`, "  >  ", prefixed("  > ", TABLE))],
+  [
+    "a quote in a list, its blank line holding spaces",
+    false,
+    lines(`- > ${COMMENT}`, "  >  ", prefixed("  > ", TABLE)),
+  ],
 
-  ["a tab after a comment in a list in a quote", false, lines(`> - ${COMMENT}\t`, ">", prefixed(">   ", TABLE))],
+  [
+    "a tab after a comment in a list in a quote",
+    false,
+    lines(`> - ${COMMENT}\t`, ">", prefixed(">   ", TABLE)),
+  ],
   // The editor's list scan reads no list after `>` and a tab, so it keeps the
   // tab after the comment as whitespace.
-  ["a tab after a comment in a list after a quote's tab", true, lines(`>\t- ${COMMENT}\t`, prefixed(">     ", TABLE))],
-  ["a quote in a list, its comment after a tab", true, lines(`- >\t${COMMENT}`, prefixed("  > ", TABLE))],
-  ["a tab after a comment in a quote in a list", false, lines(`- > ${COMMENT}\t`, prefixed("  > ", TABLE))],
+  [
+    "a tab after a comment in a list after a quote's tab",
+    true,
+    lines(`>\t- ${COMMENT}\t`, prefixed(">     ", TABLE)),
+  ],
+  [
+    "a quote in a list, its comment after a tab",
+    true,
+    lines(`- >\t${COMMENT}`, prefixed("  > ", TABLE)),
+  ],
+  [
+    "a tab after a comment in a quote in a list",
+    false,
+    lines(`- > ${COMMENT}\t`, prefixed("  > ", TABLE)),
+  ],
 
   ["a task item", true, lines("- [ ] Task", "", `  ${COMMENT}`, prefixed("  ", TABLE))],
 ];
@@ -131,7 +204,9 @@ describe("read table row heights match the editor's", () => {
 
     expect(readRows(markdown), "The read view disagrees with the editor").toEqual(editor);
     // A chunk keeps the comment, the blank lines as written, and the table.
-    expect(splitMarkdownBlocks(split(markdown)).some((chunk) => chunk.includes(markdown))).toBe(true);
+    expect(splitMarkdownBlocks(split(markdown)).some((chunk) => chunk.includes(markdown))).toBe(
+      true,
+    );
     expect(readRows(split(markdown)), "A split document disagrees with the editor").toEqual(
       editorRows(split(markdown)),
     );

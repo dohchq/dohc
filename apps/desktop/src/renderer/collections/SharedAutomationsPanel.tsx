@@ -1,6 +1,9 @@
 import { AlertTriangle, Clock, FileCode2, History as HistoryIcon, Save, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { ListCollectionAutomationsResult, SwitchCollectionAutomationResult } from "../../ipc/bridgeContract";
+import type {
+  ListCollectionAutomationsResult,
+  SwitchCollectionAutomationResult,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { SwitchControl } from "../settings/SettingRow";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -15,7 +18,10 @@ import { automationSentence, sentenceText } from "./automationSentence";
 // saves the file. The host runs the automations and keeps their runs, so
 // this panel never says whether one runs.
 
-export type SharedAutomationDefinitions = Extract<ListCollectionAutomationsResult, { status: "shared" }>["definitions"];
+export type SharedAutomationDefinitions = Extract<
+  ListCollectionAutomationsResult,
+  { status: "shared" }
+>["definitions"];
 type ErrorReport = (fallback: string, error: unknown, retry?: (() => void) | null) => void;
 
 /** What went wrong with a switch, or null when the panel shows the outcome itself. */
@@ -56,9 +62,12 @@ async function switchAgain(
   try {
     const listed = await bridge().listCollectionAutomations(target);
     const definitions = listed.status === "shared" ? listed.definitions : null;
-    const entry = definitions?.file.status === "read"
-      ? definitions.file.entries.find((candidate) => candidate.status === "valid" && candidate.automation.id === automation)
-      : undefined;
+    const entry =
+      definitions?.file.status === "read"
+        ? definitions.file.entries.find(
+            (candidate) => candidate.status === "valid" && candidate.automation.id === automation,
+          )
+        : undefined;
     if (!definitions?.contentHash || entry === undefined) {
       onError(`${AUTOMATIONS_FILE} no longer has "${name}", so dohc did not switch it.`, null);
       return;
@@ -69,12 +78,23 @@ async function switchAgain(
       return;
     }
     const result = await bridge().switchCollectionAutomation({
-      ...target, automation, enabled, expectedContentHash: definitions.contentHash, reformat: false, submitId: crypto.randomUUID(),
+      ...target,
+      automation,
+      enabled,
+      expectedContentHash: definitions.contentHash,
+      reformat: false,
+      submitId: crypto.randomUUID(),
     });
-    const problem = result.status === "reformats"
-      ? `${AUTOMATIONS_FILE} has hand formatting, so dohc did not switch ${words}. Switch it in the panel to save the file in dohc's layout.`
-      : switchProblem(result, words);
-    if (problem !== null) onError(problem, null, result.status === "unknown" || result.status === "conflict" ? again : null);
+    const problem =
+      result.status === "reformats"
+        ? `${AUTOMATIONS_FILE} has hand formatting, so dohc did not switch ${words}. Switch it in the panel to save the file in dohc's layout.`
+        : switchProblem(result, words);
+    if (problem !== null)
+      onError(
+        problem,
+        null,
+        result.status === "unknown" || result.status === "conflict" ? again : null,
+      );
   } catch (error) {
     onError(`dohc could not switch ${words}.`, error, again);
   }
@@ -101,7 +121,9 @@ export function SharedAutomationsPanel(props: {
   const [sending, setSending] = useState<{ automation: string; enabled: boolean } | null>(null);
   // Switches main saved, by automation. Until a read after the save
   // succeeds, each shows what main saved and whether the relay has it.
-  const [saved, setSaved] = useState<ReadonlyMap<string, { enabled: boolean; pending: boolean; version: number }>>(new Map());
+  const [saved, setSaved] = useState<
+    ReadonlyMap<string, { enabled: boolean; pending: boolean; version: number }>
+  >(new Map());
   const latest = useRef({ definitions, version, saved, readOnly: props.readOnly });
   latest.current = { definitions, version, saved, readOnly: props.readOnly };
   // The file main wrote last, which the next switch saves over until a read replaces it.
@@ -130,21 +152,39 @@ export function SharedAutomationsPanel(props: {
 
   const toggle = (automation: string, name: string, enabled: boolean, agreed = false) => {
     const { definitions: current, version: read, saved: saves, readOnly } = latest.current;
-    const entry = current.file.status === "read"
-      ? current.file.entries.find((candidate) => candidate.status === "valid" && candidate.automation.id === automation)
-      : undefined;
+    const entry =
+      current.file.status === "read"
+        ? current.file.entries.find(
+            (candidate) => candidate.status === "valid" && candidate.automation.id === automation,
+          )
+        : undefined;
     const save = saves.get(automation);
     const shown = save !== undefined && save.version === read ? save.enabled : entry?.enabledInFile;
-    const expectedContentHash = lastWrite.current?.version === read ? lastWrite.current.contentHash : current.contentHash;
-    if (readOnly || busy.current || expectedContentHash === null || !entry?.canSwitch || shown === enabled) return;
+    const expectedContentHash =
+      lastWrite.current?.version === read ? lastWrite.current.contentHash : current.contentHash;
+    if (
+      readOnly ||
+      busy.current ||
+      expectedContentHash === null ||
+      !entry?.canSwitch ||
+      shown === enabled
+    )
+      return;
     const words = `"${name}" ${enabled ? "on" : "off"}`;
-    const again = () => void switchAgain({ workspaceId, collectionPath }, automation, name, enabled, onError);
+    const again = () =>
+      void switchAgain({ workspaceId, collectionPath }, automation, name, enabled, onError);
     const epoch = scope.current();
     busy.current = true;
     setSending({ automation, enabled });
     void bridge()
       .switchCollectionAutomation({
-        workspaceId, collectionPath, automation, enabled, expectedContentHash, reformat: agreed, submitId: crypto.randomUUID(),
+        workspaceId,
+        collectionPath,
+        automation,
+        enabled,
+        expectedContentHash,
+        reformat: agreed,
+        submitId: crypto.randomUUID(),
       })
       .then(async (result) => {
         if (!scope.isCurrent(epoch)) return;
@@ -153,7 +193,11 @@ export function SharedAutomationsPanel(props: {
           return;
         }
         if (result.status === "written") {
-          const save = { enabled, pending: result.sync === "pending", version: latest.current.version };
+          const save = {
+            enabled,
+            pending: result.sync === "pending",
+            version: latest.current.version,
+          };
           lastWrite.current = { contentHash: result.contentHash, version: save.version };
           setSaved((saves) => new Map(saves).set(automation, save));
         }
@@ -161,7 +205,12 @@ export function SharedAutomationsPanel(props: {
         if (!scope.isCurrent(epoch)) return;
         const problem = switchProblem(result, words);
         // Try again reads the file again, so it still works after the panel closes.
-        if (problem !== null) onError(problem, null, result.status === "unknown" || result.status === "conflict" ? again : null);
+        if (problem !== null)
+          onError(
+            problem,
+            null,
+            result.status === "unknown" || result.status === "conflict" ? again : null,
+          );
       })
       .catch((error: unknown) => {
         if (scope.isCurrent(epoch)) onError(`dohc could not switch ${words}.`, error, again);
@@ -182,7 +231,8 @@ export function SharedAutomationsPanel(props: {
   };
   const [focusAsk, setFocusAsk] = useState<{ automation: string; version: number } | null>(null);
   useEffect(() => {
-    if (props.focus?.controls) setFocusAsk({ automation: props.focus.automationId, version: latest.current.version });
+    if (props.focus?.controls)
+      setFocusAsk({ automation: props.focus.automationId, version: latest.current.version });
   }, [props.focus?.seq]);
   useEffect(() => {
     if (focusAsk === null) return;
@@ -223,50 +273,95 @@ export function SharedAutomationsPanel(props: {
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-line px-2">
         <span className="flex-1" />
         {file.status === "missing" ? null : (
-          <IconButton aria-label={`Open ${AUTOMATIONS_FILE}`} title={`Open ${AUTOMATIONS_FILE}`} onClick={() => props.onOpenFile(filePath)}>
+          <IconButton
+            aria-label={`Open ${AUTOMATIONS_FILE}`}
+            title={`Open ${AUTOMATIONS_FILE}`}
+            onClick={() => props.onOpenFile(filePath)}
+          >
             <FileCode2 size={14} aria-hidden />
           </IconButton>
         )}
-        <IconButton ref={closeButton} aria-label="Close automations" title="Close automations" onClick={props.onClose}>
+        <IconButton
+          ref={closeButton}
+          aria-label="Close automations"
+          title="Close automations"
+          onClick={props.onClose}
+        >
           <X size={14} aria-hidden />
         </IconButton>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {file.status === "missing" || (file.status === "read" && entries.length === 0) ? (
-          <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection has no automations.</p>
+          <p className="m-0 px-3 py-4 text-[12px] text-muted">
+            This Collection has no automations.
+          </p>
         ) : file.status === "unreadable" ? (
           <div className="px-3 pb-3 pt-2">
             <StatusLine tone="danger" icon={AlertTriangle} label="Cannot read">
               <p className="m-0">dohc cannot read {AUTOMATIONS_FILE}.</p>
               <p className="m-0 mt-1 font-mono text-[11px] text-subtle">
-                {file.diagnostic.code}{file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
+                {file.diagnostic.code}
+                {file.diagnostic.line === undefined ? "" : ` on line ${file.diagnostic.line}`}
               </p>
-              <SecondaryButton size="compact" className="mt-2" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
+              <SecondaryButton
+                size="compact"
+                className="mt-2"
+                onClick={() => props.onOpenFile(filePath)}
+              >
+                Open file
+              </SecondaryButton>
             </StatusLine>
           </div>
         ) : (
           <>
-            {!props.readOnly && definitions.canSwitch && unreadable ? fileNote(
-              <>
-                <p className="m-0">Fix the automations dohc cannot read to switch them here.</p>
-                <SecondaryButton size="compact" className="mt-1.5" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
-              </>,
-            ) : null}
-            {definitions.sync === "refused" ? fileNote(
-              <StatusLine tone="warning" icon={AlertTriangle} label="Not synced">Your change to {AUTOMATIONS_FILE} did not sync.</StatusLine>,
-            ) : pending && saved.size === 0 && sending === null ? fileNote(
-              <StatusLine tone="muted" icon={Clock} label="Waiting">Waiting to sync</StatusLine>,
-            ) : null}
+            {!props.readOnly && definitions.canSwitch && unreadable
+              ? fileNote(
+                  <>
+                    <p className="m-0">Fix the automations dohc cannot read to switch them here.</p>
+                    <SecondaryButton
+                      size="compact"
+                      className="mt-1.5"
+                      onClick={() => props.onOpenFile(filePath)}
+                    >
+                      Open file
+                    </SecondaryButton>
+                  </>,
+                )
+              : null}
+            {definitions.sync === "refused"
+              ? fileNote(
+                  <StatusLine tone="warning" icon={AlertTriangle} label="Not synced">
+                    Your change to {AUTOMATIONS_FILE} did not sync.
+                  </StatusLine>,
+                )
+              : pending && saved.size === 0 && sending === null
+                ? fileNote(
+                    <StatusLine tone="muted" icon={Clock} label="Waiting">
+                      Waiting to sync
+                    </StatusLine>,
+                  )
+                : null}
             <ul className="m-0 list-none p-0">
               {entries.map((entry, index) => {
                 if (entry.status === "invalid") {
                   const [diagnostic] = entry.diagnostics;
                   return (
-                    <li key={`invalid-${index}`} ref={rowRef(entry.id)} tabIndex={-1} className="border-b border-line px-3 py-2.5">
-                      <p className="m-0 truncate text-[13px] font-medium text-ink">{entry.name ?? entry.id ?? `Automation ${index + 1}`}</p>
+                    <li
+                      key={`invalid-${index}`}
+                      ref={rowRef(entry.id)}
+                      tabIndex={-1}
+                      className="border-b border-line px-3 py-2.5"
+                    >
+                      <p className="m-0 truncate text-[13px] font-medium text-ink">
+                        {entry.name ?? entry.id ?? `Automation ${index + 1}`}
+                      </p>
                       <StatusLine tone="danger" icon={AlertTriangle} label="Cannot read">
                         <p className="m-0">dohc cannot read this automation.</p>
-                        {diagnostic ? <p className="m-0 font-mono text-[11px] text-subtle">{diagnostic.code} at {diagnostic.path}</p> : null}
+                        {diagnostic ? (
+                          <p className="m-0 font-mono text-[11px] text-subtle">
+                            {diagnostic.code} at {diagnostic.path}
+                          </p>
+                        ) : null}
                       </StatusLine>
                     </li>
                   );
@@ -289,7 +384,9 @@ export function SharedAutomationsPanel(props: {
                       {!props.readOnly && entry.canSwitch ? (
                         <SwitchControl
                           label={automation.name}
-                          checked={sent?.enabled ?? (unread ? save.enabled : entry.enabledInFile === true)}
+                          checked={
+                            sent?.enabled ?? (unread ? save.enabled : entry.enabledInFile === true)
+                          }
                           disabled={sending !== null}
                           onChange={(enabled) => toggle(automation.id, automation.name, enabled)}
                         />
@@ -298,13 +395,25 @@ export function SharedAutomationsPanel(props: {
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="m-0 truncate text-[13px] font-medium text-ink">{automation.name}</p>
-                      <p className="m-0 mt-0.5 break-words text-[12px] leading-snug text-muted" title={sentenceText(sentence)}>
+                      <p className="m-0 truncate text-[13px] font-medium text-ink">
+                        {automation.name}
+                      </p>
+                      <p
+                        className="m-0 mt-0.5 break-words text-[12px] leading-snug text-muted"
+                        title={sentenceText(sentence)}
+                      >
                         <Sentence parts={sentence} />
                       </p>
-                      {entry.switchReason ? <p className="m-0 mt-1 text-[12px] leading-snug text-muted">{entry.switchReason}</p> : null}
-                      {sent !== null || (save !== undefined && (unread ? save.pending : pending)) ? (
-                        <StatusLine tone="muted" icon={Clock} label="Waiting">Waiting to sync</StatusLine>
+                      {entry.switchReason ? (
+                        <p className="m-0 mt-1 text-[12px] leading-snug text-muted">
+                          {entry.switchReason}
+                        </p>
+                      ) : null}
+                      {sent !== null ||
+                      (save !== undefined && (unread ? save.pending : pending)) ? (
+                        <StatusLine tone="muted" icon={Clock} label="Waiting">
+                          Waiting to sync
+                        </StatusLine>
                       ) : null}
                     </div>
                   </li>
@@ -334,7 +443,8 @@ export function SharedAutomationsPanel(props: {
           }}
         >
           <p>
-            dohc rewrites the whole file when it saves, so you lose its comments and hand formatting.
+            dohc rewrites the whole file when it saves, so you lose its comments and hand
+            formatting.
           </p>
         </ConfirmDialog>
       ) : null}

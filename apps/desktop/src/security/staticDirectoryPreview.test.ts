@@ -50,18 +50,16 @@ describe("startStaticDirectoryPreview", () => {
       expect(response.headers.get("cache-control")).toBe("no-store");
       await expect(response.text()).resolves.toContain("App panel");
       await expect(
-        fetch(new URL("/.dohc/secret.txt", preview.url)).then(
-          (result) => result.status,
-        ),
+        fetch(new URL("/.dohc/secret.txt", preview.url)).then((result) => result.status),
       ).resolves.toBe(403);
       await expect(
         rawRequestStatus(preview.url, "/index.html", {
           headers: { host: "attacker.example" },
         }),
       ).resolves.toBe(403);
-      await expect(
-        rawRequestStatus(preview.url, "/index.html", { setHost: false }),
-      ).resolves.toBe(400);
+      await expect(rawRequestStatus(preview.url, "/index.html", { setHost: false })).resolves.toBe(
+        400,
+      );
     } finally {
       await preview.stop();
     }
@@ -84,7 +82,12 @@ describe("startStaticDirectoryPreview", () => {
       },
     });
     try {
-      for (const host of ["attacker.example", "localhost", "127.0.0.1:1", `${new URL(preview.url).host}.attacker.example`]) {
+      for (const host of [
+        "attacker.example",
+        "localhost",
+        "127.0.0.1:1",
+        `${new URL(preview.url).host}.attacker.example`,
+      ]) {
         await expect(
           rawRequestStatus(preview.url, "/index.html", { headers: { host } }),
         ).resolves.toBe(403);
@@ -94,9 +97,7 @@ describe("startStaticDirectoryPreview", () => {
         "owner index",
       );
       await expect(
-        fetch(new URL("/recipient-only.js", preview.url)).then(
-          (response) => response.status,
-        ),
+        fetch(new URL("/recipient-only.js", preview.url)).then((response) => response.status),
       ).resolves.toBe(404);
       expect(read).toHaveBeenCalledTimes(1);
       expect(read).toHaveBeenCalledWith("index.html");
@@ -164,25 +165,22 @@ describe("startStaticDirectoryPreview", () => {
     try {
       const asset = await fetch(new URL("/assets/app.js", preview.url));
       expect(asset.status).toBe(200);
-      expect(asset.headers.get("content-type"), "mime: a wrong table entry ships JS as octet-stream and the panel's module never executes.").toBe(
-        "application/javascript; charset=utf-8",
-      );
+      expect(
+        asset.headers.get("content-type"),
+        "mime: a wrong table entry ships JS as octet-stream and the panel's module never executes.",
+      ).toBe("application/javascript; charset=utf-8");
       expect(asset.headers.get("x-content-type-options")).toBe("nosniff");
       // Sent raw, because `fetch` rewrites the path before it leaves the
       // client. A plainly spelled `..` is resolved away by the URL parser on
       // both sides, so it arrives already contained.
-      await expect(rawRequestStatus(preview.url, "/../outside.txt")).resolves.toBe(
-        404,
-      );
+      await expect(rawRequestStatus(preview.url, "/../outside.txt")).resolves.toBe(404);
       // An ENCODED slash is what the parser cannot see: it keeps `%2f`
       // opaque, so the traversal appears only after decodeURIComponent. That
       // is the case the segment check exists for.
-      await expect(
-        rawRequestStatus(preview.url, "/assets%2f..%2f..%2foutside.txt"),
-      ).resolves.toBe(400);
-      await expect(rawRequestStatus(preview.url, "/%00index.html")).resolves.toBe(
+      await expect(rawRequestStatus(preview.url, "/assets%2f..%2f..%2foutside.txt")).resolves.toBe(
         400,
       );
+      await expect(rawRequestStatus(preview.url, "/%00index.html")).resolves.toBe(400);
     } finally {
       await preview.stop();
     }
@@ -201,7 +199,10 @@ describe("startStaticDirectoryPreview", () => {
     try {
       const asset = await fetch(new URL("/index.htm", preview.url));
       expect(asset.status).toBe(200);
-      expect(asset.headers.get("content-type"), "mime: a missing .htm table entry falls through to application/octet-stream and the browser downloads the page instead of rendering it.").toBe("text/html; charset=utf-8");
+      expect(
+        asset.headers.get("content-type"),
+        "mime: a missing .htm table entry falls through to application/octet-stream and the browser downloads the page instead of rendering it.",
+      ).toBe("text/html; charset=utf-8");
     } finally {
       await preview.stop();
     }
@@ -224,9 +225,7 @@ describe("startStaticDirectoryPreview", () => {
       entryLabel: "panel entry",
     });
     try {
-      await expect(rawRequestStatus(preview.url, "/escape/sibling.txt")).resolves.toBe(
-        403,
-      );
+      await expect(rawRequestStatus(preview.url, "/escape/sibling.txt")).resolves.toBe(403);
     } finally {
       await preview.stop();
     }
@@ -275,9 +274,7 @@ describe("containment of '..'-prefixed names", () => {
       entryLabel: "panel entry",
     });
     try {
-      await expect(fetch(preview.url).then((r) => r.text())).resolves.toContain(
-        "Dot-dot name",
-      );
+      await expect(fetch(preview.url).then((r) => r.text())).resolves.toContain("Dot-dot name");
     } finally {
       await preview.stop();
     }

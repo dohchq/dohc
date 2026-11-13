@@ -62,17 +62,16 @@ export function useConnectionNotices() {
   // One reporter per surface: `reopen` is what that surface does when the
   // retry can no longer reach the panel that failed.
   const reporter = useCallback(
-    (reopen?: (serverUrl: string | null) => void) =>
-      (error: ConnectionErrorReport) => {
-        reportShellFailure({
-          message: error.message,
-          cause: error.cause,
-          retry: () => {
-            if (error.retry?.()) return;
-            reopen?.(error.serverUrl);
-          },
-        });
-      },
+    (reopen?: (serverUrl: string | null) => void) => (error: ConnectionErrorReport) => {
+      reportShellFailure({
+        message: error.message,
+        cause: error.cause,
+        retry: () => {
+          if (error.retry?.()) return;
+          reopen?.(error.serverUrl);
+        },
+      });
+    },
     [reportShellFailure],
   );
 
@@ -84,17 +83,21 @@ export function useConnectionNotices() {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.command ? { command: error.command } : {}),
-        copy: { report: errorDetails([
-          ["Error", error.message],
-          ...(error.title ? [["Title", error.title] as const] : []),
-          ...(error.details ?? []),
-          ["Platform", bridge().platform],
-          ["Time", new Date(error.atMs).toISOString()],
-        ]) },
+        copy: {
+          report: errorDetails([
+            ["Error", error.message],
+            ...(error.title ? [["Title", error.title] as const] : []),
+            ...(error.details ?? []),
+            ["Platform", bridge().platform],
+            ["Time", new Date(error.atMs).toISOString()],
+          ]),
+        },
         atMs: error.atMs,
         canRetry: error.retry !== null,
         ...(error.action ? { actionLabel: error.action.label } : {}),
-        ...(error.action?.additional ? { additionalActionLabels: error.action.additional.map((action) => action.label) } : {}),
+        ...(error.action?.additional
+          ? { additionalActionLabels: error.action.additional.map((action) => action.label) }
+          : {}),
         seen: error.seen,
       })),
     [shellErrors],
@@ -164,34 +167,33 @@ export function ConnectionNotices(props: {
 }) {
   if (props.notices.length === 0 && !props.crashReport && !props.keptTyping?.length) return null;
   return (
-    <div
-      data-testid="connection-notices"
-      className="fixed bottom-2 right-3 z-30"
-    >
+    <div data-testid="connection-notices" className="fixed bottom-2 right-3 z-30">
       <ShellErrorReporter.Provider value={props.reportFailure}>
-      <NoticeCenter
-        workspaceId={NO_WORKSPACE}
-        host="corner"
-        syncStatus={null}
-        agentActive={false}
-        conflictSummaries={[]}
-        onOpenHistory={NOOP}
-        onOpenSettings={NOOP}
-        onOpenConflicts={NOOP}
-        onRefreshShareView={NOOP}
-        onRebuildEngineStore={NOOP}
-        workspaceErrors={props.notices}
-        onRetryWorkspaceError={props.onRetry}
-        {...(props.onAction ? { onWorkspaceErrorAction: props.onAction } : {})}
-        onHideWorkspaceError={props.onHide}
-        onDismissWorkspaceError={props.onDismiss}
-        crashReport={props.crashReport ?? null}
-        {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
-        {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
-        {...(props.onReadCrashReport ? { onReadCrashReport: props.onReadCrashReport } : {})}
-        {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
-        {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
-      />
+        <NoticeCenter
+          workspaceId={NO_WORKSPACE}
+          host="corner"
+          syncStatus={null}
+          agentActive={false}
+          conflictSummaries={[]}
+          onOpenHistory={NOOP}
+          onOpenSettings={NOOP}
+          onOpenConflicts={NOOP}
+          onRefreshShareView={NOOP}
+          onRebuildEngineStore={NOOP}
+          workspaceErrors={props.notices}
+          onRetryWorkspaceError={props.onRetry}
+          {...(props.onAction ? { onWorkspaceErrorAction: props.onAction } : {})}
+          onHideWorkspaceError={props.onHide}
+          onDismissWorkspaceError={props.onDismiss}
+          crashReport={props.crashReport ?? null}
+          {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
+          {...(props.onDismissCrashReport
+            ? { onDismissCrashReport: props.onDismissCrashReport }
+            : {})}
+          {...(props.onReadCrashReport ? { onReadCrashReport: props.onReadCrashReport } : {})}
+          {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
+          {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
+        />
       </ShellErrorReporter.Provider>
     </div>
   );

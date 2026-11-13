@@ -8,10 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
 import { documentVersionKey } from "../documentVersionKey";
-import type {
-  EngineRemovalInProgress,
-  EngineYDocBinding,
-} from "./engineYDocProvider";
+import type { EngineRemovalInProgress, EngineYDocBinding } from "./engineYDocProvider";
 import {
   engineDocRequestKey,
   retainEngineDocLease,
@@ -118,10 +115,7 @@ export type UseEngineDoc = {
   // Image recovery for a drawing retained after deletion or a read-only
   // transition, or after a permanent local-update refusal. While loading, the
   // immediate draft has null file references.
-  recoveryAssets:
-    | { state: "loading"; count: number }
-    | { state: "missing"; count: number }
-    | null;
+  recoveryAssets: { state: "loading"; count: number } | { state: "missing"; count: number } | null;
   // A local update exceeded the permanent transport limit, or main refused a
   // delivery outright. The rejected document is retained for recovery only.
   permanentFailureWhileEditing: boolean;
@@ -167,17 +161,17 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const waiting = useRef(false);
   const activityRevision = useRef(0);
   const openingRevision = useRef(0);
-  useEffect(() => bridge().onWorkspaceActivity?.(event => {
-    if (event.workspaceId !== undefined && event.workspaceId !== input.workspaceId) return;
-    if (event.paths?.length && !event.paths.includes(input.path)) return;
-    activityRevision.current++;
-    if (waiting.current) setDeliveryRetry(value => value + 1);
-  }), [input.workspaceId, input.path]);
-  const versionKey = documentVersionKey(
-    input.workspaceId,
-    input.path,
-    input.reopenKey,
+  useEffect(
+    () =>
+      bridge().onWorkspaceActivity?.((event) => {
+        if (event.workspaceId !== undefined && event.workspaceId !== input.workspaceId) return;
+        if (event.paths?.length && !event.paths.includes(input.path)) return;
+        activityRevision.current++;
+        if (waiting.current) setDeliveryRetry((value) => value + 1);
+      }),
+    [input.workspaceId, input.path],
   );
+  const versionKey = documentVersionKey(input.workspaceId, input.path, input.reopenKey);
   const committedRequestRef = useRef<{
     versionKey: string;
     retryKey: number;
@@ -199,7 +193,10 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     const previousRequest = committedRequestRef.current;
     if (!input.enabled) {
       setReadOnlyHistory((previous) =>
-        previous?.versionKey === versionKey && previous.retryKey === retryKey && previous.bound && input.accessEnded
+        previous?.versionKey === versionKey &&
+        previous.retryKey === retryKey &&
+        previous.bound &&
+        input.accessEnded
           ? { ...previous, cause: "access-ended" }
           : previous,
       );
@@ -210,8 +207,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     }
 
     const isRetry =
-      previousRequest?.versionKey === versionKey &&
-      previousRequest.retryKey !== retryKey;
+      previousRequest?.versionKey === versionKey && previousRequest.retryKey !== retryKey;
     openingRevision.current = activityRevision.current;
     const lease = retainEngineDocLease(requestInput, requestKey, isRetry);
     committedRequestRef.current = { versionKey, retryKey, lease };
@@ -220,11 +216,17 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
       setLeaseState({ requestKey, snapshot });
       const bound = snapshot.outcome?.kind === "bound";
       const transition = snapshot.readOnlyTransition;
-      const cause = snapshot.outcome?.kind === "bound" && transition?.token === snapshot.outcome.token
-        ? transition.cause : null;
+      const cause =
+        snapshot.outcome?.kind === "bound" && transition?.token === snapshot.outcome.token
+          ? transition.cause
+          : null;
       setReadOnlyHistory((previous) =>
-        previous?.versionKey === versionKey && previous.retryKey === retryKey && previous.bound === bound && previous.cause === cause
-          ? previous : { versionKey, retryKey, bound, cause },
+        previous?.versionKey === versionKey &&
+        previous.retryKey === retryKey &&
+        previous.bound === bound &&
+        previous.cause === cause
+          ? previous
+          : { versionKey, retryKey, bound, cause },
       );
     };
     const unsubscribe = lease.subscribe(update);
@@ -247,36 +249,51 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
 
   // Derive this during render. A result for an earlier request never grants
   // one editable frame while a version, path, gate, or retry request changes.
-  const settled =
-    leaseState?.requestKey === requestKey ? leaseState.snapshot : null;
+  const settled = leaseState?.requestKey === requestKey ? leaseState.snapshot : null;
   const outcome = settled?.outcome ?? null;
-  const admissionWaiting = input.enabled && outcome?.kind === "shared-waiting" && outcome.waiting.state === "failed";
+  const admissionWaiting =
+    input.enabled && outcome?.kind === "shared-waiting" && outcome.waiting.state === "failed";
   useEffect(() => {
     if (!admissionWaiting) return;
-    let active: {cancel: AbortController; sessionId: string} | undefined;
+    let active: { cancel: AbortController; sessionId: string } | undefined;
     const stop = () => {
       if (!active) return;
       active.cancel.abort();
-      void bridge().closeEngineYDocSession({sessionId: active.sessionId}).catch(() => {});
+      void bridge()
+        .closeEngineYDocSession({ sessionId: active.sessionId })
+        .catch(() => {});
       active = undefined;
     };
     const start = () => {
-      if (document.visibilityState === "hidden") { stop(); return; }
+      if (document.visibilityState === "hidden") {
+        stop();
+        return;
+      }
       if (active) return;
-      const run = {cancel: new AbortController(), sessionId: crypto.randomUUID()};
+      const run = { cancel: new AbortController(), sessionId: crypto.randomUUID() };
       active = run;
-      void rearmDesktopAdmission({signal: run.cancel.signal,
-        wait: () => bridge().waitForEngineYDocAdmission({workspaceId: input.workspaceId, path: input.path, sessionId: run.sessionId}),
-        ready: () => setDeliveryRetry(value => value + 1),
+      void rearmDesktopAdmission({
+        signal: run.cancel.signal,
+        wait: () =>
+          bridge().waitForEngineYDocAdmission({
+            workspaceId: input.workspaceId,
+            path: input.path,
+            sessionId: run.sessionId,
+          }),
+        ready: () => setDeliveryRetry((value) => value + 1),
       });
     };
     document.addEventListener("visibilitychange", start);
     start();
-    return () => { document.removeEventListener("visibilitychange", start); stop(); };
+    return () => {
+      document.removeEventListener("visibilitychange", start);
+      stop();
+    };
   }, [admissionWaiting, input.workspaceId, input.path, requestKey]);
   waiting.current = outcome?.kind === "shared-waiting" || outcome?.kind === "live-host-unavailable";
   useEffect(() => {
-    if (waiting.current && activityRevision.current > openingRevision.current) setDeliveryRetry(value => value + 1);
+    if (waiting.current && activityRevision.current > openingRevision.current)
+      setDeliveryRetry((value) => value + 1);
   }, [outcome]);
   const available = outcome?.kind === "bound";
   const doc = outcome?.kind === "bound" ? outcome.doc : null;
@@ -285,10 +302,10 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const opening = input.enabled && outcome === null;
   const notInVersion = outcome?.kind === "not-in-version";
   const documentUnavailable = outcome?.kind === "document-unavailable";
-  const engineMayHoldDocument = outcome?.kind === "engine-may-hold-document" || outcome?.kind === "capture-held";
+  const engineMayHoldDocument =
+    outcome?.kind === "engine-may-hold-document" || outcome?.kind === "capture-held";
   const artifactAssetsInvalid = outcome?.kind === "artifact-assets-invalid";
-  const artifactAssets =
-    outcome?.kind === "bound" ? outcome.artifactAssets : [];
+  const artifactAssets = outcome?.kind === "bound" ? outcome.artifactAssets : [];
   const readArtifactAsset =
     outcome?.kind === "bound"
       ? outcome.readArtifactAsset
@@ -299,41 +316,42 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
             ),
           );
   const flushPendingLocalUpdates =
-    outcome?.kind === "bound"
-      ? outcome.flushPendingLocalUpdates
-      : () => Promise.resolve();
-  const removalInProgress =
-    outcome?.kind === "removal-in-progress" ? outcome.removal : null;
+    outcome?.kind === "bound" ? outcome.flushPendingLocalUpdates : () => Promise.resolve();
+  const removalInProgress = outcome?.kind === "removal-in-progress" ? outcome.removal : null;
   const deletedWhileEditing =
     outcome?.kind === "bound" && settled?.deletion?.token === outcome.token;
-  const deletedDraftId = deletedWhileEditing
-    ? (settled?.deletion?.draftId ?? null)
-    : null;
-  const goneCause = deletedWhileEditing
-    ? (settled?.deletion?.cause ?? "deleted")
-    : null;
+  const deletedDraftId = deletedWhileEditing ? (settled?.deletion?.draftId ?? null) : null;
+  const goneCause = deletedWhileEditing ? (settled?.deletion?.cause ?? "deleted") : null;
   const readOnlyWhileEditing =
-    outcome?.kind === "bound" &&
-    settled?.readOnlyTransition?.token === outcome.token;
+    outcome?.kind === "bound" && settled?.readOnlyTransition?.token === outcome.token;
   const readOnlyDraftId = readOnlyWhileEditing
     ? (settled?.readOnlyTransition?.draftId ?? null)
     : null;
-  const history = readOnlyHistory?.versionKey === versionKey && readOnlyHistory.retryKey === retryKey
-    ? readOnlyHistory : null;
+  const history =
+    readOnlyHistory?.versionKey === versionKey && readOnlyHistory.retryKey === retryKey
+      ? readOnlyHistory
+      : null;
   const readOnlyCause = !input.enabled
-    ? input.accessEnded && history?.bound ? "access-ended" : history?.cause ?? null
-    : readOnlyWhileEditing ? settled!.readOnlyTransition!.cause : null;
-  const retryReplacement = readOnlyWhileEditing ? settled!.readOnlyTransition!.retry ?? null : null;
+    ? input.accessEnded && history?.bound
+      ? "access-ended"
+      : (history?.cause ?? null)
+    : readOnlyWhileEditing
+      ? settled!.readOnlyTransition!.cause
+      : null;
+  const retryReplacement = readOnlyWhileEditing
+    ? (settled!.readOnlyTransition!.retry ?? null)
+    : null;
   const permanentFailureWhileEditing =
-    outcome?.kind === "bound" &&
-    settled?.permanentFailure?.token === outcome.token;
+    outcome?.kind === "bound" && settled?.permanentFailure?.token === outcome.token;
   const permanentFailureDraftId = permanentFailureWhileEditing
     ? (settled?.permanentFailure?.draftId ?? null)
     : null;
   const outsideWriteWaiting = outcome?.kind === "outside-write-waiting";
   const changedOutside =
     outcome?.kind === "bound" && settled?.changedOutside?.token === outcome.token
-      ? settled.changedOutside.unsaved ? "unsaved" : "saved"
+      ? settled.changedOutside.unsaved
+        ? "unsaved"
+        : "saved"
       : null;
   const recoveryAssets =
     settled?.sceneRecoveryAssets != null &&
@@ -359,7 +377,8 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     authorCapacity: settled?.authorCapacity ?? false,
     notInVersion,
     documentUnavailable,
-    liveHostUnavailable: outcome?.kind === "live-host-unavailable" || outcome?.kind === "shared-waiting",
+    liveHostUnavailable:
+      outcome?.kind === "live-host-unavailable" || outcome?.kind === "shared-waiting",
     sharedWaiting: outcome?.kind === "shared-waiting" ? outcome.waiting : null,
     engineMayHoldDocument,
     openRefusal: outcome?.kind === "capture-held" ? captureHeldLiveMessage(input.path) : undefined,

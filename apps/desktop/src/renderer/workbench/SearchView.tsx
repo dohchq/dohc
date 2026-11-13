@@ -25,11 +25,7 @@ import {
   windowPreviewForRow,
   type SearchGroup,
 } from "./search-model";
-import type {
-  SearchCriteria,
-  SearchRunOptions,
-  WorkspaceSearchApi,
-} from "./useWorkspaceSearch";
+import type { SearchCriteria, SearchRunOptions, WorkspaceSearchApi } from "./useWorkspaceSearch";
 
 // Phase E5.0 content-search panel (Cmd/Ctrl+Shift+F surface): debounced
 // search-as-you-type over the streamed ripgrep IPC, grouped-by-file results
@@ -111,7 +107,9 @@ const FileGroup = memo(function FileGroup(props: {
               <MessageSquare size={10} aria-hidden />
               Chat
             </span>
-            <span className="truncate font-medium">{chatEntry.title ?? basenameOf(group.path)}</span>
+            <span className="truncate font-medium">
+              {chatEntry.title ?? basenameOf(group.path)}
+            </span>
           </>
         ) : (
           <Ref path={group.path} folder />
@@ -183,9 +181,7 @@ function ToggleButton(props: {
       // legible at a glance — not a loud tint. Color in Search is reserved for
       // the match highlight; a toggled-on filter earns weight, not hue.
       className={`grid size-5.5 shrink-0 place-items-center rounded-md transition-colors duration-75 ${
-        props.pressed
-          ? "bg-selected text-ink"
-          : "text-subtle hover:bg-hover hover:text-ink"
+        props.pressed ? "bg-selected text-ink" : "text-subtle hover:bg-hover hover:text-ink"
       }`}
     >
       <props.Icon size={13} aria-hidden />
@@ -208,9 +204,7 @@ export function SearchView(props: {
   // windowing, keyboard selection — is view-local and resets on reopen.
   const { model, criteria, setCriteria } = props.search;
   const { query, caseSensitive, wholeWord, regex, includeGlob, excludeGlob } = criteria;
-  const [filtersOpen, setFiltersOpen] = useState(
-    () => includeGlob !== "" || excludeGlob !== "",
-  );
+  const [filtersOpen, setFiltersOpen] = useState(() => includeGlob !== "" || excludeGlob !== "");
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [showAllGroups, setShowAllGroups] = useState<ReadonlySet<string>>(new Set());
   const [groupWindow, setGroupWindow] = useState(GROUP_WINDOW_STEP);
@@ -326,9 +320,7 @@ export function SearchView(props: {
 
   // Keep the keyboard-selected row visible inside the scrolling list.
   useEffect(() => {
-    listRef.current
-      ?.querySelector('[data-selected="true"]')
-      ?.scrollIntoView({ block: "nearest" });
+    listRef.current?.querySelector('[data-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
   function onInputKeyDown(event: React.KeyboardEvent): void {
@@ -357,8 +349,7 @@ export function SearchView(props: {
 
   const fileCount = model.groups.length;
   // Anything beyond the query that can hide a match: a toggle or a glob.
-  const narrowed =
-    caseSensitive || wholeWord || regex || includeGlob !== "" || excludeGlob !== "";
+  const narrowed = caseSensitive || wholeWord || regex || includeGlob !== "" || excludeGlob !== "";
 
   return (
     <div
@@ -417,9 +408,7 @@ export function SearchView(props: {
           // which excludes. The nested <label> carries the accessible name.
           <div className="flex flex-col gap-1.5">
             <label className="flex flex-col gap-0.5">
-              <SectionLabel className="px-0.5">
-                Files to include
-              </SectionLabel>
+              <SectionLabel className="px-0.5">Files to include</SectionLabel>
               <input
                 type="text"
                 data-testid="search-include"
@@ -431,9 +420,7 @@ export function SearchView(props: {
               />
             </label>
             <label className="flex flex-col gap-0.5">
-              <SectionLabel className="px-0.5">
-                Files to exclude
-              </SectionLabel>
+              <SectionLabel className="px-0.5">Files to exclude</SectionLabel>
               <input
                 type="text"
                 data-testid="search-exclude"
@@ -446,26 +433,20 @@ export function SearchView(props: {
             </label>
           </div>
         ) : null}
-        <div
-          role="status"
-          className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle"
-        >
+        <div role="status" className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle">
           {model.status === "idle" ? null : model.status === "searching" ||
             model.status === "updating" ? (
-              <span data-testid="search-spinner" className="flex items-center gap-1.5">
-                <span
-                  aria-hidden
-                  className="size-2 animate-pulse rounded-full bg-accent"
-                />
-                {model.status === "updating" ? "Updating workspace…" : "Searching…"}
-              </span>
-            ) : (
-              <span data-testid="search-summary">
-                {model.totalMatches === 0
-                  ? "No results"
-                  : `${model.totalMatches} result${model.totalMatches === 1 ? "" : "s"} in ${fileCount} file${fileCount === 1 ? "" : "s"}`}
-              </span>
-            )}
+            <span data-testid="search-spinner" className="flex items-center gap-1.5">
+              <span aria-hidden className="size-2 animate-pulse rounded-full bg-accent" />
+              {model.status === "updating" ? "Updating workspace…" : "Searching…"}
+            </span>
+          ) : (
+            <span data-testid="search-summary">
+              {model.totalMatches === 0
+                ? "No results"
+                : `${model.totalMatches} result${model.totalMatches === 1 ? "" : "s"} in ${fileCount} file${fileCount === 1 ? "" : "s"}`}
+            </span>
+          )}
         </div>
       </div>
 
@@ -474,8 +455,7 @@ export function SearchView(props: {
           data-testid="search-cap-notice"
           className="border-b border-line bg-panel-2 px-3 py-1.5 text-[11px] text-warning"
         >
-          Showing the first {RESULT_CAP} matches — narrow your search to see
-          everything.
+          Showing the first {RESULT_CAP} matches — narrow your search to see everything.
         </div>
       ) : null}
 
@@ -542,9 +522,7 @@ export function SearchView(props: {
                   return next;
                 })
               }
-              onShowAll={(path) =>
-                setShowAllGroups((current) => new Set(current).add(path))
-              }
+              onShowAll={(path) => setShowAllGroups((current) => new Set(current).add(path))}
               onOpen={props.onOpenResult}
             />
           ))}

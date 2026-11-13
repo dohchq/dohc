@@ -7,7 +7,9 @@ import { vi } from "vitest";
  */
 export function mockListLayout(listHeight: number): () => void {
   const spies = [
-    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
       const list = this.closest('[role="listbox"]');
       if (!list || list === this) return 0;
       return 4 + [...list.querySelectorAll('[role="option"]')].indexOf(this) * 28;
@@ -22,5 +24,8 @@ export function mockListLayout(listHeight: number): () => void {
 
 /** Whether `row` lies wholly inside the scrolled view of `list`. */
 export function inListView(list: HTMLElement, row: HTMLElement): boolean {
-  return row.offsetTop >= list.scrollTop && row.offsetTop + row.offsetHeight <= list.scrollTop + list.clientHeight;
+  return (
+    row.offsetTop >= list.scrollTop &&
+    row.offsetTop + row.offsetHeight <= list.scrollTop + list.clientHeight
+  );
 }

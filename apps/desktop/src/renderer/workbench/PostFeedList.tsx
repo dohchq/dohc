@@ -1,17 +1,37 @@
 import { LegendList } from "@legendapp/list/react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 
 // While the list shows `empty`, it drops its padding and its content is a
 // column as tall as the list. `empty` takes the height the header leaves, so
 // it centers there.
-const EMPTY_CONTENT: CSSProperties = { display: "flex", flexDirection: "column", minHeight: "100%" };
+const EMPTY_CONTENT: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  minHeight: "100%",
+};
 
 // Posts and Home share a top-down list of rows. Keep focused rows and their
 // neighbors mounted so scrolling cannot discard a control's keyboard focus.
 // The last row is marked `data-feed-last`, so it draws no hairline under it.
 export function PostFeedList<T>({
-  items, itemKey, renderItem, header, footer, empty, columnClassName = "",
-  testId, bottomPadding = 48, topPadding = 12,
+  items,
+  itemKey,
+  renderItem,
+  header,
+  footer,
+  empty,
+  columnClassName = "",
+  testId,
+  bottomPadding = 48,
+  topPadding = 12,
 }: {
   items: readonly T[];
   itemKey: (item: T) => string;
@@ -27,9 +47,8 @@ export function PostFeedList<T>({
   const viewport = useRef<HTMLElement>(null);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
-  const focusedIndex = focusedKey === null
-    ? -1
-    : items.findIndex((item) => itemKey(item) === focusedKey);
+  const focusedIndex =
+    focusedKey === null ? -1 : items.findIndex((item) => itemKey(item) === focusedKey);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
@@ -42,9 +61,10 @@ export function PostFeedList<T>({
       const focus = selection && !selection.isCollapsed ? rowKey(selection.focusNode) : undefined;
       const start = items.findIndex((item) => itemKey(item) === anchor);
       const end = items.findIndex((item) => itemKey(item) === focus);
-      const next = start < 0 || end < 0
-        ? []
-        : items.slice(Math.min(start, end), Math.max(start, end) + 1).map(itemKey);
+      const next =
+        start < 0 || end < 0
+          ? []
+          : items.slice(Math.min(start, end), Math.max(start, end) + 1).map(itemKey);
       setSelectedKeys((current) =>
         current.length === next.length && current.every((key, index) => key === next[index])
           ? current
@@ -54,11 +74,18 @@ export function PostFeedList<T>({
     document.addEventListener("selectionchange", retainSelection);
     return () => document.removeEventListener("selectionchange", retainSelection);
   }, [items, itemKey]);
-  const alwaysRender = useMemo(() => ({
-    keys: selectedKeys,
-    indices: focusedIndex < 0 ? [] : [focusedIndex - 1, focusedIndex, focusedIndex + 1]
-      .filter((index) => index >= 0 && index < items.length),
-  }), [focusedIndex, items.length, selectedKeys]);
+  const alwaysRender = useMemo(
+    () => ({
+      keys: selectedKeys,
+      indices:
+        focusedIndex < 0
+          ? []
+          : [focusedIndex - 1, focusedIndex, focusedIndex + 1].filter(
+              (index) => index >= 0 && index < items.length,
+            ),
+    }),
+    [focusedIndex, items.length, selectedKeys],
+  );
   const column = (node: ReactNode) => (
     <div className={`px-3 sm:px-4 ${columnClassName}`}>{node}</div>
   );
@@ -84,9 +111,11 @@ export function PostFeedList<T>({
       extraData={renderItem}
       ListHeaderComponent={header ? column(header) : undefined}
       ListFooterComponent={footer ? column(footer) : undefined}
-      ListEmptyComponent={empty ? (
-        <div className={`flex flex-1 flex-col px-3 sm:px-4 ${columnClassName}`}>{empty}</div>
-      ) : undefined}
+      ListEmptyComponent={
+        empty ? (
+          <div className={`flex flex-1 flex-col px-3 sm:px-4 ${columnClassName}`}>{empty}</div>
+        ) : undefined
+      }
       onFocusCapture={(event) => {
         const row = (event.target as HTMLElement).closest<HTMLElement>("[data-post-feed-key]");
         setFocusedKey(row?.dataset.postFeedKey ?? null);

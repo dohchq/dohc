@@ -169,7 +169,11 @@ export function createWorkspaceAuthorityOwner<
       .find((reservation) => reservation !== undefined && reservation !== allowed);
   }
 
-  function release<Holder>(holders: Map<string, Holder>, keys: readonly string[], holder: Holder): void {
+  function release<Holder>(
+    holders: Map<string, Holder>,
+    keys: readonly string[],
+    holder: Holder,
+  ): void {
     for (const key of keys) {
       if (holders.get(key) === holder) holders.delete(key);
     }
@@ -209,11 +213,7 @@ export function createWorkspaceAuthorityOwner<
             ? current
             : record.initialWorkspace),
         }) as Readonly<Workspace>;
-        return options.disposeState?.(
-          record.state,
-          record.binding,
-          workspaceAtDisposal,
-        );
+        return options.disposeState?.(record.state, record.binding, workspaceAtDisposal);
       })
       .then(record.resolveDrained, record.rejectDrained);
   }
@@ -279,9 +279,7 @@ export function createWorkspaceAuthorityOwner<
     if (!workspace) throw new Error("This workspace is not open. Open it again.");
     const slot = slotFor(workspaceId);
     if (slot.registrationBlocked) {
-      throw new Error(
-        "This workspace was closed. Open it again.",
-      );
+      throw new Error("This workspace was closed. Open it again.");
     }
     const current = slot.current;
     if (current?.retired) {
@@ -305,14 +303,12 @@ export function createWorkspaceAuthorityOwner<
     if (workspace && !bindingMatchesWorkspace(record.binding, workspace)) {
       throw new Error("This workspace changed while this ran. Try again.");
     }
-    if (
-      record.retired ||
-      slot?.current !== record ||
-      !workspace
-    ) {
-      throw new Error(closing
-        ? "dohc is closing. Open dohc again to continue."
-        : "This workspace was closed. Open it again.");
+    if (record.retired || slot?.current !== record || !workspace) {
+      throw new Error(
+        closing
+          ? "dohc is closing. Open dohc again to continue."
+          : "This workspace was closed. Open it again.",
+      );
     }
   }
 
@@ -348,9 +344,11 @@ export function createWorkspaceAuthorityOwner<
       throw new Error("This workspace changed while this ran. Try again.");
     }
     if (!record) {
-      throw new Error(closing
-        ? "dohc is closing. Open dohc again to continue."
-        : "This workspace was closed. Open it again.");
+      throw new Error(
+        closing
+          ? "dohc is closing. Open dohc again to continue."
+          : "This workspace was closed. Open it again.",
+      );
     }
     return record;
   }
@@ -379,19 +377,16 @@ export function createWorkspaceAuthorityOwner<
     });
   }
 
-  function prepareWorkspaceIdentity(
-    workspace: { workspaceId: string; rootPath: string },
-  ): PreparedWorkspaceIdentity<Workspace, State> {
+  function prepareWorkspaceIdentity(workspace: {
+    workspaceId: string;
+    rootPath: string;
+  }): PreparedWorkspaceIdentity<Workspace, State> {
     const slot = slotFor(workspace.workspaceId);
     if (slot.registrationBlocked || slot.current?.retired) {
-      throw new Error(
-        "This workspace was closed. Open it again.",
-      );
+      throw new Error("This workspace was closed. Open it again.");
     }
     if (slot.current || options.findWorkspace(workspace.workspaceId)) {
-      throw new Error(
-        `Workspace ${workspace.workspaceId} is already registered.`,
-      );
+      throw new Error(`Workspace ${workspace.workspaceId} is already registered.`);
     }
     const root = authorityRoot(workspace.rootPath);
     const rootOwner = ownerOf(root.rootKeys);
@@ -427,20 +422,11 @@ export function createWorkspaceAuthorityOwner<
       const persisted = options.findWorkspace(workspace.workspaceId);
       if (
         !persisted ||
-        !bindingMatchesWorkspace(
-          { registeredRootPath: workspace.rootPath },
-          persisted,
-        )
+        !bindingMatchesWorkspace({ registeredRootPath: workspace.rootPath }, persisted)
       ) {
-        throw new Error(
-          "Workspace registration did not persist the requested binding.",
-        );
+        throw new Error("Workspace registration did not persist the requested binding.");
       }
-      const created = createRecord(
-        persisted,
-        root,
-        prepared.reservation,
-      );
+      const created = createRecord(persisted, root, prepared.reservation);
       slot.current = created;
       slot.registrationBlocked = false;
       return created.binding;
@@ -449,9 +435,7 @@ export function createWorkspaceAuthorityOwner<
       try {
         registration.rollback();
         if (options.findWorkspace(workspace.workspaceId)) {
-          throw new Error(
-            "Workspace registration rollback left the registry binding in place.",
-          );
+          throw new Error("Workspace registration rollback left the registry binding in place.");
         }
         rollbackSucceeded = true;
       } catch (rollbackError) {
@@ -472,17 +456,15 @@ export function createWorkspaceAuthorityOwner<
     workspaceIds(): string[] {
       return [...slots.entries()]
         .filter(
-          ([, slot]) =>
-            !slot.registrationBlocked &&
-            slot.current !== null &&
-            !slot.current.retired,
+          ([, slot]) => !slot.registrationBlocked && slot.current !== null && !slot.current.retired,
         )
         .map(([workspaceId]) => workspaceId);
     },
 
-    reserveBinding(
-      workspace: { workspaceId: string; rootPath: string },
-    ): WorkspaceAuthorityReservation {
+    reserveBinding(workspace: {
+      workspaceId: string;
+      rootPath: string;
+    }): WorkspaceAuthorityReservation {
       assertOpen();
       const prepared = prepareWorkspaceIdentity(workspace);
       const reservation = Object.freeze({
@@ -502,11 +484,7 @@ export function createWorkspaceAuthorityOwner<
       registration: WorkspaceBindingRegistration,
     ): WorkspaceAuthorityBinding<Workspace> {
       assertOpen();
-      return runRegistration(
-        prepareRegistration(workspace),
-        registration,
-        false,
-      );
+      return runRegistration(prepareRegistration(workspace), registration, false);
     },
 
     registerReservedBinding(
@@ -539,7 +517,12 @@ export function createWorkspaceAuthorityOwner<
           // its keys again and keep the reservation's own.
           root: {
             canonicalRootPath: reservation.canonicalRootPath,
-            rootKeys: [...new Set([...reservationState.rootKeys, ...rootKeys(reservation.canonicalRootPath)])],
+            rootKeys: [
+              ...new Set([
+                ...reservationState.rootKeys,
+                ...rootKeys(reservation.canonicalRootPath),
+              ]),
+            ],
           },
           reservation,
         },
@@ -577,9 +560,7 @@ export function createWorkspaceAuthorityOwner<
         }
         await cleanup();
         if (options.findWorkspace(reservation.workspaceId)) {
-          throw new Error(
-            "Workspace registration cleanup raced with a new registry binding.",
-          );
+          throw new Error("Workspace registration cleanup raced with a new registry binding.");
         }
         slot.reservation = null;
         slot.registrationBlocked = false;
@@ -668,9 +649,7 @@ export function createWorkspaceAuthorityOwner<
 
     withOperation<Result>(
       workspaceId: string,
-      work: (
-        operation: WorkspaceAuthorityOperation<Workspace, State>,
-      ) => Result | Promise<Result>,
+      work: (operation: WorkspaceAuthorityOperation<Workspace, State>) => Result | Promise<Result>,
     ): Promise<Result> {
       const lease = this.acquire(workspaceId);
       try {
@@ -734,8 +713,7 @@ export function createWorkspaceAuthorityOwner<
       ];
       closeOperation = Promise.allSettled(ownedWork).then((results) => {
         const failed = results.find(
-          (result): result is PromiseRejectedResult =>
-            result.status === "rejected",
+          (result): result is PromiseRejectedResult => result.status === "rejected",
         );
         if (failed) throw failed.reason;
         slots.clear();

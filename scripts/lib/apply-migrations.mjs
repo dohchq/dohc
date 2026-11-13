@@ -16,9 +16,7 @@ export const MIGRATIONS_DIR = fileURLToPath(
 // Migration ids are the filenames without `.sql`. The `NNNN_` numeric prefix
 // makes lexical sort equal apply order (0001 -> 0002 -> 0003 -> ...).
 export async function listMigrations() {
-  const files = (await readdir(MIGRATIONS_DIR))
-    .filter((name) => name.endsWith(".sql"))
-    .sort();
+  const files = (await readdir(MIGRATIONS_DIR)).filter((name) => name.endsWith(".sql")).sort();
   return files.map((file) => ({
     id: file.replace(/\.sql$/, ""),
     file,

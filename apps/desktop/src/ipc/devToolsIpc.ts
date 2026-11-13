@@ -4,7 +4,10 @@ import { CHANNELS } from "./channels";
 // The debug panel's main-side actions. Double-gated like the test bridge:
 // DOHC_DEV_TOOLS=1 and an unpackaged build. A packaged app launched with
 // the env var set must never grow this surface.
-export function devToolsEnabled(env: NodeJS.ProcessEnv, app: { readonly isPackaged: boolean }): boolean {
+export function devToolsEnabled(
+  env: NodeJS.ProcessEnv,
+  app: { readonly isPackaged: boolean },
+): boolean {
   return env.DOHC_DEV_TOOLS === "1" && !app.isPackaged;
 }
 
@@ -33,8 +36,13 @@ export function registerDevToolsIpcHandlers<Event>(dependencies: {
   showItemInFolder(path: string): void;
 }): void {
   const {
-    enabled, registerHandler, assertTrustedSender, listWorkspaces, forgetWorkspace,
-    stateDir, showItemInFolder,
+    enabled,
+    registerHandler,
+    assertTrustedSender,
+    listWorkspaces,
+    forgetWorkspace,
+    stateDir,
+    showItemInFolder,
   } = dependencies;
   if (!enabled) return;
 

@@ -35,9 +35,7 @@ export interface WorkspaceSearchEngineInput {
   isCurrent: () => boolean;
 }
 
-export interface WorkspaceSearchAuthority<
-  Workspace extends WorkspaceSearchWorkspace,
-> {
+export interface WorkspaceSearchAuthority<Workspace extends WorkspaceSearchWorkspace> {
   workspace: Workspace;
   attachmentId: symbol;
   signal: AbortSignal;
@@ -52,26 +50,15 @@ const completedSearchActivity: WorkspaceSearchActivity = Object.freeze({
   settled: Promise.resolve(),
 });
 
-export interface WorkspaceSearchOwnerDependencies<
-  Workspace extends WorkspaceSearchWorkspace,
-> {
-  searchRegistry: Pick<
-    SearchRegistry,
-    "startSearch" | "cancel" | "disposeOwner" | "killAll"
-  >;
-  prepareOwnedSearch(
-    workspace: Workspace,
-  ): Promise<Pick<OwnedWorkspaceSearchView, "allowPath">>;
-  engineCaptureFor(
-    workspaceId: string,
-  ): Pick<WorkspaceEngineCapture, "flush"> | null;
+export interface WorkspaceSearchOwnerDependencies<Workspace extends WorkspaceSearchWorkspace> {
+  searchRegistry: Pick<SearchRegistry, "startSearch" | "cancel" | "disposeOwner" | "killAll">;
+  prepareOwnedSearch(workspace: Workspace): Promise<Pick<OwnedWorkspaceSearchView, "allowPath">>;
+  engineCaptureFor(workspaceId: string): Pick<WorkspaceEngineCapture, "flush"> | null;
   queryEngine(
     workspace: Workspace,
     input: WorkspaceSearchEngineInput,
   ): Promise<SearchResult[] | null>;
-  readEnginePolicy?(
-    rootPath: string,
-  ): Promise<WorkspaceEnginePolicySnapshot>;
+  readEnginePolicy?(rootPath: string): Promise<WorkspaceEnginePolicySnapshot>;
   logError(message: string, error?: unknown): void;
 }
 
@@ -82,9 +69,7 @@ interface SearchIdentity {
 }
 
 function stoppedSearchError(): Error {
-  return new Error(
-    "Workspace search stopped because it is no longer current.",
-  );
+  return new Error("Workspace search stopped because it is no longer current.");
 }
 
 /** Owns workspace-search policy and every renderer-scoped search lifetime. */
@@ -115,10 +100,8 @@ export class WorkspaceSearchOwner<
     const previous = this.#latest.get(sender.id);
     this.#latest.set(sender.id, identity);
 
-    const ownsSearch = () =>
-      !this.#disposed && this.#latest.get(sender.id) === identity;
-    const isCurrent = () =>
-      ownsSearch() && !sender.isDestroyed() && authority.isCurrent();
+    const ownsSearch = () => !this.#disposed && this.#latest.get(sender.id) === identity;
+    const isCurrent = () => ownsSearch() && !sender.isDestroyed() && authority.isCurrent();
     const assertCurrent = () => {
       if (!isCurrent()) throw stoppedSearchError();
     };
@@ -127,16 +110,12 @@ export class WorkspaceSearchOwner<
       if (previous.execution) {
         await previous.execution.cancel();
       } else {
-        await this.#dependencies.searchRegistry.cancel(
-          sender.id,
-          previous.searchId,
-        );
+        await this.#dependencies.searchRegistry.cancel(sender.id, previous.searchId);
       }
       assertCurrent();
     }
 
-    const ownedSearchView =
-      await this.#dependencies.prepareOwnedSearch(workspace);
+    const ownedSearchView = await this.#dependencies.prepareOwnedSearch(workspace);
     assertCurrent();
 
     const registeredMounts = storedShareMounts(workspace);
@@ -163,9 +142,7 @@ export class WorkspaceSearchOwner<
     assertCurrent();
 
     const policy = resolveEngineSearchPolicy(
-      await (this.#dependencies.readEnginePolicy ?? readWorkspaceEnginePolicy)(
-        workspace.rootPath,
-      ),
+      await (this.#dependencies.readEnginePolicy ?? readWorkspaceEnginePolicy)(workspace.rootPath),
     );
     assertCurrent();
     if (policy.kind === "blocked") {
@@ -403,10 +380,7 @@ export class WorkspaceSearchOwner<
     if (identity.settled || !ownsSearch() || sender.isDestroyed()) return;
     identity.settled = true;
     void identity.execution?.cancel().catch((error: unknown) => {
-      this.#dependencies.logError(
-        "Workspace search could not settle its stale child.",
-        error,
-      );
+      this.#dependencies.logError("Workspace search could not settle its stale child.", error);
     });
     this.#send(
       sender,
@@ -430,10 +404,7 @@ export class WorkspaceSearchOwner<
     if (!isCurrent()) return false;
     const parsed = SearchResultsEvent.safeParse(event);
     if (!parsed.success) {
-      this.#dependencies.logError(
-        `Workspace search dropped an invalid ${source}.`,
-        parsed.error,
-      );
+      this.#dependencies.logError(`Workspace search dropped an invalid ${source}.`, parsed.error);
       return false;
     }
     if (!isCurrent()) return false;
@@ -441,10 +412,7 @@ export class WorkspaceSearchOwner<
       sender.send(CHANNELS.searchResults, parsed.data);
       return true;
     } catch (error) {
-      this.#dependencies.logError(
-        `Workspace search could not send a ${source}.`,
-        error,
-      );
+      this.#dependencies.logError(`Workspace search could not send a ${source}.`, error);
       return false;
     }
   }

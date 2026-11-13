@@ -9,14 +9,8 @@ import {
   type ShareViewFilesWorkspaceRecord,
 } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
-import {
-  prepareShareProjectionRead,
-  resolveShareMountPath,
-} from "./shareMounts";
-import type {
-  PreparedWorkspaceFileRead,
-  WorkspaceTextReadResult,
-} from "./workspaceAssets";
+import { prepareShareProjectionRead, resolveShareMountPath } from "./shareMounts";
+import type { PreparedWorkspaceFileRead, WorkspaceTextReadResult } from "./workspaceAssets";
 import {
   readDatabasePageFromBytes,
   readDatabaseSnapshotFromBytes,
@@ -27,10 +21,7 @@ import {
 } from "./workspaceDatabase";
 
 export interface OwnedWorkspaceDatabaseReader {
-  readPrepared(
-    path: string,
-    source: PreparedWorkspaceFileRead,
-  ): Promise<DatabaseSnapshotView>;
+  readPrepared(path: string, source: PreparedWorkspaceFileRead): Promise<DatabaseSnapshotView>;
   readBytes(path: string, bytes: Uint8Array): Promise<DatabaseSnapshotView>;
   readPagePrepared(
     path: string,
@@ -54,46 +45,43 @@ export interface OwnedWorkspaceFileReader {
   readText(path: string): Promise<WorkspaceTextReadResult>;
   readAsset(
     path: string,
-  ): Promise<
-    { path: string } & Extract<ShareViewFileReadOutcome, { kind: "asset" }>
-  >;
+  ): Promise<{ path: string } & Extract<ShareViewFileReadOutcome, { kind: "asset" }>>;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
-  readDatabasePage(
-    path: string,
-    table: string,
-    offset: number,
-  ): Promise<DatabasePageView>;
+  readDatabasePage(path: string, table: string, offset: number): Promise<DatabasePageView>;
 }
 
-export async function resolveOwnedWorkspaceSharePath(workspace: ShareViewFilesWorkspaceRecord, path: string): Promise<{
-    target: ShareViewFilesTarget;
-    path: string;
-  } | null> {
-    if (shareViewIsPresent(workspace.shareView)) {
-      return {
-        target: {
-          kind: "standalone",
-          workspaceId: workspace.workspaceId,
-        },
-        path,
-      };
-    }
-    const resolved = await resolveShareMountPath(
-      workspace.rootPath,
+export async function resolveOwnedWorkspaceSharePath(
+  workspace: ShareViewFilesWorkspaceRecord,
+  path: string,
+): Promise<{
+  target: ShareViewFilesTarget;
+  path: string;
+} | null> {
+  if (shareViewIsPresent(workspace.shareView)) {
+    return {
+      target: {
+        kind: "standalone",
+        workspaceId: workspace.workspaceId,
+      },
       path,
-      storedShareMounts(workspace),
-      shareMountRegistryIsPresent(workspace),
-    );
-    return resolved === null
-      ? null
-      : {
-          target: {
-            kind: "mount",
-            workspaceId: workspace.workspaceId,
-            shareId: resolved.mount.shareId,
-          },
-          path: resolved.path,
-        };
+    };
+  }
+  const resolved = await resolveShareMountPath(
+    workspace.rootPath,
+    path,
+    storedShareMounts(workspace),
+    shareMountRegistryIsPresent(workspace),
+  );
+  return resolved === null
+    ? null
+    : {
+        target: {
+          kind: "mount",
+          workspaceId: workspace.workspaceId,
+          shareId: resolved.mount.shareId,
+        },
+        path: resolved.path,
+      };
 }
 
 /** Reads local files from disk and received-share files from their owner store. */
@@ -163,15 +151,16 @@ export function createOwnedWorkspaceFileReader(input: {
     return { path: prepared.path, ...read };
   }
 
-  const databaseReader: OwnedWorkspaceDatabaseReader =
-    input.databaseReader ?? {
-      readPrepared: readPreparedDatabaseSnapshot,
-      readBytes: readDatabaseSnapshotFromBytes,
-      readPagePrepared: readPreparedDatabasePage,
-      readPageBytes: readDatabasePageFromBytes,
-    };
+  const databaseReader: OwnedWorkspaceDatabaseReader = input.databaseReader ?? {
+    readPrepared: readPreparedDatabaseSnapshot,
+    readBytes: readDatabaseSnapshotFromBytes,
+    readPagePrepared: readPreparedDatabasePage,
+    readPageBytes: readDatabasePageFromBytes,
+  };
 
-  async function preparedDatabase(path: string): Promise<
+  async function preparedDatabase(
+    path: string,
+  ): Promise<
     | { kind: "local"; source: PreparedWorkspaceFileRead }
     | { kind: "share"; path: string; bytes: Uint8Array }
   > {
@@ -218,19 +207,9 @@ export function createOwnedWorkspaceFileReader(input: {
     async readDatabasePage(path, table, offset) {
       const prepared = await preparedDatabase(path);
       if (prepared.kind === "local") {
-        return databaseReader.readPagePrepared(
-          path,
-          prepared.source,
-          table,
-          offset,
-        );
+        return databaseReader.readPagePrepared(path, prepared.source, table, offset);
       }
-      return databaseReader.readPageBytes(
-        path,
-        prepared.bytes,
-        table,
-        offset,
-      );
+      return databaseReader.readPageBytes(path, prepared.bytes, table, offset);
     },
   };
 }

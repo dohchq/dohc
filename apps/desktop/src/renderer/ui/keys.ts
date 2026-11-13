@@ -11,18 +11,34 @@ export function isComposingKey(event: KeyboardEvent | ReactKeyboardEvent): boole
 }
 
 /** On macOS, ⌥↩ starts a new line in a message, as ⇧↩ does. */
-export function isOptionReturn(event: { key: string; altKey: boolean }, platform = window.dohcDesktop?.platform): boolean {
+export function isOptionReturn(
+  event: { key: string; altKey: boolean },
+  platform = window.dohcDesktop?.platform,
+): boolean {
   return platform === "darwin" && event.altKey && event.key === "Enter";
 }
 
 /** Whether Enter sends from a message field: not ⇧↩, ⌥↩ on macOS, or an IME's Enter. */
-export function isSendKey(event: ReactKeyboardEvent, platform = window.dohcDesktop?.platform): boolean {
-  return event.key === "Enter" && !event.shiftKey && !isOptionReturn(event, platform) && !isComposingKey(event);
+export function isSendKey(
+  event: ReactKeyboardEvent,
+  platform = window.dohcDesktop?.platform,
+): boolean {
+  return (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !isOptionReturn(event, platform) &&
+    !isComposingKey(event)
+  );
 }
 
 /** The key that deletes the selection: Delete, and ⌘⌫ on macOS, as in Finder. */
-export function isDeleteKey(event: { key: string; metaKey: boolean }, platform = window.dohcDesktop?.platform): boolean {
-  return event.key === "Delete" || (platform === "darwin" && event.metaKey && event.key === "Backspace");
+export function isDeleteKey(
+  event: { key: string; metaKey: boolean },
+  platform = window.dohcDesktop?.platform,
+): boolean {
+  return (
+    event.key === "Delete" || (platform === "darwin" && event.metaKey && event.key === "Backspace")
+  );
 }
 
 /** The keys that open the focused item's context menu: the Menu key, and Shift+F10. */
@@ -31,6 +47,9 @@ export function isContextMenuKey(event: { key: string; shiftKey: boolean }): boo
 }
 
 /** On macOS, Control with the primary button opens the context menu instead of clicking. */
-export function isMacContextClick(event: { button: number; ctrlKey: boolean }, platform = window.dohcDesktop?.platform): boolean {
+export function isMacContextClick(
+  event: { button: number; ctrlKey: boolean },
+  platform = window.dohcDesktop?.platform,
+): boolean {
   return platform === "darwin" && event.button === 0 && event.ctrlKey;
 }

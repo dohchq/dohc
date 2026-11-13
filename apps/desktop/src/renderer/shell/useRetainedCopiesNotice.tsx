@@ -26,7 +26,10 @@ export function oldFileCopies(count: number): string {
   return `${count.toLocaleString("en-US")} old file ${count === 1 ? "copy" : "copies"}`;
 }
 
-export function retainedCopiesNotice(summary: RetainedCopiesSummary): { title: string; message: string } {
+export function retainedCopiesNotice(summary: RetainedCopiesSummary): {
+  title: string;
+  message: string;
+} {
   return {
     title: oldFileCopies(summary.count),
     message: `They take up ${retainedCopiesSize(summary.bytes)}. dohc can't check whether another program still uses these copies on this drive.`,
@@ -34,7 +37,8 @@ export function retainedCopiesNotice(summary: RetainedCopiesSummary): { title: s
 }
 
 export const RETAINED_COPIES_ACTION = "Delete copies…";
-export const RETAINED_COPIES_NOT_YET = "dohc can't delete these old file copies yet: they changed recently or dohc still needs them.";
+export const RETAINED_COPIES_NOT_YET =
+  "dohc can't delete these old file copies yet: they changed recently or dohc still needs them.";
 
 export function retainedCopiesDeleted(answer: { deleted: number; skipped: number }): string {
   const deleted = `Deleted ${oldFileCopies(answer.deleted)}`;
@@ -82,12 +86,15 @@ export function useRetainedCopiesNotice(input: {
   workspaceId: string;
   workspaceName: string;
   summary: RetainedCopiesSummary | undefined;
-  show: (notice: {
-    title: string;
-    message: string;
-    action: { label: string; run: () => void };
-    onDismiss: () => void;
-  } | null, toast: boolean) => void;
+  show: (
+    notice: {
+      title: string;
+      message: string;
+      action: { label: string; run: () => void };
+      onDismiss: () => void;
+    } | null,
+    toast: boolean,
+  ) => void;
   showDone: (message: string) => void;
   report: (notice: { message: string; tone?: "warning"; retry: () => void }) => void;
   reportError: (fallback: string, error: unknown, retry: () => void) => void;
@@ -109,38 +116,53 @@ export function useRetainedCopiesNotice(input: {
     const epoch = workspace.current();
     const askedFor = workspaceId;
     const name = workspaceName;
-    bridge().listRetainedCopies({ workspaceId: askedFor }).then((listed) => {
-      if (!workspace.isCurrent(epoch)) return;
-      if (listed.copies.length === 0) {
-        latest.current.report({ tone: "warning", message: RETAINED_COPIES_NOT_YET, retry: start });
-        return;
-      }
-      setPending({ workspaceId: askedFor, workspaceName: name, copies: listed.copies });
-    }, (error: unknown) => {
-      if (!workspace.isCurrent(epoch)) return;
-      latest.current.reportError("dohc could not list old file copies.", error, start);
-    });
+    bridge()
+      .listRetainedCopies({ workspaceId: askedFor })
+      .then(
+        (listed) => {
+          if (!workspace.isCurrent(epoch)) return;
+          if (listed.copies.length === 0) {
+            latest.current.report({
+              tone: "warning",
+              message: RETAINED_COPIES_NOT_YET,
+              retry: start,
+            });
+            return;
+          }
+          setPending({ workspaceId: askedFor, workspaceName: name, copies: listed.copies });
+        },
+        (error: unknown) => {
+          if (!workspace.isCurrent(epoch)) return;
+          latest.current.reportError("dohc could not list old file copies.", error, start);
+        },
+      );
   }, [workspace, workspaceId, workspaceName]);
 
   const count = summary?.count ?? 0;
   const bytes = summary?.bytes ?? 0;
   const key = storageKey(workspaceId);
-  const show = useCallback((current: RetainedCopiesSummary) => {
-    if (current.count === 0 || current.bytes < RETAINED_COPIES_NOTICE_BYTES) {
-      dismissed.delete(key);
-      remember(key, false);
-      latest.current.show(null, false);
-      return;
-    }
-    if (dismissed.has(key)) return;
-    const toast = !toldBefore(key);
-    if (toast) remember(key, true);
-    latest.current.show({
-      ...retainedCopiesNotice(current),
-      action: { label: RETAINED_COPIES_ACTION, run: start },
-      onDismiss: () => dismissed.add(key),
-    }, toast);
-  }, [key, start]);
+  const show = useCallback(
+    (current: RetainedCopiesSummary) => {
+      if (current.count === 0 || current.bytes < RETAINED_COPIES_NOTICE_BYTES) {
+        dismissed.delete(key);
+        remember(key, false);
+        latest.current.show(null, false);
+        return;
+      }
+      if (dismissed.has(key)) return;
+      const toast = !toldBefore(key);
+      if (toast) remember(key, true);
+      latest.current.show(
+        {
+          ...retainedCopiesNotice(current),
+          action: { label: RETAINED_COPIES_ACTION, run: start },
+          onDismiss: () => dismissed.add(key),
+        },
+        toast,
+      );
+    },
+    [key, start],
+  );
   useEffect(() => {
     if (summary === undefined) return;
     show({ count, bytes });
@@ -157,7 +179,9 @@ export function useRetainedCopiesNotice(input: {
       for (let at = 0; at < asked.copies.length; at += MAX_RETAINED_COPIES_PER_DELETE) {
         const answer = await bridge().deleteRetainedCopies({
           workspaceId: asked.workspaceId,
-          copies: asked.copies.slice(at, at + MAX_RETAINED_COPIES_PER_DELETE).map(({ id, revision }) => ({ id, revision })),
+          copies: asked.copies
+            .slice(at, at + MAX_RETAINED_COPIES_PER_DELETE)
+            .map(({ id, revision }) => ({ id, revision })),
           acceptLateWriteRisk: true,
         });
         // A window that changed workspaces stops asking: the person is no
@@ -176,10 +200,14 @@ export function useRetainedCopiesNotice(input: {
     }
     if (remaining) show(remaining);
     if (total.failed > 0) {
-      latest.current.report({ message: `dohc could not delete ${oldFileCopies(total.failed)}.`, retry: start });
+      latest.current.report({
+        message: `dohc could not delete ${oldFileCopies(total.failed)}.`,
+        retry: start,
+      });
     }
     if (total.deleted > 0) latest.current.showDone(retainedCopiesDeleted(total));
-    else if (total.failed === 0) latest.current.report({ tone: "warning", message: RETAINED_COPIES_NOT_YET, retry: start });
+    else if (total.failed === 0)
+      latest.current.report({ tone: "warning", message: RETAINED_COPIES_NOT_YET, retry: start });
   }, [pending, show, start, workspace]);
 
   return pending ? (
@@ -195,8 +223,8 @@ export function useRetainedCopiesNotice(input: {
       onConfirm={() => void confirm()}
     >
       <p>
-        Close other programs that use this workspace first. A program that still uses one of these copies may lose
-        what it writes next. This can't be undone.
+        Close other programs that use this workspace first. A program that still uses one of these
+        copies may lose what it writes next. This can't be undone.
       </p>
     </ConfirmDialog>
   ) : null;

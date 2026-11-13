@@ -1,5 +1,10 @@
 import { asRecord, validateUserWritePath } from "@dohc/workspace-core";
-import type { SqliteDb, CurrentFileStateRow, CurrentFileStateSnapshot, SyncRelayLogRow } from "./types";
+import type {
+  SqliteDb,
+  CurrentFileStateRow,
+  CurrentFileStateSnapshot,
+  SyncRelayLogRow,
+} from "./types";
 import { LINK_REVISION_SCAN_LIMIT, SHARED_BLOB_CANDIDATE_LIMIT } from "./limits";
 import { rowToLogRow } from "./rows";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
@@ -15,7 +20,9 @@ function recordIdentity(content: unknown): string | null {
   if (!(content instanceof Uint8Array)) return null;
   try {
     return parseCollectionRecordIdentity(new TextDecoder().decode(content));
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 function initializeRecordIdentitySchema(db: SqliteDb): void {
@@ -25,15 +32,27 @@ function initializeRecordIdentitySchema(db: SqliteDb): void {
     FOREIGN KEY (workspace_id, version_id, path) REFERENCES sync_relay_current_files(workspace_id, version_id, path) ON DELETE CASCADE
   ) STRICT;
   CREATE INDEX IF NOT EXISTS idx_sync_relay_current_record_ids_id ON sync_relay_current_record_ids(workspace_id, version_id, record_id);`);
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(RECORD_IDENTITIES_MIGRATION_ID)) return;
+  if (
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(RECORD_IDENTITIES_MIGRATION_ID)
+  )
+    return;
   const insert = db.prepare(RECORD_IDENTITY_INSERT_SQL);
-  for (const row of db.prepare(`SELECT f.workspace_id, f.version_id, f.path, substr(b.content, 1, 65536) AS frontmatter
+  for (const row of db
+    .prepare(`SELECT f.workspace_id, f.version_id, f.path, substr(b.content, 1, 65536) AS frontmatter
     FROM sync_relay_current_files f JOIN sync_relay_blobs b ON b.workspace_id = f.workspace_id AND b.sha256 = f.blob_sha256
-    WHERE f.content_kind = 'text'`).iterate()) {
-    const id = String(row.path).toLowerCase().endsWith(".md") ? recordIdentity(row.frontmatter) : null;
+    WHERE f.content_kind = 'text'`)
+    .iterate()) {
+    const id = String(row.path).toLowerCase().endsWith(".md")
+      ? recordIdentity(row.frontmatter)
+      : null;
     if (id) insert.run(String(row.workspace_id), String(row.version_id), String(row.path), id);
   }
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(RECORD_IDENTITIES_MIGRATION_ID, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    RECORD_IDENTITIES_MIGRATION_ID,
+    Date.now(),
+  );
 }
 
 const CURRENT_FILE_KEYS_MIGRATION_ID = "current-file-collision-keys-v1";
@@ -63,14 +82,23 @@ export function initializeCurrentFileKeySchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_current_file_keys_key
       ON sync_relay_current_file_keys(workspace_id, version_id, collision_key);
   `);
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(CURRENT_FILE_KEYS_MIGRATION_ID)) return;
+  if (
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(CURRENT_FILE_KEYS_MIGRATION_ID)
+  )
+    return;
   const insert = db.prepare(CURRENT_FILE_KEY_INSERT_SQL);
-  for (const row of db.prepare("SELECT workspace_id, version_id, path FROM sync_relay_current_files").iterate()) {
+  for (const row of db
+    .prepare("SELECT workspace_id, version_id, path FROM sync_relay_current_files")
+    .iterate()) {
     const path = String(row.path);
     insert.run(String(row.workspace_id), String(row.version_id), path, pathCollisionKey(path));
   }
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(CURRENT_FILE_KEYS_MIGRATION_ID, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    CURRENT_FILE_KEYS_MIGRATION_ID,
+    Date.now(),
+  );
 }
 
 // Where a `moment.append` payload says its object is after the op: the
@@ -115,12 +143,14 @@ export function objectPathFromMomentPayload(
 export function objectMomentFromMomentPayload(
   payloadJson: string,
 ): ReturnType<typeof objectMomentFromMomentValue> {
-  try { return objectMomentFromMomentValue(JSON.parse(payloadJson)); } catch { return null; }
+  try {
+    return objectMomentFromMomentValue(JSON.parse(payloadJson));
+  } catch {
+    return null;
+  }
 }
 
-export function objectMomentFromMomentValue(
-  parsed: unknown,
-): {
+export function objectMomentFromMomentValue(parsed: unknown): {
   objectId: string;
   momentId: string;
   versionId: string;
@@ -149,11 +179,14 @@ export function objectMomentFromMomentValue(
     return null;
   }
   const deleted = record.operation === "delete";
-  const path = deleted ? null : readableString(record.path) ?? readableString(record.payloadAfterPath);
+  const path = deleted
+    ? null
+    : (readableString(record.path) ?? readableString(record.payloadAfterPath));
   const blobSha256 = deleted ? null : readableString(record.payloadAfterBlobSha256);
   const contentKind = deleted ? null : readableString(record.payloadAfterContentKind);
   const byteLength =
-    !deleted && typeof record.payloadAfterByteLength === "number" &&
+    !deleted &&
+    typeof record.payloadAfterByteLength === "number" &&
     Number.isSafeInteger(record.payloadAfterByteLength)
       ? record.payloadAfterByteLength
       : null;
@@ -192,21 +225,44 @@ interface CurrentFileStatements {
 // A current file and its collision key. Removing the file removes the key.
 function putCurrentFile(
   statements: CurrentFileStatements,
-  row: { workspaceId: string; versionId: string; path: string; blobSha256: string; contentKind: string; relaySeq: number },
+  row: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+    blobSha256: string;
+    contentKind: string;
+    relaySeq: number;
+  },
 ): void {
-  statements.put.run(row.workspaceId, row.versionId, row.path, row.blobSha256, row.contentKind, row.relaySeq);
+  statements.put.run(
+    row.workspaceId,
+    row.versionId,
+    row.path,
+    row.blobSha256,
+    row.contentKind,
+    row.relaySeq,
+  );
   statements.key.run(row.workspaceId, row.versionId, row.path, pathCollisionKey(row.path));
   const schemaPath = `${row.path.slice(0, row.path.lastIndexOf("/") + 1)}collection.yaml`;
-  const id = row.contentKind === "text" && row.path.toLowerCase().endsWith(".md")
-    && statements.collection.get(row.workspaceId, row.versionId, schemaPath) !== undefined
-    ? recordIdentity(statements.frontmatter.get(row.workspaceId, row.blobSha256)?.frontmatter) : null;
+  const id =
+    row.contentKind === "text" &&
+    row.path.toLowerCase().endsWith(".md") &&
+    statements.collection.get(row.workspaceId, row.versionId, schemaPath) !== undefined
+      ? recordIdentity(statements.frontmatter.get(row.workspaceId, row.blobSha256)?.frontmatter)
+      : null;
   if (id) statements.recordId.run(row.workspaceId, row.versionId, row.path, id);
   else statements.removeRecordId.run(row.workspaceId, row.versionId, row.path);
   if (row.path.endsWith("/collection.yaml")) {
     const folder = row.path.slice(0, -"collection.yaml".length);
     // A manifest may arrive after its records. Read their bounded prefixes
     // once on manifest changes, never on unrelated Markdown saves.
-    for (const record of statements.records.all(row.workspaceId, row.versionId, folder, `${folder}\uffff`, folder)) {
+    for (const record of statements.records.all(
+      row.workspaceId,
+      row.versionId,
+      folder,
+      `${folder}\uffff`,
+      folder,
+    )) {
       const path = String(record.path);
       const id = recordIdentity(record.frontmatter);
       if (id) statements.recordId.run(row.workspaceId, row.versionId, path, id);
@@ -216,11 +272,14 @@ function putCurrentFile(
 
 export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
   return {
-    records: db.prepare(`SELECT f.path, substr(b.content, 1, 65536) AS frontmatter FROM sync_relay_current_files f
+    records:
+      db.prepare(`SELECT f.path, substr(b.content, 1, 65536) AS frontmatter FROM sync_relay_current_files f
       JOIN sync_relay_blobs b ON b.workspace_id=f.workspace_id AND b.sha256=f.blob_sha256
       WHERE f.workspace_id=? AND f.version_id=? AND f.path>=? AND f.path<?
         AND instr(substr(f.path,length(?)+1),'/')=0 AND f.content_kind='text' AND lower(f.path) LIKE '%.md'`),
-    collection: db.prepare("SELECT 1 FROM sync_relay_current_files WHERE workspace_id = ? AND version_id = ? AND path = ?"),
+    collection: db.prepare(
+      "SELECT 1 FROM sync_relay_current_files WHERE workspace_id = ? AND version_id = ? AND path = ?",
+    ),
     get: db.prepare(
       `SELECT blob_sha256
        FROM sync_relay_current_files
@@ -236,9 +295,13 @@ export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
          state_relay_seq = excluded.state_relay_seq`,
     ),
     key: db.prepare(CURRENT_FILE_KEY_INSERT_SQL),
-    frontmatter: db.prepare("SELECT substr(content, 1, 65536) AS frontmatter FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?"),
+    frontmatter: db.prepare(
+      "SELECT substr(content, 1, 65536) AS frontmatter FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
+    ),
     recordId: db.prepare(RECORD_IDENTITY_INSERT_SQL),
-    removeRecordId: db.prepare("DELETE FROM sync_relay_current_record_ids WHERE workspace_id = ? AND version_id = ? AND path = ?"),
+    removeRecordId: db.prepare(
+      "DELETE FROM sync_relay_current_record_ids WHERE workspace_id = ? AND version_id = ? AND path = ?",
+    ),
     remove: db.prepare(
       `DELETE FROM sync_relay_current_files
        WHERE workspace_id = ? AND version_id = ? AND path = ?`,
@@ -262,9 +325,7 @@ function optionalPathAliasMatches(value: unknown, expected: string | null): bool
 }
 
 function digest(value: unknown): string | null {
-  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value)
-    ? value
-    : null;
+  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : null;
 }
 
 export function applyCurrentFileOp(
@@ -312,13 +373,11 @@ export function applyCurrentFileOp(
   if (operation !== "write" && operation !== "rename" && operation !== "delete") return;
   const hasNoBefore =
     (payload.payloadBeforePath === null || payload.payloadBeforePath === undefined) &&
-    (payload.payloadBeforeBlobSha256 === null ||
-      payload.payloadBeforeBlobSha256 === undefined);
+    (payload.payloadBeforeBlobSha256 === null || payload.payloadBeforeBlobSha256 === undefined);
   const beforePath = trackedPath(payload.payloadBeforePath);
   const beforeBlobSha256 = digest(payload.payloadBeforeBlobSha256);
-  const before = beforePath && beforeBlobSha256
-    ? { path: beforePath, blobSha256: beforeBlobSha256 }
-    : null;
+  const before =
+    beforePath && beforeBlobSha256 ? { path: beforePath, blobSha256: beforeBlobSha256 } : null;
   if (!hasNoBefore && !before) return;
   if (!optionalPathAliasMatches(payload.beforePath, before?.path ?? null)) return;
 
@@ -371,7 +430,10 @@ export function applyCurrentFileOp(
   });
 }
 
-function currentFileSelectorClause(selectorPaths: readonly string[], column = "path"): {
+function currentFileSelectorClause(
+  selectorPaths: readonly string[],
+  column = "path",
+): {
   sql: string;
   params: string[];
 } {
@@ -395,8 +457,7 @@ export function currentFileStateQuery(selectorPaths: readonly string[]): {
 } {
   const selector = currentFileSelectorClause(selectorPaths);
   return {
-    sql:
-      `SELECT path, blob_sha256, content_kind
+    sql: `SELECT path, blob_sha256, content_kind
        FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_path
        WHERE workspace_id = ? AND version_id = ?
          AND state_relay_seq > ? AND state_relay_seq <= ?${selector.sql}
@@ -412,8 +473,7 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
 } {
   const selector = currentFileSelectorClause(selectorPaths);
   return {
-    sql:
-      `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
+    sql: `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
        FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
        JOIN sync_relay_blobs AS blob
          ON blob.workspace_id = sync_relay_current_files.workspace_id
@@ -434,26 +494,29 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
 // LINK_REVISION_SCAN_LIMIT moments with this content, so a link request's work
 // does not grow with how often the content recurs. Membership is checked
 // before the result is capped.
-export function listLinkRevisionLogRows(storage: StorageContext, input: {
+export function listLinkRevisionLogRows(
+  storage: StorageContext,
+  input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
-  }): SyncRelayLogRow[] {
-    const revisionSelector = currentFileSelectorClause(input.selectorPaths, "scanned.path");
-    const currentSelector = currentFileSelectorClause(input.selectorPaths, "current_file.path");
-    const latest = (column: "path" | "relay_seq") =>
-      `(SELECT latest.${column}
+  },
+): SyncRelayLogRow[] {
+  const revisionSelector = currentFileSelectorClause(input.selectorPaths, "scanned.path");
+  const currentSelector = currentFileSelectorClause(input.selectorPaths, "current_file.path");
+  const latest = (column: "path" | "relay_seq") =>
+    `(SELECT latest.${column}
         FROM sync_relay_object_moments AS latest
           INDEXED BY idx_sync_relay_object_moments_latest
         WHERE latest.workspace_id = ? AND latest.version_id = ?
           AND latest.object_id = revisions.object_id
         ORDER BY latest.relay_seq DESC
         LIMIT 1)`;
-    return storage.db
-      .prepare(
-        `WITH scanned AS MATERIALIZED (
+  return storage.db
+    .prepare(
+      `WITH scanned AS MATERIALIZED (
            SELECT object_id, relay_seq, path
            FROM sync_relay_object_moments
              INDEXED BY idx_sync_relay_object_moments_blob_lookup
@@ -484,50 +547,53 @@ export function listLinkRevisionLogRows(storage: StorageContext, input: {
          WHERE current_file.state_relay_seq > ?${currentSelector.sql}
          ORDER BY placed.relay_seq DESC
          LIMIT ?`,
-      )
-      .all(
-        input.workspaceId,
-        input.versionId,
-        input.sha256,
-        LINK_REVISION_SCAN_LIMIT,
-        input.epochLogFloor,
-        ...revisionSelector.params,
-        input.workspaceId,
-        input.versionId,
-        input.workspaceId,
-        input.versionId,
-        input.workspaceId,
-        input.versionId,
-        input.epochLogFloor,
-        ...currentSelector.params,
-        SHARED_BLOB_CANDIDATE_LIMIT,
-      )
-      .map(rowToLogRow);
-  }
+    )
+    .all(
+      input.workspaceId,
+      input.versionId,
+      input.sha256,
+      LINK_REVISION_SCAN_LIMIT,
+      input.epochLogFloor,
+      ...revisionSelector.params,
+      input.workspaceId,
+      input.versionId,
+      input.workspaceId,
+      input.versionId,
+      input.workspaceId,
+      input.versionId,
+      input.epochLogFloor,
+      ...currentSelector.params,
+      SHARED_BLOB_CANDIDATE_LIMIT,
+    )
+    .map(rowToLogRow);
+}
 
 // The bytes of `sha256` when the object is in the share now: its latest moment
 // in this version is the current file at a selected path, set above the epoch
 // floor. A delete, a move out of the selector, or another object taking the
 // path leaves no answer.
-export function currentObjectBlobByteLength(storage: StorageContext, input: {
+export function currentObjectBlobByteLength(
+  storage: StorageContext,
+  input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     objectId: string;
     sha256: string;
     epochLogFloor: number;
-  }): number | null {
-    const selector = currentFileSelectorClause(input.selectorPaths);
-    const latest = (column: "path" | "relay_seq") =>
-      `(SELECT latest.${column}
+  },
+): number | null {
+  const selector = currentFileSelectorClause(input.selectorPaths);
+  const latest = (column: "path" | "relay_seq") =>
+    `(SELECT latest.${column}
         FROM sync_relay_object_moments AS latest
           INDEXED BY idx_sync_relay_object_moments_latest
         WHERE latest.workspace_id = ? AND latest.version_id = ? AND latest.object_id = ?
         ORDER BY latest.relay_seq DESC
         LIMIT 1)`;
-    const row = storage.db
-      .prepare(
-        `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
+  const row = storage.db
+    .prepare(
+      `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
          FROM sync_relay_current_files
          JOIN sync_relay_blobs AS blob
            ON blob.workspace_id = sync_relay_current_files.workspace_id
@@ -538,47 +604,48 @@ export function currentObjectBlobByteLength(storage: StorageContext, input: {
            AND sync_relay_current_files.state_relay_seq = ${latest("relay_seq")}
            AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
          LIMIT 1`,
-      )
-      .get(
-        input.sha256,
-        input.workspaceId,
-        input.versionId,
-        input.workspaceId,
-        input.versionId,
-        input.objectId,
-        input.workspaceId,
-        input.versionId,
-        input.objectId,
-        input.epochLogFloor,
-        ...selector.params,
-      );
-    return row && typeof row.byte_length === "string"
-      ? Number(row.byte_length)
-      : null;
-  }
+    )
+    .get(
+      input.sha256,
+      input.workspaceId,
+      input.versionId,
+      input.workspaceId,
+      input.versionId,
+      input.objectId,
+      input.workspaceId,
+      input.versionId,
+      input.objectId,
+      input.epochLogFloor,
+      ...selector.params,
+    );
+  return row && typeof row.byte_length === "string" ? Number(row.byte_length) : null;
+}
 
 // The paths of the object's moments in this version after `afterRelaySeq`,
 // newest first, at most `limit` of them. A delete answers null.
-export function laterObjectMomentPaths(storage: StorageContext, input: {
+export function laterObjectMomentPaths(
+  storage: StorageContext,
+  input: {
     workspaceId: string;
     versionId: string;
     objectId: string;
     afterRelaySeq: number;
     limit: number;
-  }): Array<string | null> {
-    return storage.db
-      .prepare(
-        `SELECT later.path
+  },
+): Array<string | null> {
+  return storage.db
+    .prepare(
+      `SELECT later.path
          FROM sync_relay_object_moments AS later
            INDEXED BY idx_sync_relay_object_moments_latest
          WHERE later.workspace_id = ? AND later.version_id = ? AND later.object_id = ?
            AND later.relay_seq > ?
          ORDER BY later.relay_seq DESC
          LIMIT ?`,
-      )
-      .all(input.workspaceId, input.versionId, input.objectId, input.afterRelaySeq, input.limit)
-      .map((row) => (typeof row.path === "string" ? row.path : null));
-  }
+    )
+    .all(input.workspaceId, input.versionId, input.objectId, input.afterRelaySeq, input.limit)
+    .map((row) => (typeof row.path === "string" ? row.path : null));
+}
 
 // Latest-wins: a rename is a later fact about the same object, and the share
 // must follow the file rather than its history.
@@ -598,83 +665,91 @@ export const OBJECT_PATH_UPSERT_SQL = `
     SET path = excluded.path, relay_seq = excluded.relay_seq
     WHERE excluded.relay_seq > sync_relay_object_paths.relay_seq`;
 
-export function readCurrentFileState(storage: StorageContext, input: {
+export function readCurrentFileState(
+  storage: StorageContext,
+  input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     limit: number;
-  }): CurrentFileStateSnapshot {
-    if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
-      throw new Error("current file limit must be a positive safe integer");
-    }
-    return storage.readTx(() => {
-      const workspace = storage.db
-        .prepare(
-          `SELECT COALESCE(epoch_log_floor, 0) AS epoch_log_floor
+  },
+): CurrentFileStateSnapshot {
+  if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
+    throw new Error("current file limit must be a positive safe integer");
+  }
+  return storage.readTx(() => {
+    const workspace = storage.db
+      .prepare(
+        `SELECT COALESCE(epoch_log_floor, 0) AS epoch_log_floor
            FROM sync_relay_workspaces
            WHERE workspace_id = ?`,
-        )
-        .get(input.workspaceId);
-      const cursor = storage.db
-        .prepare(
-          `SELECT relay_seq
+      )
+      .get(input.workspaceId);
+    const cursor = storage.db
+      .prepare(
+        `SELECT relay_seq
            FROM sync_relay_log INDEXED BY idx_sync_relay_log_page
            WHERE workspace_id = ?
            ORDER BY relay_seq DESC
            LIMIT 1`,
-        )
-        .get(input.workspaceId);
-      const epochLogFloor = Number(workspace?.epoch_log_floor ?? 0);
-      const nextCursor = Number(cursor?.relay_seq ?? 0);
-      const query = currentFileStateQuery(input.selectorPaths);
-      const rows = storage.db
-        .prepare(query.sql)
-        .all(
-          input.workspaceId,
-          input.versionId,
-          epochLogFloor,
-          nextCursor,
-          ...query.selectorParams,
-          input.limit + 1,
-        );
-      return {
-        files: rows.slice(0, input.limit).map((row) => ({
-          path: String(row.path),
-          blobSha256: String(row.blob_sha256),
-          contentKind: row.content_kind === "binary" ? "binary" : "text",
-        })),
-        nextCursor,
+      )
+      .get(input.workspaceId);
+    const epochLogFloor = Number(workspace?.epoch_log_floor ?? 0);
+    const nextCursor = Number(cursor?.relay_seq ?? 0);
+    const query = currentFileStateQuery(input.selectorPaths);
+    const rows = storage.db
+      .prepare(query.sql)
+      .all(
+        input.workspaceId,
+        input.versionId,
         epochLogFloor,
-        tooMany: rows.length > input.limit,
-      };
-    });
-  }
+        nextCursor,
+        ...query.selectorParams,
+        input.limit + 1,
+      );
+    return {
+      files: rows.slice(0, input.limit).map((row) => ({
+        path: String(row.path),
+        blobSha256: String(row.blob_sha256),
+        contentKind: row.content_kind === "binary" ? "binary" : "text",
+      })),
+      nextCursor,
+      epochLogFloor,
+      tooMany: rows.length > input.limit,
+    };
+  });
+}
 
-export function currentFileBlobByteLength(storage: StorageContext, input: {
+export function currentFileBlobByteLength(
+  storage: StorageContext,
+  input: {
     workspaceId: string;
     versionId: string;
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
-  }): number | null {
-    const query = currentFileBlobByteLengthQuery(input.selectorPaths);
-    const row = storage.db
-      .prepare(query.sql)
-      .get(
-        input.workspaceId,
-        input.versionId,
-        input.sha256,
-        input.epochLogFloor,
-        ...query.selectorParams,
-      );
-    return row && typeof row.byte_length === "string"
-      ? Number(row.byte_length)
-      : null;
-  }
+  },
+): number | null {
+  const query = currentFileBlobByteLengthQuery(input.selectorPaths);
+  const row = storage.db
+    .prepare(query.sql)
+    .get(
+      input.workspaceId,
+      input.versionId,
+      input.sha256,
+      input.epochLogFloor,
+      ...query.selectorParams,
+    );
+  return row && typeof row.byte_length === "string" ? Number(row.byte_length) : null;
+}
 
-export function currentObjectPath(storage: StorageContext, input: { workspaceId: string; versionId: string; objectId: string }): string | null {
-  const row = storage.db.prepare(
-    `SELECT current.path FROM sync_relay_current_files current
+export function currentObjectPath(
+  storage: StorageContext,
+  input: { workspaceId: string; versionId: string; objectId: string },
+): string | null {
+  const row = storage.db
+    .prepare(
+      `SELECT current.path FROM sync_relay_current_files current
      JOIN sync_relay_object_moments moment
        ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
       AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
@@ -682,16 +757,29 @@ export function currentObjectPath(storage: StorageContext, input: { workspaceId:
        AND moment.relay_seq = (SELECT MAX(latest.relay_seq) FROM sync_relay_object_moments latest
          WHERE latest.workspace_id = moment.workspace_id AND latest.version_id = moment.version_id AND latest.object_id = moment.object_id)
        AND current.state_relay_seq > ?`,
-  ).get(input.workspaceId, input.versionId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
+    )
+    .get(
+      input.workspaceId,
+      input.versionId,
+      input.objectId,
+      storage.getEpochLogFloor(input.workspaceId),
+    );
   return typeof row?.path === "string" ? row.path : null;
 }
 
-export function currentObjectFile(storage: StorageContext, input: {
-  workspaceId: string; versionId: string; objectId: string; epochLogFloor: number;
-}): CurrentFileStateRow | null | "reset" {
+export function currentObjectFile(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    objectId: string;
+    epochLogFloor: number;
+  },
+): CurrentFileStateRow | null | "reset" {
   const params = [input.workspaceId, input.versionId, input.objectId, input.epochLogFloor];
-  const rows = storage.db.prepare(
-    `WITH moments AS MATERIALIZED (
+  const rows = storage.db
+    .prepare(
+      `WITH moments AS MATERIALIZED (
        SELECT workspace_id, version_id, path, relay_seq
        FROM sync_relay_object_moments INDEXED BY idx_sync_relay_object_moments_latest
        WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND relay_seq > ?
@@ -704,23 +792,35 @@ export function currentObjectFile(storage: StorageContext, input: {
        ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
       AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
      ORDER BY moment.relay_seq DESC`,
-  ).all(...params, ...params);
-  const row = rows.find(candidate => typeof candidate.path === "string");
-  if (row) return { path: String(row.path), blobSha256: String(row.blob_sha256),
-    contentKind: row.content_kind === "binary" ? "binary" : "text" };
+    )
+    .all(...params, ...params);
+  const row = rows.find((candidate) => typeof candidate.path === "string");
+  if (row)
+    return {
+      path: String(row.path),
+      blobSha256: String(row.blob_sha256),
+      contentKind: row.content_kind === "binary" ? "binary" : "text",
+    };
   const last = rows.at(-1);
   return last && Number(last.relay_seq) > Number(last.oldest_relay_seq) ? "reset" : null;
 }
 
-export function currentFileObjectId(storage: StorageContext, input: {
-  workspaceId: string; versionId: string; path: string;
-}): string | undefined {
-  const row = storage.db.prepare(
-    `SELECT moment.object_id FROM sync_relay_current_files current
+export function currentFileObjectId(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+  },
+): string | undefined {
+  const row = storage.db
+    .prepare(
+      `SELECT moment.object_id FROM sync_relay_current_files current
      JOIN sync_relay_object_moments moment INDEXED BY idx_sync_relay_object_moments_path
        ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
       AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
      WHERE current.workspace_id = ? AND current.version_id = ? AND current.path = ?`,
-  ).get(input.workspaceId, input.versionId, input.path);
+    )
+    .get(input.workspaceId, input.versionId, input.path);
   return typeof row?.object_id === "string" ? row.object_id : undefined;
 }

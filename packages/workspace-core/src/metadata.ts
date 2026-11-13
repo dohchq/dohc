@@ -24,7 +24,8 @@ export function createWorkspaceManifest(input: {
   kind: WorkspaceKind;
   mode?: WorkspaceMode;
 }): WorkspaceManifest {
-  if (RESERVED_WORKSPACE_IDS.includes(input.workspaceId)) throw new ReservedWorkspaceIdError(input.workspaceId);
+  if (RESERVED_WORKSPACE_IDS.includes(input.workspaceId))
+    throw new ReservedWorkspaceIdError(input.workspaceId);
   return {
     version: 1,
     workspaceId: input.workspaceId,

@@ -1,8 +1,4 @@
-import {
-  Component,
-  type ErrorInfo,
-  type ReactNode,
-} from "react";
+import { Component, type ErrorInfo, type ReactNode } from "react";
 import { reportRendererError } from "../rendererErrorReport";
 
 type EditorErrorBoundaryProps = {
@@ -46,8 +42,8 @@ export class EditorErrorBoundary extends Component<
       >
         <p className="text-sm font-medium text-ink">The editor could not render this document.</p>
         <p className="max-w-md text-xs text-muted">
-          Your workspace is still running. Try rendering this document again, or switch
-          documents and come back.
+          Your workspace is still running. Try rendering this document again, or switch documents
+          and come back.
         </p>
         <button
           type="button"

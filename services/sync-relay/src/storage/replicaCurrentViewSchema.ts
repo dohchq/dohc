@@ -1,5 +1,5 @@
-import type {SqliteDb} from "./types";
-import {currentShareGrantSql} from "./currentShareGrant";
+import type { SqliteDb } from "./types";
+import { currentShareGrantSql } from "./currentShareGrant";
 
 const currentShare = `EXISTS (SELECT 1 FROM sync_relay_shares s JOIN sync_relay_share_grants g ON g.share_id=s.share_id
   WHERE s.workspace_id=sync_relay_replica_cuts.workspace_id AND ${currentShareGrantSql("g", "s")})`;

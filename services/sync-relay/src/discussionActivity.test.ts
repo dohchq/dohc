@@ -27,11 +27,7 @@ describe("DiscussionActivityHub", () => {
       maxWaitersPerShare: 2,
       maxWaitersPerActor: 1,
     });
-    const controllers = [
-      new AbortController(),
-      new AbortController(),
-      new AbortController(),
-    ];
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
     const first = hub.wait("share-a", "actor-a", {
       holdMs: 60_000,
       signal: controllers[0]!.signal,

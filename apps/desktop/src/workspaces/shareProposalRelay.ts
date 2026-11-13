@@ -60,11 +60,7 @@ function text(value: Record<string, unknown>, key: string, at: string): string {
   return field;
 }
 
-function nullableText(
-  value: Record<string, unknown>,
-  key: string,
-  at: string,
-): string | null {
+function nullableText(value: Record<string, unknown>, key: string, at: string): string | null {
   const field = value[key];
   if (field === null) return null;
   if (typeof field !== "string" || field.length === 0) {
@@ -76,18 +72,12 @@ function nullableText(
 function count(value: Record<string, unknown>, key: string, at: string): number {
   const field = value[key];
   if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) {
-    throw unreadable(
-      `${at}.${key} is not a non-negative integer`,
-    );
+    throw unreadable(`${at}.${key} is not a non-negative integer`);
   }
   return field;
 }
 
-function nullableCount(
-  value: Record<string, unknown>,
-  key: string,
-  at: string,
-): number | null {
+function nullableCount(value: Record<string, unknown>, key: string, at: string): number | null {
   if (value[key] === null) return null;
   return count(value, key, at);
 }
@@ -111,10 +101,7 @@ const PROPOSAL_STATES: readonly ShareProposalState[] = [
 // speaking the same protocol as, and every guess picks a wrong button: read
 // as `open` it offers accept on a settled proposal, read as `accepted` it
 // hides work the granter still has to answer.
-function proposalState(
-  value: Record<string, unknown>,
-  at: string,
-): ShareProposalState {
+function proposalState(value: Record<string, unknown>, at: string): ShareProposalState {
   const field = value.state;
   const known = PROPOSAL_STATES.find((state) => state === field);
   if (known === undefined) {
@@ -123,10 +110,7 @@ function proposalState(
   return known;
 }
 
-function operation(
-  value: Record<string, unknown>,
-  at: string,
-): "write" | "delete" {
+function operation(value: Record<string, unknown>, at: string): "write" | "delete" {
   const field = value.operation;
   if (field !== "write" && field !== "delete") {
     throw unreadable(`${at}.operation is not an operation`);
@@ -134,16 +118,11 @@ function operation(
   return field;
 }
 
-function nullableContentKind(
-  value: Record<string, unknown>,
-  at: string,
-): "text" | "binary" | null {
+function nullableContentKind(value: Record<string, unknown>, at: string): "text" | "binary" | null {
   const field = value.afterContentKind;
   if (field === null) return null;
   if (field !== "text" && field !== "binary") {
-    throw unreadable(
-      `${at}.afterContentKind is not a content kind`,
-    );
+    throw unreadable(`${at}.afterContentKind is not a content kind`);
   }
   return field;
 }
@@ -192,9 +171,7 @@ function parseProposal(value: unknown, at: string): ShareProposal {
     shareId: text(proposal, "shareId", at),
     proposedByEmail: nullableText(proposal, "proposedByEmail", at),
     createdAtMs: count(proposal, "createdAtMs", at),
-    ops: array(proposal.ops, `${at}.ops`).map((op, index) =>
-      parseOp(op, `${at}.ops[${index}]`),
-    ),
+    ops: array(proposal.ops, `${at}.ops`).map((op, index) => parseOp(op, `${at}.ops[${index}]`)),
   };
 }
 
@@ -222,19 +199,13 @@ function parseSentProposal(value: unknown, at: string): SentShareProposal {
   };
 }
 
-function parseSettlement(
-  value: unknown,
-  at: string,
-  proposalId: string,
-): ShareProposalSettlement {
+function parseSettlement(value: unknown, at: string, proposalId: string): ShareProposalSettlement {
   const settled = record(value, at);
   const answered = text(settled, "proposalId", at);
   // The relay answering about another proposal is not a settlement this
   // client can report — it would mark the wrong row settled.
   if (answered !== proposalId) {
-    throw unreadable(
-      `${at}.proposalId answered ${answered} for ${proposalId}`,
-    );
+    throw unreadable(`${at}.proposalId answered ${answered} for ${proposalId}`);
   }
   return { proposalId: answered, state: proposalState(settled, at) };
 }
@@ -254,10 +225,7 @@ export async function listShareProposals(input: {
   workspaceId: string;
 }): Promise<ShareProposalSummary[]> {
   const body = record(
-    await relayFetch(
-      input.relay,
-      `/sync/${encodeURIComponent(input.workspaceId)}/proposals`,
-    ),
+    await relayFetch(input.relay, `/sync/${encodeURIComponent(input.workspaceId)}/proposals`),
     "proposals response",
   );
   return array(body.proposals, "proposals").map((proposal, index) =>
@@ -289,9 +257,7 @@ export async function readShareProposal(input: {
   // The relay answering about another proposal is not a review this client can
   // show — it would put one sender's changes under another's name.
   if (proposal.proposalId !== input.proposalId) {
-    throw unreadable(
-      `proposal answered ${proposal.proposalId} for ${input.proposalId}`,
-    );
+    throw unreadable(`proposal answered ${proposal.proposalId} for ${input.proposalId}`);
   }
   return proposal;
 }
@@ -322,9 +288,7 @@ export async function readShareProposalOp(input: {
   // The relay answering about another op is not a file this review can show —
   // it would put one file's content under another file's row.
   if (op.opIndex !== input.opIndex) {
-    throw unreadable(
-      `proposal op answered index ${op.opIndex} for ${input.opIndex}`,
-    );
+    throw unreadable(`proposal op answered index ${op.opIndex} for ${input.opIndex}`);
   }
   return op;
 }
@@ -359,10 +323,7 @@ export async function listMyShareProposals(input: {
   shareId: string;
 }): Promise<SentShareProposal[]> {
   const body = record(
-    await relayFetch(
-      input.relay,
-      `/sync/shares/${encodeURIComponent(input.shareId)}/proposals`,
-    ),
+    await relayFetch(input.relay, `/sync/shares/${encodeURIComponent(input.shareId)}/proposals`),
     "sent proposals response",
   );
   return array(body.proposals, "sent proposals").map((proposal, index) =>

@@ -68,9 +68,7 @@ export interface WorkspaceDatabaseWorkerOwner {
 export interface WorkspaceDatabaseWorkerOwnerOptions {
   workerUrl?: URL;
   workerFactory?: (url: URL) => WorkerAdapter;
-  onRequestStarted?: (
-    request: Pick<WorkspaceDatabaseWorkerRequest, "id" | "kind">,
-  ) => void;
+  onRequestStarted?: (request: Pick<WorkspaceDatabaseWorkerRequest, "id" | "kind">) => void;
   unref?: boolean;
 }
 
@@ -95,15 +93,12 @@ interface QueuedRequest<Result extends WorkspaceDatabaseWorkerResult> {
 
 function cancellationMessage(kind: RequestWithoutId["kind"]): string {
   if (kind === "import-data") return "Database import was cancelled.";
-  return kind === "edit-path"
-    ? "Database edit was cancelled."
-    : "Database read was cancelled.";
+  return kind === "edit-path" ? "Database edit was cancelled." : "Database read was cancelled.";
 }
 
-function requestError(response: Extract<
-  WorkspaceDatabaseWorkerResponse,
-  { kind: "error" }
->): Error {
+function requestError(
+  response: Extract<WorkspaceDatabaseWorkerResponse, { kind: "error" }>,
+): Error {
   const error = new Error(response.error.message);
   error.name = response.error.name;
   if (response.error.stack) error.stack = response.error.stack;
@@ -119,10 +114,8 @@ export function createWorkspaceDatabaseWorkerOwner(
   const defaultWorkerFile = import.meta.url.endsWith(".ts")
     ? "workspaceDatabaseThread.ts"
     : "workspace-database-worker.js";
-  const workerUrl =
-    options.workerUrl ?? new URL(defaultWorkerFile, import.meta.url);
-  const workerFactory =
-    options.workerFactory ?? ((url: URL) => new Worker(url) as WorkerAdapter);
+  const workerUrl = options.workerUrl ?? new URL(defaultWorkerFile, import.meta.url);
+  const workerFactory = options.workerFactory ?? ((url: URL) => new Worker(url) as WorkerAdapter);
   const queue: Array<QueuedRequest<WorkspaceDatabaseWorkerResult>> = [];
   let worker: WorkerAdapter | null = null;
   let active: QueuedRequest<WorkspaceDatabaseWorkerResult> | null = null;
@@ -131,9 +124,7 @@ export function createWorkspaceDatabaseWorkerOwner(
   let disposePromise: Promise<void> | null = null;
   let resolveDrained: (() => void) | null = null;
 
-  function removeAbortListener(
-    entry: QueuedRequest<WorkspaceDatabaseWorkerResult>,
-  ): void {
+  function removeAbortListener(entry: QueuedRequest<WorkspaceDatabaseWorkerResult>): void {
     if (entry.abortListener) {
       entry.signal?.removeEventListener("abort", entry.abortListener);
       entry.abortListener = undefined;
@@ -270,9 +261,7 @@ export function createWorkspaceDatabaseWorkerOwner(
         entry.abortListener = () => {
           entry.aborted = true;
           if (entry.dispatched) return;
-          const index = queue.indexOf(
-            entry as QueuedRequest<WorkspaceDatabaseWorkerResult>,
-          );
+          const index = queue.indexOf(entry as QueuedRequest<WorkspaceDatabaseWorkerResult>);
           if (index >= 0) queue.splice(index, 1);
           settle(entry as QueuedRequest<WorkspaceDatabaseWorkerResult>, {
             error: new Error(entry.cancelMessage),

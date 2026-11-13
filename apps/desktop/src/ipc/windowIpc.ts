@@ -1,15 +1,27 @@
 import type { BrowserWindow as ElectronWindow } from "electron";
 import {
-  DesktopUserSettingsResult, DesktopMarksResult, ExitRoundAnswerPayload, LaunchMarksResult,
-  OpenExternalUrlPayload, ReloadRendererRequestPayload, SetTitlebarThemePayload,
-  StepWindowZoomPayload, VersionRoundAnswerPayload,
+  DesktopUserSettingsResult,
+  DesktopMarksResult,
+  ExitRoundAnswerPayload,
+  LaunchMarksResult,
+  OpenExternalUrlPayload,
+  ReloadRendererRequestPayload,
+  SetTitlebarThemePayload,
+  StepWindowZoomPayload,
+  VersionRoundAnswerPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { isSafeExternalUrl } from "../security/electronSecurity";
-import type { DesktopUserSettingsResult as UserSettingsResult, ZoomStep } from "../settings/userSettings";
+import type {
+  DesktopUserSettingsResult as UserSettingsResult,
+  ZoomStep,
+} from "../settings/userSettings";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
 import type { createVersionRounds } from "../versionRounds";
-import type { rememberChromeTheme as RememberChromeTheme, titleBarOverlayOptions as TitleBarOverlayOptions } from "../window/createMainWindow";
+import type {
+  rememberChromeTheme as RememberChromeTheme,
+  titleBarOverlayOptions as TitleBarOverlayOptions,
+} from "../window/createMainWindow";
 import { palette } from "../renderer/tokens";
 
 export function createWindowIpc<
@@ -23,8 +35,12 @@ export function createWindowIpc<
   prepareForRendererReload(sender: Sender, rendererDocumentId: string): Promise<boolean>;
   shell: { openExternal(url: string): Promise<void> };
   BrowserWindow: {
-    fromWebContents(sender: Sender):
-      (Pick<ElectronWindow, "setBackgroundColor"> & Partial<Pick<ElectronWindow, "setTitleBarOverlay">>) | null;
+    fromWebContents(
+      sender: Sender,
+    ):
+      | (Pick<ElectronWindow, "setBackgroundColor"> &
+          Partial<Pick<ElectronWindow, "setTitleBarOverlay">>)
+      | null;
   };
   rememberChromeTheme: typeof RememberChromeTheme;
   titleBarOverlayOptions: typeof TitleBarOverlayOptions;
@@ -33,16 +49,35 @@ export function createWindowIpc<
   versionRounds: Pick<ReturnType<typeof createVersionRounds<unknown>>, "answer">;
   quitGuard: Pick<ReturnType<typeof createQuitGuard>, "hold" | "resume">;
   isTrustedFrame(url: string): boolean;
-  launchMarks: Pick<typeof import("../performance/launchMarks").launchMarks, "firstPaint" | "snapshot">;
-  desktopMarks: Pick<typeof import("../performance/desktopMarks").desktopMarks, "markOnce" | "snapshot">;
+  launchMarks: Pick<
+    typeof import("../performance/launchMarks").launchMarks,
+    "firstPaint" | "snapshot"
+  >;
+  desktopMarks: Pick<
+    typeof import("../performance/desktopMarks").desktopMarks,
+    "markOnce" | "snapshot"
+  >;
   logLaunchMarksOnce(): void;
   app: { readonly isPackaged: boolean };
 }) {
   const {
-    registerHandler, registerEvent, assertTrustedSender, prepareForRendererReload,
-    shell, BrowserWindow, rememberChromeTheme, titleBarOverlayOptions,
-    stepWindowZoom, exitRounds, versionRounds, quitGuard, isTrustedFrame, launchMarks,
-    desktopMarks, logLaunchMarksOnce, app,
+    registerHandler,
+    registerEvent,
+    assertTrustedSender,
+    prepareForRendererReload,
+    shell,
+    BrowserWindow,
+    rememberChromeTheme,
+    titleBarOverlayOptions,
+    stepWindowZoom,
+    exitRounds,
+    versionRounds,
+    quitGuard,
+    isTrustedFrame,
+    launchMarks,
+    desktopMarks,
+    logLaunchMarksOnce,
+    app,
   } = dependencies;
 
   function registerReload(): void {
@@ -50,10 +85,7 @@ export function createWindowIpc<
       assertTrustedSender(event);
       const input = ReloadRendererRequestPayload.parse(payload);
       const sender = event.sender;
-      const accepted = await prepareForRendererReload(
-        sender,
-        input.rendererDocumentId,
-      );
+      const accepted = await prepareForRendererReload(sender, input.rendererDocumentId);
       if (accepted && !sender.isDestroyed()) sender.reload();
     });
   }

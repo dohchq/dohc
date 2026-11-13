@@ -12,7 +12,19 @@ import { REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions"
 
 import { createTestScratch } from "./testTemp";
 
-import { engine, compiledRelayMain, LiveDaemonCapture, pushUntilDrained, openLiveDaemonCapture, openJoinedDaemonCapture, openIndependentPlaintextLineage, OpenEditor, openEditor, typeAtEnd, shown } from "./twoDaemonSync.fixture";
+import {
+  engine,
+  compiledRelayMain,
+  LiveDaemonCapture,
+  pushUntilDrained,
+  openLiveDaemonCapture,
+  openJoinedDaemonCapture,
+  openIndependentPlaintextLineage,
+  OpenEditor,
+  openEditor,
+  typeAtEnd,
+  shown,
+} from "./twoDaemonSync.fixture";
 
 it.skipIf(engine.missing)(
   "preserves edits made on A while B reviews a seed conflict and converges without retries",
@@ -28,12 +40,15 @@ it.skipIf(engine.missing)(
     const rootA = await createTestScratch("dohc-diverged-seed-a-");
     const rootB = await createTestScratch("dohc-diverged-seed-b-");
     const relayRoot = await createTestScratch("dohc-diverged-seed-relay-");
-    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relay = await spawnSyncRelay({
+      dbPath: join(relayRoot, "relay", "relay.sqlite"),
+      compiledMain: compiledRelayMain,
+    });
     let daemonA: LiveDaemonCapture | null = null;
     let daemonB: LiveDaemonCapture | null = null;
     const editors: OpenEditor[] = [];
     const pull = (daemon: LiveDaemonCapture) =>
-      daemon.relay.pull(apply => daemon.capture.runRelaySync(apply));
+      daemon.relay.pull((apply) => daemon.capture.runRelaySync(apply));
     try {
       daemonA = await openLiveDaemonCapture({
         workspaceId,
@@ -73,8 +88,8 @@ it.skipIf(engine.missing)(
       await typeAtEnd(editingA, "saved on A during review\n");
       const before = Y.encodeStateVector(editingA.doc);
       editingA.doc.getText("plainText").insert(savedA.length, unsaved);
-      await editingA.session.applyDecidedLocalUpdate(
-        () => Y.encodeStateAsUpdate(editingA.doc, before),
+      await editingA.session.applyDecidedLocalUpdate(() =>
+        Y.encodeStateAsUpdate(editingA.doc, before),
       );
       expect(shown(editingA)).toBe(liveA);
       expect(await readFile(join(rootA, path), "utf8")).toBe(savedA);
@@ -167,10 +182,16 @@ it.skipIf(engine.missing)(
         });
         const idle = await pull(daemon);
         expect(idle).toMatchObject({
-          fetched: 0, applied: 0, conflictsOpened: 0, sharingDeclined: [],
+          fetched: 0,
+          applied: 0,
+          conflictsOpened: 0,
+          sharingDeclined: [],
         });
         expect(await pull(daemon)).toMatchObject({
-          fetched: 0, applied: 0, nextCursor: idle.nextCursor, sharingDeclined: [],
+          fetched: 0,
+          applied: 0,
+          nextCursor: idle.nextCursor,
+          sharingDeclined: [],
         });
       }
     } finally {

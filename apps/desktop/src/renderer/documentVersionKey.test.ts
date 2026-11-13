@@ -13,9 +13,13 @@ it("moves the key once for each change main makes, whichever shell reads it firs
   act(() => observeLiveSessions("ws-observe", 1, false));
   act(() => observeLiveSessions("ws-observe", 1, true));
   expect(key.result.current).toBe(1);
-  act(() => { observeLiveSessions("ws-observe", 2, true); observeLiveSessions("ws-observe", 2, true); });
+  act(() => {
+    observeLiveSessions("ws-observe", 2, true);
+    observeLiveSessions("ws-observe", 2, true);
+  });
   expect(key.result.current).toBe(2);
-  shellA(); shellB();
+  shellA();
+  shellB();
   watchLiveSessions("ws-observe");
   act(() => observeLiveSessions("ws-observe", 1, false));
   act(() => observeLiveSessions("ws-observe", 2, true));

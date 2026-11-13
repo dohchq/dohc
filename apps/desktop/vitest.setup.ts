@@ -30,10 +30,7 @@ import { afterEach, vi } from "vitest";
 // Registered as a vitest setupFile, so it runs inside each test file's own
 // environment. The typeof guard keeps it inert in the node-environment suites,
 // which have no document at all.
-if (
-  typeof document !== "undefined" &&
-  typeof document.elementFromPoint !== "function"
-) {
+if (typeof document !== "undefined" && typeof document.elementFromPoint !== "function") {
   Object.defineProperty(document, "elementFromPoint", {
     configurable: true,
     writable: true,
@@ -45,10 +42,7 @@ if (
 // strip calls it to reveal the active tab, which a test that gives elements a
 // width reaches. With nothing laid out there is nothing to scroll, so it does
 // nothing. A test that checks scrolling installs its own.
-if (
-  typeof Element !== "undefined" &&
-  typeof Element.prototype.scrollTo !== "function"
-) {
+if (typeof Element !== "undefined" && typeof Element.prototype.scrollTo !== "function") {
   Object.defineProperty(Element.prototype, "scrollTo", {
     configurable: true,
     writable: true,
@@ -59,10 +53,7 @@ if (
 // jsdom runs no animations and has no document.getAnimations. A theme change
 // reads it to end the color transitions it starts (theme.ts); with nothing
 // animated, no animation is the honest answer.
-if (
-  typeof document !== "undefined" &&
-  typeof document.getAnimations !== "function"
-) {
+if (typeof document !== "undefined" && typeof document.getAnimations !== "function") {
   Object.defineProperty(document, "getAnimations", {
     configurable: true,
     writable: true,
@@ -83,9 +74,7 @@ const waitFor = vi.waitFor;
 vi.waitFor = (callback, options) =>
   waitFor(
     callback,
-    typeof options === "number" || vi.isFakeTimers()
-      ? options
-      : { timeout: 10_000, ...options },
+    typeof options === "number" || vi.isFakeTimers() ? options : { timeout: 10_000, ...options },
   );
 
 // jsdom has no Worker. Every opening note asks the note-check worker
@@ -93,7 +82,8 @@ vi.waitFor = (callback, options) =>
 // tests answer that one worker in-thread with the same check. Any other
 // worker still fails to construct, as it does without this.
 if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
-  const { isLossyDocumentState, isLossyMarkdown } = await import("@dohc/ydoc-projection/lossy-markdown");
+  const { isLossyDocumentState, isLossyMarkdown } =
+    await import("@dohc/ydoc-projection/lossy-markdown");
   class NoteCheckWorker {
     onmessage: ((event: { data: unknown }) => void) | null = null;
     onerror: ((event: unknown) => void) | null = null;
@@ -103,9 +93,18 @@ if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
         throw new ReferenceError("Worker is not defined");
       }
     }
-    postMessage(data: { id: number; markdown?: string; state?: Uint8Array; headSha256?: string | null }): void {
+    postMessage(data: {
+      id: number;
+      markdown?: string;
+      state?: Uint8Array;
+      headSha256?: string | null;
+    }): void {
       void Promise.resolve().then(() => {
-        const answer = { lossy: data.state ? isLossyDocumentState(data.state, data.headSha256 ?? null) : isLossyMarkdown(data.markdown ?? "") };
+        const answer = {
+          lossy: data.state
+            ? isLossyDocumentState(data.state, data.headSha256 ?? null)
+            : isLossyMarkdown(data.markdown ?? ""),
+        };
         if (!this.#closed) this.onmessage?.({ data: { id: data.id, ...answer } });
       });
     }
@@ -113,7 +112,11 @@ if (typeof window !== "undefined" && typeof globalThis.Worker === "undefined") {
       this.#closed = true;
     }
   }
-  Object.defineProperty(globalThis, "Worker", { configurable: true, writable: true, value: NoteCheckWorker });
+  Object.defineProperty(globalThis, "Worker", {
+    configurable: true,
+    writable: true,
+    value: NoteCheckWorker,
+  });
 }
 // Tests reuse made-up content hashes for different text, and some stub the
 // worker, so no verdict or check outlives its test. A shared test worker keeps

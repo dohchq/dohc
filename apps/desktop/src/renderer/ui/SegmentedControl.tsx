@@ -50,7 +50,8 @@ export function useRadioGroup<T extends string>(props: {
     const from = focused >= 0 ? focused : tabbableIndex;
     let target: number;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") target = step(from, 1);
-    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") target = step(Math.max(from, 0), -1);
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp")
+      target = step(Math.max(from, 0), -1);
     else if (event.key === "Home") target = firstEnabled;
     else if (event.key === "End") target = step(0, -1);
     else return;

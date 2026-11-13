@@ -50,5 +50,5 @@ export const WORKSPACE_API_REQUEST_LOG = createRequestLog("workspace-api", [
 
 /** The pattern a path under /api/auth/ logs as. */
 export function authPattern(path: string): (typeof AUTH_PATTERNS)[number] | "/api/auth/*" {
-  return AUTH_ROUTES.has(path) ? path as (typeof AUTH_PATTERNS)[number] : "/api/auth/*";
+  return AUTH_ROUTES.has(path) ? (path as (typeof AUTH_PATTERNS)[number]) : "/api/auth/*";
 }

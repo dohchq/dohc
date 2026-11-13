@@ -6,30 +6,57 @@ import { describe, expect, it, vi } from "vitest";
 import type { OwnerLiveQuarantine, SyncStatusResult } from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { LIVE_EDITING_PAUSED_REASON } from "./readOnlyReasons";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import {
+  DesktopWorkspaceShell,
+  WORKSPACE,
+  OTHER_WORKSPACE,
+  SYNC_STATUS,
+  makeBridge,
+  renderShell,
+  enterMarkdownSource,
+  shellBootstrapProps,
+} from "./DesktopWorkspaceShell.testHarness";
 
 // While this computer's queue for a note takes no more edits, the engine
 // refuses each one, so the note's editor stays read-only instead of taking
 // typing it then sets aside. Each way out of the pause makes it editable again.
 describe("a note whose live editing is paused", () => {
-  const ROW: OwnerLiveQuarantine = { objectId: "object-a", path: "a.md", reason: "invalid-update", storedOn: "this-computer",
-    incident: "outbox:delivery:0", recovery: "paused" };
-  const withRows = (...rows: OwnerLiveQuarantine[]): SyncStatusResult => ({ ...SYNC_STATUS, ownerLiveQuarantines: rows });
+  const ROW: OwnerLiveQuarantine = {
+    objectId: "object-a",
+    path: "a.md",
+    reason: "invalid-update",
+    storedOn: "this-computer",
+    incident: "outbox:delivery:0",
+    recovery: "paused",
+  };
+  const withRows = (...rows: OwnerLiveQuarantine[]): SyncStatusResult => ({
+    ...SYNC_STATUS,
+    ownerLiveQuarantines: rows,
+  });
 
   async function openNote(bridge: ReturnType<typeof makeBridge>) {
     const user = userEvent.setup();
-    const row = (await screen.findAllByTestId("tree-row")).find((candidate) => candidate.dataset.path === "a.md")!;
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
     await user.click(row);
     await screen.findByTestId("view-markdown");
-    return { user, toggle: async () => await screen.findByTestId("markdown-edit-toggle"), status: (next: SyncStatusResult) => {
-      bridge.getSyncStatus.mockResolvedValue(next);
-      const reads = bridge.getSyncStatus.mock.calls.length;
-      act(() => bridge.emitWorkspaceActivity());
-      return waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
-    } };
+    return {
+      user,
+      toggle: async () => await screen.findByTestId("markdown-edit-toggle"),
+      status: (next: SyncStatusResult) => {
+        bridge.getSyncStatus.mockResolvedValue(next);
+        const reads = bridge.getSyncStatus.mock.calls.length;
+        act(() => bridge.emitWorkspaceActivity());
+        return waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
+      },
+    };
   }
 
-  const expectPaused = async (toggle: () => Promise<HTMLElement>, reason = LIVE_EDITING_PAUSED_REASON) => {
+  const expectPaused = async (
+    toggle: () => Promise<HTMLElement>,
+    reason = LIVE_EDITING_PAUSED_REASON,
+  ) => {
     await waitFor(async () => expect((await toggle()).getAttribute("aria-disabled")).toBe("true"));
     expect((await toggle()).getAttribute("title")).toBe(reason);
   };
@@ -61,10 +88,17 @@ describe("a note whose live editing is paused", () => {
   it("edits the same path in another workspace", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     let current: Workspace = WORKSPACE;
-    bridge.getSyncStatus = vi.fn(async () => current.workspaceId === WORKSPACE.workspaceId ? withRows(ROW) : SYNC_STATUS);
+    bridge.getSyncStatus = vi.fn(async () =>
+      current.workspaceId === WORKSPACE.workspaceId ? withRows(ROW) : SYNC_STATUS,
+    );
     const shell = (workspace: Workspace) => (
-      <DesktopWorkspaceShell key={workspace.workspaceId} workspace={workspace} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
-        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      <DesktopWorkspaceShell
+        key={workspace.workspaceId}
+        workspace={workspace}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
     );
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(WORKSPACE));

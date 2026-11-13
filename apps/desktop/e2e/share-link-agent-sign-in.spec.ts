@@ -2,11 +2,25 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { shareWebRequest, signInLinkAgent, startAgentCallback, stopAgentCallback, type AgentCallback } from "./helpers/linkAgent";
+import {
+  shareWebRequest,
+  signInLinkAgent,
+  startAgentCallback,
+  stopAgentCallback,
+  type AgentCallback,
+} from "./helpers/linkAgent";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
-import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
+import {
+  sharedDatasetViewerOrigin,
+  startSharedDatasetBrowser,
+} from "./helpers/sharedDatasetBrowser";
 import { holdSystemClipboard } from "./helpers/systemClipboard";
-import { relayAdoptedIdentity, spawnSyncRelay, type RelayWorkspaceIdentity, type SyncRelayHandle } from "./helpers/syncRelay";
+import {
+  relayAdoptedIdentity,
+  spawnSyncRelay,
+  type RelayWorkspaceIdentity,
+  type SyncRelayHandle,
+} from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -55,7 +69,11 @@ async function closeDialog(dialog: Locator): Promise<void> {
 // mcpChallenge(origin, secret, true), a 401 with no body.
 async function expectInvalidToken(response: Response, address: string): Promise<void> {
   const { origin, pathname } = new URL(address);
-  expect({ status: response.status, challenge: response.headers.get("www-authenticate"), body: await response.text() }).toEqual({
+  expect({
+    status: response.status,
+    challenge: response.headers.get("www-authenticate"),
+    body: await response.text(),
+  }).toEqual({
     status: 401,
     challenge: `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource${pathname}", error="invalid_token"`,
     body: "",
@@ -65,8 +83,11 @@ async function expectInvalidToken(response: Response, address: string): Promise<
 // The token endpoint's refusal of a refresh the relay will not grant, with
 // share-web's own no-store on every answer.
 async function expectInvalidGrant(response: Response): Promise<void> {
-  expect({ status: response.status, cache: response.headers.get("cache-control"), body: await response.json() })
-    .toEqual({ status: 400, cache: "private, no-store", body: { error: "invalid_grant" } });
+  expect({
+    status: response.status,
+    cache: response.headers.get("cache-control"),
+    body: await response.json(),
+  }).toEqual({ status: 400, cache: "private, no-store", body: { error: "invalid_grant" } });
 }
 
 test("@share-link-agent-sign-in an agent signs in to a share link, keeps working across a restart and a refresh, and stops at Disconnect", async () => {
@@ -80,15 +101,37 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
   try {
     callback = await startAgentCallback();
     await seedWorkspaceManifest(temp, WORKSPACE_ID);
-    await writeWorkspaceFiles(temp, [{ path: PATH, contents: PLAN },{ path: OTHER_PATH, contents: "# Budget\n\nCabin, 400.\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: PATH, contents: PLAN },
+      { path: OTHER_PATH, contents: "# Budget\n\nCabin, 400.\n" },
+    ]);
     relay = await spawnSyncRelay({
       dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
-      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin },
+      linkBoundary: {
+        linkKey: randomBytes(32).toString("base64url"),
+        relayExchangeKey,
+        publicViewerOrigin: sharedDatasetViewerOrigin,
+      },
     });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: TOKEN, workspaceId: WORKSPACE_ID });
-    await seedWorkspaceRegistry(temp, [{ workspaceId: WORKSPACE_ID, rootPath: temp.rootPath, remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER } }]);
-    await seedCloudCredentials(temp, { serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: `${OWNER}@dohc.test`, userId: OWNER, token: TOKEN });
-    shared = await startSharedDatasetBrowser({ relayUrl: relay.baseUrl, exchangeKey: relayExchangeKey });
+    await seedWorkspaceRegistry(temp, [
+      {
+        workspaceId: WORKSPACE_ID,
+        rootPath: temp.rootPath,
+        remote: { serverUrl: relay.baseUrl, ownerUserId: OWNER },
+      },
+    ]);
+    await seedCloudCredentials(temp, {
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: `${OWNER}@dohc.test`,
+      userId: OWNER,
+      token: TOKEN,
+    });
+    shared = await startSharedDatasetBrowser({
+      relayUrl: relay.baseUrl,
+      exchangeKey: relayExchangeKey,
+    });
     const { handle } = shared;
     desktop = await launchDesktopApp({
       workspace: temp,
@@ -99,16 +142,31 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
 
     // A link shares what the relay holds, so both files reach it first.
     let identity: RelayWorkspaceIdentity | null = null;
-    await expect.poll(async () => {
-      identity ??= relayAdoptedIdentity(relay!.dbPath, WORKSPACE_ID);
-      if (identity === null) return false;
-      const query = new URLSearchParams({ since: "0", limit: "500", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity });
-      const response = await fetch(`${relay!.baseUrl}/sync/${encodeURIComponent(WORKSPACE_ID)}/log?${query.toString()}`, { headers: { authorization: `Bearer ${TOKEN}` } });
-      if (response.status === 409) identity = null;
-      if (!response.ok) return false;
-      const body = (await response.json()) as { ops: Array<{ payload?: { path?: string } }> };
-      return [PATH, OTHER_PATH].every((path) => body.ops.some((op) => op.payload?.path === path));
-    }, { timeout: 90_000, intervals: [1_000] }).toBe(true);
+    await expect
+      .poll(
+        async () => {
+          identity ??= relayAdoptedIdentity(relay!.dbPath, WORKSPACE_ID);
+          if (identity === null) return false;
+          const query = new URLSearchParams({
+            since: "0",
+            limit: "500",
+            replicationEpoch: identity.replicationEpoch,
+            streamIdentity: identity.streamIdentity,
+          });
+          const response = await fetch(
+            `${relay!.baseUrl}/sync/${encodeURIComponent(WORKSPACE_ID)}/log?${query.toString()}`,
+            { headers: { authorization: `Bearer ${TOKEN}` } },
+          );
+          if (response.status === 409) identity = null;
+          if (!response.ok) return false;
+          const body = (await response.json()) as { ops: Array<{ payload?: { path?: string } }> };
+          return [PATH, OTHER_PATH].every((path) =>
+            body.ops.some((op) => op.payload?.path === path),
+          );
+        },
+        { timeout: 90_000, intervals: [1_000] },
+      )
+      .toBe(true);
 
     // Another link, whose address this agent's token must not open.
     let dialog = await openLinkPane(page, OTHER_PATH);
@@ -119,7 +177,10 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
 
     // The Comment link the agents use, and the address Copy for an agent gives.
     dialog = await openLinkPane(page, PATH);
-    await dialog.getByRole("radiogroup", { name: "Link access" }).getByRole("radio", { name: "Comment", exact: true }).click();
+    await dialog
+      .getByRole("radiogroup", { name: "Link access" })
+      .getByRole("radio", { name: "Comment", exact: true })
+      .click();
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
     const linkUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
     expect(linkUrl.origin).toBe(sharedDatasetViewerOrigin);
@@ -133,34 +194,64 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     expect(address).toBe(`${sharedDatasetViewerOrigin}/mcp/s/${secret}`);
     await closeDialog(dialog);
 
-    const claude = await signInLinkAgent({ handle, browser: shared.browser, callback, address, clientName: "Claude Code" });
-    const codex = await signInLinkAgent({ handle, browser: shared.browser, callback, address, clientName: "Codex" });
+    const claude = await signInLinkAgent({
+      handle,
+      browser: shared.browser,
+      callback,
+      address,
+      clientName: "Claude Code",
+    });
+    const codex = await signInLinkAgent({
+      handle,
+      browser: shared.browser,
+      callback,
+      address,
+      clientName: "Codex",
+    });
     const listed = await claude.tool("dohc_list_files");
     expect(listed.status).toBe(200);
     const files = (listed.result?.files ?? []) as Array<{ path: string; blobSha256: string }>;
     expect(files.map((file) => file.path)).toEqual([expect.stringMatching(/(^|\/)plan\.md$/u)]);
-    expect(await claude.tool("dohc_read_file", { blobSha256: files[0]!.blobSha256 }))
-      .toMatchObject({ status: 200, result: { ok: true, encoding: "utf8", content: expect.stringContaining("Pack light.") } });
+    expect(await claude.tool("dohc_read_file", { blobSha256: files[0]!.blobSha256 })).toMatchObject(
+      {
+        status: 200,
+        result: { ok: true, encoding: "utf8", content: expect.stringContaining("Pack light.") },
+      },
+    );
     expect((await codex.tool("dohc_share_status")).status).toBe(200);
 
     // 3. A share-web restart keeps no state an agent needs: the relay holds it.
     shared.restart();
-    expect(await claude.tool("dohc_list_files")).toMatchObject({ status: 200, result: { ok: true } });
+    expect(await claude.tool("dohc_list_files")).toMatchObject({
+      status: 200,
+      result: { ok: true },
+    });
 
     // 4. A wrong resource: the token is refused at another link's address,
     // and so is a refresh naming it. Neither ends the agent's connection.
-    await expectInvalidToken(await shareWebRequest(handle, otherAddress, {
-      method: "POST",
-      headers: { authorization: `Bearer ${claude.accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    }), otherAddress);
+    await expectInvalidToken(
+      await shareWebRequest(handle, otherAddress, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${claude.accessToken}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }),
+      otherAddress,
+    );
     await expectInvalidGrant(await claude.refresh(claude.refreshToken!, otherAddress));
     expect((await claude.tool("dohc_share_status")).status).toBe(200);
 
     // 6. Agent authorship: the post is the agent's, under the name its client
     // reported, as a link author the owner can block.
-    expect(await claude.tool("dohc_post_discussion", { body: COMMENT, idempotencyKey: "agent-sign-in-e2e" }))
-      .toMatchObject({ status: 200, result: { ok: true } });
+    expect(
+      await claude.tool("dohc_post_discussion", {
+        body: COMMENT,
+        idempotencyKey: "agent-sign-in-e2e",
+      }),
+    ).toMatchObject({ status: 200, result: { ok: true } });
     dialog = await openLinkPane(page, PATH);
     await dialog.getByRole("button", { name: "Comments", exact: true }).click();
     const comment = dialog.locator("[data-comment-message-id]").filter({ hasText: COMMENT });
@@ -171,7 +262,9 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     // The link's Agents list names both, and the post is Claude Code's last action.
     const agents = dialog.getByRole("region", { name: "Agents" });
     await expect(agents.getByRole("listitem")).toHaveCount(2);
-    await expect(agents.getByRole("listitem").filter({ hasText: "Claude Code" })).toContainText("Last action");
+    await expect(agents.getByRole("listitem").filter({ hasText: "Claude Code" })).toContainText(
+      "Last action",
+    );
 
     // 5. Disconnect from the list: that agent's next call gets the challenge,
     // and the other agent keeps working.
@@ -186,7 +279,11 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     // token is refused and ends the connection, new tokens included.
     const refreshed = await claude.refresh(claude.refreshToken!);
     expect(refreshed.status).toBe(200);
-    const next = (await refreshed.json()) as { access_token: string; token_type: string; refresh_token: string };
+    const next = (await refreshed.json()) as {
+      access_token: string;
+      token_type: string;
+      refresh_token: string;
+    };
     expect(next.token_type).toBe("Bearer");
     expect(next.access_token).not.toBe(claude.accessToken);
     expect(next.refresh_token).not.toBe(claude.refreshToken);
@@ -199,9 +296,17 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     expect(desktop.logs.filter((entry) => entry.text.includes(secret))).toEqual([]);
     expect(shared.failures).toEqual([]);
   } finally {
-    try { await shared?.close(); } finally {
-      try { await stopAgentCallback(callback); } finally {
-        try { await relay?.stop(); } finally { await cleanupDesktopWorkspace(desktop, temp); }
+    try {
+      await shared?.close();
+    } finally {
+      try {
+        await stopAgentCallback(callback);
+      } finally {
+        try {
+          await relay?.stop();
+        } finally {
+          await cleanupDesktopWorkspace(desktop, temp);
+        }
       }
     }
   }

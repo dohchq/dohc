@@ -25,9 +25,17 @@ const SYNC_AGAIN = "Sync this workspace in Settings → Sync and sharing, then t
  * listing did not see. It is written before the pull request is sent, and
  * only the next listing replaces it.
  */
-export type RosterObservation = { listing: RosterListing | null; checkedAtMs: number | null; freshness: "fresh" | "stale" | "unknown" };
+export type RosterObservation = {
+  listing: RosterListing | null;
+  checkedAtMs: number | null;
+  freshness: "fresh" | "stale" | "unknown";
+};
 
-export type ShareRoster = RosterListing & { version: number; listedAtMs: number; pulledAfter?: true };
+export type ShareRoster = RosterListing & {
+  version: number;
+  listedAtMs: number;
+  pulledAfter?: true;
+};
 
 /**
  * What the reach check knows on this computer.
@@ -79,7 +87,12 @@ interface RosterState {
   // `partial` is true when the relay answered part of one of them.
   noAnswer: { next: string; partial: boolean } | null;
   // A listing the registry has not saved yet.
-  unsaved: { listing: RosterListing; pulledAfter: boolean; listedAtMs: number; context: unknown } | null;
+  unsaved: {
+    listing: RosterListing;
+    pulledAfter: boolean;
+    listedAtMs: number;
+    context: unknown;
+  } | null;
   running: Promise<"requested" | "unavailable"> | null;
   again: boolean;
   retry: ReturnType<typeof setTimeout> | null;
@@ -108,7 +121,12 @@ interface RosterState {
  */
 export function createShareRosters(dependencies: {
   findWorkspace(workspaceId: string): RegistryEntry | null;
-  saveRoster(workspaceId: string, listing: RosterListing, pulledAfter: boolean, listedAtMs: number): void;
+  saveRoster(
+    workspaceId: string,
+    listing: RosterListing,
+    pulledAfter: boolean,
+    listedAtMs: number,
+  ): void;
   // Records that a pull started after the stored listing.
   markRosterPulled(workspaceId: string): void;
   listRoster(workspace: RegistryEntry): Promise<RosterAnswer>;
@@ -135,9 +153,23 @@ export function createShareRosters(dependencies: {
     let state = states.get(workspaceId);
     if (!state || state.retired) {
       state = {
-        timer: null, lastAttemptMs: null, pullStarts: 0, pullsRunning: 0, markFailed: false,
-        noAnswer: null, unsaved: null, running: null, again: false, retry: null,
-        changeGeneration: 0, checkedAtMs: null, checkedContext: null, invalidated: false, retired: false, parsedSource: undefined, parsed: null,
+        timer: null,
+        lastAttemptMs: null,
+        pullStarts: 0,
+        pullsRunning: 0,
+        markFailed: false,
+        noAnswer: null,
+        unsaved: null,
+        running: null,
+        again: false,
+        retry: null,
+        changeGeneration: 0,
+        checkedAtMs: null,
+        checkedContext: null,
+        invalidated: false,
+        retired: false,
+        parsedSource: undefined,
+        parsed: null,
       };
       states.set(workspaceId, state);
     }
@@ -146,9 +178,17 @@ export function createShareRosters(dependencies: {
 
   function save(workspaceId: string, state: RosterState): void {
     if (!state.unsaved) return;
-    if (state.retired || state.unsaved.context !== context(workspaceId)) { state.unsaved = null; return; }
+    if (state.retired || state.unsaved.context !== context(workspaceId)) {
+      state.unsaved = null;
+      return;
+    }
     try {
-      dependencies.saveRoster(workspaceId, state.unsaved.listing, state.unsaved.pulledAfter, state.unsaved.listedAtMs);
+      dependencies.saveRoster(
+        workspaceId,
+        state.unsaved.listing,
+        state.unsaved.pulledAfter,
+        state.unsaved.listedAtMs,
+      );
       state.unsaved = null;
       state.markFailed = false;
     } catch (error) {
@@ -186,7 +226,10 @@ export function createShareRosters(dependencies: {
     return state.noAnswer.partial || pulledSinceListing(workspaceId, state);
   }
 
-  async function listOnce(workspaceId: string, state: RosterState): Promise<"requested" | "unavailable"> {
+  async function listOnce(
+    workspaceId: string,
+    state: RosterState,
+  ): Promise<"requested" | "unavailable"> {
     const workspace = dependencies.findWorkspace(workspaceId);
     const remote = workspace?.remote ?? workspace?.pausedRemote;
     if (!workspace || !remote || workspace.shareView) return "unavailable";
@@ -207,19 +250,33 @@ export function createShareRosters(dependencies: {
     }
     const current = dependencies.findWorkspace(workspaceId);
     const currentRemote = current?.remote ?? current?.pausedRemote;
-    if (state.retired || context(workspaceId) !== capturedContext || !current ||
-        current.rootPath !== workspace.rootPath || currentRemote?.ownerUserId !== remote.ownerUserId ||
-        currentRemote?.serverUrl !== remote.serverUrl) return "unavailable";
+    if (
+      state.retired ||
+      context(workspaceId) !== capturedContext ||
+      !current ||
+      current.rootPath !== workspace.rootPath ||
+      currentRemote?.ownerUserId !== remote.ownerUserId ||
+      currentRemote?.serverUrl !== remote.serverUrl
+    )
+      return "unavailable";
     if (answer.kind === "unanswered") {
       state.invalidated = true;
-      state.noAnswer = { next: answer.next, partial: (state.noAnswer?.partial ?? false) || answer.partial };
+      state.noAnswer = {
+        next: answer.next,
+        partial: (state.noAnswer?.partial ?? false) || answer.partial,
+      };
       return "unavailable";
     }
     state.noAnswer = null;
     state.checkedAtMs = listedAtMs;
     state.checkedContext = capturedContext;
     state.invalidated = capturedChange !== state.changeGeneration || answer.listing.grants === null;
-    state.unsaved = { listing: answer.listing, listedAtMs, context: capturedContext, pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore };
+    state.unsaved = {
+      listing: answer.listing,
+      listedAtMs,
+      context: capturedContext,
+      pulledAfter: pullRunning || state.pullStarts !== pullStartsBefore,
+    };
     save(workspaceId, state);
     dependencies.onListed?.(workspaceId);
     return "requested";
@@ -229,13 +286,17 @@ export function createShareRosters(dependencies: {
   // relisting for automation reach.
   function pacedRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> {
     const state = stateFor(workspaceId);
-    if (state.running) return state.running.then(status => status === "requested" ? "joined" : status);
+    if (state.running)
+      return state.running.then((status) => (status === "requested" ? "joined" : status));
     if (due(state)) return refresh(workspaceId);
     if (!state.retry) {
-      state.retry = setTimeout(() => {
-        state.retry = null;
-        void refresh(workspaceId);
-      }, Math.max(0, SHARE_ROSTER_FRESH_MS - (nowMs() - state.lastAttemptMs!)));
+      state.retry = setTimeout(
+        () => {
+          state.retry = null;
+          void refresh(workspaceId);
+        },
+        Math.max(0, SHARE_ROSTER_FRESH_MS - (nowMs() - state.lastAttemptMs!)),
+      );
       state.retry.unref?.();
     }
     return Promise.resolve("paced");
@@ -243,8 +304,14 @@ export function createShareRosters(dependencies: {
 
   function refresh(workspaceId: string): Promise<"requested" | "unavailable"> {
     const state = stateFor(workspaceId);
-    if (state.running) { state.again = true; return state.running; }
-    if (state.retry) { clearTimeout(state.retry); state.retry = null; }
+    if (state.running) {
+      state.again = true;
+      return state.running;
+    }
+    if (state.retry) {
+      clearTimeout(state.retry);
+      state.retry = null;
+    }
     const running = (async () => {
       let status: "requested" | "unavailable";
       do {
@@ -252,7 +319,9 @@ export function createShareRosters(dependencies: {
         status = await listOnce(workspaceId, state);
       } while (state.again && !state.retired);
       return status;
-    })().finally(() => { state.running = null; });
+    })().finally(() => {
+      state.running = null;
+    });
     state.running = running;
     return running;
   }
@@ -280,16 +349,33 @@ export function createShareRosters(dependencies: {
   }
 
   // What this computer knows now, with no listing.
-  async function known(workspaceId: string, state: RosterState, overlapped: boolean): Promise<ReachRoster> {
+  async function known(
+    workspaceId: string,
+    state: RosterState,
+    overlapped: boolean,
+  ): Promise<ReachRoster> {
     const entry = dependencies.findWorkspace(workspaceId);
     if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
-    if (!entry) return { kind: "unknown", problem: { kind: "unchecked", next: "Open this workspace, then try again." } };
+    if (!entry)
+      return {
+        kind: "unknown",
+        problem: { kind: "unchecked", next: "Open this workspace, then try again." },
+      };
     const noAnswer = state.noAnswer;
     const remote = entry.remote ?? entry.pausedRemote;
-    const next = noAnswer?.next ?? (entry.pausedRemote ? "Turn sync on in Settings → Sync and sharing, then try again." : "Try again in a moment.");
+    const next =
+      noAnswer?.next ??
+      (entry.pausedRemote
+        ? "Turn sync on in Settings → Sync and sharing, then try again."
+        : "Try again in a moment.");
     if (remote && !entry.shareView && (overlapped || stale(workspaceId, state))) {
-      return { kind: "unknown", problem: { kind: "unchecked", next: state.markFailed
-        ? "Check that your disk has free space, then try again." : next } };
+      return {
+        kind: "unknown",
+        problem: {
+          kind: "unchecked",
+          next: state.markFailed ? "Check that your disk has free space, then try again." : next,
+        },
+      };
     }
     return reachRosterFor({
       entry,
@@ -344,7 +430,9 @@ export function createShareRosters(dependencies: {
      */
     pulled(workspaceId: string, recovered: boolean): Promise<void> {
       const state = stateFor(workspaceId);
-      return (recovered || state.noAnswer !== null) && due(state) ? pacedRefresh(workspaceId).then(() => undefined) : Promise.resolve();
+      return (recovered || state.noAnswer !== null) && due(state)
+        ? pacedRefresh(workspaceId).then(() => undefined)
+        : Promise.resolve();
     },
 
     /**
@@ -375,18 +463,33 @@ export function createShareRosters(dependencies: {
     },
 
     /** Sharing, Access, and the CLI use this same pacing decision. */
-    requestRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> { return pacedRefresh(workspaceId); },
+    requestRefresh(workspaceId: string): Promise<AccessRefreshResult["status"]> {
+      return pacedRefresh(workspaceId);
+    },
 
     observation(workspaceId: string): RosterObservation {
       const state = stateFor(workspaceId);
       if (state.unsaved && state.unsaved.context !== context(workspaceId)) state.unsaved = null;
       const raw = state.unsaved?.listing ?? dependencies.findWorkspace(workspaceId)?.shareRoster;
-      if (state.parsedSource !== raw) { state.parsedSource = raw; state.parsed = readStoredRoster(raw); }
+      if (state.parsedSource !== raw) {
+        state.parsedSource = raw;
+        state.parsed = readStoredRoster(raw);
+      }
       const listing = state.parsed;
-      const checkedAtMs = state.checkedAtMs ?? dependencies.findWorkspace(workspaceId)?.shareRoster?.listedAtMs ?? null;
-      const freshness = !listing || listing.grants === null ? "unknown" :
-        state.checkedAtMs === null || state.invalidated || state.checkedContext !== context(workspaceId) ||
-        wallNowMs() - state.checkedAtMs < 0 || wallNowMs() - state.checkedAtMs >= SHARE_ROSTER_REFRESH_MS ? "stale" : "fresh";
+      const checkedAtMs =
+        state.checkedAtMs ??
+        dependencies.findWorkspace(workspaceId)?.shareRoster?.listedAtMs ??
+        null;
+      const freshness =
+        !listing || listing.grants === null
+          ? "unknown"
+          : state.checkedAtMs === null ||
+              state.invalidated ||
+              state.checkedContext !== context(workspaceId) ||
+              wallNowMs() - state.checkedAtMs < 0 ||
+              wallNowMs() - state.checkedAtMs >= SHARE_ROSTER_REFRESH_MS
+            ? "stale"
+            : "fresh";
       return { listing, checkedAtMs, freshness };
     },
 
@@ -399,7 +502,6 @@ export function createShareRosters(dependencies: {
     cached(workspaceId: string): Promise<ReachRoster> {
       return known(workspaceId, stateFor(workspaceId), false);
     },
-
   };
 }
 
@@ -427,7 +529,10 @@ export function rosterAuthorLabel(
 ): string {
   if (listing === null || listing.grants === null) return "Someone you shared with";
   const grant = listing.grants.find((candidate) => candidate.grantId === author.grantId);
-  if (grant?.recipientEmail && (grant.recipientUserId === null || grant.recipientUserId === author.userId)) {
+  if (
+    grant?.recipientEmail &&
+    (grant.recipientUserId === null || grant.recipientUserId === author.userId)
+  ) {
     return `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
   }
   return rosterPersonLabel(listing, author.userId);
@@ -436,92 +541,165 @@ export function rosterAuthorLabel(
 /** A Button presser's name, including people whose grants have ended. */
 export function rosterPersonLabel(listing: RosterListing | null, userId: string): string {
   if (listing === null || listing.grants === null) return "Someone you shared with";
-  const grant = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
-    (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
-  );
+  const grant = [
+    ...listing.grants,
+    ...listing.formerGrants.map((former) => former.grant),
+    ...listing.endedGrants,
+  ].find((candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null);
   if (!grant?.recipientEmail) return "Someone you shared with";
   return grant.recipientEmail;
 }
 
 /** History's window-lifetime cache. Reads never wait for account lookups. */
 export function createHistoryLabels(dependencies: {
-  snapshot(workspaceId: string): { roster: RosterListing | null; owner: boolean; context: unknown; inventory: unknown;
-    shareView?: Pick<ShareViewIdentity, "granterUserId" | "sharerName" | "granterEmail"> };
-  lookupAccounts(workspaceId: string, ids: { grantIds: string[]; userIds: string[] }): Promise<HistoryAccount[] | null>;
+  snapshot(workspaceId: string): {
+    roster: RosterListing | null;
+    owner: boolean;
+    context: unknown;
+    inventory: unknown;
+    shareView?: Pick<ShareViewIdentity, "granterUserId" | "sharerName" | "granterEmail">;
+  };
+  lookupAccounts(
+    workspaceId: string,
+    ids: { grantIds: string[]; userIds: string[] },
+  ): Promise<HistoryAccount[] | null>;
   ready?(workspaceId: string): void;
   nowMs?(): number;
 }) {
   type Snapshot = ReturnType<typeof dependencies.snapshot>;
-  type Cache = { snapshot: Snapshot; grants: Map<string, HistoryAccount>; people: Map<string, HistoryAccount>;
-    asked: Set<string>; pending: Map<string, { userId: string; grantId?: string }>; running: boolean; retryAt: number };
+  type Cache = {
+    snapshot: Snapshot;
+    grants: Map<string, HistoryAccount>;
+    people: Map<string, HistoryAccount>;
+    asked: Set<string>;
+    pending: Map<string, { userId: string; grantId?: string }>;
+    running: boolean;
+    retryAt: number;
+  };
   const caches = new Map<string, Cache>();
   const now = dependencies.nowMs ?? (() => performance.now());
-  const key = (person: { userId: string; grantId?: string }) => person.grantId === undefined ? `user:${person.userId}` : `grant:${person.grantId}`;
-  const same = (left: Snapshot, right: Snapshot) => left.context === right.context && left.inventory === right.inventory;
+  const key = (person: { userId: string; grantId?: string }) =>
+    person.grantId === undefined ? `user:${person.userId}` : `grant:${person.grantId}`;
+  const same = (left: Snapshot, right: Snapshot) =>
+    left.context === right.context && left.inventory === right.inventory;
   const current = (workspaceId: string, snapshot: Snapshot) => {
     const cache = caches.get(workspaceId);
     return cache && same(cache.snapshot, snapshot) ? cache : undefined;
   };
-  const live = (workspaceId: string, cache: Cache) => caches.get(workspaceId) === cache && same(cache.snapshot, dependencies.snapshot(workspaceId)) && dependencies.snapshot(workspaceId).owner;
+  const live = (workspaceId: string, cache: Cache) =>
+    caches.get(workspaceId) === cache &&
+    same(cache.snapshot, dependencies.snapshot(workspaceId)) &&
+    dependencies.snapshot(workspaceId).owner;
   function cachedLabel(workspaceId: string, userId: string, grantId?: string): string {
     const snapshot = dependencies.snapshot(workspaceId);
     const cache = snapshot.owner ? current(workspaceId, snapshot) : undefined;
     const account = grantId === undefined ? cache?.people.get(userId) : cache?.grants.get(grantId);
     return account?.recipientUserId === userId && account.recipientEmail
-      ? `${account.recipientEmail} (via share link)` : "Someone you shared with";
+      ? `${account.recipientEmail} (via share link)`
+      : "Someone you shared with";
   }
   function schedule(workspaceId: string, target: Cache): void {
     if (target.running || target.pending.size === 0 || now() < target.retryAt) return;
     target.running = true;
     // Let the IPC read answer and release its workspace lease before starting I/O.
-    setImmediate(() => { void (async () => {
-      if (!live(workspaceId, target)) return;
-      const batch = [...target.pending.entries()].slice(0, 200);
-      for (const [id] of batch) { target.pending.delete(id); target.asked.add(id); }
-      let accounts: HistoryAccount[] | null;
-      try { accounts = await dependencies.lookupAccounts(workspaceId, {
-        grantIds: batch.flatMap(([, person]) => person.grantId === undefined ? [] : [person.grantId]),
-        userIds: batch.flatMap(([, person]) => person.grantId === undefined ? [person.userId] : []),
-      }); } catch { accounts = null; }
-      if (!live(workspaceId, target)) return;
-      if (accounts === null) { for (const [id] of batch) target.asked.delete(id); target.retryAt = now() + 60_000; target.pending.clear(); return; }
-      for (const [id] of batch) target.asked.add(id);
-      for (const account of accounts) {
-        target.grants.set(account.grantId, account);
-        if (!target.people.has(account.recipientUserId)) target.people.set(account.recipientUserId, account);
-      }
-      if (accounts.some(account => account.recipientEmail)) dependencies.ready?.(workspaceId);
-    })().finally(() => {
-      target.running = false;
-      if (live(workspaceId, target)) schedule(workspaceId, target);
-    }); });
+    setImmediate(() => {
+      void (async () => {
+        if (!live(workspaceId, target)) return;
+        const batch = [...target.pending.entries()].slice(0, 200);
+        for (const [id] of batch) {
+          target.pending.delete(id);
+          target.asked.add(id);
+        }
+        let accounts: HistoryAccount[] | null;
+        try {
+          accounts = await dependencies.lookupAccounts(workspaceId, {
+            grantIds: batch.flatMap(([, person]) =>
+              person.grantId === undefined ? [] : [person.grantId],
+            ),
+            userIds: batch.flatMap(([, person]) =>
+              person.grantId === undefined ? [person.userId] : [],
+            ),
+          });
+        } catch {
+          accounts = null;
+        }
+        if (!live(workspaceId, target)) return;
+        if (accounts === null) {
+          for (const [id] of batch) target.asked.delete(id);
+          target.retryAt = now() + 60_000;
+          target.pending.clear();
+          return;
+        }
+        for (const [id] of batch) target.asked.add(id);
+        for (const account of accounts) {
+          target.grants.set(account.grantId, account);
+          if (!target.people.has(account.recipientUserId))
+            target.people.set(account.recipientUserId, account);
+        }
+        if (accounts.some((account) => account.recipientEmail)) dependencies.ready?.(workspaceId);
+      })().finally(() => {
+        target.running = false;
+        if (live(workspaceId, target)) schedule(workspaceId, target);
+      });
+    });
   }
   return {
     invalidate(workspaceId: string | null): void {
-      if (workspaceId === null) caches.clear(); else caches.delete(workspaceId);
+      if (workspaceId === null) caches.clear();
+      else caches.delete(workspaceId);
     },
-    prepare(workspaceId: string, principals: readonly { userId: string; grantId?: string }[]): void {
+    prepare(
+      workspaceId: string,
+      principals: readonly { userId: string; grantId?: string }[],
+    ): void {
       const snapshot = dependencies.snapshot(workspaceId);
       if (!snapshot.owner) return;
       let cache = current(workspaceId, snapshot);
       if (cache && now() < cache.retryAt) return;
-      const missing = principals.filter(person => !cache?.asked.has(key(person)) && !(person.grantId === undefined ? cache?.people.has(person.userId) : cache?.grants.has(person.grantId)) && (person.grantId === undefined
-        ? rosterPersonLabel(snapshot.roster, person.userId) : rosterAuthorLabel(snapshot.roster, { userId: person.userId, grantId: person.grantId })) === "Someone you shared with");
+      const missing = principals.filter(
+        (person) =>
+          !cache?.asked.has(key(person)) &&
+          !(person.grantId === undefined
+            ? cache?.people.has(person.userId)
+            : cache?.grants.has(person.grantId)) &&
+          (person.grantId === undefined
+            ? rosterPersonLabel(snapshot.roster, person.userId)
+            : rosterAuthorLabel(snapshot.roster, {
+                userId: person.userId,
+                grantId: person.grantId,
+              })) === "Someone you shared with",
+      );
       if (missing.length === 0) return;
       if (!cache) {
-        cache = { snapshot, grants: new Map(), people: new Map(), asked: new Set(), pending: new Map(), running: false, retryAt: 0 };
+        cache = {
+          snapshot,
+          grants: new Map(),
+          people: new Map(),
+          asked: new Set(),
+          pending: new Map(),
+          running: false,
+          retryAt: 0,
+        };
         caches.set(workspaceId, cache);
       }
       if (now() < cache.retryAt) return;
       for (const person of missing) {
         const id = key(person);
-        if (!cache.asked.has(id) && (person.grantId === undefined ? !cache.people.has(person.userId) : !cache.grants.has(person.grantId))) cache.pending.set(id, person);
+        if (
+          !cache.asked.has(id) &&
+          (person.grantId === undefined
+            ? !cache.people.has(person.userId)
+            : !cache.grants.has(person.grantId))
+        )
+          cache.pending.set(id, person);
       }
       schedule(workspaceId, cache);
     },
     author(workspaceId: string, author: { userId: string; grantId: string }): string {
       const known = rosterAuthorLabel(dependencies.snapshot(workspaceId).roster, author);
-      return known !== "Someone you shared with" ? known : cachedLabel(workspaceId, author.userId, author.grantId);
+      return known !== "Someone you shared with"
+        ? known
+        : cachedLabel(workspaceId, author.userId, author.grantId);
     },
     person(workspaceId: string, userId: string): string {
       const snapshot = dependencies.snapshot(workspaceId);

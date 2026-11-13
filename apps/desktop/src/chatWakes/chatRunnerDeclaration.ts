@@ -26,17 +26,21 @@ export function chatRunnerDeclaration(input: {
   computerLabel: string;
   agents: readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[];
 }): { ok: true; declaration: ChatRunnerDeclaration } | ({ ok: false } & ChatRunnerRefusal) {
-  if (!isChatWakeLine(input.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS)) return { ok: false, reason: "install-id" };
-  if (!isChatWakeLine(input.computerLabel, CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS)) return { ok: false, reason: "computer-label" };
+  if (!isChatWakeLine(input.installId, CHAT_RUNNER_INSTALL_ID_MAX_CHARS))
+    return { ok: false, reason: "install-id" };
+  if (!isChatWakeLine(input.computerLabel, CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS))
+    return { ok: false, reason: "computer-label" };
   const runners = input.agents.filter((agent) => agent.launch !== undefined);
   if (runners.length > CHAT_RUNNER_AGENTS) return { ok: false, reason: "too-many-agents" };
   const handles = new Set<string>();
   for (const agent of runners) {
     if (!isChatRunnerAgentId(agent.id)) return { ok: false, reason: "agent-id", agentId: agent.id };
-    if (!isChatWakeLine(agent.name, CHAT_RUNNER_DISPLAY_NAME_MAX_CHARS)) return { ok: false, reason: "agent-name", agentId: agent.id };
+    if (!isChatWakeLine(agent.name, CHAT_RUNNER_DISPLAY_NAME_MAX_CHARS))
+      return { ok: false, reason: "agent-name", agentId: agent.id };
     // The relay derives each handle from the name and refuses two agents with one.
     const handle = normalizeHandle(handleForName(agent.name));
-    if (handle !== "" && handles.has(handle)) return { ok: false, reason: "same-name", agentId: agent.id };
+    if (handle !== "" && handles.has(handle))
+      return { ok: false, reason: "same-name", agentId: agent.id };
     handles.add(handle);
   }
   return {
@@ -44,7 +48,11 @@ export function chatRunnerDeclaration(input: {
     declaration: {
       installId: input.installId,
       computerLabel: input.computerLabel,
-      runners: runners.map((agent) => ({ agentId: agent.id, displayName: agent.name, enabled: agent.enabled })),
+      runners: runners.map((agent) => ({
+        agentId: agent.id,
+        displayName: agent.name,
+        enabled: agent.enabled,
+      })),
     },
   };
 }

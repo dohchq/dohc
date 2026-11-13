@@ -9,14 +9,23 @@ type DraftLister = Pick<EngineClient, "ownerYDocListDrafts">;
  * its edits, and a document read returns its file. Drafts belong to main, so
  * another active version has none.
  */
-export async function listOwnerPendingSharePaths(client: DraftLister, workspace: string, activeVersionId: string,
-  signal?: AbortSignal): Promise<string[]> {
+export async function listOwnerPendingSharePaths(
+  client: DraftLister,
+  workspace: string,
+  activeVersionId: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
   const paths: string[] = [];
   let after: Parameters<EngineClient["ownerYDocListDrafts"]>[1]["after"] = null;
   do {
-    const page = await client.ownerYDocListDrafts({ id: 0, workspace, deadlineMs: 30_000 }, { after, limit: 64, pendingOnly: true }, signal);
+    const page = await client.ownerYDocListDrafts(
+      { id: 0, workspace, deadlineMs: 30_000 },
+      { after, limit: 64, pendingOnly: true },
+      signal,
+    );
     for (const draft of page.drafts) {
-      if (draft.state !== "quarantined" && draft.binding.mainVersionId === activeVersionId) paths.push(draft.binding.currentPath);
+      if (draft.state !== "quarantined" && draft.binding.mainVersionId === activeVersionId)
+        paths.push(draft.binding.currentPath);
     }
     after = page.next;
   } while (after);
@@ -34,14 +43,16 @@ export function createOwnerPendingShare(options: {
   onChange(workspaceId: string): void;
 }) {
   const paths = new Map<string, readonly string[]>();
-  const reading = new Set<string>(), again = new Set<string>();
+  const reading = new Set<string>(),
+    again = new Set<string>();
   async function read(workspaceId: string): Promise<void> {
     do {
       again.delete(workspaceId);
       try {
         const next = await options.read(workspaceId);
         if (next.join("\0") === (paths.get(workspaceId) ?? []).join("\0")) continue;
-        if (next.length) paths.set(workspaceId, next); else paths.delete(workspaceId);
+        if (next.length) paths.set(workspaceId, next);
+        else paths.delete(workspaceId);
         options.onChange(workspaceId);
       } catch (error) {
         console.error("[desktop] pending share read failed:", error);
@@ -51,7 +62,10 @@ export function createOwnerPendingShare(options: {
   }
   return {
     refresh(workspaceId: string): void {
-      if (reading.has(workspaceId)) { again.add(workspaceId); return; }
+      if (reading.has(workspaceId)) {
+        again.add(workspaceId);
+        return;
+      }
       reading.add(workspaceId);
       void read(workspaceId);
     },

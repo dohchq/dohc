@@ -85,9 +85,7 @@ describe("chat render cost", () => {
         declined: [],
       }));
       bridgeMock.listChatMessages.mockImplementation(async () => ({
-        messages: [
-          message({ id: "m-1", threadId: "thread-dm-1", body: "see @[docs/plan.md]" }),
-        ],
+        messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "see @[docs/plan.md]" })],
       }));
       bridgeMock.listChatReactions.mockImplementation(async () => ({
         reactions: [],
@@ -309,17 +307,13 @@ describe("suspended polling", () => {
       );
       await waitFor(() => {
         expect(bridgeMock.syncDms.mock.calls.length).toBe(dmSyncs + 1);
-        expect(
-          bridgeMock.listChatChannels.mock.calls.length,
-        ).toBeGreaterThanOrEqual(listings + 1);
+        expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThanOrEqual(listings + 1);
       });
       expect(workspaceActivityCallbacks.size).toBe(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_100);
       });
-      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThanOrEqual(
-        dmSyncs + 2,
-      );
+      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThanOrEqual(dmSyncs + 2);
     } finally {
       vi.useRealTimers();
     }

@@ -178,7 +178,8 @@ function withWrite(
     row.authorId === write.author ||
     row.reactionId === painted ||
     thread.listed.get(row.reactionId)?.names.has(write.author) === true;
-  if (rows.some(covers)) return write.state === "removed" ? rows.filter((row) => !covers(row)) : rows;
+  if (rows.some(covers))
+    return write.state === "removed" ? rows.filter((row) => !covers(row)) : rows;
   if (write.state === "removed") return rows;
   const viewer = thread.viewer?.id ?? "";
   const author = viewer && samePerson(thread, viewer, write.author) ? viewer : write.author;
@@ -202,7 +203,9 @@ function confirmedAt(thread: Thread, messageId: string): number {
 
 function confirmedRows(thread: Thread, messageId?: string): ChatReactionRecord[] {
   if (messageId !== undefined) {
-    return thread.messages.get(messageId)?.rows ?? thread.full?.rows.filter(inMessage(messageId)) ?? [];
+    return (
+      thread.messages.get(messageId)?.rows ?? thread.full?.rows.filter(inMessage(messageId)) ?? []
+    );
   }
   let rows = thread.full?.rows ?? [];
   for (const [id, record] of thread.messages) rows = replaceRows(rows, inMessage(id), record.rows);
@@ -212,11 +215,16 @@ function confirmedRows(thread: Thread, messageId?: string): ChatReactionRecord[]
 function ingestRead(thread: Thread, read: ReactionRead) {
   const { ticket } = read;
   const viewer = read.viewerAuthorId ?? "";
-  if (viewer && (!thread.viewer || thread.viewer.at < ticket)) thread.viewer = { id: viewer, at: ticket };
+  if (viewer && (!thread.viewer || thread.viewer.at < ticket))
+    thread.viewer = { id: viewer, at: ticket };
   for (const row of read.reactions) {
     const known = thread.listed.get(row.reactionId);
     if (!known) {
-      thread.listed.set(row.reactionId, { names: new Set([row.authorId]), author: row.authorId, at: ticket });
+      thread.listed.set(row.reactionId, {
+        names: new Set([row.authorId]),
+        author: row.authorId,
+        at: ticket,
+      });
       continue;
     }
     known.names.add(row.authorId);
@@ -297,12 +305,21 @@ export function createReactionStore(workspaceId: string): ReactionStore {
 
   const busy = (cell: Cell) => cell.writing !== null || cell.queued !== null || cell.listings > 0;
   const idle = () =>
-    [...threads.values()].every((thread) => [...thread.cells.values()].every((cell) => !busy(cell)));
+    [...threads.values()].every((thread) =>
+      [...thread.cells.values()].every((cell) => !busy(cell)),
+    );
 
   function threadOf(threadId: string): Thread {
     let thread = threads.get(threadId);
     if (!thread) {
-      thread = { full: null, messages: new Map(), viewer: null, listed: new Map(), cells: new Map(), revision: 0 };
+      thread = {
+        full: null,
+        messages: new Map(),
+        viewer: null,
+        listed: new Map(),
+        cells: new Map(),
+        revision: 0,
+      };
       threads.set(threadId, thread);
     }
     return thread;
@@ -332,7 +349,8 @@ export function createReactionStore(workspaceId: string): ReactionStore {
         (error: unknown) => {
           // A newer toggle's own listing or rejection speaks for it.
           if (cell.latest !== latest) return;
-          const saved = accepted !== undefined && samePerson(thread, accepted.author, latest.author);
+          const saved =
+            accepted !== undefined && samePerson(thread, accepted.author, latest.author);
           latest.onError(
             withErrorWords(
               saved
@@ -387,7 +405,8 @@ export function createReactionStore(workspaceId: string): ReactionStore {
       const before = new Map<string, ReactionView>();
       for (const read of reads) {
         const thread = threadOf(read.threadId);
-        if (!before.has(read.threadId)) before.set(read.threadId, project(read.threadId, thread, undefined));
+        if (!before.has(read.threadId))
+          before.set(read.threadId, project(read.threadId, thread, undefined));
         ingestRead(thread, read);
       }
       const touched = [...before].flatMap(([threadId, view]) => {
@@ -481,7 +500,9 @@ export function ReactionStoreProvider(props: { workspaceId: string | null; child
       });
     }
   }, [stores, workspaceId]);
-  return <ReactionStoreContext.Provider value={store}>{props.children}</ReactionStoreContext.Provider>;
+  return (
+    <ReactionStoreContext.Provider value={store}>{props.children}</ReactionStoreContext.Provider>
+  );
 }
 
 // The open workspace's reactions. The caller renders again whenever they change.

@@ -1,87 +1,197 @@
-import {afterEach, expect, it, vi} from "vitest";
-import {startDesktopOwnerHost} from "./desktopOwnerHost";
+import { afterEach, expect, it, vi } from "vitest";
+import { startDesktopOwnerHost } from "./desktopOwnerHost";
 
-const transport = vi.hoisted(() => ({connect: vi.fn()}));
-vi.mock("@dohc/sync-relay/device-host", async importOriginal => ({
-  ...await importOriginal<object>(), connectDeviceHost: transport.connect,
+const transport = vi.hoisted(() => ({ connect: vi.fn() }));
+vi.mock("@dohc/sync-relay/device-host", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  connectDeviceHost: transport.connect,
 }));
-afterEach(() => { vi.useRealTimers(); transport.connect.mockReset(); });
-
-it.each(["lookup", "owner", "registered"])("reconnects after a binding retires during %s and leaves the next connection alone", async phase => {
-  vi.useFakeTimers();
-  type Options = Parameters<typeof startDesktopOwnerHost>[0];
-  let generation = 0;
-  const calls: {options: Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0]; stop: ReturnType<typeof vi.fn>}[] = [];
-  transport.connect.mockImplementation(options => {
-    const closed = Promise.withResolvers<void>();
-    const stop = vi.fn(() => closed.resolve()); calls.push({options,stop});
-    return {stop,closed:closed.promise};
-  });
-  const owner = {nativeSessionId:"session", onSettlementWanted: () => () => undefined, onDurableLocalChange: () => () => undefined, assertCurrent:vi.fn(), prepareHandoff:vi.fn(), finishHandoff:vi.fn(), remoteApplied:vi.fn()};
-  const ownerFor = vi.fn(async () => owner);
-  const bindings = vi.fn(async () => {
-    const captured = generation;
-    return {client:{} as Awaited<ReturnType<Options["bindings"]>>["client"],workspaces:[{workspaceId:"workspace",workspaceHandle:`handle-${captured}`}],
-      assertCurrent() {if (generation !== captured) throw new Error("binding retired");}};
-  });
-  const host = startDesktopOwnerHost({
-    config:{url:"wss://owner.test",credential:{},control:{},transport:{},reconnectDelayMs:10} as Options["config"],
-    bindings,ownerFor,onError:vi.fn(),
-  });
-  try {
-    await vi.advanceTimersByTimeAsync(0);
-    const first = calls[0]!;
-    const binding = {} as Parameters<Options["ownerFor"]>[0];
-    const retained = phase === "owner" ? await first.options.existingOwner!.ownerFor(binding) : undefined;
-    generation++;
-    const check = phase === "lookup" ? () => first.options.existingOwner!.ownerFor(binding)
-      : phase === "owner" ? async () => retained!.assertCurrent() : async () => first.options.onRegistered!({} as never);
-    await expect(check()).rejects.toThrow("binding retired");
-    expect(first.stop).toHaveBeenCalledOnce();
-    if (phase === "lookup") expect(ownerFor).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(10);
-    expect(bindings).toHaveBeenCalledTimes(2);
-    expect(calls[1]!.options.existingOwner!.workspaces[0]!.workspaceHandle).toBe("handle-1");
-    await expect(check()).rejects.toThrow("binding retired");
-    expect(calls[1]!.stop).not.toHaveBeenCalled();
-  } finally {host.stop(); await vi.advanceTimersByTimeAsync(100);}
+afterEach(() => {
+  vi.useRealTimers();
+  transport.connect.mockReset();
 });
+
+it.each(["lookup", "owner", "registered"])(
+  "reconnects after a binding retires during %s and leaves the next connection alone",
+  async (phase) => {
+    vi.useFakeTimers();
+    type Options = Parameters<typeof startDesktopOwnerHost>[0];
+    let generation = 0;
+    const calls: {
+      options: Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0];
+      stop: ReturnType<typeof vi.fn>;
+    }[] = [];
+    transport.connect.mockImplementation((options) => {
+      const closed = Promise.withResolvers<void>();
+      const stop = vi.fn(() => closed.resolve());
+      calls.push({ options, stop });
+      return { stop, closed: closed.promise };
+    });
+    const owner = {
+      nativeSessionId: "session",
+      onSettlementWanted: () => () => undefined,
+      onDurableLocalChange: () => () => undefined,
+      assertCurrent: vi.fn(),
+      prepareHandoff: vi.fn(),
+      finishHandoff: vi.fn(),
+      remoteApplied: vi.fn(),
+    };
+    const ownerFor = vi.fn(async () => owner);
+    const bindings = vi.fn(async () => {
+      const captured = generation;
+      return {
+        client: {} as Awaited<ReturnType<Options["bindings"]>>["client"],
+        workspaces: [{ workspaceId: "workspace", workspaceHandle: `handle-${captured}` }],
+        assertCurrent() {
+          if (generation !== captured) throw new Error("binding retired");
+        },
+      };
+    });
+    const host = startDesktopOwnerHost({
+      config: {
+        url: "wss://owner.test",
+        credential: {},
+        control: {},
+        transport: {},
+        reconnectDelayMs: 10,
+      } as Options["config"],
+      bindings,
+      ownerFor,
+      onError: vi.fn(),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      const first = calls[0]!;
+      const binding = {} as Parameters<Options["ownerFor"]>[0];
+      const retained =
+        phase === "owner" ? await first.options.existingOwner!.ownerFor(binding) : undefined;
+      generation++;
+      const check =
+        phase === "lookup"
+          ? () => first.options.existingOwner!.ownerFor(binding)
+          : phase === "owner"
+            ? async () => retained!.assertCurrent()
+            : async () => first.options.onRegistered!({} as never);
+      await expect(check()).rejects.toThrow("binding retired");
+      expect(first.stop).toHaveBeenCalledOnce();
+      if (phase === "lookup") expect(ownerFor).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(bindings).toHaveBeenCalledTimes(2);
+      expect(calls[1]!.options.existingOwner!.workspaces[0]!.workspaceHandle).toBe("handle-1");
+      await expect(check()).rejects.toThrow("binding retired");
+      expect(calls[1]!.stop).not.toHaveBeenCalled();
+    } finally {
+      host.stop();
+      await vi.advanceTimersByTimeAsync(100);
+    }
+  },
+);
 
 it("keeps a current connection when the requested editor is unavailable", async () => {
   type Options = Parameters<typeof startDesktopOwnerHost>[0];
-  const connected = Promise.withResolvers<Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0]>();
-  const closed = Promise.withResolvers<void>(), stop = vi.fn(() => closed.resolve());
-  transport.connect.mockImplementation(options => {connected.resolve(options);return {stop,closed:closed.promise};});
-  const host = startDesktopOwnerHost({config:{url:"wss://owner.test",credential:{},control:{},transport:{},reconnectDelayMs:10} as Options["config"],
-    bindings:async () => ({client:{} as Awaited<ReturnType<Options["bindings"]>>["client"],workspaces:[],assertCurrent(){}}),
-    async ownerFor(){throw new Error("Existing owner is unavailable.");},onError:vi.fn()});
-  try {const options = await connected.promise;await expect(options.existingOwner!.ownerFor({} as never)).rejects.toThrow("Existing owner is unavailable");expect(stop).not.toHaveBeenCalled();}
-  finally {host.stop();await closed.promise;}
+  const connected =
+    Promise.withResolvers<
+      Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0]
+    >();
+  const closed = Promise.withResolvers<void>(),
+    stop = vi.fn(() => closed.resolve());
+  transport.connect.mockImplementation((options) => {
+    connected.resolve(options);
+    return { stop, closed: closed.promise };
+  });
+  const host = startDesktopOwnerHost({
+    config: {
+      url: "wss://owner.test",
+      credential: {},
+      control: {},
+      transport: {},
+      reconnectDelayMs: 10,
+    } as Options["config"],
+    bindings: async () => ({
+      client: {} as Awaited<ReturnType<Options["bindings"]>>["client"],
+      workspaces: [],
+      assertCurrent() {},
+    }),
+    async ownerFor() {
+      throw new Error("Existing owner is unavailable.");
+    },
+    onError: vi.fn(),
+  });
+  try {
+    const options = await connected.promise;
+    await expect(options.existingOwner!.ownerFor({} as never)).rejects.toThrow(
+      "Existing owner is unavailable",
+    );
+    expect(stop).not.toHaveBeenCalled();
+  } finally {
+    host.stop();
+    await closed.promise;
+  }
 });
 
 it("forwards edit and settlement hooks from the same owner session without reconnecting", async () => {
   type Options = Parameters<typeof startDesktopOwnerHost>[0];
-  const connected = Promise.withResolvers<Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0]>();
-  const closed = Promise.withResolvers<void>(), stop = vi.fn(() => closed.resolve());
-  transport.connect.mockImplementation(options => { connected.resolve(options); return {stop, closed: closed.promise}; });
-  const changes = new Set<() => void>(), settlements = new Set<() => void>();
-  const owner = {nativeSessionId: "opened-from-notice", assertCurrent: vi.fn(),
-    onDurableLocalChange(listener: () => void) { changes.add(listener); return () => changes.delete(listener); },
-    onSettlementWanted(listener: () => void) { settlements.add(listener); return () => settlements.delete(listener); },
-    prepareHandoff: vi.fn(async () => undefined), finishHandoff: vi.fn(async () => undefined), remoteApplied: vi.fn(async () => undefined)};
-  const ownerFor = vi.fn(async () => owner), onError = vi.fn();
-  const host = startDesktopOwnerHost({
-    config: {url: "wss://owner.test", credential: {}, control: {}, transport: {}, reconnectDelayMs: 10} as Options["config"],
-    bindings: async () => ({client: {} as Awaited<ReturnType<Options["bindings"]>>["client"],
-      workspaces: [{workspaceId: "workspace", workspaceHandle: "handle"}], assertCurrent() {}}), ownerFor, onError,
+  const connected =
+    Promise.withResolvers<
+      Parameters<typeof import("@dohc/sync-relay/device-host").connectDeviceHost>[0]
+    >();
+  const closed = Promise.withResolvers<void>(),
+    stop = vi.fn(() => closed.resolve());
+  transport.connect.mockImplementation((options) => {
+    connected.resolve(options);
+    return { stop, closed: closed.promise };
   });
-  let disposeChange = () => {}, disposeSettlement = () => {};
+  const changes = new Set<() => void>(),
+    settlements = new Set<() => void>();
+  const owner = {
+    nativeSessionId: "opened-from-notice",
+    assertCurrent: vi.fn(),
+    onDurableLocalChange(listener: () => void) {
+      changes.add(listener);
+      return () => changes.delete(listener);
+    },
+    onSettlementWanted(listener: () => void) {
+      settlements.add(listener);
+      return () => settlements.delete(listener);
+    },
+    prepareHandoff: vi.fn(async () => undefined),
+    finishHandoff: vi.fn(async () => undefined),
+    remoteApplied: vi.fn(async () => undefined),
+  };
+  const ownerFor = vi.fn(async () => owner),
+    onError = vi.fn();
+  const host = startDesktopOwnerHost({
+    config: {
+      url: "wss://owner.test",
+      credential: {},
+      control: {},
+      transport: {},
+      reconnectDelayMs: 10,
+    } as Options["config"],
+    bindings: async () => ({
+      client: {} as Awaited<ReturnType<Options["bindings"]>>["client"],
+      workspaces: [{ workspaceId: "workspace", workspaceHandle: "handle" }],
+      assertCurrent() {},
+    }),
+    ownerFor,
+    onError,
+  });
+  let disposeChange = () => {},
+    disposeSettlement = () => {};
   try {
     const options = await connected.promise;
-    const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "note", lineageClaimId: "a".repeat(64),
-      currentPath: "note.md", selectorPaths: ["note.md"], restoreFenceGeneration: 1};
+    const binding = {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId: "note",
+      lineageClaimId: "a".repeat(64),
+      currentPath: "note.md",
+      selectorPaths: ["note.md"],
+      restoreFenceGeneration: 1,
+    };
     const captured = await options.existingOwner!.ownerFor(binding);
-    const changed = vi.fn(), settlementWanted = vi.fn();
+    const changed = vi.fn(),
+      settlementWanted = vi.fn();
     disposeChange = captured.onDurableLocalChange(changed);
     disposeSettlement = captured.onSettlementWanted(settlementWanted);
     for (const notify of changes) notify();
@@ -94,7 +204,10 @@ it("forwards edit and settlement hooks from the same owner session without recon
     expect(stop).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
   } finally {
-    disposeChange(); disposeSettlement(); host.stop(); await closed.promise;
+    disposeChange();
+    disposeSettlement();
+    host.stop();
+    await closed.promise;
   }
   expect(changes.size).toBe(0);
   expect(settlements.size).toBe(0);

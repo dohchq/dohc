@@ -4,8 +4,16 @@ import { vi } from "vitest";
 
 // An uncertain swap probe reaches the listing on either kind of disk.
 export function forceStoredNameListing(...entries: string[]): void {
-  const swapped = new Set(entries.map(entry => join(dirname(entry), basename(entry)
-    .replace(/[A-Za-z]/gu, letter => letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()))));
+  const swapped = new Set(
+    entries.map((entry) =>
+      join(
+        dirname(entry),
+        basename(entry).replace(/[A-Za-z]/gu, (letter) =>
+          letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase(),
+        ),
+      ),
+    ),
+  );
   const original = vi.isMockFunction(fsPromises.lstat)
     ? vi.mocked(fsPromises.lstat).getMockImplementation()!
     : fsPromises.lstat;

@@ -6,7 +6,7 @@
 const { withPodfileProperties } = require("expo/config-plugins");
 
 module.exports = function iosCameraWithoutBarcodeCompanion(config) {
-  return withPodfileProperties(config, podfile => {
+  return withPodfileProperties(config, (podfile) => {
     podfile.modResults["expo.camera.barcode-scanner-enabled"] = "false";
     return podfile;
   });

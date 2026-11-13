@@ -7,12 +7,24 @@ import { createTestScratch } from "../workspaces/testTemp";
 import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
-import { ReservedWorkspaceIdError, stateFolderRefusal, WorkspaceFolderRefusalError } from "@dohc/workspace-core";
-import { RelayUnauthorizedError, RelayUnreachableError, SharedFileReadOnlyError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import {
+  ReservedWorkspaceIdError,
+  stateFolderRefusal,
+  WorkspaceFolderRefusalError,
+} from "@dohc/workspace-core";
+import {
+  RelayUnauthorizedError,
+  RelayUnreachableError,
+  SharedFileReadOnlyError,
+  ShareUnavailableError,
+} from "@dohc/workspace-contracts/relay";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DatasetReopenWaitError } from "@dohc/app-backend-runtime/supervisor";
-import { DatasetHostError, resolveCompatibleDatasetRevision } from "@dohc/app-backend-runtime/dataset-host";
+import {
+  DatasetHostError,
+  resolveCompatibleDatasetRevision,
+} from "@dohc/app-backend-runtime/dataset-host";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
 import { EngineWorkspaceFolderTimeoutError } from "@dohc/workspace-engine-client/daemon";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
@@ -20,7 +32,15 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
-import { liveFolderBody, LiveDocumentMutationError, LiveFolderError, liveFolderTitle, LivePageOwnedError, MergeStoppedPartwayError, RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import {
+  liveFolderBody,
+  LiveDocumentMutationError,
+  LiveFolderError,
+  liveFolderTitle,
+  LivePageOwnedError,
+  MergeStoppedPartwayError,
+  RestorePolicyRefusalError,
+} from "../workspaces/workspaceEngineCapture";
 import { EngineCaptureNotSettledError } from "../workspaces/workspaceEngineCaptureLiveStore";
 import { sharedViewRefusal, sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
@@ -74,8 +94,12 @@ vi.mock("../atomicReplaceFile", async (importOriginal) => {
 });
 
 it("explains the held-file live-open refusal after Electron serializes it", () => {
-  const error = new Error("Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md");
-  expect(readError(error).words).toBe('dohc cannot open "notes/held.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file\'s exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.');
+  const error = new Error(
+    "Error invoking remote method 'desktop:engine-ydoc-open': DaemonRefusalError [CONFLICT]: capture-file-held: notes/held.md",
+  );
+  expect(readError(error).words).toBe(
+    "dohc cannot open \"notes/held.md\" for live editing. dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+  );
 });
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -86,18 +110,35 @@ function acrossIpc(error: unknown, channel = "desktop:list-workspace-versions"):
 
 it("shows a refused shared-file read in plain words after an IPC rejection", async () => {
   const received = acrossIpc(await sharedViewRefusal(), "desktop:read-workspace-text");
-  expect(readError(received).words, "IPC refusal uses only the shared-file message").toBe(sharedViewRefusalWords);
+  expect(readError(received).words, "IPC refusal uses only the shared-file message").toBe(
+    sharedViewRefusalWords,
+  );
   expect(refusalCode(received)).toBe("share-collision-record");
   expect(ipcErrorMessage(received, "Could not read the file.")).toBe(sharedViewRefusalWords);
 });
 
 it("keeps a server Collection's not found code across Electron, with the words other callers show", () => {
-  const error = acrossIpc(markDatasetServerNotFound(new Error("That share isn't available anymore."), 404, { code: "not_found" }), "desktop:dataset");
+  const error = acrossIpc(
+    markDatasetServerNotFound(new Error("That share isn't available anymore."), 404, {
+      code: "not_found",
+    }),
+    "desktop:dataset",
+  );
   expect(isDatasetServerNotFound(error)).toBe(true);
   expect(readError(error).words).toBe("That share isn't available anymore.");
-  expect(isDatasetServerNotFound(acrossIpc(new Error("That share isn't available anymore."), "desktop:dataset"))).toBe(false);
-  expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 404, { code: "share_access_removed" }))).toBe(false);
-  expect(isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" }))).toBe(false);
+  expect(
+    isDatasetServerNotFound(
+      acrossIpc(new Error("That share isn't available anymore."), "desktop:dataset"),
+    ),
+  ).toBe(false);
+  expect(
+    isDatasetServerNotFound(
+      markDatasetServerNotFound(new Error("x"), 404, { code: "share_access_removed" }),
+    ),
+  ).toBe(false);
+  expect(
+    isDatasetServerNotFound(markDatasetServerNotFound(new Error("x"), 403, { code: "not_found" })),
+  ).toBe(false);
 });
 
 it("keeps a shared view's owner-only refusal code across Electron, with its words", () => {
@@ -105,7 +146,14 @@ it("keeps a shared view's owner-only refusal code across Electron, with its word
   expect(isDatasetOwnerOnly(error)).toBe(true);
   expect(isDatasetServerNotFound(error)).toBe(false);
   expect(readError(error).words).toBe("Open the original workspace to manage this Collection.");
-  expect(isDatasetOwnerOnly(acrossIpc(new Error("Open the original workspace to manage this Collection."), "desktop:dataset"))).toBe(false);
+  expect(
+    isDatasetOwnerOnly(
+      acrossIpc(
+        new Error("Open the original workspace to manage this Collection."),
+        "desktop:dataset",
+      ),
+    ),
+  ).toBe(false);
 });
 
 function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
@@ -113,14 +161,20 @@ function refusal(code: DaemonErrorCode, message: string): DaemonRefusalError {
 }
 
 it.each([
-  ["held-change-shared-owner", "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing."],
-  ["held-change-stale", "The note or its file changed. Choose Drop again to review the waiting edits."],
+  [
+    "held-change-shared-owner",
+    "dohc cannot drop or restore held changes in shared notes yet. Open the note to continue editing.",
+  ],
+  [
+    "held-change-stale",
+    "The note or its file changed. Choose Drop again to review the waiting edits.",
+  ],
   ["held-change-missing", "There is no held change to drop. Open the note again."],
   ["held-change-conflict", "The note has a conflict. Resolve it before using Drop."],
   ["held-change-undo-stale", "The note changed after Drop. Open History to find the waiting text."],
 ])("shows %s across Electron without offering a futile retry", (reason, words) => {
   const received = acrossIpc(refusal("INVALID_PARAMS", reason), "desktop:held-note-change");
-  expect(readError(received)).toMatchObject({words, canRetry: false});
+  expect(readError(received)).toMatchObject({ words, canRetry: false });
   expect(ipcErrorMessage(received, "dohc could not read the held change.")).toContain(words);
 });
 
@@ -139,11 +193,17 @@ it("keeps the taken group name signal across IPC without matching its words", ()
 
 it("keeps the synced deletion refusal words across Electron for History and conflict choices", () => {
   const received = acrossIpc(refusal("INVALID_PARAMS", "synced-deletion-revival-refused"));
-  expect(readError(received).title).toBe("dohc can't bring back this file, because that could stop sync");
-  expect(ipcErrorMessage(received, "Could not restore this file.")).toContain("Choose Keep this machine's copy, then copy its text from its History into a file with a new name.");
+  expect(readError(received).title).toBe(
+    "dohc can't bring back this file, because that could stop sync",
+  );
+  expect(ipcErrorMessage(received, "Could not restore this file.")).toContain(
+    "Choose Keep this machine's copy, then copy its text from its History into a file with a new name.",
+  );
   // The engine's refusal code is neither an instruction nor the Reason, so Copy details keeps it.
   expect(readError(received).cause).toContain("synced-deletion-revival-refused");
-  expect(readError(acrossIpc(new SyncedDeletionRevivalError())).words).toBe(readError(received).words);
+  expect(readError(acrossIpc(new SyncedDeletionRevivalError())).words).toBe(
+    readError(received).words,
+  );
 });
 
 it("uses History instructions for restore refusals without changing conflict instructions", () => {
@@ -151,13 +211,17 @@ it("uses History instructions for restore refusals without changing conflict ins
   expect(restore.title).toBe("dohc can't bring back trip.txt, because that could stop sync");
   expect(restore.words).toBe("Copy its text from its History into a file with a new name.");
   expect(restore.canRetry).toBe(false);
-  expect(readError(new SyncedDeletionRevivalError("tasks/trip.txt")).words).toBe("Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.");
+  expect(readError(new SyncedDeletionRevivalError("tasks/trip.txt")).words).toBe(
+    "Choose Keep this machine's copy, then copy its text from its History into a file with a new name. When your other machine shows a conflict for trip.txt, keep the removal there.",
+  );
 });
 
 // The engine's own list: every `ErrorCode` arm of `as_str`.
 const engineCodes = [
-  ...readFileSync(new URL("../../../../crates/dohc-engine-protocol/src/error.rs", import.meta.url), "utf8")
-    .matchAll(/ErrorCode::\w+ => "([A-Z_]+)"/g),
+  ...readFileSync(
+    new URL("../../../../crates/dohc-engine-protocol/src/error.rs", import.meta.url),
+    "utf8",
+  ).matchAll(/ErrorCode::\w+ => "([A-Z_]+)"/g),
 ].map((match) => match[1]!);
 
 describe("error words", () => {
@@ -170,8 +234,11 @@ describe("error words", () => {
     vi.mocked(atomicCreateFile).mockRejectedValueOnce(
       Object.assign(new Error("link failed"), { code: "ENOTSUP", syscall: "link" }),
     );
-    const failure = await installWorkspaceDataKey(root, Buffer.alloc(32, 7)).catch(error => error);
-    const sentence = "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
+    const failure = await installWorkspaceDataKey(root, Buffer.alloc(32, 7)).catch(
+      (error) => error,
+    );
+    const sentence =
+      "This drive can't store the workspace's secret key safely. Move the workspace to an NTFS, APFS or ext4 drive, then try again.";
     const received = acrossIpc(failure, channel);
     expect(readError(received).words).toBe(sentence);
     expect(ipcErrorMessage(received, prefix)).toBe(sentence);
@@ -192,31 +259,34 @@ describe("error words", () => {
     refusal("FORBIDDEN", "chat-mention-access-changed"),
     refusal("CONFLICT", "chat-mention-access-changed: extra"),
     new Error("Chat access changed. Try again."),
-  ])("does not restart a chat page for %s", error => {
+  ])("does not restart a chat page for %s", (error) => {
     expect(isChatMentionPageChanged(acrossIpc(error))).toBe(false);
   });
 
-  it.each([
-    "Each choice is one line of at most 200 characters.",
-    "Each choice appears once.",
-  ])("keeps the engine poll sentence across IPC: %s", sentence => {
-    const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
-    expect(readError(received)).toEqual({
-      words: sentence,
-      mapped: false,
-      cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
-    });
-  });
+  it.each(["Each choice is one line of at most 200 characters.", "Each choice appears once."])(
+    "keeps the engine poll sentence across IPC: %s",
+    (sentence) => {
+      const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
+      expect(readError(received)).toEqual({
+        words: sentence,
+        mapped: false,
+        cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
+      });
+    },
+  );
 
   it.each(["A new poll rule.", "A poll has at most twelve choices."])(
-    "uses the caller's words for an unknown poll sentence: %s", sentence => {
+    "uses the caller's words for an unknown poll sentence: %s",
+    (sentence) => {
       const received = acrossIpc(refusal("INVALID_PARAMS", sentence));
       expect(readError(received)).toEqual({
         words: null,
         mapped: false,
         cause: `DaemonRefusalError [INVALID_PARAMS]: ${sentence}`,
       });
-      expect(withErrorWords("Could not send that message.", received)).toBe("Could not send that message.");
+      expect(withErrorWords("Could not send that message.", received)).toBe(
+        "Could not send that message.",
+      );
     },
   );
 
@@ -231,13 +301,16 @@ describe("error words", () => {
     new Error("This Collection does not have Edit access."),
     new Error("Your access to this share ended."),
     new Error("connect ECONNREFUSED 127.0.0.1:3000"),
-  ])("rechecks share access for %s across IPC", error => {
+  ])("rechecks share access for %s across IPC", (error) => {
     expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(true);
   });
 
   it.each(["FORBIDDEN", "AUTH_FAILED", "SHARE_UNAVAILABLE", "SHARE_READ_ONLY"] as const)(
-    "rechecks share access for engine %s across IPC", code => {
-      expect(shouldRecheckShareAccess(acrossIpc(refusal(code, "The request was rejected.")))).toBe(true);
+    "rechecks share access for engine %s across IPC",
+    (code) => {
+      expect(shouldRecheckShareAccess(acrossIpc(refusal(code, "The request was rejected.")))).toBe(
+        true,
+      );
     },
   );
 
@@ -245,7 +318,7 @@ describe("error words", () => {
     "The shared file session changed.",
     "The shared file session changed. Open the Collection again.",
     "The shared file session changed. Read the automations again.",
-  ])("rechecks share access for %s across IPC", message => {
+  ])("rechecks share access for %s across IPC", (message) => {
     expect(shouldRecheckShareAccess(acrossIpc(new Error(message)))).toBe(true);
   });
 
@@ -255,14 +328,19 @@ describe("error words", () => {
     new Error("This Collection does not have a current document schema."),
     new TypeError("Cannot read properties of undefined"),
     refusal("CONFLICT", "The record changed."),
-  ])("does not recheck share access for %s", error => {
+  ])("does not recheck share access for %s", (error) => {
     expect(shouldRecheckShareAccess(acrossIpc(error))).toBe(false);
   });
 
   it.each([
     [new SharedFileReadOnlyError(), true],
     [refusal("SHARE_READ_ONLY", "The share is read-only."), true],
-    [Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }), false],
+    [
+      Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), {
+        code: "EPERM",
+      }),
+      false,
+    ],
     [refusal("FORBIDDEN", "The request was rejected."), false],
   ] as const)("reads %s as a share's write refusal across IPC: %s", (error, refused) => {
     expect(isShareReadOnlyRefusal(acrossIpc(error, "desktop:write-workspace-text"))).toBe(refused);
@@ -277,26 +355,30 @@ describe("error words", () => {
     expect(versionNameRefusal(acrossIpc(error, "desktop:create-workspace-version"))).toBe(refused);
   });
 
-  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
-    const error = new ReservedWorkspaceIdError(workspaceId);
-    const expected = {
-      title: "dohc can't open this folder",
-      words: `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
-      mapped: false,
-      cause: error.toString(),
-      canRetry: false,
-      refusal: "not-a-workspace",
-    };
-    expect(readError(error)).toEqual(expected);
-    expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
-  });
+  it.each(["link", "shares", "notices", "workspaces", "personal-agents", "account"])(
+    "keeps the reserved-ID refusal title and body across IPC for %s",
+    (workspaceId) => {
+      const error = new ReservedWorkspaceIdError(workspaceId);
+      const expected = {
+        title: "dohc can't open this folder",
+        words: `This folder's workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+        mapped: false,
+        cause: error.toString(),
+        canRetry: false,
+        refusal: "not-a-workspace",
+      };
+      expect(readError(error)).toEqual(expected);
+      expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
+    },
+  );
 
   // The screen for a listed workspace offers Remove from list for this, and
   // Open folder offers another folder. Neither offers Try again.
   it("marks a folder that can never be a workspace across IPC", () => {
     const error = new WorkspaceFolderRefusalError(stateFolderRefusal("inside"));
     const expected = {
-      words: "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace.",
+      words:
+        "This folder is inside the folder that holds dohc's own settings, so it cannot be a workspace.",
       mapped: false,
       cause: error.toString(),
       canRetry: false,
@@ -307,16 +389,24 @@ describe("error words", () => {
   });
 
   it("says why a folder's manifest stops it opening, and keeps the parser's reason for Copy", () => {
-    const unreadable = new WorkspaceManifestError("unreadable", "this folder has an invalid .dohc/manifest.json: manifest kind is invalid");
+    const unreadable = new WorkspaceManifestError(
+      "unreadable",
+      "this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
+    );
     expect(readError(acrossIpc(unreadable, "desktop:attach-workspace-folder"))).toEqual({
       words: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
       mapped: true,
-      cause: "WorkspaceManifestError [unreadable]: this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
+      cause:
+        "WorkspaceManifestError [unreadable]: this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
     });
-    const newer = new WorkspaceManifestError("newer-version", "this workspace was created by a newer version of dohc (manifest v2)");
+    const newer = new WorkspaceManifestError(
+      "newer-version",
+      "this workspace was created by a newer version of dohc (manifest v2)",
+    );
     // Main sends a failed launch open's cause as this one string.
-    expect(withErrorWords("dohc could not open Trips.", String(ipcWireError(newer))))
-      .toBe("dohc could not open Trips. It needs a newer version of dohc. Update dohc to open it.");
+    expect(withErrorWords("dohc could not open Trips.", String(ipcWireError(newer)))).toBe(
+      "dohc could not open Trips. It needs a newer version of dohc. Update dohc to open it.",
+    );
     expect(needsNewerDohc(String(ipcWireError(newer)))).toBe(true);
     expect(needsNewerDohc(acrossIpc(newer))).toBe(true);
     expect(needsNewerDohc(acrossIpc(unreadable))).toBe(false);
@@ -331,8 +421,9 @@ describe("error words", () => {
       cause: "DaemonRefusalError [INTERNAL]: privacy-denied",
     });
     expect(isPrivacyDenied(engine)).toBe(true);
-    expect(withErrorWords("Could not refresh workspace files.", engine))
-      .toBe(`Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`);
+    expect(withErrorWords("Could not refresh workspace files.", engine)).toBe(
+      `Could not refresh workspace files. ${PRIVACY_DENIED_WORDS}`,
+    );
     expect(PRIVACY_DENIED_WORDS).toBe(
       "macOS blocked dohc from this folder. Allow dohc in System Settings › Privacy & Security › Files & Folders.",
     );
@@ -340,12 +431,16 @@ describe("error words", () => {
 
   it("says a workspace's folder did not answer, after the caller's sentence, without the folder's path", () => {
     const stuck = acrossIpc(new EngineWorkspaceFolderTimeoutError("workspace-1", 2_000));
-    expect(withErrorWords("dohc could not open this workspace.", stuck))
-      .toBe("dohc could not open this workspace. dohc could not reach this workspace's folder.");
+    expect(withErrorWords("dohc could not open this workspace.", stuck)).toBe(
+      "dohc could not open this workspace. dohc could not reach this workspace's folder.",
+    );
   });
 
   it("says why dohc can't keep a file private on a volume that shares new files, after the caller's sentence", () => {
-    const engine = acrossIpc(refusal("INTERNAL", "volume-shares-new-files"), "desktop:write-workspace-file");
+    const engine = acrossIpc(
+      refusal("INTERNAL", "volume-shares-new-files"),
+      "desktop:write-workspace-file",
+    );
     expect(readError(engine)).toEqual({
       words: VOLUME_SHARES_NEW_FILES_WORDS,
       mapped: true,
@@ -360,45 +455,122 @@ describe("error words", () => {
   const OTHER_OWNER = "Make it yours again, then try again.";
   const OTHER_OWNER_FOLDER = "Make it and everything in it yours again, then try again.";
   const MOVE_ASIDE = "Rename or move it, then try again.";
-  const NOT_CHANGEABLE = "Give your account full control of this folder and everything in it, then try again.";
+  const NOT_CHANGEABLE =
+    "Give your account full control of this folder and everything in it, then try again.";
   const ITEM_OTHER_OWNER = "Ask an administrator to make it yours, then try again.";
-  const ITEM_NOT_CHANGEABLE = "Ask an administrator to give your account full control of it, then try again.";
+  const ITEM_NOT_CHANGEABLE =
+    "Ask an administrator to give your account full control of it, then try again.";
   it.each([
-    ["link .dohc", `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`],
-    ["link .dohc/engine/engine.db-journal", `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`],
-    ["not-folder .dohc/engine", `This workspace's .dohc/engine is not a folder, so dohc can't keep its History private. ${MOVE_ASIDE}`],
-    ["not-file .dohc/engine/engine.db-wal", `This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private. ${MOVE_ASIDE}`],
-    ["other-owner .dohc", `This workspace's .dohc belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
-    ["other-owner .dohc/engine", `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`],
-    ["other-owner .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`],
-    ["unchecked-volume .dohc/engine", "This workspace's .dohc/engine is on a disk dohc can't check, so dohc can't keep its History private. Move the workspace to a disk formatted as APFS, then try again."],
-    ["unchecked-system .dohc/engine", "This workspace's .dohc/engine is on a system where dohc can't check it, so dohc can't keep its History private. Run dohc where it can read its own /proc/self/fd, then try again."],
-    ["link .dohc/engine/engine.db-shm", `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`],
-    ["link .dohc/local", `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`],
-    ["not-folder .dohc/local", `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`],
-    ["other-owner .dohc/local", `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`],
-    ["not-changeable .dohc", `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
-    ["not-changeable .dohc/local", `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`],
-    ["not-changeable .dohc/engine", `This workspace's .dohc/engine has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`],
-    ["other-owner .dohc/engine/ROOT_BINDING", `This workspace's .dohc/engine/ROOT_BINDING belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`],
-    ["other-owner .dohc/engine/displaced/worker-0", `This workspace's .dohc/engine/displaced/worker-0 belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`],
-    ["not-changeable .dohc/engine/secret.key", `This workspace's .dohc/engine/secret.key has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
-    ["not-changeable .dohc/engine/engine.db", `This workspace's .dohc/engine/engine.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
-    ["not-changeable .dohc/engine/displaced/worker-0/6a6f62.0", `This workspace's .dohc/engine/displaced/worker-0/6a6f62.0 has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
-    ["other-owner .dohc/local/ui-state.json", `This workspace's .dohc/local/ui-state.json belongs to another user, so dohc can't keep this computer's own data private. ${ITEM_OTHER_OWNER}`],
-    ["other-owner .dohc/engine/Café notes/año 2026.txt", `This workspace's .dohc/engine/Café notes/año 2026.txt belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`],
-    ["not-changeable .dohc/engine/copy [1] of 日誌.db", `This workspace's .dohc/engine/copy [1] of 日誌.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`],
-  ])("names what keeps a workspace's History from being private, where, and the fix that keeps it: %s", (detail, words) => {
-    const message = `engine-folder-not-private: ${detail}`;
-    expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
-      words,
-      mapped: true,
-      cause: `DaemonRefusalError [INTERNAL]: ${message}`,
-    });
-    for (const sentence of words.split(/(?<=\.) /)) {
-      expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
-    }
-  });
+    [
+      "link .dohc",
+      `This workspace's .dohc is a link, so dohc can't keep its History private. ${LINK}`,
+    ],
+    [
+      "link .dohc/engine/engine.db-journal",
+      `This workspace's .dohc/engine/engine.db-journal is a link, so dohc can't keep its History private. ${LINK}`,
+    ],
+    [
+      "not-folder .dohc/engine",
+      `This workspace's .dohc/engine is not a folder, so dohc can't keep its History private. ${MOVE_ASIDE}`,
+    ],
+    [
+      "not-file .dohc/engine/engine.db-wal",
+      `This workspace's .dohc/engine/engine.db-wal is not a file, so dohc can't keep its History private. ${MOVE_ASIDE}`,
+    ],
+    [
+      "other-owner .dohc",
+      `This workspace's .dohc belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`,
+    ],
+    [
+      "other-owner .dohc/engine",
+      `This workspace's .dohc/engine belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER_FOLDER}`,
+    ],
+    [
+      "other-owner .dohc/engine/engine.db",
+      `This workspace's .dohc/engine/engine.db belongs to another user, so dohc can't keep its History private. ${OTHER_OWNER}`,
+    ],
+    [
+      "unchecked-volume .dohc/engine",
+      "This workspace's .dohc/engine is on a disk dohc can't check, so dohc can't keep its History private. Move the workspace to a disk formatted as APFS, then try again.",
+    ],
+    [
+      "unchecked-system .dohc/engine",
+      "This workspace's .dohc/engine is on a system where dohc can't check it, so dohc can't keep its History private. Run dohc where it can read its own /proc/self/fd, then try again.",
+    ],
+    [
+      "link .dohc/engine/engine.db-shm",
+      `This workspace's .dohc/engine/engine.db-shm is a link, so dohc can't keep its History private. ${LINK}`,
+    ],
+    [
+      "link .dohc/local",
+      `This workspace's .dohc/local is a link, so dohc can't keep this computer's own data private. ${LINK}`,
+    ],
+    [
+      "not-folder .dohc/local",
+      `This workspace's .dohc/local is not a folder, so dohc can't keep this computer's own data private. ${MOVE_ASIDE}`,
+    ],
+    [
+      "other-owner .dohc/local",
+      `This workspace's .dohc/local belongs to another user, so dohc can't keep this computer's own data private. ${OTHER_OWNER_FOLDER}`,
+    ],
+    [
+      "not-changeable .dohc",
+      `This workspace's .dohc has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`,
+    ],
+    [
+      "not-changeable .dohc/local",
+      `This workspace's .dohc/local has permissions dohc can't use, so dohc can't keep this computer's own data private. ${NOT_CHANGEABLE}`,
+    ],
+    [
+      "not-changeable .dohc/engine",
+      `This workspace's .dohc/engine has permissions dohc can't use, so dohc can't keep its History private. ${NOT_CHANGEABLE}`,
+    ],
+    [
+      "other-owner .dohc/engine/ROOT_BINDING",
+      `This workspace's .dohc/engine/ROOT_BINDING belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`,
+    ],
+    [
+      "other-owner .dohc/engine/displaced/worker-0",
+      `This workspace's .dohc/engine/displaced/worker-0 belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`,
+    ],
+    [
+      "not-changeable .dohc/engine/secret.key",
+      `This workspace's .dohc/engine/secret.key has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+    ],
+    [
+      "not-changeable .dohc/engine/engine.db",
+      `This workspace's .dohc/engine/engine.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+    ],
+    [
+      "not-changeable .dohc/engine/displaced/worker-0/6a6f62.0",
+      `This workspace's .dohc/engine/displaced/worker-0/6a6f62.0 has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+    ],
+    [
+      "other-owner .dohc/local/ui-state.json",
+      `This workspace's .dohc/local/ui-state.json belongs to another user, so dohc can't keep this computer's own data private. ${ITEM_OTHER_OWNER}`,
+    ],
+    [
+      "other-owner .dohc/engine/Café notes/año 2026.txt",
+      `This workspace's .dohc/engine/Café notes/año 2026.txt belongs to another user, so dohc can't keep its History private. ${ITEM_OTHER_OWNER}`,
+    ],
+    [
+      "not-changeable .dohc/engine/copy [1] of 日誌.db",
+      `This workspace's .dohc/engine/copy [1] of 日誌.db has permissions dohc can't use, so dohc can't keep its History private. ${ITEM_NOT_CHANGEABLE}`,
+    ],
+  ])(
+    "names what keeps a workspace's History from being private, where, and the fix that keeps it: %s",
+    (detail, words) => {
+      const message = `engine-folder-not-private: ${detail}`;
+      expect(readError(acrossIpc(refusal("INTERNAL", message), "desktop:open-workspace"))).toEqual({
+        words,
+        mapped: true,
+        cause: `DaemonRefusalError [INTERNAL]: ${message}`,
+      });
+      for (const sentence of words.split(/(?<=\.) /)) {
+        expect(sentence.split(" ").length, sentence).toBeLessThanOrEqual(20);
+      }
+    },
+  );
 
   it("leaves a refusal of the engine's folder it has no words for to the caller", () => {
     for (const detail of [
@@ -418,14 +590,22 @@ describe("error words", () => {
       "other-owner /.dohc/engine/engine.db",
       "link ../.dohc",
     ]) {
-      expect(readError(acrossIpc(refusal("INTERNAL", `engine-folder-not-private: ${detail}`))).words).toBeNull();
+      expect(
+        readError(acrossIpc(refusal("INTERNAL", `engine-folder-not-private: ${detail}`))).words,
+      ).toBeNull();
     }
   });
 
   it("keeps an EPERM main did not name a privacy refusal as a permission problem", () => {
-    const eperm = acrossIpc(Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), { code: "EPERM" }));
+    const eperm = acrossIpc(
+      Object.assign(new Error("EPERM: operation not permitted, rename 'a' -> 'b'"), {
+        code: "EPERM",
+      }),
+    );
     expect(isPrivacyDenied(eperm)).toBe(false);
-    expect(readError(eperm).words).toBe("dohc does not have permission to use this file or folder.");
+    expect(readError(eperm).words).toBe(
+      "dohc does not have permission to use this file or folder.",
+    );
   });
 
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
@@ -435,7 +615,8 @@ describe("error words", () => {
   });
 
   it("writes every entry the way the interface skill asks", () => {
-    const words = Object.values(ERROR_WORDS).flatMap((entry) => Object.values(entry))
+    const words = Object.values(ERROR_WORDS)
+      .flatMap((entry) => Object.values(entry))
       .filter((value): value is string => value !== null);
     for (const text of new Set(words)) {
       expect(text, text).toMatch(/^(?:[A-Z]|dohc )[^]*\.$/);
@@ -458,16 +639,26 @@ describe("error words", () => {
       cause: "DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
     });
     expect(isWorkspaceUpdatingError(received)).toBe(true);
-    expect(isWorkspaceUpdatingError(acrossIpc(refusal("OVERLOADED", "engine-store-busy")))).toBe(false);
-    expect(isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again.")))).toBe(false);
+    expect(isWorkspaceUpdatingError(acrossIpc(refusal("OVERLOADED", "engine-store-busy")))).toBe(
+      false,
+    );
+    expect(
+      isWorkspaceUpdatingError(acrossIpc(new Error("Workspace is still updating. Try again."))),
+    ).toBe(false);
   });
 
   it("says a file is not read yet without promising that the workspace will finish", () => {
-    const received = acrossIpc(refusal("OVERLOADED", "dohc has not read this file yet. Open it again once dohc has read it."));
+    const received = acrossIpc(
+      refusal(
+        "OVERLOADED",
+        "dohc has not read this file yet. Open it again once dohc has read it.",
+      ),
+    );
     expect(readError(received)).toEqual({
       words: "dohc has not read this file yet. Try again when it has.",
       mapped: true,
-      cause: "DaemonRefusalError [OVERLOADED]: dohc has not read this file yet. Open it again once dohc has read it.",
+      cause:
+        "DaemonRefusalError [OVERLOADED]: dohc has not read this file yet. Open it again once dohc has read it.",
     });
     expect(isWorkspaceUpdatingError(received)).toBe(false);
   });
@@ -479,39 +670,68 @@ describe("error words", () => {
     const received = acrossIpc(refused, "desktop:restore-engine-moment-file");
     expect(isSharedLiveFileRefusal(received)).toBe(true);
     expect(readError(received).words).toBe(refused.message);
-    expect(isSharedLiveFileRefusal(acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"))).toBe(false);
-    expect(isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active")))).toBe(false);
+    expect(
+      isSharedLiveFileRefusal(
+        acrossIpc(new Error(refused.message), "desktop:restore-engine-moment-file"),
+      ),
+    ).toBe(false);
+    expect(
+      isSharedLiveFileRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-document-binding-active"))),
+    ).toBe(false);
   });
 
   it("knows a merge that stopped partway across IPC, and keeps the failure for Copy details", () => {
-    const received = acrossIpc(new MergeStoppedPartwayError(new Error("disk full")), "desktop:merge-workspace-version");
+    const received = acrossIpc(
+      new MergeStoppedPartwayError(new Error("disk full")),
+      "desktop:merge-workspace-version",
+    );
     expect(isMergeStoppedPartway(received)).toBe(true);
     expect(readError(received)).toEqual({ words: null, mapped: false, cause: "Error: disk full" });
-    expect(isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version"))).toBe(false);
+    expect(
+      isMergeStoppedPartway(acrossIpc(new Error("disk full"), "desktop:merge-workspace-version")),
+    ).toBe(false);
   });
 
   it("keeps a shared live file's restore words within 500 characters, with what to do", () => {
-    expect(sharedLiveRestoreDetail("notes/plan.md").split("\n")).toEqual(
-      ["dohc can't restore \"notes/plan.md\" because it has been shared live", SHARED_LIVE_RESTORE_BODY]);
+    expect(sharedLiveRestoreDetail("notes/plan.md").split("\n")).toEqual([
+      'dohc can\'t restore "notes/plan.md" because it has been shared live',
+      SHARED_LIVE_RESTORE_BODY,
+    ]);
     const detail = sharedLiveRestoreDetail(`${`${"a".repeat(199)}/`.repeat(10)}a.md`);
     expect(detail).toHaveLength(500);
-    expect(detail.split("\n")).toEqual([expect.stringMatching(/^dohc can't restore "…[a/]+\/a\.md" because it has been shared live$/), SHARED_LIVE_RESTORE_BODY]);
+    expect(detail.split("\n")).toEqual([
+      expect.stringMatching(/^dohc can't restore "…[a/]+\/a\.md" because it has been shared live$/),
+      SHARED_LIVE_RESTORE_BODY,
+    ]);
   });
 
   it("reads a refused folder move across IPC as its title and body", () => {
     const title = liveFolderTitle("notes/box", "move");
-    const received = acrossIpc(new LiveFolderError([title, liveFolderBody("move")].join(String.fromCharCode(10))), "desktop:move-workspace-path");
+    const received = acrossIpc(
+      new LiveFolderError([title, liveFolderBody("move")].join(String.fromCharCode(10))),
+      "desktop:move-workspace-path",
+    );
     expect(isLiveFolderRefusal(received)).toBe(true);
-    expect(readError(received)).toMatchObject({ title: `dohc can't move "notes/box" while a page in it has live editing on`, words: liveFolderBody("move") });
+    expect(readError(received)).toMatchObject({
+      title: `dohc can't move "notes/box" while a page in it has live editing on`,
+      words: liveFolderBody("move"),
+    });
     expect(isSharedLiveFileRefusal(received)).toBe(false);
   });
 
   it("reads a refused page move across IPC as its title and body, with a word for each action", () => {
-    const received = acrossIpc(new LivePageOwnedError([livePageTitle("docs/a.md", "move"), livePageBody("move")].join(String.fromCharCode(10))),
-      "desktop:move-workspace-path");
+    const received = acrossIpc(
+      new LivePageOwnedError(
+        [livePageTitle("docs/a.md", "move"), livePageBody("move")].join(String.fromCharCode(10)),
+      ),
+      "desktop:move-workspace-path",
+    );
     expect(isLivePageOwnedRefusal(received)).toBe(true);
-    expect(readError(received)).toMatchObject({ title: `dohc can't move "docs/a.md" while it has live editing on`,
-      words: "In Live documents, stop live editing for this page, then move it again.", cause: null });
+    expect(readError(received)).toMatchObject({
+      title: `dohc can't move "docs/a.md" while it has live editing on`,
+      words: "In Live documents, stop live editing for this page, then move it again.",
+      cause: null,
+    });
     expect(isLiveFolderRefusal(received)).toBe(false);
     expect(isSharedLiveFileRefusal(received)).toBe(false);
     expect([livePageTitle("docs/a.md", "rename"), livePageBody("rename")]).toEqual([
@@ -528,15 +748,28 @@ describe("error words", () => {
       `dohc can't replace "docs/a.md" while it has live editing on`,
       "In Live documents, stop live editing for this page, then try again.",
     ]);
-    const archive = acrossIpc(new LivePageOwnedError([livePageTitle("Bookmarks/Chats/a.md", "archive"), livePageBody("archive")].join(String.fromCharCode(10))),
-      "desktop:archive-chat-bookmark");
-    expect(readError(archive)).toMatchObject({ title: `dohc can't archive "Bookmarks/Chats/a.md" while it has live editing on`,
-      words: "In Live documents, stop live editing for this page, then archive it again." });
-    expect(isLivePageOwnedRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(false);
+    const archive = acrossIpc(
+      new LivePageOwnedError(
+        [livePageTitle("Bookmarks/Chats/a.md", "archive"), livePageBody("archive")].join(
+          String.fromCharCode(10),
+        ),
+      ),
+      "desktop:archive-chat-bookmark",
+    );
+    expect(readError(archive)).toMatchObject({
+      title: `dohc can't archive "Bookmarks/Chats/a.md" while it has live editing on`,
+      words: "In Live documents, stop live editing for this page, then archive it again.",
+    });
+    expect(isLivePageOwnedRefusal(acrossIpc(refusal("INVALID_PARAMS", "live-page-owned")))).toBe(
+      false,
+    );
   });
 
   it("explains an open editing session across IPC and keeps its refusal for Copy", () => {
-    const received = acrossIpc(refusal("INVALID_PARAMS", "ydoc-session-busy"), "desktop:restore-engine-moment-file");
+    const received = acrossIpc(
+      refusal("INVALID_PARAMS", "ydoc-session-busy"),
+      "desktop:restore-engine-moment-file",
+    );
     expect(received.message).toBe(
       "Error invoking remote method 'desktop:restore-engine-moment-file': DaemonRefusalError [INVALID_PARAMS]: ydoc-session-busy",
     );
@@ -546,7 +779,10 @@ describe("error words", () => {
       mapped: true,
       cause: "DaemonRefusalError [INVALID_PARAMS]: ydoc-session-busy",
     });
-    for (const sentence of ["dohc could not restore kyoto.md.", "dohc could not undo the restore of kyoto.md."]) {
+    for (const sentence of [
+      "dohc could not restore kyoto.md.",
+      "dohc could not undo the restore of kyoto.md.",
+    ]) {
       expect(withErrorWords(sentence, received)).toBe(`${sentence} ${words}`);
       expect(ipcErrorMessage(received, sentence)).toBe(`${sentence} ${words}`);
     }
@@ -558,8 +794,9 @@ describe("error words", () => {
       mapped: false,
       cause: "DaemonRefusalError [INVALID_PARAMS]: invalid-input",
     });
-    expect(readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words)
-      .toBe("This share is read-only.");
+    expect(
+      readError(acrossIpc(refusal("SHARE_READ_ONLY", "workspace operation failed"))).words,
+    ).toBe("This share is read-only.");
   });
 
   // The engine names a collaboration refusal by its code word. The person
@@ -573,18 +810,27 @@ describe("error words", () => {
     ["LIMIT_EXCEEDED", "configured-byte-budget-exceeded"],
   ] as const)("keeps the %s code word %s out of the words", (code, word) => {
     const received = acrossIpc(refusal(code, word));
-    expect(readError(received)).toEqual({ words: null, mapped: false, cause: `DaemonRefusalError [${code}]: ${word}` });
+    expect(readError(received)).toEqual({
+      words: null,
+      mapped: false,
+      cause: `DaemonRefusalError [${code}]: ${word}`,
+    });
     const sentence = "dohc could not save notes/plan.md.";
     expect(withErrorWords(sentence, received)).toBe(sentence);
   });
 
   it("names https when the engine refuses a server address", () => {
-    expect(readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words)
-      .toBe("Your server's address does not use https. Disconnect, then connect your server again with its https address.");
+    expect(
+      readError(acrossIpc(refusal("RELAY_HTTPS_REQUIRED", "workspace operation failed"))).words,
+    ).toBe(
+      "Your server's address does not use https. Disconnect, then connect your server again with its https address.",
+    );
   });
 
   it("reads the app compiler and the Collection worker by their codes", () => {
-    const timeout = Object.assign(new CompilerProcessError("timeout", "Compiler timed out."), { details: "Supervisor-only details" });
+    const timeout = Object.assign(new CompilerProcessError("timeout", "Compiler timed out."), {
+      details: "Supervisor-only details",
+    });
     expect(String(ipcWireError(timeout))).not.toContain(timeout.details);
     expect(readError(acrossIpc(new CompilerProcessError("exit", "Compiler exited (1).")))).toEqual({
       words: "The app's code did not build.",
@@ -595,9 +841,14 @@ describe("error words", () => {
       "worker_deadline",
       "The dataset worker exceeded its deadline. Reopen it from the journal.",
     );
-    expect(readError(acrossIpc(worker, "desktop:dataset")).words).toBe("It took too long to finish. Try again.");
-    expect(readError(acrossIpc(new PersistentRuntimeError("worker_stalled", "The dataset worker stopped."))).words)
-      .toBeNull();
+    expect(readError(acrossIpc(worker, "desktop:dataset")).words).toBe(
+      "It took too long to finish. Try again.",
+    );
+    expect(
+      readError(
+        acrossIpc(new PersistentRuntimeError("worker_stalled", "The dataset worker stopped.")),
+      ).words,
+    ).toBeNull();
   });
 
   it("keeps a sentence written for a person and drops only what is not", () => {
@@ -618,9 +869,12 @@ describe("error words", () => {
       expect(readError(acrossIpc(new Error(raw))).words, raw).toBeNull();
     }
     // A file-system error that lost its code still leads with it.
-    expect(readError(acrossIpc(new Error("ENOENT: no such file or directory, open 'a.md'"))).words)
-      .toBe("The file or folder is not there anymore.");
-    const denied = Object.assign(new Error("EACCES: permission denied, open 'a.md'"), { code: "EACCES" });
+    expect(
+      readError(acrossIpc(new Error("ENOENT: no such file or directory, open 'a.md'"))).words,
+    ).toBe("The file or folder is not there anymore.");
+    const denied = Object.assign(new Error("EACCES: permission denied, open 'a.md'"), {
+      code: "EACCES",
+    });
     expect(readError(acrossIpc(denied))).toEqual({
       words: "dohc does not have permission to use this file or folder.",
       mapped: true,
@@ -637,10 +891,18 @@ describe("error words", () => {
   it("keeps data and a stack for Copy, after the caller's sentence alone", () => {
     const invalid = z.uuid().safeParse("not-an-id").error!;
     const sentence = "dohc could not read this Collection's automations.";
-    expect(readError(acrossIpc(invalid, "desktop:dataset"))).toEqual({ words: null, mapped: false, cause: invalid.message });
+    expect(readError(acrossIpc(invalid, "desktop:dataset"))).toEqual({
+      words: null,
+      mapped: false,
+      cause: invalid.message,
+    });
     expect(withErrorWords(sentence, acrossIpc(invalid, "desktop:dataset"))).toBe(sentence);
     for (const dump of ['{"error":"bad"}', "Sync failed.\n    at run (main.js:1:1)"]) {
-      expect(readError(acrossIpc(new Error(dump))), dump).toEqual({ words: null, mapped: false, cause: dump });
+      expect(readError(acrossIpc(new Error(dump))), dump).toEqual({
+        words: null,
+        mapped: false,
+        cause: dump,
+      });
     }
     // Words stay words when they start with a bracket or a path makes them long.
     const pressed = "[Send] changed after it was pressed. Press it again.";
@@ -655,8 +917,15 @@ describe("error words", () => {
       "The Collection's rules changed. Reload the Collection. Then try again.",
       "Journal.md changed on disk. Open it again.",
       "Dataset uses custom rules in Edit. Update ops/dataset/operations.ts, then choose Review source change.",
-      ...["Materialization", "Checkpoint", "Materialization is truncated.: Status", "Dataset operation"].map((field) =>
-        `${field} uses custom rules in Edit. Update Dataset host/operations.ts, then choose Review source change.`),
+      ...[
+        "Materialization",
+        "Checkpoint",
+        "Materialization is truncated.: Status",
+        "Dataset operation",
+      ].map(
+        (field) =>
+          `${field} uses custom rules in Edit. Update Dataset host/operations.ts, then choose Review source change.`,
+      ),
     ]) {
       expect(readError(acrossIpc(new Error(message), "desktop:dataset")), message).toEqual({
         words: message,
@@ -664,133 +933,278 @@ describe("error words", () => {
         cause: null,
       });
     }
-    expect(withErrorWords("dohc could not prepare this review.", acrossIpc(
-      new Error("The Collection changed after this preview. Preview the change again."),
-      "desktop:dataset",
-    ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
+    expect(
+      withErrorWords(
+        "dohc could not prepare this review.",
+        acrossIpc(
+          new Error("The Collection changed after this preview. Preview the change again."),
+          "desktop:dataset",
+        ),
+      ),
+    ).toBe(
+      "dohc could not prepare this review. The Collection changed after this preview. Preview the change again.",
+    );
   });
 
   it("carries a refusal to use the Collections here across IPC, with its kind, its words and the computer that keeps them", () => {
-    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
-    expect(String(ipcWireError(elsewhere))).toBe(`CollectionsRefusalError [collections-elsewhere] [computer=Laptop]: ${elsewhere.message}`);
-    expect(readCollectionsRefusal(acrossIpc(elsewhere, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" });
+    const elsewhere = new CollectionsRefusalError({
+      kind: "elsewhere",
+      computer: { installId: "install-laptop", label: "Laptop" },
+      sameName: false,
+    });
+    expect(String(ipcWireError(elsewhere))).toBe(
+      `CollectionsRefusalError [collections-elsewhere] [computer=Laptop]: ${elsewhere.message}`,
+    );
+    expect(readCollectionsRefusal(acrossIpc(elsewhere, "desktop:dataset"))).toEqual({
+      kind: "elsewhere",
+      words: elsewhere.message,
+      computer: "Laptop",
+    });
     // A name with spaces and brackets crosses whole.
-    const studio = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-studio", label: "Sam's Studio [2]" }, sameName: false });
-    expect(readCollectionsRefusal(acrossIpc(studio, "desktop:dataset"))).toEqual({ kind: "elsewhere", words: studio.message, computer: "Sam's Studio [2]" });
+    const studio = new CollectionsRefusalError({
+      kind: "elsewhere",
+      computer: { installId: "install-studio", label: "Sam's Studio [2]" },
+      sameName: false,
+    });
+    expect(readCollectionsRefusal(acrossIpc(studio, "desktop:dataset"))).toEqual({
+      kind: "elsewhere",
+      words: studio.message,
+      computer: "Sam's Studio [2]",
+    });
     // A refusal with no name, or one that doesn't decode, stays a refusal and names no computer.
     for (const wire of ["", " [computer=%ZZ]"]) {
-      expect(readCollectionsRefusal(`Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]${wire}: ${elsewhere.message}`))
-        .toEqual({ kind: "elsewhere", words: elsewhere.message, computer: null });
+      expect(
+        readCollectionsRefusal(
+          `Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-elsewhere]${wire}: ${elsewhere.message}`,
+        ),
+      ).toEqual({ kind: "elsewhere", words: elsewhere.message, computer: null });
     }
-    const unclaimed = { kind: "unclaimed", words: new CollectionsRefusalError({ kind: "unclaimed" }).message } as const;
-    expect(readCollectionsRefusal(acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"))).toEqual(unclaimed);
+    const unclaimed = {
+      kind: "unclaimed",
+      words: new CollectionsRefusalError({ kind: "unclaimed" }).message,
+    } as const;
+    expect(
+      readCollectionsRefusal(
+        acrossIpc(new CollectionsRefusalError({ kind: "unclaimed" }), "desktop:dataset"),
+      ),
+    ).toEqual(unclaimed);
     // A list returns these refusals, and a report reads each as the thrown one.
-    for (const [returned, thrown] of [[unclaimed, new CollectionsRefusalError({ kind: "unclaimed" })],
-      [{ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" }, elsewhere]] as const) {
-      expect(readError(collectionsRefusalError(returned))).toEqual(readError(acrossIpc(thrown, "desktop:dataset")));
+    for (const [returned, thrown] of [
+      [unclaimed, new CollectionsRefusalError({ kind: "unclaimed" })],
+      [{ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" }, elsewhere],
+    ] as const) {
+      expect(readError(collectionsRefusalError(returned))).toEqual(
+        readError(acrossIpc(thrown, "desktop:dataset")),
+      );
       expect(readCollectionsRefusal(collectionsRefusalError(returned))).toEqual(returned);
     }
-    expect(withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset"))).toBe(`Could not read Collections. ${elsewhere.message}`);
+    expect(
+      withErrorWords("Could not read Collections.", acrossIpc(elsewhere, "desktop:dataset")),
+    ).toBe(`Could not read Collections. ${elsewhere.message}`);
     // Another error with the same words is not a refusal.
-    expect(readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset"))).toBeNull();
-    expect(readCollectionsRefusal(acrossIpc(Object.assign(new Error("x"), { name: "CollectionsRefusalError", code: "collections-other" })))).toBeNull();
+    expect(
+      readCollectionsRefusal(acrossIpc(new Error(elsewhere.message), "desktop:dataset")),
+    ).toBeNull();
+    expect(
+      readCollectionsRefusal(
+        acrossIpc(
+          Object.assign(new Error("x"), {
+            name: "CollectionsRefusalError",
+            code: "collections-other",
+          }),
+        ),
+      ),
+    ).toBeNull();
   });
 
   it("keeps where the Collections are apart from why the server list failed, and reports that list as before", () => {
-    const elsewhere = new CollectionsRefusalError({ kind: "elsewhere", computer: { installId: "install-laptop", label: "Laptop" }, sameName: false });
+    const elsewhere = new CollectionsRefusalError({
+      kind: "elsewhere",
+      computer: { installId: "install-laptop", label: "Laptop" },
+      sameName: false,
+    });
     const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
     expect(failed.elsewhere).toBe(elsewhere);
     expect(failed.failure).toBe("TypeError: fetch failed");
     // The server's error reads as it would have alone.
-    for (const cause of [new TypeError("fetch failed"), new CollectionsRefusalError({ kind: "unclaimed" }), new Error("Your server session changed. Try again.")]) {
-      expect(readError(new Error(new ServerCollectionsUnavailableError(elsewhere, cause).failure))).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
+    for (const cause of [
+      new TypeError("fetch failed"),
+      new CollectionsRefusalError({ kind: "unclaimed" }),
+      new Error("Your server session changed. Try again."),
+    ]) {
+      expect(
+        readError(new Error(new ServerCollectionsUnavailableError(elsewhere, cause).failure)),
+      ).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
     }
     expect(new ServerCollectionsUnavailableError(elsewhere, new Error()).failure).toBe("");
     // A report names no words of its own for that list, and offers nothing to keep.
-    const returned = collectionsRefusalError({ kind: "server-unavailable", words: elsewhere.message, computer: "Laptop", failure: failed.failure });
-    expect(readError(returned)).toMatchObject({ words: null, cause: `ServerCollectionsUnavailableError: ${failed.message}` });
+    const returned = collectionsRefusalError({
+      kind: "server-unavailable",
+      words: elsewhere.message,
+      computer: "Laptop",
+      failure: failed.failure,
+    });
+    expect(readError(returned)).toMatchObject({
+      words: null,
+      cause: `ServerCollectionsUnavailableError: ${failed.message}`,
+    });
     expect(readCollectionsRefusal(returned)).toBeNull();
   });
 
   it("carries a Collection's reopen wait across IPC as a number beside its code", () => {
-    for (const [retryAfterMs, words] of [[1, "1 second"], [4_200, "5 seconds"], [60_000, "1 minute"]] as const) {
+    for (const [retryAfterMs, words] of [
+      [1, "1 second"],
+      [4_200, "5 seconds"],
+      [60_000, "1 minute"],
+    ] as const) {
       const wait = new DatasetReopenWaitError(retryAfterMs);
-      expect(String(ipcWireError(wait))).toBe(`DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=${retryAfterMs}]: ${wait.message}`);
-      expect(readCollectionReopenWait(acrossIpc(wait, "desktop:dataset")))
-        .toEqual({ words: `This Collection is waiting to reopen. Try again in ${words}.`, waitMs: retryAfterMs });
+      expect(String(ipcWireError(wait))).toBe(
+        `DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=${retryAfterMs}]: ${wait.message}`,
+      );
+      expect(readCollectionReopenWait(acrossIpc(wait, "desktop:dataset"))).toEqual({
+        words: `This Collection is waiting to reopen. Try again in ${words}.`,
+        waitMs: retryAfterMs,
+      });
       expect(readCollectionReopenWait(wait)).toEqual({ words: wait.message, waitMs: retryAfterMs });
     }
     // A worker failure that starts a wait carries it too, and keeps its own words.
-    const stopped = Object.assign(new PersistentRuntimeError("worker_stopped", "stopped"), { retryAfterMs: 5000 });
-    expect(String(ipcWireError(stopped))).toBe("PersistentRuntimeError [worker_stopped] [retryAfterMs=5000]: stopped");
-    expect(readError(acrossIpc(stopped, "desktop:dataset")).words).toBe(readError(acrossIpc(new PersistentRuntimeError("worker_stopped", "stopped"), "desktop:dataset")).words);
+    const stopped = Object.assign(new PersistentRuntimeError("worker_stopped", "stopped"), {
+      retryAfterMs: 5000,
+    });
+    expect(String(ipcWireError(stopped))).toBe(
+      "PersistentRuntimeError [worker_stopped] [retryAfterMs=5000]: stopped",
+    );
+    expect(readError(acrossIpc(stopped, "desktop:dataset")).words).toBe(
+      readError(
+        acrossIpc(new PersistentRuntimeError("worker_stopped", "stopped"), "desktop:dataset"),
+      ).words,
+    );
     expect(readCollectionReopenWait(acrossIpc(stopped, "desktop:dataset"))).toBeNull();
-    expect(readCollectionReopenWait(new Error("This Collection is waiting to reopen. Try again in 5 seconds."))).toBeNull();
+    expect(
+      readCollectionReopenWait(
+        new Error("This Collection is waiting to reopen. Try again in 5 seconds."),
+      ),
+    ).toBeNull();
   });
 
   it("tells a request the Collection's host refused for replaced rules from its other conflicts, across IPC", () => {
     // The host's own check, with rules approved at revision 2 and no history that reaches the request's revision 1.
-    const none = { prepare: () => ({ get: () => undefined, all: () => [] }) } as unknown as Parameters<typeof resolveCompatibleDatasetRevision>[0];
-    const approved = { revision: 2, revisionSha256: "b".repeat(64) } as Parameters<typeof resolveCompatibleDatasetRevision>[3];
+    const none = {
+      prepare: () => ({ get: () => undefined, all: () => [] }),
+    } as unknown as Parameters<typeof resolveCompatibleDatasetRevision>[0];
+    const approved = { revision: 2, revisionSha256: "b".repeat(64) } as Parameters<
+      typeof resolveCompatibleDatasetRevision
+    >[3];
     let replaced: unknown;
-    try { resolveCompatibleDatasetRevision(none, { workspaceId: "workspace", datasetId: "dataset" }, { revision: 1, revisionSha256: "a".repeat(64) }, approved); } catch (error) { replaced = error; }
+    try {
+      resolveCompatibleDatasetRevision(
+        none,
+        { workspaceId: "workspace", datasetId: "dataset" },
+        { revision: 1, revisionSha256: "a".repeat(64) },
+        approved,
+      );
+    } catch (error) {
+      replaced = error;
+    }
     expect(replaced).toBeInstanceOf(DatasetHostError);
     expect(isCollectionRulesReplaced(acrossIpc(replaced, "desktop:dataset"))).toBe(true);
-    expect(isCollectionRulesReplaced(acrossIpc(new DatasetHostError("conflict", "This Collection is archived. Its owner can restore it."), "desktop:dataset"))).toBe(false);
-    expect(isCollectionRulesReplaced(new Error("The Collection's rules changed. Its owner must approve this access again."))).toBe(false);
+    expect(
+      isCollectionRulesReplaced(
+        acrossIpc(
+          new DatasetHostError(
+            "conflict",
+            "This Collection is archived. Its owner can restore it.",
+          ),
+          "desktop:dataset",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isCollectionRulesReplaced(
+        new Error("The Collection's rules changed. Its owner must approve this access again."),
+      ),
+    ).toBe(false);
   });
 
   it("tells a person what to do for each way the engine can be unavailable", () => {
     const unavailable = (message: string) =>
-      readError(acrossIpc(Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" }))).words;
+      readError(
+        acrossIpc(Object.assign(new Error(message), { name: "EngineDaemonUnavailableError" })),
+      ).words;
     expect(unavailable("Rust engine daemon is not available.")).toBe("Try again in a moment.");
-    expect(unavailable("Rust engine workspace.open timed out after 30000ms.")).toBe("Try again in a moment.");
-    expect(unavailable("Rust engine exited during its startup handshake.")).toBe("Try again in a moment.");
+    expect(unavailable("Rust engine workspace.open timed out after 30000ms.")).toBe(
+      "Try again in a moment.",
+    );
+    expect(unavailable("Rust engine exited during its startup handshake.")).toBe(
+      "Try again in a moment.",
+    );
     expect(unavailable("Rust engine lifecycle is already stopping.")).toBeNull();
-    expect(unavailable("Rust engine binary not found: C:\\dohc\\dohc-workspace-engine.exe"))
-      .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
-    expect(unavailable("Electron resources path is unavailable for the packaged Rust engine."))
-      .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
+    expect(unavailable("Rust engine binary not found: C:\\dohc\\dohc-workspace-engine.exe")).toBe(
+      "This copy of dohc is missing a file it needs. Reinstall dohc.",
+    );
+    expect(
+      unavailable("Electron resources path is unavailable for the packaged Rust engine."),
+    ).toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
   });
 
   it("names the rules file a refused restore could not read, and keeps the parser's text for Copy only", () => {
     const parser = "visibility.toml: TOML parse error at line 3, column 9";
-    const refused = (unreadable: WorkspacePolicyPath[]) => acrossIpc(
-      new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable, detail: parser }),
-      "desktop:restore-engine-moment-file",
-    );
+    const refused = (unreadable: WorkspacePolicyPath[]) =>
+      acrossIpc(
+        new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable, detail: parser }),
+        "desktop:restore-engine-moment-file",
+      );
     expect(readError(refused([".dohc/visibility.toml"]))).toEqual({
       words: "It can't read .dohc/visibility.toml. Fix the file, then try again.",
       mapped: true,
       cause: `RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${parser}`,
     });
-    expect(withErrorWords("dohc could not restore notes/plan.md.", refused([".dohc/visibility.toml"]))).toBe(
+    expect(
+      withErrorWords("dohc could not restore notes/plan.md.", refused([".dohc/visibility.toml"])),
+    ).toBe(
       "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
     );
-    expect(readError(refused([".dohc/files.toml"])).words).toBe("It can't read .dohc/files.toml. Fix the file, then try again.");
-    expect(readError(refused([".dohc/files.toml", ".dohc/visibility.toml"])).words)
-      .toBe("It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.");
-    expect(readError(refused([".dohc"])).words).toBe("It can't read this workspace's .dohc folder. Fix the folder, then try again.");
+    expect(readError(refused([".dohc/files.toml"])).words).toBe(
+      "It can't read .dohc/files.toml. Fix the file, then try again.",
+    );
+    expect(readError(refused([".dohc/files.toml", ".dohc/visibility.toml"])).words).toBe(
+      "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+    );
+    expect(readError(refused([".dohc"])).words).toBe(
+      "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
+    );
     // Main reads the class itself for Stop and restore's review rows.
-    expect(readError(new RestorePolicyRefusalError({ reason: "path-not-admitted" })).words)
-      .toBe("History no longer tracks this file. Track it in .dohc/files.toml, then try again.");
+    expect(readError(new RestorePolicyRefusalError({ reason: "path-not-admitted" })).words).toBe(
+      "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
+    );
   });
 
   it("puts the caller's sentence before the words the map adds", () => {
-    const stopped = acrossIpc(new PersistentRuntimeError("worker_stopped", "The dataset worker stopped."));
-    expect(withErrorWords("Could not open this Collection.", stopped))
-      .toBe("Could not open this Collection. It stopped before it finished. Try again.");
-    expect(withErrorWords("Could not open this Collection.", acrossIpc(refusal("INTERNAL", "workspace operation failed"))))
-      .toBe("Could not open this Collection.");
-    expect(withErrorWords("Could not share.", acrossIpc(new Error("Sync this workspace before sharing."))))
-      .toBe("Could not share. Sync this workspace before sharing.");
+    const stopped = acrossIpc(
+      new PersistentRuntimeError("worker_stopped", "The dataset worker stopped."),
+    );
+    expect(withErrorWords("Could not open this Collection.", stopped)).toBe(
+      "Could not open this Collection. It stopped before it finished. Try again.",
+    );
+    expect(
+      withErrorWords(
+        "Could not open this Collection.",
+        acrossIpc(refusal("INTERNAL", "workspace operation failed")),
+      ),
+    ).toBe("Could not open this Collection.");
+    expect(
+      withErrorWords(
+        "Could not share.",
+        acrossIpc(new Error("Sync this workspace before sharing.")),
+      ),
+    ).toBe("Could not share. Sync this workspace before sharing.");
   });
 });
 
 it("reads every page whose live editing stopped from Try again on History, whole, and from nothing else", () => {
   const across = (error: Error) => acrossIpc(error, "desktop:retry-history-capture");
   const one = ["notes/Q&A: plan [draft].md"];
-  const several = ["notes/a, b.md", "notes/12:30 \"call\" ].md", "notes/trailing space .md "];
+  const several = ["notes/a, b.md", 'notes/12:30 "call" ].md', "notes/trailing space .md "];
   for (const paths of [one, several]) {
     const stopped = new HistoryStillPausedError(paths);
     expect(liveEditingStoppedPaths(stopped)).toEqual(paths);
@@ -800,7 +1214,8 @@ it("reads every page whose live editing stopped from Try again on History, whole
   }
   expect(liveEditingStoppedPaths(across(new HistoryStillPausedError([])))).toEqual([]);
   // The class, the code and the lead are all needed, and the rest must be a list of paths.
-  const wire = (text: string) => new Error(`Error invoking remote method 'desktop:retry-history-capture': ${text}`);
+  const wire = (text: string) =>
+    new Error(`Error invoking remote method 'desktop:retry-history-capture': ${text}`);
   const lead = "History is still paused. Live editing stopped on ";
   for (const text of [
     `HistoryStillPausedError [live-editing-stopped]: ${lead}notes/plan.md`,
@@ -812,12 +1227,15 @@ it("reads every page whose live editing stopped from Try again on History, whole
     `HistoryStillPausedError [OVERLOADED]: ${lead}["notes/plan.md"]`,
     `DaemonRefusalError [live-editing-stopped]: ${lead}["notes/plan.md"]`,
     `HistoryStillPausedError [live-editing-stopped]: History is still paused. ["notes/plan.md"]`,
-  ]) expect(liveEditingStoppedPaths(wire(text))).toEqual([]);
+  ])
+    expect(liveEditingStoppedPaths(wire(text))).toEqual([]);
 });
 
 it("reads Try again on History as catching up only while the engine still takes in files", () => {
   const across = (error: Error) => acrossIpc(error, "desktop:retry-history-capture");
-  expect(isHistoryCatchingUp(across(refusal("OVERLOADED", "Workspace is still updating. Try again.")))).toBe(true);
+  expect(
+    isHistoryCatchingUp(across(refusal("OVERLOADED", "Workspace is still updating. Try again."))),
+  ).toBe(true);
   expect(isHistoryCatchingUp(across(new EngineCaptureNotSettledError("workspace-1")))).toBe(true);
   expect(isHistoryCatchingUp(across(refusal("OVERLOADED", "engine-store-busy")))).toBe(false);
   expect(isHistoryCatchingUp(across(new HistoryStillPausedError([])))).toBe(false);
@@ -825,10 +1243,17 @@ it("reads Try again on History as catching up only while the engine still takes 
 });
 
 it("names the Collection in a stopped move's words, as written, and leaves any other error as it is", () => {
-  const stopped = acrossIpc(new CollectionMoveUnfinishedError("sync.example.test", { cause: null, waited: true }), "dohc:dataset");
-  expect(readError(namingCollectionMove(stopped, "Q&A $& notes")).words).toBe("\"Q&A $& notes\" didn't finish moving to sync.example.test. Its records are kept on this computer.");
+  const stopped = acrossIpc(
+    new CollectionMoveUnfinishedError("sync.example.test", { cause: null, waited: true }),
+    "dohc:dataset",
+  );
+  expect(readError(namingCollectionMove(stopped, "Q&A $& notes")).words).toBe(
+    '"Q&A $& notes" didn\'t finish moving to sync.example.test. Its records are kept on this computer.',
+  );
   const named = readError(namingCollectionMove(stopped, "CRM: Accounts")).words;
-  expect(named).toBe("\"CRM: Accounts\" didn't finish moving to sync.example.test. Its records are kept on this computer.");
+  expect(named).toBe(
+    '"CRM: Accounts" didn\'t finish moving to sync.example.test. Its records are kept on this computer.',
+  );
   expect(readError(named).words).toBe(named);
   expect(waitedForCollectionMove(namingCollectionMove(stopped, "Orders"))).toBe(true);
   const other = acrossIpc(new Error("Sharing failed (502)."), "dohc:dataset");

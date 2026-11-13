@@ -123,14 +123,8 @@ test("a drag's field write on one device moves the card on the other device's op
     const apolloPath = "tasks/apollo.md";
     const zephyrPath = "tasks/zephyr.md";
     await writeFile(join(sourceRoot, schemaPath), SCHEMA_YAML);
-    await writeFile(
-      join(sourceRoot, apolloPath),
-      recordMd(APOLLO_ID, "Apollo", "Todo"),
-    );
-    await writeFile(
-      join(sourceRoot, zephyrPath),
-      recordMd(ZEPHYR_ID, "Zephyr", "Doing"),
-    );
+    await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Todo"));
+    await writeFile(join(sourceRoot, zephyrPath), recordMd(ZEPHYR_ID, "Zephyr", "Doing"));
     await Promise.all([
       waitForPathMoments(capture, schemaPath, 1),
       waitForPathMoments(capture, apolloPath, 1),
@@ -154,18 +148,14 @@ test("a drag's field write on one device moves the card on the other device's op
     });
     const page = desktop.page;
     await page.getByTestId("first-run-join-synced").click();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
     await showExplorerFiles(page);
     await waitForWorkspaceFile(page, workspaceId, schemaPath);
     await waitForWorkspaceFile(page, workspaceId, apolloPath);
-    expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain(
-      "Status: Todo",
-    );
+    expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain("Status: Todo");
 
     // Open the collection in three separately-named layers: the tree row
     // exposes data-collection once the engine lists the folder as a
@@ -227,9 +217,9 @@ test("a drag's field write on one device moves the card on the other device's op
             { path: `nudges/sync-nudge-${nudge}.md`, contents: `nudge ${nudge}\n` },
           ]);
           try {
-            return (
-              await readFile(join(temp.rootPath, apolloPath), "utf8")
-            ).includes("Status: Doing");
+            return (await readFile(join(temp.rootPath, apolloPath), "utf8")).includes(
+              "Status: Doing",
+            );
           } catch {
             return false;
           }
@@ -255,13 +245,8 @@ test("a drag's field write on one device moves the card on the other device's op
                 workspaceId: id,
                 collectionPath: "tasks",
               });
-              const apollo = result.records.find(
-                (record) => record.path === "tasks/apollo.md",
-              );
-              return (
-                apollo?.values.find((entry) => entry.field === "Status")
-                  ?.value ?? null
-              );
+              const apollo = result.records.find((record) => record.path === "tasks/apollo.md");
+              return apollo?.values.find((entry) => entry.field === "Status")?.value ?? null;
             } catch (error) {
               // Surface the query failure in the poll's report instead of
               // timing out on a silent null.
@@ -381,9 +366,7 @@ test("an agent's file save on one device opens a conflict against a record the o
     });
     const page = desktop.page;
     await page.getByTestId("first-run-join-synced").click();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);

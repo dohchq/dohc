@@ -1,22 +1,59 @@
-import { APP_BACKEND_INPUT_BYTES, APP_BACKEND_UPLOAD_BYTES, APP_BACKEND_OPERATION_FILES, type AppBackendJson } from "@dohc/security-contract/app-backend";
+import {
+  APP_BACKEND_INPUT_BYTES,
+  APP_BACKEND_UPLOAD_BYTES,
+  APP_BACKEND_OPERATION_FILES,
+  type AppBackendJson,
+} from "@dohc/security-contract/app-backend";
 import { FORM_CSS } from "./datasetFormStyles";
 
 export interface DatasetFormField {
   fieldId: string;
   name: string;
-  type: "text" | "number" | "checkbox" | "date" | "select" | "multi-select" | "url" | "attachment" | "relation";
-  relation?: { operation: string; keyFieldId: string; labelFieldId: string; keyType: "text" | "number"; many: boolean };
+  type:
+    | "text"
+    | "number"
+    | "checkbox"
+    | "date"
+    | "select"
+    | "multi-select"
+    | "url"
+    | "attachment"
+    | "relation";
+  relation?: {
+    operation: string;
+    keyFieldId: string;
+    labelFieldId: string;
+    keyType: "text" | "number";
+    many: boolean;
+  };
   options?: string[];
   required: boolean;
   omitWhenEmpty: boolean;
   default?: AppBackendJson;
 }
-export interface DatasetFormFrontendInput { title: string; operation: string; fields: DatasetFormField[] }
+export interface DatasetFormFrontendInput {
+  title: string;
+  operation: string;
+  fields: DatasetFormField[];
+}
 
-export function generateDatasetFormFrontend(input: DatasetFormFrontendInput): { "frontend.js": string; "frontend.css": string } {
-  const data = JSON.stringify({ ...input, inputBytes: APP_BACKEND_INPUT_BYTES, uploadBytes: APP_BACKEND_UPLOAD_BYTES, operationFiles: APP_BACKEND_OPERATION_FILES })
-    .replace(/</g, "\\u003c").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
-  return { "frontend.js": `import './frontend.css';\n(() => {\nconst definition = ${data};\n${SCRIPT}\n})();\n`, "frontend.css": FORM_CSS };
+export function generateDatasetFormFrontend(input: DatasetFormFrontendInput): {
+  "frontend.js": string;
+  "frontend.css": string;
+} {
+  const data = JSON.stringify({
+    ...input,
+    inputBytes: APP_BACKEND_INPUT_BYTES,
+    uploadBytes: APP_BACKEND_UPLOAD_BYTES,
+    operationFiles: APP_BACKEND_OPERATION_FILES,
+  })
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  return {
+    "frontend.js": `import './frontend.css';\n(() => {\nconst definition = ${data};\n${SCRIPT}\n})();\n`,
+    "frontend.css": FORM_CSS,
+  };
 }
 
 const SCRIPT = String.raw`

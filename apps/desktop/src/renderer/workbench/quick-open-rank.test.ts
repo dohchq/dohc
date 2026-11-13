@@ -23,7 +23,13 @@ describe("quick-open match tiers", () => {
       "docs/Notes-and-more.md",
       "x/keynotes.md",
     ]);
-    for (const path of ["a/x-note.md", "a/x_note.md", "a/x.note.md", "a/x note.md", "a/note/y.md"]) {
+    for (const path of [
+      "a/x-note.md",
+      "a/x_note.md",
+      "a/x.note.md",
+      "a/x note.md",
+      "a/note/y.md",
+    ]) {
       // A word-boundary match sits between a basename prefix and a substring.
       expect(rank("note", ["a/xnote.md", path, "long/dir/note.md"]), path).toEqual([
         "long/dir/note.md",
@@ -40,10 +46,12 @@ describe("quick-open match tiers", () => {
 
 describe("rankPreparedQuickOpenPaths", () => {
   it("ranks prefix over word-boundary over substring over fuzzy", () => {
-    const ranked = rank(
-      "note",
-      ["docs/keynotes.md", "docs/meeting-notes.md", "docs/notes.md", "nat/omega-thing-e.md"],
-    );
+    const ranked = rank("note", [
+      "docs/keynotes.md",
+      "docs/meeting-notes.md",
+      "docs/notes.md",
+      "nat/omega-thing-e.md",
+    ]);
     expect(ranked).toEqual([
       "docs/notes.md",
       "docs/meeting-notes.md",
@@ -80,10 +88,13 @@ describe("rankPreparedQuickOpenPaths", () => {
   it("ties break by shorter path then alphabetical; non-matches drop", () => {
     // Both notes.md basenames are tier 0 (basename prefix) — shorter path
     // first; the boundary matches (a-/b-notes.md) follow alphabetically.
-    const ranked = rank(
-      "note",
-      ["deep/dir/notes.md", "notes.md", "b-notes.md", "a-notes.md", "zzz.md"],
-    );
+    const ranked = rank("note", [
+      "deep/dir/notes.md",
+      "notes.md",
+      "b-notes.md",
+      "a-notes.md",
+      "zzz.md",
+    ]);
     expect(ranked).toEqual(["notes.md", "deep/dir/notes.md", "a-notes.md", "b-notes.md"]);
   });
 
@@ -216,7 +227,10 @@ describe("incremental quick-open ranking", () => {
         "",
         randomItem(random, ["note", "REPORT", "beta", "x_r", "a p"]),
         lowercaseSample.slice(0, Math.min(5, lowercaseSample.length)),
-        [...lowercaseSample].filter((_, index) => index % 3 === 0).slice(0, 5).join(""),
+        [...lowercaseSample]
+          .filter((_, index) => index % 3 === 0)
+          .slice(0, 5)
+          .join(""),
         `missing-${workspaceIndex}`,
       ];
       const prepared = prepareQuickOpenPaths(paths, context);

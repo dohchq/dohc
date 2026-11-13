@@ -1,4 +1,7 @@
-import { AutomationStoreNotOpenedError, type AutomationStoreFolder } from "@dohc/automation-executor/automation-run-store";
+import {
+  AutomationStoreNotOpenedError,
+  type AutomationStoreFolder,
+} from "@dohc/automation-executor/automation-run-store";
 import {
   localStateDir,
   LocalStateUnavailableError,
@@ -32,7 +35,8 @@ export function localAutomationStoreFolder(workspace: LocalStateWorkspace): Auto
       try {
         return await localStateDir(workspace);
       } catch (error) {
-        if (error instanceof LocalStateUnavailableError) throw new LocalStateUnavailableError(error.refusal, notSaved(error.refusal));
+        if (error instanceof LocalStateUnavailableError)
+          throw new LocalStateUnavailableError(error.refusal, notSaved(error.refusal));
         throw error;
       }
     },
@@ -40,7 +44,8 @@ export function localAutomationStoreFolder(workspace: LocalStateWorkspace): Auto
       try {
         return await readOwnedLocalState(workspace.rootPath, work);
       } catch (error) {
-        if (error instanceof LocalStateUnavailableError) throw new AutomationStoreNotOpenedError(error.message);
+        if (error instanceof LocalStateUnavailableError)
+          throw new AutomationStoreNotOpenedError(error.message);
         throw error;
       }
     },

@@ -9,13 +9,18 @@ type Named = Pick<ScheduleHostComputer, "kind" | "label" | "thisComputer">;
 
 /** How a computer heads its row: "This computer", "This server" with the server's name, or its name. */
 export function computerName(computer: Named): string {
-  if (computer.kind === "server") return computer.label === "This server" ? "This server" : `This server (${computer.label})`;
+  if (computer.kind === "server")
+    return computer.label === "This server" ? "This server" : `This server (${computer.label})`;
   return computer.thisComputer ? "This computer" : computer.label;
 }
 
 /** How a computer reads inside a sentence: "this computer", "this server", or its name. */
 export function computerInSentence(computer: Named): string {
-  return computer.kind === "server" ? "this server" : computer.thisComputer ? "this computer" : computer.label;
+  return computer.kind === "server"
+    ? "this server"
+    : computer.thisComputer
+      ? "this computer"
+      : computer.label;
 }
 
 /**
@@ -25,11 +30,21 @@ export function computerInSentence(computer: Named): string {
  * never stopped, or nothing when the server was the one running.
  * `serverOff` says why. Choosing a computer then starts it at once.
  */
-export function shownScheduleHost(relay: RelayHost): { hostInstallId: string | null; handoverFrom: string | null; serverOff: boolean } {
+export function shownScheduleHost(relay: RelayHost): {
+  hostInstallId: string | null;
+  handoverFrom: string | null;
+  serverOff: boolean;
+} {
   const { hostInstallId, handoverFrom } = relay;
-  const serverOff = (hostInstallId === AUTOMATION_SERVER_INSTALL_ID || handoverFrom === AUTOMATION_SERVER_INSTALL_ID) &&
+  const serverOff =
+    (hostInstallId === AUTOMATION_SERVER_INSTALL_ID ||
+      handoverFrom === AUTOMATION_SERVER_INSTALL_ID) &&
     !relay.computers.some((computer) => computer.kind === "server");
   if (!serverOff) return { hostInstallId, handoverFrom, serverOff };
   const running = handoverFrom ?? hostInstallId;
-  return { hostInstallId: running === AUTOMATION_SERVER_INSTALL_ID ? null : running, handoverFrom: null, serverOff };
+  return {
+    hostInstallId: running === AUTOMATION_SERVER_INSTALL_ID ? null : running,
+    handoverFrom: null,
+    serverOff,
+  };
 }

@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  ListChatChannelSharesResult,
-  MAX_CHAT_CHANNEL_SHARE_ROWS,
-} from "./ipc/bridgeContract";
+import { ListChatChannelSharesResult, MAX_CHAT_CHANNEL_SHARE_ROWS } from "./ipc/bridgeContract";
 import {
   chatShareSessionKey,
   handleRelayUnauthorized,
@@ -28,11 +25,8 @@ describe("runtime main chat IPC boundaries", () => {
     generation += 1;
     resolveIdentity({ authorUserId: "old-user-id" });
 
-    await expect(resolving).rejects.toThrow(
-      "Your server session changed. Try again.",
-    );
+    await expect(resolving).rejects.toThrow("Your server session changed. Try again.");
   });
-
 });
 
 // A relay outage must resolve as "unreachable", never as an empty
@@ -46,9 +40,7 @@ describe("readRelayChatShareLanes", () => {
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
         Promise.reject(
-          new RelaySessionError(
-            "Your server session expired. Sign in again, then retry.",
-          ),
+          new RelaySessionError("Your server session expired. Sign in again, then retry."),
         ),
       workspaceId: "workspace-1",
     });
@@ -96,7 +88,12 @@ describe("readRelayChatShareLanes", () => {
             {
               shareId: "share-group",
               granterEmail: "owner@example.com",
-              selector: { kind: "group", channelWireId: "wire-group", paths: ["team"], versionId: null },
+              selector: {
+                kind: "group",
+                channelWireId: "wire-group",
+                paths: ["team"],
+                versionId: null,
+              },
               access: "read-only",
             },
             { shareId: "share-other", selector: { kind: "document" } },
@@ -142,13 +139,23 @@ describe("readRelayChatShareLanes", () => {
       fetchListing: () =>
         Promise.resolve({
           removed: [
-            { shareId: "share-gone", grantId: "grant", message: "The owner removed your access.", removedAtMs: 5 },
+            {
+              shareId: "share-gone",
+              grantId: "grant",
+              message: "The owner removed your access.",
+              removedAtMs: 5,
+            },
             { shareId: 7 },
           ],
         }),
       workspaceId: "workspace-1",
     });
-    expect(removed).toEqual({ state: "answered", granted: [], received: [], removed: ["share-gone"] });
+    expect(removed).toEqual({
+      state: "answered",
+      granted: [],
+      received: [],
+      removed: ["share-gone"],
+    });
     const malformed = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () => Promise.resolve({ removed: "share-gone" as unknown as unknown[] }),
@@ -177,28 +184,27 @@ describe("readRelayChatShareLanes", () => {
   }
 
   for (const lane of ["received"] as const) {
+    it("reports a chat row with unreadable access as unreachable", async () => {
+      const lanes = await readRelayChatShareLanes({
+        shareIdsClaimedElsewhere: new Set<string>(),
+        fetchListing: () =>
+          Promise.resolve({
+            granted: [
+              {
+                shareId: "share-corrupt",
+                workspaceId: "workspace-1",
+                recipientEmail: "ana@example.com",
+                revokedAtMs: null,
+                selector: { kind: "chat", channelWireId: "wire-corrupt" },
+                access: "edit",
+              },
+            ],
+          }),
+        workspaceId: "workspace-1",
+      });
 
-  it("reports a chat row with unreadable access as unreachable", async () => {
-    const lanes = await readRelayChatShareLanes({
-      shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({
-          granted: [
-            {
-              shareId: "share-corrupt",
-              workspaceId: "workspace-1",
-              recipientEmail: "ana@example.com",
-              revokedAtMs: null,
-              selector: { kind: "chat", channelWireId: "wire-corrupt" },
-              access: "edit",
-            },
-          ],
-        }),
-      workspaceId: "workspace-1",
+      expect(lanes).toEqual({ state: "unreachable" });
     });
-
-    expect(lanes).toEqual({ state: "unreachable" });
-  });
 
     it(`reports an over-cap ${lane} lane as over-limit, so cached rows survive and the surface can name it`, async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -276,14 +282,13 @@ describe("readRelayChatShareLanes", () => {
     // account is back under the cap and can list again.
     const afterOneRevoke = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
-      fetchListing: () =>
-        Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
+      fetchListing: () => Promise.resolve({ granted: grantRows(MAX_CHAT_CHANNEL_SHARE_ROWS) }),
       workspaceId: "workspace-1",
     });
     expect(afterOneRevoke.state).toBe("answered");
-    expect(
-      afterOneRevoke.state === "answered" && afterOneRevoke.granted,
-    ).toHaveLength(MAX_CHAT_CHANNEL_SHARE_ROWS);
+    expect(afterOneRevoke.state === "answered" && afterOneRevoke.granted).toHaveLength(
+      MAX_CHAT_CHANNEL_SHARE_ROWS,
+    );
     // And no revoked row is listed at all — nothing renders them, and carrying
     // them would leave the payload unbounded while merely uncounting them.
     expect(
@@ -350,7 +355,6 @@ describe("readRelayChatShareLanes", () => {
 // The session key scopes the renderer's cached relay rows to one account, so
 // preservation through an outage can never keep another account's rows.
 describe("chatShareSessionKey", () => {
-
   it("answers null without a session", () => {
     expect(chatShareSessionKey(null)).toBeNull();
   });

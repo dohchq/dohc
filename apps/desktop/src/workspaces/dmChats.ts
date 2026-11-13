@@ -37,10 +37,7 @@ export interface DmRecordInfo {
   updatedAtMs: number;
 }
 
-type DmStore = Pick<
-  LinkedChatStore,
-  "listChannels" | "listChannelThreads" | "getChannelWireId"
->;
+type DmStore = Pick<LinkedChatStore, "listChannels" | "listChannelThreads" | "getChannelWireId">;
 
 // Main-process trust-boundary guard for the generic shared-channel IPC. A
 // renderer can craft bridge payloads, so the handler must derive the channel
@@ -112,8 +109,7 @@ export async function listDmRecords(input: {
       channelId: channel.id,
       channelWireId: wireId,
       name: channel.name,
-      peerLabel:
-        role === "participant" ? (joined?.granterEmail ?? channel.name) : channel.name,
+      peerLabel: role === "participant" ? (joined?.granterEmail ?? channel.name) : channel.name,
       role,
       shareId: joined?.shareId ?? null,
       threadId: running?.thread.id ?? null,
@@ -122,9 +118,7 @@ export async function listDmRecords(input: {
       updatedAtMs: running?.thread.updatedAtMs ?? channel.updatedAtMs,
     });
   }
-  return dms.sort(
-    (a, b) => b.updatedAtMs - a.updatedAtMs || (a.channelId < b.channelId ? -1 : 1),
-  );
+  return dms.sort((a, b) => b.updatedAtMs - a.updatedAtMs || (a.channelId < b.channelId ? -1 : 1));
 }
 
 // One page of a relay share-log GET (`/sync/shares/:id/log`): the relay
@@ -158,11 +152,7 @@ export async function resolveDmKinds(input: {
   cache: Map<string, "dm" | "not-dm">;
   peekKind: (shareId: string) => Promise<DmPeekResult>;
 }): Promise<void> {
-  for (
-    let start = 0;
-    start < input.shareIds.length;
-    start += DM_KIND_PEEK_BATCH_SIZE
-  ) {
+  for (let start = 0; start < input.shareIds.length; start += DM_KIND_PEEK_BATCH_SIZE) {
     const batch = input.shareIds.slice(start, start + DM_KIND_PEEK_BATCH_SIZE);
     // A failed peek proves no immutable kind. It stays uncached for the next call.
     await Promise.allSettled(
@@ -179,9 +169,7 @@ export function shareIdsToWithholdFromOrdinaryInvites(input: {
   shareIds: readonly string[];
   cache: ReadonlyMap<string, "dm" | "not-dm">;
 }): Set<string> {
-  return new Set(
-    input.shareIds.filter((shareId) => input.cache.get(shareId) !== "not-dm"),
-  );
+  return new Set(input.shareIds.filter((shareId) => input.cache.get(shareId) !== "not-dm"));
 }
 
 // Peek a received chat grant's KIND without mutating the local store

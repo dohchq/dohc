@@ -171,16 +171,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     label: "Callout",
     hint: "Highlighted info box",
     icon: Info,
-    aliases: [
-      "callout",
-      "note",
-      "tip",
-      "info",
-      "warning",
-      "danger",
-      "admonition",
-      "aside",
-    ],
+    aliases: ["callout", "note", "tip", "info", "warning", "danger", "admonition", "aside"],
   },
   {
     id: "toggle",
@@ -276,10 +267,7 @@ function anchorSlash(yTiptap: YTiptap, sync: YSyncState, from: number): Relative
   return yTiptap.absolutePositionToRelativePosition(from + 1, sync.type, sync.binding.mapping);
 }
 
-function readSlashCommandState(
-  view: EditorView,
-  previous: SlashCommandState,
-): SlashCommandState {
+function readSlashCommandState(view: EditorView, previous: SlashCommandState): SlashCommandState {
   if (view.editable === false) {
     return CLOSED_SLASH_COMMAND_STATE;
   }
@@ -363,7 +351,8 @@ export function makeSlashCommandPlugin({
         if (!trigger) return null;
         // Read from the old state: this state's later plugins aren't built yet.
         const sync: YSyncState | undefined = yTiptap?.ySyncPluginKey.getState(oldState);
-        const anchor = (from: number) => (yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null);
+        const anchor = (from: number) =>
+          yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null;
         if (dismissing || !dismissed) return { from: trigger.from, anchor: anchor(trigger.from) };
 
         // Y.js applies a remote edit, or an undo, by replacing the whole
@@ -410,9 +399,7 @@ export function makeSlashCommandPlugin({
           event.preventDefault();
           publish({
             ...slashState,
-            selected: items.length
-              ? (slashState.selected - 1 + items.length) % items.length
-              : 0,
+            selected: items.length ? (slashState.selected - 1 + items.length) % items.length : 0,
           });
           return true;
         }
@@ -573,7 +560,10 @@ export function runSlashCommand(
 
   switch (id) {
     case "wikilink":
-      chain.insertContent("[[]]").setTextSelection(state.from + 2).run();
+      chain
+        .insertContent("[[]]")
+        .setTextSelection(state.from + 2)
+        .run();
       return;
     case "heading-1":
       chain.toggleHeading({ level: 1 }).run();

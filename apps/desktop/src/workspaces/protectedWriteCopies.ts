@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { z } from "zod";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import { PROTECTED_COPY_FINAL_ERROR } from "../ipc/errorWords";
-import { localStateFolder, localStateOpened, LocalStateUnavailableError, type LocalStateWorkspace } from "./workspaceLocalState";
+import {
+  localStateFolder,
+  localStateOpened,
+  LocalStateUnavailableError,
+  type LocalStateWorkspace,
+} from "./workspaceLocalState";
 
 // Text of a protected file that a sync was about to replace and History did
 // not hold. It stays on this computer: `.dohc` is never captured, synced,
@@ -13,18 +18,23 @@ import { localStateFolder, localStateOpened, LocalStateUnavailableError, type Lo
 export const PROTECTED_COPIES_PATH = ".dohc/local/protected-copies";
 // The engine's MAX_SECRET_FILE_BYTES: protected History holds nothing larger.
 export const MAX_PROTECTED_HISTORY_BYTES = 1024 * 1024;
-const guard = { path: PROTECTED_COPIES_PATH, lead: "dohc could not open the folder where it keeps changes to protected files." };
+const guard = {
+  path: PROTECTED_COPIES_PATH,
+  lead: "dohc could not open the folder where it keeps changes to protected files.",
+};
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const COPY_FILE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/;
 // atomicWriteFile's temp name, left behind when dohc stopped mid-write.
 const TEMPORARY = /^[0-9a-f-]{36}\.json\.tmp-\d+-[0-9a-f-]{36}$/;
-const KeptText = z.object({
-  path: z.string(),
-  id: z.string().regex(ID),
-  versionId: z.string(),
-  createdAtMs: z.number(),
-  text: z.string(),
-}).strict();
+const KeptText = z
+  .object({
+    path: z.string(),
+    id: z.string().regex(ID),
+    versionId: z.string(),
+    createdAtMs: z.number(),
+    text: z.string(),
+  })
+  .strict();
 export type ProtectedCopy = z.infer<typeof KeptText>;
 type CopyFacts = Omit<ProtectedCopy, "text">;
 export type ProtectedCopyRow = [path: string, id: string, keptAtMs: number];
@@ -66,7 +76,11 @@ async function readCopy(dir: string, name: string): Promise<ProtectedCopy> {
   const shown = `${PROTECTED_COPIES_PATH}/${name}`;
   const text = await readFile(join(dir, name), "utf8");
   let value: unknown;
-  try { value = JSON.parse(text); } catch { throw new ProtectedCopyReadError(shown); }
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new ProtectedCopyReadError(shown);
+  }
   const parsed = KeptText.safeParse(value);
   if (!parsed.success || `${parsed.data.id}.json` !== name) throw new ProtectedCopyReadError(shown);
   return parsed.data;
@@ -76,7 +90,10 @@ export function protectedWriteCopies(workspace: LocalStateWorkspace) {
   let pending = Promise.resolve();
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
     const result = pending.then(task);
-    pending = result.then(() => undefined, () => undefined);
+    pending = result.then(
+      () => undefined,
+      () => undefined,
+    );
     return result;
   }
   const directory = () => localStateFolder(workspace, "protected-copies", guard);
@@ -95,7 +112,12 @@ export function protectedWriteCopies(workspace: LocalStateWorkspace) {
       if (known.has(name)) continue;
       try {
         const copy = await readCopy(dir, name);
-        known.set(name, { path: copy.path, id: copy.id, versionId: copy.versionId, createdAtMs: copy.createdAtMs });
+        known.set(name, {
+          path: copy.path,
+          id: copy.id,
+          versionId: copy.versionId,
+          createdAtMs: copy.createdAtMs,
+        });
       } catch (error) {
         onReadError(error);
       }
@@ -109,7 +131,8 @@ export function protectedWriteCopies(workspace: LocalStateWorkspace) {
       // engine's binding, so a list refused meanwhile waits once for that open.
       return enqueue(async () => {
         const copies = await load(onReadError).catch(async (error: unknown) => {
-          if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened") throw error;
+          if (!(error instanceof LocalStateUnavailableError) || error.refusal !== "not-opened")
+            throw error;
           await localStateOpened(workspace);
           return load(onReadError);
         });
@@ -129,7 +152,10 @@ export function protectedWriteCopies(workspace: LocalStateWorkspace) {
         const id = randomUUID();
         const createdAtMs = Date.now();
         // Written whole or not at all, at 0600, before the file is replaced.
-        await atomicWriteFile(join(dir, `${id}.json`), JSON.stringify({ path, id, versionId, createdAtMs, text }));
+        await atomicWriteFile(
+          join(dir, `${id}.json`),
+          JSON.stringify({ path, id, versionId, createdAtMs, text }),
+        );
         known.set(`${id}.json`, { path, id, versionId, createdAtMs });
         return true;
       });
@@ -137,14 +163,17 @@ export function protectedWriteCopies(workspace: LocalStateWorkspace) {
     read(id: string): Promise<ProtectedCopy | null> {
       return enqueue(async () => {
         const dir = await directory();
-        return await readCopy(dir, `${checkedId(id)}.json`).catch(ignoreMissing) ?? null;
+        return (await readCopy(dir, `${checkedId(id)}.json`).catch(ignoreMissing)) ?? null;
       });
     },
     // False when no copy has this id.
     remove(id: string): Promise<boolean> {
       return enqueue(async () => {
         const name = `${checkedId(id)}.json`;
-        const removed = await unlink(join(await directory(), name)).then(() => true, (error: unknown) => ignoreMissing(error) ?? false);
+        const removed = await unlink(join(await directory(), name)).then(
+          () => true,
+          (error: unknown) => ignoreMissing(error) ?? false,
+        );
         known.delete(name);
         return removed;
       });

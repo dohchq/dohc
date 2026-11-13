@@ -1,41 +1,64 @@
-import {accountDeletionKey, presentsAccountDeletionKey, ACCOUNT_DELETION_KEY_HEADER, ACCOUNT_DELETION_PATH} from "@dohc/security-contract/account-deletion";
+import {
+  accountDeletionKey,
+  presentsAccountDeletionKey,
+  ACCOUNT_DELETION_KEY_HEADER,
+  ACCOUNT_DELETION_PATH,
+} from "@dohc/security-contract/account-deletion";
 import { createAppLaunchHandler } from "./appLaunch";
 import { createNamedAppMaterialResolver } from "./namedAppMaterial";
 import { createAppDiscovery } from "./appDiscovery";
 import type { AppLaunchConfig } from "./appLaunchConfig";
-import {parsePublicEditRelease, type PublicEditRelease} from "@dohc/security-contract";
-import {createNamedRecipientChatClient} from "./namedRecipientChat";
-import {createPushClient} from "./pushClient";
-import {createNamedRecipientDocumentsClient} from "./namedRecipientDocuments";
-import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
+import { parsePublicEditRelease, type PublicEditRelease } from "@dohc/security-contract";
+import { createNamedRecipientChatClient } from "./namedRecipientChat";
+import { createPushClient } from "./pushClient";
+import { createNamedRecipientDocumentsClient } from "./namedRecipientDocuments";
+import type { NamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter, readBoundedJson } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
-import { RELAY_API_VERSION, RELAY_API_VERSION_HEADER, SHARE_WEB_API_VERSION, SHARE_WEB_API_VERSION_HEADER } from "@dohc/workspace-contracts/relay-values";
+import {
+  RELAY_API_VERSION,
+  RELAY_API_VERSION_HEADER,
+  SHARE_WEB_API_VERSION,
+  SHARE_WEB_API_VERSION_HEADER,
+} from "@dohc/workspace-contracts/relay-values";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
-import { createNamedLiveBrowserClient, type NamedLiveBrowserClientLimits, type NamedLiveBrowserSessionContext } from "./namedLiveBrowserClient";
-import {createNamedLiveTicketClient} from "./namedLiveTicketClient";
-import {createLinkLiveClient} from "./linkLiveClient";
-import {linkRefusalBody, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
-import {linkChatRefusalBody, opaqueLinkRefusal as refused} from "./linkRefusal";
-import {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
-export {SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS} from "./securityHeaders";
-import {serveRemoteMcp} from "./remoteMcp";
-import {createAgentChatClient} from "./agentChatClient";
 import {
-  MCP_CORS_HEADERS, MCP_PATH_PREFIX, PERSONAL_MCP_PATH_PREFIX, type SignInPagePolicy, createMcpSignIn, isMcpCorsPath, mcpChallenge,
-  mcpLinkSecret, mcpPersonalWorkspace, mcpRoutePattern, signInPagePolicy,
+  createNamedLiveBrowserClient,
+  type NamedLiveBrowserClientLimits,
+  type NamedLiveBrowserSessionContext,
+} from "./namedLiveBrowserClient";
+import { createNamedLiveTicketClient } from "./namedLiveTicketClient";
+import { createLinkLiveClient } from "./linkLiveClient";
+import { linkRefusalBody, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
+import { linkChatRefusalBody, opaqueLinkRefusal as refused } from "./linkRefusal";
+import { SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS } from "./securityHeaders";
+export { SHARE_WEB_CSP, SHARE_WEB_SECURITY_HEADERS } from "./securityHeaders";
+import { serveRemoteMcp } from "./remoteMcp";
+import { createAgentChatClient } from "./agentChatClient";
+import {
+  MCP_CORS_HEADERS,
+  MCP_PATH_PREFIX,
+  PERSONAL_MCP_PATH_PREFIX,
+  type SignInPagePolicy,
+  createMcpSignIn,
+  isMcpCorsPath,
+  mcpChallenge,
+  mcpLinkSecret,
+  mcpPersonalWorkspace,
+  mcpRoutePattern,
+  signInPagePolicy,
 } from "./mcpSignIn";
-import {SHARE_WEB_REQUEST_LOG} from "./requestLog";
-export {SHARE_WEB_REQUEST_LOG} from "./requestLog";
-import {servePersonalMcp} from "./personalMcp";
-import {createPersonalAgentClient} from "./personalAgentClient";
-import {createPersonalLiveClient} from "./personalLiveClient";
-import {COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES} from "./collectionWrites";
+import { SHARE_WEB_REQUEST_LOG } from "./requestLog";
+export { SHARE_WEB_REQUEST_LOG } from "./requestLog";
+import { servePersonalMcp } from "./personalMcp";
+import { createPersonalAgentClient } from "./personalAgentClient";
+import { createPersonalLiveClient } from "./personalLiveClient";
+import { COLLECTION_WRITES_PATH, MAX_COLLECTION_WRITE_ENVELOPE_BYTES } from "./collectionWrites";
 import { viewerPage } from "../viewer/src/pages";
 import { serveWorkLinkPage } from "./workLinkPage";
 import { SHARE_WEB_API_VERSIONS, mcpApiVersions, shareWebApiVersionRefusal } from "./apiVersion";
@@ -48,7 +71,13 @@ const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 // The relay's own bound on a link post: an 8,000-byte body, escaped, and its fields.
 const MAX_LINK_CHAT_POST_BYTES = 64 * 1024;
-const LINK_CHAT_POST_FIELDS = new Set(["channelWireId", "threadId", "body", "claimedName", "idempotencyKey"]);
+const LINK_CHAT_POST_FIELDS = new Set([
+  "channelWireId",
+  "threadId",
+  "body",
+  "claimedName",
+  "idempotencyKey",
+]);
 const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
 export const EXCHANGE_BUCKET_CAPACITY = 12;
 const EXCHANGE_REFILL_PER_SECOND = 0.2;
@@ -134,11 +163,14 @@ type LinkCaller = BrowserSession | AgentCaller;
  * share first, so its grant is known before any per-link limit applies.
  */
 function linkKeyOf(caller: LinkCaller): string {
-  return "session" in caller ? caller.session.grantId : caller.grantId ?? caller.addressKey;
+  return "session" in caller ? caller.session.grantId : (caller.grantId ?? caller.addressKey);
 }
 
 /** Keeps an agent's grant from the relay's share answer, and removes it from the answer. */
-function takeAgentGrant(agent: AgentCaller, meta: Record<string, unknown> | null): Record<string, unknown> | null {
+function takeAgentGrant(
+  agent: AgentCaller,
+  meta: Record<string, unknown> | null,
+): Record<string, unknown> | null {
   if (!meta) return null;
   const { grantId, ...rest } = meta;
   if (typeof grantId === "string" && grantId.length > 0) agent.grantId = grantId;
@@ -169,7 +201,11 @@ interface RelayCall {
    */
   retryable?: boolean;
   /** Answers a relay 200. `holdSlot` keeps the limiter slot until its release runs. */
-  ok?(relayResponse: Response, holdSlot: () => () => void, signal: AbortSignal): Response | Promise<Response>;
+  ok?(
+    relayResponse: Response,
+    holdSlot: () => () => void,
+    signal: AbortSignal,
+  ): Response | Promise<Response>;
   /** Translates a relay refusal, or returns null for the generic refusal. */
   refusal?(relayResponse: Response): Promise<Response | null>;
 }
@@ -195,16 +231,30 @@ export interface CreateShareWebApplicationOptions {
   namedLiveTickets?: boolean;
   namedRecipientBrowserLimits?: NamedLiveBrowserLimits;
   deleteAccountGateways?(userId: string, workspaceIds: readonly string[]): void;
-  linkLive?: {publicOrigin: string; requests: NamedLiveBrowserClientLimits; editor: NamedLiveBrowserLimits};
+  linkLive?: {
+    publicOrigin: string;
+    requests: NamedLiveBrowserClientLimits;
+    editor: NamedLiveBrowserLimits;
+  };
 }
 
 export type LinkBrowserMaterial =
-  | { ok: true; grantId?: string; capabilityToken: string; profileSecret: string; setCookie: string | null; currentCapability(): Promise<string | null> }
+  | {
+      ok: true;
+      grantId?: string;
+      capabilityToken: string;
+      profileSecret: string;
+      setCookie: string | null;
+      currentCapability(): Promise<string | null>;
+    }
   | { ok: false; status: 404 | 503 };
 
 export interface ShareWebApplication {
   handle(request: Request): Promise<Response>;
-  resolveNamedBrowserSession(request: Request, discriminator: string): Promise<NamedLiveBrowserSessionContext | null>;
+  resolveNamedBrowserSession(
+    request: Request,
+    discriminator: string,
+  ): Promise<NamedLiveBrowserSessionContext | null>;
   linkLive?: ReturnType<typeof createLinkLiveClient>;
   resolveLinkBrowserMaterial(
     discriminator: string,
@@ -223,7 +273,8 @@ class ShareWebSessionStore {
   }
 
   deleteGrants(grantIds: readonly string[]) {
-    for (const [key, session] of this.sessions) if (grantIds.includes(session.grantId)) this.sessions.delete(key);
+    for (const [key, session] of this.sessions)
+      if (grantIds.includes(session.grantId)) this.sessions.delete(key);
   }
 
   set(token: string, session: ShareWebSession, nowMs: number): void {
@@ -240,21 +291,14 @@ class ShareWebSessionStore {
   get(discriminator: string, token: string, nowMs: number): ShareWebSession | null {
     const key = sessionKey(discriminator, token);
     const session = this.sessions.get(key);
-    if (
-      !session ||
-      session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < nowMs
-    ) {
+    if (!session || session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < nowMs) {
       if (session) this.sessions.delete(key);
       return null;
     }
     return session;
   }
 
-  deleteIfCapability(
-    discriminator: string,
-    token: string,
-    capabilityToken: string,
-  ): void {
+  deleteIfCapability(discriminator: string, token: string, capabilityToken: string): void {
     const key = sessionKey(discriminator, token);
     if (this.sessions.get(key)?.capabilityToken === capabilityToken) {
       this.sessions.delete(key);
@@ -275,12 +319,7 @@ class ShareWebSessionStore {
     return session;
   }
 
-  isCurrent(
-    discriminator: string,
-    token: string,
-    capabilityToken: string,
-    nowMs: number,
-  ): boolean {
+  isCurrent(discriminator: string, token: string, capabilityToken: string, nowMs: number): boolean {
     return this.get(discriminator, token, nowMs)?.capabilityToken === capabilityToken;
   }
 
@@ -340,10 +379,7 @@ class ShareWebInFlightLimiter {
   acquire(sessionIdentity: string, grantIdentity: string): (() => void) | null {
     const sessionInFlight = this.inFlightBySession.get(sessionIdentity) ?? 0;
     const grantInFlight = this.inFlightByGrant.get(grantIdentity) ?? 0;
-    if (
-      sessionInFlight >= this.maxPerSession ||
-      grantInFlight >= this.maxPerGrant
-    ) {
+    if (sessionInFlight >= this.maxPerSession || grantInFlight >= this.maxPerGrant) {
       return null;
     }
     this.inFlightBySession.set(sessionIdentity, sessionInFlight + 1);
@@ -437,12 +473,16 @@ function parseCookies(header: string | null): Map<string, string> {
 
 async function exchangeInput(request: Request): Promise<string | null> {
   try {
-    const input = asRecord(await readBoundedJson(request, MAX_EXCHANGE_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(DEFAULT_RELAY_REQUEST_TIMEOUT_MS)])));
+    const input = asRecord(
+      await readBoundedJson(
+        request,
+        MAX_EXCHANGE_BODY_BYTES,
+        AbortSignal.any([request.signal, AbortSignal.timeout(DEFAULT_RELAY_REQUEST_TIMEOUT_MS)]),
+      ),
+    );
     if (!input) return null;
     const secret = input.secret;
-    return typeof secret === "string" && LINK_SECRET_PATTERN.test(secret)
-      ? secret
-      : null;
+    return typeof secret === "string" && LINK_SECRET_PATTERN.test(secret) ? secret : null;
   } catch {
     return null;
   }
@@ -484,12 +524,7 @@ function logRelayPath(request: Request): string {
 function discussionRelayPath(request: Request): string | null {
   const url = new URL(request.url);
   for (const key of url.searchParams.keys()) {
-    if (
-      key !== "session" &&
-      key !== "cursor" &&
-      key !== "limit" &&
-      key !== "direction"
-    ) {
+    if (key !== "session" && key !== "cursor" && key !== "limit" && key !== "direction") {
       return null;
     }
   }
@@ -507,9 +542,7 @@ function discussionRelayPath(request: Request): string | null {
   if (
     (cursor !== null && !DISCUSSION_CURSOR.test(cursor)) ||
     (limit !== null && (!DISCUSSION_LIMIT.test(limit) || Number(limit) > 100)) ||
-    (direction !== null &&
-      direction !== "oldest-first" &&
-      direction !== "newest-first")
+    (direction !== null && direction !== "oldest-first" && direction !== "newest-first")
   ) {
     return null;
   }
@@ -521,9 +554,7 @@ function discussionRelayPath(request: Request): string | null {
   return `/sync/link/discussion${serialized ? `?${serialized}` : ""}`;
 }
 
-function discussionActivityRelayPath(
-  request: Request,
-): { path: string; holdMs: number } | null {
+function discussionActivityRelayPath(request: Request): { path: string; holdMs: number } | null {
   const url = new URL(request.url);
   if (
     [...url.searchParams.keys()].some(
@@ -568,9 +599,7 @@ function hasOnlySessionQuery(request: Request, discriminator: string): boolean {
 async function discussionState(
   relayResponse: Response,
 ): Promise<
-  | { state: "blocked" | "paused"; activityRevision: number }
-  | { state: "limit-reached" }
-  | null
+  { state: "blocked" | "paused"; activityRevision: number } | { state: "limit-reached" } | null
 > {
   // The relay error code is the contract; its message text is not.
   try {
@@ -610,25 +639,40 @@ async function discussionState(
 async function discussionRefusal(relayResponse: Response): Promise<Response | null> {
   if (relayResponse.status !== 403 && relayResponse.status !== 413) return null;
   const state = await discussionState(relayResponse);
-  return state && jsonResponse(
-    { ok: false, ...state },
-    { status: state.state === "limit-reached" ? 413 : 403 },
+  return (
+    state &&
+    jsonResponse({ ok: false, ...state }, { status: state.state === "limit-reached" ? 413 : 403 })
   );
 }
 
 // A Group's channel read through its link: the channel, a page of messages
 // newest first with `before`, or new ones with `since` and an optional hold.
-function linkChatReadPath(request: Request, channels: boolean): { path: string; holdMs: number } | null {
+function linkChatReadPath(
+  request: Request,
+  channels: boolean,
+): { path: string; holdMs: number } | null {
   const params = new URL(request.url).searchParams;
-  const allowed = channels ? ["session"] : ["session", "channelWireId", "before", "since", "hold", "limit"];
-  if ([...params.keys()].some((key) => !allowed.includes(key) || params.getAll(key).length !== 1)) return null;
+  const allowed = channels
+    ? ["session"]
+    : ["session", "channelWireId", "before", "since", "hold", "limit"];
+  if ([...params.keys()].some((key) => !allowed.includes(key) || params.getAll(key).length !== 1))
+    return null;
   if (channels) return { path: "/sync/link/chat/channels", holdMs: 0 };
   const channelWireId = params.get("channelWireId");
-  const cursor = (key: string) => params.get(key) === null || /^(?:0|[1-9][0-9]{0,15})$/u.test(params.get(key)!);
+  const cursor = (key: string) =>
+    params.get(key) === null || /^(?:0|[1-9][0-9]{0,15})$/u.test(params.get(key)!);
   const hold = params.get("hold") ?? "0";
-  if (!channelWireId || channelWireId.length > 256 || !cursor("before") || !cursor("since") ||
-      !DISCUSSION_HOLD.test(hold) || Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS ||
-      (params.has("limit") && (!DISCUSSION_LIMIT.test(params.get("limit")!) || Number(params.get("limit")) > 100))) return null;
+  if (
+    !channelWireId ||
+    channelWireId.length > 256 ||
+    !cursor("before") ||
+    !cursor("since") ||
+    !DISCUSSION_HOLD.test(hold) ||
+    Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS ||
+    (params.has("limit") &&
+      (!DISCUSSION_LIMIT.test(params.get("limit")!) || Number(params.get("limit")) > 100))
+  )
+    return null;
   const relaySearch = new URLSearchParams({ channelWireId });
   for (const key of ["before", "since", "hold", "limit"]) {
     const value = params.get(key);
@@ -641,10 +685,15 @@ function linkChatReadPath(request: Request, channels: boolean): { path: string; 
 // key and the link holder's optional name.
 async function linkChatPostInput(request: Request): Promise<string | null> {
   try {
-    const value = asRecord(await readBoundedJson(request, MAX_LINK_CHAT_POST_BYTES, request.signal));
+    const value = asRecord(
+      await readBoundedJson(request, MAX_LINK_CHAT_POST_BYTES, request.signal),
+    );
     if (
-      !value || Object.keys(value).some((key) => !LINK_CHAT_POST_FIELDS.has(key)) ||
-      typeof value.channelWireId !== "string" || typeof value.body !== "string" || typeof value.idempotencyKey !== "string" ||
+      !value ||
+      Object.keys(value).some((key) => !LINK_CHAT_POST_FIELDS.has(key)) ||
+      typeof value.channelWireId !== "string" ||
+      typeof value.body !== "string" ||
+      typeof value.idempotencyKey !== "string" ||
       (Object.hasOwn(value, "threadId") && typeof value.threadId !== "string") ||
       (Object.hasOwn(value, "claimedName") && typeof value.claimedName !== "string")
     ) {
@@ -657,7 +706,10 @@ async function linkChatPostInput(request: Request): Promise<string | null> {
 }
 
 async function linkChatRefusal(relayResponse: Response): Promise<Response | null> {
-  const refusal = linkChatRefusalBody(await relayResponse.json().catch(() => null), relayResponse.status);
+  const refusal = linkChatRefusalBody(
+    await relayResponse.json().catch(() => null),
+    relayResponse.status,
+  );
   return refusal ? jsonResponse(refusal, { status: relayResponse.status }) : null;
 }
 
@@ -665,7 +717,8 @@ async function linkChatRefusal(relayResponse: Response): Promise<Response | null
 // Only the receipt's own fields pass: the relay's words, never its headers.
 async function acceptedCollectionWrite(relayResponse: Response): Promise<Response> {
   const receipt = asRecord(await relayResponse.json().catch(() => null));
-  if (receipt?.ok !== true || typeof receipt.submitId !== "string") return jsonResponse(linkRefusalBody("link_unavailable"), {status: 503});
+  if (receipt?.ok !== true || typeof receipt.submitId !== "string")
+    return jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 });
   // A retry the relay already recorded is accepted the same way. The paths
   // are the writer's own, so the answer stays small.
   return jsonResponse({ ok: true, outcome: "accepted", submitId: receipt.submitId });
@@ -683,15 +736,25 @@ async function collectionWriteRefusal(relayResponse: Response): Promise<Response
   // keeps their text and reads the winner before trying again.
   if (relayResponse.status === 409 && record.code === "stale") {
     const current = record.currentBlobSha256;
-    if (typeof record.path !== "string" || !(current === null || (typeof current === "string" && SHA256_HEX_PATTERN.test(current)))) {
+    if (
+      typeof record.path !== "string" ||
+      !(current === null || (typeof current === "string" && SHA256_HEX_PATTERN.test(current)))
+    ) {
       return null;
     }
-    return jsonResponse({ ok: false, outcome: "stale", path: record.path, currentBlobSha256: current }, { status: 409 });
+    return jsonResponse(
+      { ok: false, outcome: "stale", path: record.path, currentBlobSha256: current },
+      { status: 409 },
+    );
   }
-  return jsonResponse({ ok: false, outcome: "refused", reason: record.error.slice(0, 1024) }, { status: 403 });
+  return jsonResponse(
+    { ok: false, outcome: "refused", reason: record.error.slice(0, 1024) },
+    { status: 403 },
+  );
 }
 
-const writesRateLimited = (): Response => jsonResponse(linkRefusalBody("link_read_rate_limited"), {status: 429});
+const writesRateLimited = (): Response =>
+  jsonResponse(linkRefusalBody("link_read_rate_limited"), { status: 429 });
 
 function relayJson(relayResponse: Response): Response {
   return response(relayResponse.body, {
@@ -752,18 +815,19 @@ async function completeRelayResponse(relayResponse: Response): Promise<Response>
   }
 
   let chunkIndex = 0;
-  const body = bufferedBytes === 0
-    ? null
-    : new ReadableStream<Uint8Array>({
-        pull(controller) {
-          const chunk = chunks[chunkIndex++];
-          if (chunk) controller.enqueue(chunk);
-          if (chunkIndex === chunks.length) controller.close();
-        },
-        cancel() {
-          chunks.length = 0;
-        },
-      });
+  const body =
+    bufferedBytes === 0
+      ? null
+      : new ReadableStream<Uint8Array>({
+          pull(controller) {
+            const chunk = chunks[chunkIndex++];
+            if (chunk) controller.enqueue(chunk);
+            if (chunkIndex === chunks.length) controller.close();
+          },
+          cancel() {
+            chunks.length = 0;
+          },
+        });
   return new Response(body, {
     status: relayResponse.status,
     statusText: relayResponse.statusText,
@@ -779,9 +843,7 @@ function sessionCookie(
 ): string {
   const maxAge = Math.max(
     1,
-    Math.ceil(
-      (expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS - nowMs) / 1_000,
-    ),
+    Math.ceil((expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS - nowMs) / 1_000),
   );
   return (
     `${cookieName(discriminator)}=${token}; Path=/; Max-Age=${maxAge}; ` +
@@ -875,10 +937,7 @@ function rasterContentType(bytes: Uint8Array): string | null {
     return "image/jpeg";
   }
   const gifSignature = String.fromCharCode(...bytes.subarray(0, 6));
-  if (
-    bytes.length >= 6 &&
-    (gifSignature === "GIF87a" || gifSignature === "GIF89a")
-  ) {
+  if (bytes.length >= 6 && (gifSignature === "GIF87a" || gifSignature === "GIF89a")) {
     return "image/gif";
   }
   if (
@@ -927,9 +986,7 @@ async function streamingBlobResponse(
     throw error;
   }
 
-  const signature = new Uint8Array(
-    Math.min(bufferedBytes, RASTER_SIGNATURE_BYTES),
-  );
+  const signature = new Uint8Array(Math.min(bufferedBytes, RASTER_SIGNATURE_BYTES));
   let signatureOffset = 0;
   for (const chunk of buffered) {
     const remaining = signature.byteLength - signatureOffset;
@@ -1014,38 +1071,86 @@ export function createShareWebApplication({
     return sendToRelay(new Request(request, { headers }));
   };
   const publicEditRelease = parsePublicEditRelease(releaseInput);
-  if (publicEditRelease && !linkLiveConfig) throw new TypeError("Public Edit release requires configured link live limits.");
-  if (namedBrowserSessionLimits && (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))) {
-    throw new TypeError("Named browser sessions require configured account auth and relay exchange.");
+  if (publicEditRelease && !linkLiveConfig)
+    throw new TypeError("Public Edit release requires configured link live limits.");
+  if (
+    namedBrowserSessionLimits &&
+    (!accountAuth || !relayExchangeKey || !publicHosts.has(new URL(accountAuth.publicOrigin).host))
+  ) {
+    throw new TypeError(
+      "Named browser sessions require configured account auth and relay exchange.",
+    );
   }
-  const namedBrowser = namedBrowserSessionLimits ? createNamedLiveBrowserClient({
-    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
-  }) : undefined;
-  if (namedLiveTickets && !namedBrowser) throw new TypeError("Named live tickets require named browser sessions.");
-  const namedTickets = namedLiveTickets ? createNamedLiveTicketClient({
-    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!, fetchRelay,
-  }) : undefined;
-  if (namedRecipientBrowserLimits && !namedTickets) throw new TypeError("Named recipient editing requires named live tickets.");
-  const namedDocuments = namedRecipientBrowserLimits ? createNamedRecipientDocumentsClient({
-    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits!,
-    browserLimits: namedRecipientBrowserLimits, fetchRelay,
-  }) : undefined;
-  const namedChat = namedBrowserSessionLimits ? createNamedRecipientChatClient({
-    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
-  }) : undefined;
-  const push = namedBrowserSessionLimits ? createPushClient({
-    relayUrl, publicOrigin: accountAuth!.publicOrigin, exchangeKey: relayExchangeKey!, limits: namedBrowserSessionLimits, fetchRelay,
-  }) : undefined;
-  const accountHandler = accountAuth ? createAccountAuthHandler({
-    ...accountAuth,
-    fetchAuth,
-    maxRequestBytes: MAX_EXCHANGE_BODY_BYTES,
-    maxResponseBytes: MAX_RELAY_RESPONSE_BYTES,
-    timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
-  }) : undefined;
+  const namedBrowser = namedBrowserSessionLimits
+    ? createNamedLiveBrowserClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits,
+        fetchRelay,
+      })
+    : undefined;
+  if (namedLiveTickets && !namedBrowser)
+    throw new TypeError("Named live tickets require named browser sessions.");
+  const namedTickets = namedLiveTickets
+    ? createNamedLiveTicketClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits!,
+        fetchRelay,
+      })
+    : undefined;
+  if (namedRecipientBrowserLimits && !namedTickets)
+    throw new TypeError("Named recipient editing requires named live tickets.");
+  const namedDocuments = namedRecipientBrowserLimits
+    ? createNamedRecipientDocumentsClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits!,
+        browserLimits: namedRecipientBrowserLimits,
+        fetchRelay,
+      })
+    : undefined;
+  const namedChat = namedBrowserSessionLimits
+    ? createNamedRecipientChatClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits,
+        fetchRelay,
+      })
+    : undefined;
+  const push = namedBrowserSessionLimits
+    ? createPushClient({
+        relayUrl,
+        publicOrigin: accountAuth!.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: namedBrowserSessionLimits,
+        fetchRelay,
+      })
+    : undefined;
+  const accountHandler = accountAuth
+    ? createAccountAuthHandler({
+        ...accountAuth,
+        fetchAuth,
+        maxRequestBytes: MAX_EXCHANGE_BODY_BYTES,
+        maxResponseBytes: MAX_RELAY_RESPONSE_BYTES,
+        timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+      })
+    : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
-  const exchangeRateLimiter = new TokenBucketLimiter(EXCHANGE_BUCKET_CAPACITY, EXCHANGE_REFILL_PER_SECOND, EXCHANGE_MAX_IPS);
-  const exchangeGlobalRateLimiter = new TokenBucketLimiter(EXCHANGE_GLOBAL_BUCKET_CAPACITY, EXCHANGE_GLOBAL_REFILL_PER_SECOND, 1);
+  const exchangeRateLimiter = new TokenBucketLimiter(
+    EXCHANGE_BUCKET_CAPACITY,
+    EXCHANGE_REFILL_PER_SECOND,
+    EXCHANGE_MAX_IPS,
+  );
+  const exchangeGlobalRateLimiter = new TokenBucketLimiter(
+    EXCHANGE_GLOBAL_BUCKET_CAPACITY,
+    EXCHANGE_GLOBAL_REFILL_PER_SECOND,
+    1,
+  );
   const exchangeAddressProbes = new TokenBucketLimiter(600, 10, EXCHANGE_MAX_IPS);
   const exchangeAddressInFlight = new Map<string, number>();
   let exchangesInFlight = 0;
@@ -1060,7 +1165,11 @@ export function createShareWebApplication({
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
   const mcpLimiter = new ShareWebInFlightLimiter(4, 16);
   // Only a refused bearer spends from its address; a valid one never does.
-  const mcpFailedSignIns = new TokenBucketLimiter(MCP_FAILED_SIGN_IN_CAPACITY, MCP_FAILED_SIGN_IN_REFILL_PER_SECOND, EXCHANGE_MAX_IPS);
+  const mcpFailedSignIns = new TokenBucketLimiter(
+    MCP_FAILED_SIGN_IN_CAPACITY,
+    MCP_FAILED_SIGN_IN_REFILL_PER_SECOND,
+    EXCHANGE_MAX_IPS,
+  );
   // One pool for every large body, whether it arrives as a Collection write
   // or as an MCP request that carries one. Either spends one of the link's
   // write tokens first. The one write an MCP request makes uses the token
@@ -1069,23 +1178,61 @@ export function createShareWebApplication({
   const writesInsideAdmittedRequests = new WeakSet<Request>();
   // A link's browsers and agents spend one budget, by its grant, before a
   // body is read. The relay limits the whole link again.
-  const collectionWriteRateLimiter = new TokenBucketLimiter(COLLECTION_WRITE_BUCKET_CAPACITY, COLLECTION_WRITE_REFILL_PER_SECOND, EXCHANGE_MAX_IPS);
+  const collectionWriteRateLimiter = new TokenBucketLimiter(
+    COLLECTION_WRITE_BUCKET_CAPACITY,
+    COLLECTION_WRITE_REFILL_PER_SECOND,
+    EXCHANGE_MAX_IPS,
+  );
   let mcpRequests = 0;
   // An MCP request's internal calls to the link handlers carry their agent
   // here, never in a header or cookie a client could send.
   const agentCallers = new WeakMap<Request, AgentCaller>();
   // A personal agent signs in with the browser's account, on the origin its cookies belong to.
-  const mcpSignIn = createMcpSignIn({relayUrl, exchangeKey: relayExchangeKey, fetchRelay, nowMs, timeoutMs: relayTimeoutMs,
-    admit: (clientIp) => exchangeAddressProbes.allow(clientIp, nowMs()) && exchangeGlobalRateLimiter.allow("global", nowMs()),
-    ...(accountAuth && accountHandler ? {account: {publicOrigin: accountAuth.publicOrigin, handle: accountHandler}} : {})});
-  if (linkLiveConfig &&(!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))) throw new TypeError("Link editing requires configured relay exchange and public Host.");
-  const linkLive = linkLiveConfig && publicEditRelease ? createLinkLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
-    limits: linkLiveConfig.requests, browserLimits: linkLiveConfig.editor, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial}) : undefined;
+  const mcpSignIn = createMcpSignIn({
+    relayUrl,
+    exchangeKey: relayExchangeKey,
+    fetchRelay,
+    nowMs,
+    timeoutMs: relayTimeoutMs,
+    admit: (clientIp) =>
+      exchangeAddressProbes.allow(clientIp, nowMs()) &&
+      exchangeGlobalRateLimiter.allow("global", nowMs()),
+    ...(accountAuth && accountHandler
+      ? { account: { publicOrigin: accountAuth.publicOrigin, handle: accountHandler } }
+      : {}),
+  });
+  if (
+    linkLiveConfig &&
+    (!relayExchangeKey || !publicHosts.has(new URL(linkLiveConfig.publicOrigin).host))
+  )
+    throw new TypeError("Link editing requires configured relay exchange and public Host.");
+  const linkLive =
+    linkLiveConfig && publicEditRelease
+      ? createLinkLiveClient({
+          relayUrl,
+          publicOrigin: linkLiveConfig.publicOrigin,
+          exchangeKey: relayExchangeKey!,
+          limits: linkLiveConfig.requests,
+          browserLimits: linkLiveConfig.editor,
+          fetchRelay,
+          resolveMaterial: resolveLinkBrowserMaterial,
+        })
+      : undefined;
   // A personal agent edits live documents through the relay, which hosts them only on a self-hosted live host and refuses elsewhere.
-  const personalLive = linkLiveConfig ? createPersonalLiveClient({relayUrl, publicOrigin: linkLiveConfig.publicOrigin, exchangeKey: relayExchangeKey!,
-    limits: linkLiveConfig.requests, fetchRelay}) : undefined;
+  const personalLive = linkLiveConfig
+    ? createPersonalLiveClient({
+        relayUrl,
+        publicOrigin: linkLiveConfig.publicOrigin,
+        exchangeKey: relayExchangeKey!,
+        limits: linkLiveConfig.requests,
+        fetchRelay,
+      })
+    : undefined;
 
-  function readBrowserSession(discriminator: string, cookies: Map<string, string>): BrowserSession | null {
+  function readBrowserSession(
+    discriminator: string,
+    cookies: Map<string, string>,
+  ): BrowserSession | null {
     if (!isSessionDiscriminator(discriminator)) return null;
     const token = cookies.get(cookieName(discriminator));
     if (!token) return null;
@@ -1096,7 +1243,8 @@ export function createShareWebApplication({
   function readSession(request: Request) {
     return readBrowserSession(
       request.headers.get(LINK_SESSION_HEADER) ??
-        new URL(request.url).searchParams.get("session") ?? "",
+        new URL(request.url).searchParams.get("session") ??
+        "",
       parseCookies(request.headers.get("cookie")),
     );
   }
@@ -1111,7 +1259,14 @@ export function createShareWebApplication({
       const result = response(bodyBuffer(bytes), {
         headers: { "content-type": contentTypeForAsset(relative) },
       });
-      if (page && appLaunchConfig) result.headers.set("content-security-policy", SHARE_WEB_CSP.replace("form-action 'none'", `form-action https://*.${appLaunchConfig.appDomain}`));
+      if (page && appLaunchConfig)
+        result.headers.set(
+          "content-security-policy",
+          SHARE_WEB_CSP.replace(
+            "form-action 'none'",
+            `form-action https://*.${appLaunchConfig.appDomain}`,
+          ),
+        );
       return result;
     } catch {
       return refused();
@@ -1120,15 +1275,9 @@ export function createShareWebApplication({
 
   async function refreshSession(
     authenticated: BrowserSession,
-  ): Promise<
-    | { ok: true; headers: Record<string, string> }
-    | { ok: false; status: 404 | 503 }
-  > {
+  ): Promise<{ ok: true; headers: Record<string, string> } | { ok: false; status: 404 | 503 }> {
     const checkedAtMs = nowMs();
-    if (
-      authenticated.session.expiresAtMs - checkedAtMs >
-      LINK_REFRESH_WINDOW_MS
-    ) {
+    if (authenticated.session.expiresAtMs - checkedAtMs > LINK_REFRESH_WINDOW_MS) {
       return { ok: true, headers: {} };
     }
 
@@ -1146,9 +1295,7 @@ export function createShareWebApplication({
             method: "POST",
             headers: {
               authorization: `LinkCapability ${expectedCapabilityToken}`,
-              ...(relayExchangeKey
-                ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-                : {}),
+              ...(relayExchangeKey ? { "x-dohc-relay-exchange-key": relayExchangeKey } : {}),
             },
           },
           relayTimeoutMs,
@@ -1159,7 +1306,11 @@ export function createShareWebApplication({
           if (relayResponse.status === 404) return { status: "invalid" };
           if (relayResponse.status !== 200) return { status: "unavailable" };
           const refreshed = parsedRelaySession(
-            await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, boundedRelay.request.signal),
+            await readBoundedJson(
+              relayResponse,
+              MAX_RELAY_RESPONSE_BYTES,
+              boundedRelay.request.signal,
+            ),
             nowMs(),
             publicEditRelease,
           );
@@ -1173,9 +1324,7 @@ export function createShareWebApplication({
             refreshed.capabilityToken,
             refreshed.expiresAtMs,
           );
-          return session
-            ? { status: "refreshed", session }
-            : { status: "unavailable" };
+          return session ? { status: "refreshed", session } : { status: "unavailable" };
         } catch {
           return { status: "unavailable" };
         } finally {
@@ -1243,12 +1392,20 @@ export function createShareWebApplication({
       if (!sessions.isCurrent(discriminator, authenticated.token, capabilityToken, nowMs())) {
         return { ok: false, status: 404 };
       }
-      return { ok: true, grantId: authenticated.session.grantId, capabilityToken, profileSecret, setCookie: refreshed.headers["set-cookie"] ?? null,
+      return {
+        ok: true,
+        grantId: authenticated.session.grantId,
+        capabilityToken,
+        profileSecret,
+        setCookie: refreshed.headers["set-cookie"] ?? null,
         async currentCapability() {
           await refreshes.get(sessionKey(discriminator, authenticated.token));
           const current = sessions.get(discriminator, authenticated.token, nowMs());
-          return current === authenticated.session && current.expiresAtMs > nowMs() ? current.capabilityToken : null;
-        } };
+          return current === authenticated.session && current.expiresAtMs > nowMs()
+            ? current.capabilityToken
+            : null;
+        },
+      };
     } finally {
       signal.removeEventListener("abort", abort);
     }
@@ -1256,23 +1413,37 @@ export function createShareWebApplication({
 
   // A browser calls with its session's capability; an agent with its own
   // token and address, which the relay checks again on every call.
-  async function callRelay(request: Request, caller: LinkCaller, call: RelayCall): Promise<Response> {
+  async function callRelay(
+    request: Request,
+    caller: LinkCaller,
+    call: RelayCall,
+  ): Promise<Response> {
     const browser = "session" in caller ? caller : null;
     const agent = "session" in caller ? null : caller;
-    const refreshed = browser ? await refreshSession(browser) : {ok: true as const, headers: {} as Record<string, string>};
-    if (!refreshed.ok) return refreshed.status === 503
-      ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
+    const refreshed = browser
+      ? await refreshSession(browser)
+      : { ok: true as const, headers: {} as Record<string, string> };
+    if (!refreshed.ok)
+      return refreshed.status === 503
+        ? jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 })
+        : refused();
     const capabilityToken = browser?.session.capabilityToken ?? "";
     const credential: Record<string, string> = agent
-      ? {authorization: `DohcAgent ${agent.accessToken}`, "x-dohc-agent-resource": agent.resource, "x-dohc-relay-exchange-key": relayExchangeKey ?? ""}
-      : {authorization: `LinkCapability ${capabilityToken}`};
+      ? {
+          authorization: `DohcAgent ${agent.accessToken}`,
+          "x-dohc-agent-resource": agent.resource,
+          "x-dohc-relay-exchange-key": relayExchangeKey ?? "",
+        }
+      : { authorization: `LinkCapability ${capabilityToken}` };
     const current = (): boolean =>
-      !browser || sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
+      !browser ||
+      sessions.isCurrent(browser.discriminator, browser.token, capabilityToken, nowMs());
     // Only an answer for a still-current session renews its cookie. A cookie
     // for a dead session could overwrite a newer one.
     const answer = (result: Response): Response => {
       if (current()) {
-        for (const [name, value] of Object.entries(refreshed.headers)) result.headers.set(name, value);
+        for (const [name, value] of Object.entries(refreshed.headers))
+          result.headers.set(name, value);
       }
       return result;
     };
@@ -1280,17 +1451,31 @@ export function createShareWebApplication({
     // retryable call it superseded tries again instead of ending the link.
     // A renewal can overtake any call, so a failed retryable one always checks.
     const superseded = (failed = false): Response | null => {
-      if (!browser || !(call.ifSessionChanged || (failed && call.retryable)) || current()) return null;
-      const renewed = call.retryable &&
-        sessions.get(browser.discriminator, browser.token, nowMs())?.grantId === browser.session.grantId;
-      return renewed ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused();
+      if (!browser || !(call.ifSessionChanged || (failed && call.retryable)) || current())
+        return null;
+      const renewed =
+        call.retryable &&
+        sessions.get(browser.discriminator, browser.token, nowMs())?.grantId ===
+          browser.session.grantId;
+      return renewed
+        ? jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 })
+        : refused();
     };
-    const release = !call.limiter ? () => {} : browser
-      ? call.limiter.acquire(sessionKey(browser.discriminator, browser.token), browser.session.grantId)
-      : call.limiter.acquire(agent?.key ?? "", linkKeyOf(caller));
+    const release = !call.limiter
+      ? () => {}
+      : browser
+        ? call.limiter.acquire(
+            sessionKey(browser.discriminator, browser.token),
+            browser.session.grantId,
+          )
+        : call.limiter.acquire(agent?.key ?? "", linkKeyOf(caller));
     // A full limiter is busy, not a refusal: the link still opens.
-    if (!release) return answer(call.retryable
-      ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
+    if (!release)
+      return answer(
+        call.retryable
+          ? jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 })
+          : refused(),
+      );
     let slotHeld = false;
     const holdSlot = (): (() => void) => {
       slotHeld = true;
@@ -1318,7 +1503,8 @@ export function createShareWebApplication({
       // Only share metadata identifies the session itself; target refusals do not.
       if (relayResponse.status === 404) {
         if (call.path === "/sync/link/share") {
-          if (browser) sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
+          if (browser)
+            sessions.deleteIfCapability(browser.discriminator, browser.token, capabilityToken);
           if (agent) agent.invalid = true;
         }
         const stale = superseded(true);
@@ -1327,7 +1513,10 @@ export function createShareWebApplication({
       }
       if (relayResponse.status >= 500) {
         await relayResponse.body?.cancel().catch(() => undefined);
-        return superseded(true) ?? answer(jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}));
+        return (
+          superseded(true) ??
+          answer(jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 }))
+        );
       }
       if (call.buffered) relayResponse = await completeRelayResponse(relayResponse);
       const stale = superseded();
@@ -1336,59 +1525,141 @@ export function createShareWebApplication({
         return stale;
       }
       if (relayResponse.status === 200) {
-        return answer(await (call.ok ?? relayJson)(relayResponse, holdSlot, bounded.request.signal));
+        return answer(
+          await (call.ok ?? relayJson)(relayResponse, holdSlot, bounded.request.signal),
+        );
       }
-      if ([400, 403, 409, 413, 429].includes(relayResponse.status) && relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json") {
+      if (
+        [400, 403, 409, 413, 429].includes(relayResponse.status) &&
+        relayResponse.headers.get("content-type")?.split(";", 1)[0] === "application/json"
+      ) {
         // An unreadable refusal says nothing about the link when the call is retryable.
-        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch((error: unknown) => {
-          if (call.retryable) throw error;
-          return null;
-        });
+        const value = await readBoundedJson(relayResponse, 4096, bounded.request.signal).catch(
+          (error: unknown) => {
+            if (call.retryable) throw error;
+            return null;
+          },
+        );
         const detail = parseLinkRefusal(value, relayResponse.status);
-        if (detail) return answer(jsonResponse(linkRefusalBody(detail), {status: relayResponse.status}));
-        const translated = await call.refusal?.(Response.json(value, {status: relayResponse.status}));
+        if (detail)
+          return answer(jsonResponse(linkRefusalBody(detail), { status: relayResponse.status }));
+        const translated = await call.refusal?.(
+          Response.json(value, { status: relayResponse.status }),
+        );
         if (translated) return answer(translated);
       }
       await relayResponse.body?.cancel().catch(() => undefined);
       // A proxy's busy answer carries no refusal, so a retryable call tries again.
-      return answer(call.retryable && relayResponse.status === 429
-        ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
+      return answer(
+        call.retryable && relayResponse.status === 429
+          ? jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 })
+          : refused(),
+      );
     } catch {
-      return superseded(true) ?? answer(call.retryable
-        ? jsonResponse(linkRefusalBody("link_unavailable"), {status: 503}) : refused());
+      return (
+        superseded(true) ??
+        answer(
+          call.retryable
+            ? jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 })
+            : refused(),
+        )
+      );
     } finally {
       bounded.dispose();
       if (!slotHeld) release();
     }
   }
 
-  if (appLaunchConfig && !publicHosts.has(new URL(appLaunchConfig.viewerOrigin).host)) throw new TypeError("App viewer origin must be an exact configured public Host.");
-  if (appLaunchConfig && accountAuth && accountAuth.publicOrigin !== appLaunchConfig.viewerOrigin) throw new TypeError("Named app accounts must use the app viewer origin.");
-  const resolveNamedAppMaterial = appLaunchConfig && accountAuth && relayExchangeKey ? createNamedAppMaterialResolver({
-    relayUrl, publicOrigin: appLaunchConfig.viewerOrigin, exchangeKey: relayExchangeKey, fetchRelay,
-    async resolveAccount(cookie, signal) {
-      const response = await accountHandler!(new Request(new URL("/api/account/session", accountAuth!.publicOrigin), {headers: {cookie, host: new URL(accountAuth!.publicOrigin).host}, signal}));
-      const body: unknown = await response.json();
-      return response.ok && body && typeof body === "object" && "user" in body && body.user && typeof body.user === "object" && "id" in body.user && typeof body.user.id === "string" ? body.user.id : null;
-    },
-  }) : undefined;
-  const appLaunch = appLaunchConfig ? createAppLaunchHandler({config: appLaunchConfig, relayUrl, fetchRelay, nowMs, resolveMaterial: resolveLinkBrowserMaterial, resolveNamedMaterial: resolveNamedAppMaterial}) : undefined;
-  const discoverApps = createAppDiscovery({viewerOrigin: appLaunchConfig?.viewerOrigin, relayUrl, fetchRelay, resolveMaterial: resolveLinkBrowserMaterial});
+  if (appLaunchConfig && !publicHosts.has(new URL(appLaunchConfig.viewerOrigin).host))
+    throw new TypeError("App viewer origin must be an exact configured public Host.");
+  if (appLaunchConfig && accountAuth && accountAuth.publicOrigin !== appLaunchConfig.viewerOrigin)
+    throw new TypeError("Named app accounts must use the app viewer origin.");
+  const resolveNamedAppMaterial =
+    appLaunchConfig && accountAuth && relayExchangeKey
+      ? createNamedAppMaterialResolver({
+          relayUrl,
+          publicOrigin: appLaunchConfig.viewerOrigin,
+          exchangeKey: relayExchangeKey,
+          fetchRelay,
+          async resolveAccount(cookie, signal) {
+            const response = await accountHandler!(
+              new Request(new URL("/api/account/session", accountAuth!.publicOrigin), {
+                headers: { cookie, host: new URL(accountAuth!.publicOrigin).host },
+                signal,
+              }),
+            );
+            const body: unknown = await response.json();
+            return response.ok &&
+              body &&
+              typeof body === "object" &&
+              "user" in body &&
+              body.user &&
+              typeof body.user === "object" &&
+              "id" in body.user &&
+              typeof body.user.id === "string"
+              ? body.user.id
+              : null;
+          },
+        })
+      : undefined;
+  const appLaunch = appLaunchConfig
+    ? createAppLaunchHandler({
+        config: appLaunchConfig,
+        relayUrl,
+        fetchRelay,
+        nowMs,
+        resolveMaterial: resolveLinkBrowserMaterial,
+        resolveNamedMaterial: resolveNamedAppMaterial,
+      })
+    : undefined;
+  const discoverApps = createAppDiscovery({
+    viewerOrigin: appLaunchConfig?.viewerOrigin,
+    relayUrl,
+    fetchRelay,
+    resolveMaterial: resolveLinkBrowserMaterial,
+  });
   const viewerHost = appLaunchConfig ? new URL(appLaunchConfig.viewerOrigin).host : undefined;
   const route = async (request: Request): Promise<Response> => {
-    const mark = (pattern: Parameters<typeof SHARE_WEB_REQUEST_LOG.mark>[1]) => SHARE_WEB_REQUEST_LOG.mark(request, pattern);
+    const mark = (pattern: Parameters<typeof SHARE_WEB_REQUEST_LOG.mark>[1]) =>
+      SHARE_WEB_REQUEST_LOG.mark(request, pattern);
     if (new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
       mark(ACCOUNT_DELETION_PATH);
-      if (!internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) || request.method !== "POST" || !relayExchangeKey || relayExchangeKey.length < 32 || !presentsAccountDeletionKey(request.headers.get(ACCOUNT_DELETION_KEY_HEADER),accountDeletionKey(relayExchangeKey))) return refused();
+      if (
+        !internalHosts?.has((request.headers.get("host") ?? "").toLowerCase()) ||
+        request.method !== "POST" ||
+        !relayExchangeKey ||
+        relayExchangeKey.length < 32 ||
+        !presentsAccountDeletionKey(
+          request.headers.get(ACCOUNT_DELETION_KEY_HEADER),
+          accountDeletionKey(relayExchangeKey),
+        )
+      )
+        return refused();
       const body: unknown = await request.json().catch(() => null);
-      if (!body || typeof body !== "object" || !("userId" in body) || typeof body.userId !== "string" || body.userId.length > 1024) return refused();
-      const list = (name: string): string[] | null => {const value = (body as Record<string, unknown>)[name]; return Array.isArray(value) && value.length <= 8 && value.every(id => typeof id === "string" && id.length <= 1024) ? value : null;};
-      const workspaceIds=list("workspaceIds"), grantIds=list("grantIds"), publicationIds=list("publicationIds");
+      if (
+        !body ||
+        typeof body !== "object" ||
+        !("userId" in body) ||
+        typeof body.userId !== "string" ||
+        body.userId.length > 1024
+      )
+        return refused();
+      const list = (name: string): string[] | null => {
+        const value = (body as Record<string, unknown>)[name];
+        return Array.isArray(value) &&
+          value.length <= 8 &&
+          value.every((id) => typeof id === "string" && id.length <= 1024)
+          ? value
+          : null;
+      };
+      const workspaceIds = list("workspaceIds"),
+        grantIds = list("grantIds"),
+        publicationIds = list("publicationIds");
       if (!workspaceIds || !grantIds || !publicationIds) return refused();
       sessions.deleteGrants(grantIds);
-      appLaunch?.deleteAccount(body.userId,grantIds,publicationIds);
-      deleteAccountGateways?.(body.userId,workspaceIds);
-      return Response.json({finished:true});
+      appLaunch?.deleteAccount(body.userId, grantIds, publicationIds);
+      deleteAccountGateways?.(body.userId, workspaceIds);
+      return Response.json({ finished: true });
     }
     const { pathname, search } = new URL(request.url);
     const host = (request.headers.get("host") ?? "").toLowerCase();
@@ -1402,32 +1673,54 @@ export function createShareWebApplication({
     }
     if (appRequest) {
       // A published app chooses its own paths, the viewer's two app routes included.
-      mark(onViewer && (pathname === "/api/apps/launch" || pathname === "/api/apps/summary") ? pathname : "app");
+      mark(
+        onViewer && (pathname === "/api/apps/launch" || pathname === "/api/apps/summary")
+          ? pathname
+          : "app",
+      );
       return appLaunch!.handle(request);
     }
     const agentOrigin = linkLiveConfig?.publicOrigin ?? `https://${request.headers.get("host")}`;
     const mcpRoute = mcpRoutePattern(pathname);
     if (mcpRoute) mark(mcpRoute);
-    if (isMcpCorsPath(pathname) && request.method === "OPTIONS") return response(null, {status: 204});
+    if (isMcpCorsPath(pathname) && request.method === "OPTIONS")
+      return response(null, { status: 204 });
     if (pathname === "/api/mcp" && request.method === "GET" && !search) {
       mark("/api/mcp");
       return jsonResponse({
-        api: "share-web", apiVersions, versionHeader: SHARE_WEB_API_VERSION_HEADER, defaultVersion: 1, mcpApiVersions: mcpApiVersions(apiVersions),
-        endpoint: "/mcp/s/<secret>", transport: "streamable-http", authorizationServer: "/.well-known/oauth-authorization-server",
-        authentication: "Replace <secret> with the text after # in the share link. The endpoint uses the standard MCP sign-in: " +
+        api: "share-web",
+        apiVersions,
+        versionHeader: SHARE_WEB_API_VERSION_HEADER,
+        defaultVersion: 1,
+        mcpApiVersions: mcpApiVersions(apiVersions),
+        endpoint: "/mcp/s/<secret>",
+        transport: "streamable-http",
+        authorizationServer: "/.well-known/oauth-authorization-server",
+        authentication:
+          "Replace <secret> with the text after # in the share link. The endpoint uses the standard MCP sign-in: " +
           "it answers 401 with its protected resource metadata, and a person allows the agent on the consent page.",
       });
     }
     const signIn = await mcpSignIn.handle(request, agentOrigin);
     if (signIn) {
       const page = signInPagePolicy(signIn);
-      return response(signIn.body, {status: signIn.status, headers: signIn.headers, ...(page ? {page} : {})});
+      return response(signIn.body, {
+        status: signIn.status,
+        headers: signIn.headers,
+        ...(page ? { page } : {}),
+      });
     }
     const personal = pathname.startsWith(PERSONAL_MCP_PATH_PREFIX);
     if (personal || pathname.startsWith(MCP_PATH_PREFIX)) {
       const secret = personal ? null : mcpLinkSecret(pathname);
-      if ((personal ? mcpPersonalWorkspace(pathname) === null || !mcpSignIn.offersPersonal(agentOrigin) : !secret) ||
-          search || !relayExchangeKey) return refused();
+      if (
+        (personal
+          ? mcpPersonalWorkspace(pathname) === null || !mcpSignIn.offersPersonal(agentOrigin)
+          : !secret) ||
+        search ||
+        !relayExchangeKey
+      )
+        return refused();
       // The address names the link, or the workspace a personal agent signed
       // in at, in its one spelling; the bearer is the credential. The relay
       // checks the token against this exact address, in its own family, on
@@ -1436,12 +1729,13 @@ export function createShareWebApplication({
       const resource = `${agentOrigin}${resourcePath}`;
       const challenge = (invalidToken: boolean) => {
         const result = mcpChallenge(agentOrigin, resourcePath, invalidToken);
-        return response(result.body, {status: result.status, headers: result.headers});
+        return response(result.body, { status: result.status, headers: result.headers });
       };
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       const authorization = request.headers.get("authorization");
       // A request with no token never reaches the relay, so a sign-in can always start.
-      if (authorization !== null && !mcpFailedSignIns.has(clientIp, nowMs())) return jsonResponse(REFUSAL_VALUE, {status: 429});
+      if (authorization !== null && !mcpFailedSignIns.has(clientIp, nowMs()))
+        return jsonResponse(REFUSAL_VALUE, { status: 429 });
       const bearer = /^Bearer ([A-Za-z0-9_-]{43})$/iu.exec(authorization ?? "")?.[1];
       if (!bearer) {
         if (authorization !== null) mcpFailedSignIns.allow(clientIp, nowMs());
@@ -1449,8 +1743,14 @@ export function createShareWebApplication({
       }
       if (mcpRequests >= 64) return refused();
       const digest = (value: string) => createHash("sha256").update(value).digest("base64url");
-      const caller: AgentCaller = {accessToken: bearer, resource, key: `agent:${digest(bearer)}`,
-        addressKey: `${personal ? "agent-personal" : "agent-link"}:${digest(resource)}`, grantId: null, invalid: false};
+      const caller: AgentCaller = {
+        accessToken: bearer,
+        resource,
+        key: `agent:${digest(bearer)}`,
+        addressKey: `${personal ? "agent-personal" : "agent-link"}:${digest(resource)}`,
+        grantId: null,
+        invalid: false,
+      };
       const release = mcpLimiter.acquire(caller.key, caller.addressKey);
       if (!release) return refused();
       mcpRequests++;
@@ -1459,38 +1759,68 @@ export function createShareWebApplication({
       let holdsLargeBody = false;
       try {
         if (personal) {
-          const result = await servePersonalMcp(request, {signal, deadlineAtMs,
+          const result = await servePersonalMcp(request, {
+            signal,
+            deadlineAtMs,
             // A write's large body spends the agent's write budget and holds its one slot, whichever of its tokens sends it.
             // The relay limits the agent too.
             admitLargeBody: (agentId) => {
               const key = `personal:${agentId}`;
               return collectionWriteRateLimiter.allow(key, nowMs()) ? admitLargeBody(key) : null;
             },
-            client: createPersonalAgentClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay}),
+            client: createPersonalAgentClient({
+              relayUrl,
+              exchangeKey: relayExchangeKey,
+              accessToken: bearer,
+              resource,
+              fetchRelay,
+            }),
             // The bearer this request carries, so a refreshed token opens its sessions with the new one.
-            ...(personalLive && linkLiveConfig ? {live: {client: personalLive.agent({accessToken: bearer, resource}), limits: linkLiveConfig.editor}} : {})});
+            ...(personalLive && linkLiveConfig
+              ? {
+                  live: {
+                    client: personalLive.agent({ accessToken: bearer, resource }),
+                    limits: linkLiveConfig.editor,
+                  },
+                }
+              : {}),
+          });
           // The token expired or was revoked, or names another address: the client refreshes or signs in again.
           if (!result) {
             mcpFailedSignIns.allow(clientIp, nowMs());
             return challenge(true);
           }
-          return response(result.body, {status: result.status, headers: result.headers});
+          return response(result.body, { status: result.status, headers: result.headers });
         }
         const result = await serveRemoteMcp(request, {
-          signal, deadlineAtMs, liveLimits: linkLiveConfig?.editor,
-          ...(linkLive ? {live: linkLive.agent({accessToken: bearer, resource})} : {}),
-          agentChat: createAgentChatClient({relayUrl, exchangeKey: relayExchangeKey, accessToken: bearer, resource, fetchRelay}),
+          signal,
+          deadlineAtMs,
+          liveLimits: linkLiveConfig?.editor,
+          ...(linkLive ? { live: linkLive.agent({ accessToken: bearer, resource }) } : {}),
+          agentChat: createAgentChatClient({
+            relayUrl,
+            exchangeKey: relayExchangeKey,
+            accessToken: bearer,
+            resource,
+            fetchRelay,
+          }),
           // A write follows the request's link probe, which names the grant.
           admitLargeBody: () => {
-            if (!caller.grantId || !collectionWriteRateLimiter.allow(caller.grantId, nowMs())) return null;
+            if (!caller.grantId || !collectionWriteRateLimiter.allow(caller.grantId, nowMs()))
+              return null;
             const lease = admitLargeBody(caller.grantId);
             holdsLargeBody = lease !== null;
             return lease;
           },
           request: (path, init = {}) => {
             const internal = new Request(new URL(path, agentOrigin), {
-              ...init, signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
-              headers: {host: new URL(agentOrigin).host, "content-type": "application/json", [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION)},
+              ...init,
+              signal: init.signal ? AbortSignal.any([signal, init.signal]) : signal,
+              headers: {
+                host: new URL(agentOrigin).host,
+                "content-type": "application/json",
+                [SHARE_WEB_API_VERSION_HEADER]: String(SHARE_WEB_API_VERSION),
+              },
             });
             agentCallers.set(internal, caller);
             if (holdsLargeBody) writesInsideAdmittedRequests.add(internal);
@@ -1502,11 +1832,13 @@ export function createShareWebApplication({
           mcpFailedSignIns.allow(clientIp, nowMs());
           return challenge(true);
         }
-        return response(result.body, {status: result.status, headers: result.headers});
+        return response(result.body, { status: result.status, headers: result.headers });
       } catch {
         return refused();
+      } finally {
+        mcpRequests--;
+        release();
       }
-      finally {mcpRequests--; release();}
     }
     if (pathname === "/api/apps") {
       mark("/api/apps");
@@ -1517,7 +1849,7 @@ export function createShareWebApplication({
       mark(pathname);
       if (!linkLive) return refused();
       const result = await linkLive.handle(request);
-      return response(result.body, {status: result.status, headers: result.headers});
+      return response(result.body, { status: result.status, headers: result.headers });
     }
 
     if (pathname === "/api/live/named-session") {
@@ -1531,28 +1863,28 @@ export function createShareWebApplication({
       mark(pathname);
       if (!namedTickets) return refused();
       const result = await namedTickets(request);
-      return response(result.body, {status: result.status, headers: result.headers});
+      return response(result.body, { status: result.status, headers: result.headers });
     }
 
     if (pathname === "/api/live/named-documents") {
       mark(pathname);
       if (!namedDocuments) return refused();
       const result = await namedDocuments(request);
-      return response(result.body, {status: result.status, headers: result.headers});
+      return response(result.body, { status: result.status, headers: result.headers });
     }
 
     if (pathname.startsWith("/api/named-chat/")) {
       mark("/api/named-chat/*");
       if (!namedChat) return refused();
       const result = await namedChat(request);
-      return response(result.body, {status: result.status, headers: result.headers});
+      return response(result.body, { status: result.status, headers: result.headers });
     }
 
     if (pathname.startsWith("/api/push/")) {
       mark("/api/push/*");
       if (!push) return refused();
       const result = await push(request);
-      return response(result.body, {status: result.status, headers: result.headers});
+      return response(result.body, { status: result.status, headers: result.headers });
     }
 
     if (pathname.startsWith("/api/account/")) {
@@ -1567,9 +1899,16 @@ export function createShareWebApplication({
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
       // What follows /s/ is a link's secret when its # was dropped.
-      mark(pathname === "/s" || pathname === "/s/" ? pathname : pathname.startsWith("/s/assets/") ? "/s/assets/*" : "/s/*");
+      mark(
+        pathname === "/s" || pathname === "/s/"
+          ? pathname
+          : pathname.startsWith("/s/assets/")
+            ? "/s/assets/*"
+            : "/s/*",
+      );
       const viewer = await serveViewer(pathname);
-      if (!pathname.startsWith("/s/assets/")) viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
+      if (!pathname.startsWith("/s/assets/"))
+        viewer.headers.set("link", '</api/mcp>; rel="service-desc"; type="application/json"');
       return viewer;
     }
 
@@ -1582,34 +1921,56 @@ export function createShareWebApplication({
       mark("/api/exchange");
       const clientIp = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       const addressPending = exchangeAddressInFlight.get(clientIp) ?? 0;
-      if (addressPending >= 16 || exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT || !exchangeAddressProbes.allow(clientIp, nowMs()) ||
-          !exchangeGlobalRateLimiter.allow("global", nowMs())) return jsonResponse(REFUSAL_VALUE, {status: 429});
+      if (
+        addressPending >= 16 ||
+        exchangesInFlight >= MAX_EXCHANGES_IN_FLIGHT ||
+        !exchangeAddressProbes.allow(clientIp, nowMs()) ||
+        !exchangeGlobalRateLimiter.allow("global", nowMs())
+      )
+        return jsonResponse(REFUSAL_VALUE, { status: 429 });
       exchangeAddressInFlight.set(clientIp, addressPending + 1);
       exchangesInFlight++;
       try {
-        const malformed = () => exchangeRateLimiter.allow(clientIp, nowMs()) ? refused() : jsonResponse(REFUSAL_VALUE, {status: 429});
+        const malformed = () =>
+          exchangeRateLimiter.allow(clientIp, nowMs())
+            ? refused()
+            : jsonResponse(REFUSAL_VALUE, { status: 429 });
         const secret = await exchangeInput(request);
         if (!secret) return malformed();
         try {
-          const bounded = boundedRelayRequest(request.signal, relayUrl, "/sync/link-exchange", {
+          const bounded = boundedRelayRequest(
+            request.signal,
+            relayUrl,
+            "/sync/link-exchange",
+            {
               method: "POST",
               headers: {
                 "content-type": "application/json",
                 "x-dohc-relay-client-ip": clientIp,
-                ...(relayExchangeKey
-                  ? { "x-dohc-relay-exchange-key": relayExchangeKey }
-                  : {}),
+                ...(relayExchangeKey ? { "x-dohc-relay-exchange-key": relayExchangeKey } : {}),
               },
               body: JSON.stringify({ secret }),
-            }, relayTimeoutMs);
+            },
+            relayTimeoutMs,
+          );
           let exchanged: ReturnType<typeof parsedRelaySession>;
           let relayResponse: Response | undefined;
           try {
             relayResponse = await fetchRelay(bounded.request);
             if (relayResponse.status !== 200) {
-              return relayResponse.status === 429 ? jsonResponse(REFUSAL_VALUE, {status: 429}) : refused();
+              return relayResponse.status === 429
+                ? jsonResponse(REFUSAL_VALUE, { status: 429 })
+                : refused();
             }
-            exchanged = parsedRelaySession(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, bounded.request.signal), nowMs(), publicEditRelease);
+            exchanged = parsedRelaySession(
+              await readBoundedJson(
+                relayResponse,
+                MAX_RELAY_RESPONSE_BYTES,
+                bounded.request.signal,
+              ),
+              nowMs(),
+              publicEditRelease,
+            );
           } finally {
             await relayResponse?.body?.cancel().catch(() => undefined);
             bounded.dispose();
@@ -1641,21 +2002,16 @@ export function createShareWebApplication({
             "set-cookie",
             sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
           );
-          responseHeaders.append(
-            "set-cookie",
-            profileCookie(discriminator, profile),
-          );
-          return jsonResponse(
-            { ok: true, session: discriminator },
-            { headers: responseHeaders },
-          );
+          responseHeaders.append("set-cookie", profileCookie(discriminator, profile));
+          return jsonResponse({ ok: true, session: discriminator }, { headers: responseHeaders });
         } catch {
           return refused();
         }
       } finally {
         exchangesInFlight--;
         const remaining = exchangeAddressInFlight.get(clientIp)! - 1;
-        if (remaining) exchangeAddressInFlight.set(clientIp, remaining); else exchangeAddressInFlight.delete(clientIp);
+        if (remaining) exchangeAddressInFlight.set(clientIp, remaining);
+        else exchangeAddressInFlight.delete(clientIp);
       }
     }
 
@@ -1670,7 +2026,10 @@ export function createShareWebApplication({
         exchangeKey: true,
         ok: async (relayResponse, _holdSlot, signal) => {
           try {
-            const handoff = parsedRelayHandoff(await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, signal), nowMs());
+            const handoff = parsedRelayHandoff(
+              await readBoundedJson(relayResponse, MAX_RELAY_RESPONSE_BYTES, signal),
+              nowMs(),
+            );
             if (!handoff) return refused();
             return jsonResponse({
               ok: true,
@@ -1693,10 +2052,14 @@ export function createShareWebApplication({
       const agent = agentCallers.get(request);
       const fetchSite = request.headers.get("sec-fetch-site");
       if (
-        request.method !== "POST" || search ||
-        (!agent && (request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
-          !request.headers.has(LINK_SESSION_HEADER))) ||
-        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+        request.method !== "POST" ||
+        search ||
+        (!agent &&
+          (request.headers.get("origin") !== agentOrigin ||
+            (fetchSite !== null && fetchSite !== "same-origin") ||
+            !request.headers.has(LINK_SESSION_HEADER))) ||
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+          "application/json"
       ) {
         return refused();
       }
@@ -1720,19 +2083,30 @@ export function createShareWebApplication({
         ok: async (relayResponse) => {
           const answer = asRecord(await relayResponse.json().catch(() => null));
           const meta = agent ? takeAgentGrant(agent, answer) : answer;
-          writable = meta?.access === "edit" && asRecord(meta.effectiveSelector)?.versionId === null;
+          writable =
+            meta?.access === "edit" && asRecord(meta.effectiveSelector)?.versionId === null;
           return response(null);
         },
       });
       if (!writable) return probe.status === 200 ? refused() : probe;
       const renewed = (result: Response): Response => {
         const cookie = probe.headers.get("set-cookie");
-        if (cookie && browser && sessions.isCurrent(browser.discriminator, browser.token, browser.session.capabilityToken, nowMs())) {
+        if (
+          cookie &&
+          browser &&
+          sessions.isCurrent(
+            browser.discriminator,
+            browser.token,
+            browser.session.capabilityToken,
+            nowMs(),
+          )
+        ) {
           result.headers.set("set-cookie", cookie);
         }
         return result;
       };
-      if (!admitted && !collectionWriteRateLimiter.allow(linkKeyOf(caller), nowMs())) return renewed(writesRateLimited());
+      if (!admitted && !collectionWriteRateLimiter.allow(linkKeyOf(caller), nowMs()))
+        return renewed(writesRateLimited());
       const release = admitted ? () => {} : admitLargeBody(linkKeyOf(caller));
       if (!release) return renewed(writesRateLimited());
       try {
@@ -1740,24 +2114,35 @@ export function createShareWebApplication({
         // profile, or the agent's token, and no cookie or account reaches the relay.
         let body: string;
         try {
-          const value = asRecord(await readBoundedJson(request, MAX_COLLECTION_WRITE_ENVELOPE_BYTES,
-            AbortSignal.any([request.signal, AbortSignal.timeout(COLLECTION_WRITE_TIMEOUT_MS)])));
-          if (!value || Object.keys(value).some((key) => key !== "submitId" && key !== "changes")) return renewed(refused());
+          const value = asRecord(
+            await readBoundedJson(
+              request,
+              MAX_COLLECTION_WRITE_ENVELOPE_BYTES,
+              AbortSignal.any([request.signal, AbortSignal.timeout(COLLECTION_WRITE_TIMEOUT_MS)]),
+            ),
+          );
+          if (!value || Object.keys(value).some((key) => key !== "submitId" && key !== "changes"))
+            return renewed(refused());
           body = JSON.stringify(value);
         } catch {
           return renewed(refused());
         }
-        return renewed(await callRelay(request, caller, {
-          path: "/sync/link/collection-writes",
-          method: "POST",
-          headers: { ...(profileSecret ? { "x-dohc-link-profile-secret": profileSecret } : {}), "content-type": "application/json" },
-          body,
-          buffered: true,
-          retryable: true,
-          timeoutMs: COLLECTION_WRITE_TIMEOUT_MS,
-          ok: acceptedCollectionWrite,
-          refusal: collectionWriteRefusal,
-        }));
+        return renewed(
+          await callRelay(request, caller, {
+            path: "/sync/link/collection-writes",
+            method: "POST",
+            headers: {
+              ...(profileSecret ? { "x-dohc-link-profile-secret": profileSecret } : {}),
+              "content-type": "application/json",
+            },
+            body,
+            buffered: true,
+            retryable: true,
+            timeoutMs: COLLECTION_WRITE_TIMEOUT_MS,
+            ok: acceptedCollectionWrite,
+            refusal: collectionWriteRefusal,
+          }),
+        );
       } finally {
         release();
       }
@@ -1769,16 +2154,25 @@ export function createShareWebApplication({
       const browser = agent ? null : readSession(request);
       const caller = agent ?? browser;
       if (!caller) return refused();
-      const cookieProfile = browser ? parseCookies(request.headers.get("cookie")).get(profileCookieName(browser.discriminator)) : undefined;
-      const profileSecret = cookieProfile && LINK_SECRET_PATTERN.test(cookieProfile) ? cookieProfile : null;
+      const cookieProfile = browser
+        ? parseCookies(request.headers.get("cookie")).get(profileCookieName(browser.discriminator))
+        : undefined;
+      const profileSecret =
+        cookieProfile && LINK_SECRET_PATTERN.test(cookieProfile) ? cookieProfile : null;
       if (request.method === "GET") {
         const channels = pathname === "/api/view/chat/channels";
         const read = linkChatReadPath(request, channels);
         if (!read) return refused();
         return await callRelay(request, caller, {
-          path: read.path, holdMs: read.holdMs, buffered: true, ifSessionChanged: true, retryable: true,
+          path: read.path,
+          holdMs: read.holdMs,
+          buffered: true,
+          ifSessionChanged: true,
+          retryable: true,
           // The channel answer names this profile's name, once set.
-          ...(channels && profileSecret ? { headers: { "x-dohc-link-profile-secret": profileSecret } } : {}),
+          ...(channels && profileSecret
+            ? { headers: { "x-dohc-link-profile-secret": profileSecret } }
+            : {}),
           ...(read.holdMs > 0 ? { limiter: activityHoldLimiter } : {}),
         });
       }
@@ -1786,10 +2180,16 @@ export function createShareWebApplication({
       // through its own agent chat.
       const fetchSite = request.headers.get("sec-fetch-site");
       if (
-        !browser || request.method !== "POST" || pathname !== "/api/view/chat/messages" || search ||
-        request.headers.get("origin") !== agentOrigin || (fetchSite !== null && fetchSite !== "same-origin") ||
-        !request.headers.has(LINK_SESSION_HEADER) || !profileSecret ||
-        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+        !browser ||
+        request.method !== "POST" ||
+        pathname !== "/api/view/chat/messages" ||
+        search ||
+        request.headers.get("origin") !== agentOrigin ||
+        (fetchSite !== null && fetchSite !== "same-origin") ||
+        !request.headers.has(LINK_SESSION_HEADER) ||
+        !profileSecret ||
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+          "application/json"
       ) {
         return refused();
       }
@@ -1800,7 +2200,10 @@ export function createShareWebApplication({
       return await callRelay(request, browser, {
         path: "/sync/link/chat/messages",
         method: "POST",
-        headers: { "x-dohc-link-profile-secret": profileSecret, "content-type": "application/json" },
+        headers: {
+          "x-dohc-link-profile-secret": profileSecret,
+          "content-type": "application/json",
+        },
         body,
         buffered: true,
         ifSessionChanged: true,
@@ -1809,10 +2212,7 @@ export function createShareWebApplication({
       });
     }
 
-    if (
-      pathname === "/api/view/discussion" ||
-      pathname === "/api/view/discussion/activity"
-    ) {
+    if (pathname === "/api/view/discussion" || pathname === "/api/view/discussion/activity") {
       mark(pathname);
       const isActivity = pathname === "/api/view/discussion/activity";
       if (
@@ -1876,24 +2276,45 @@ export function createShareWebApplication({
     }
 
     if (pathname.startsWith("/api/view/")) {
-      if (pathname === "/api/view/meta" || pathname === "/api/view/current" || pathname === "/api/view/log") mark(pathname);
+      if (
+        pathname === "/api/view/meta" ||
+        pathname === "/api/view/current" ||
+        pathname === "/api/view/log"
+      )
+        mark(pathname);
       else if (pathname.startsWith("/api/view/blob/")) mark("/api/view/blob/:sha256");
       const authenticated = agentCallers.get(request) ?? readSession(request);
       if (!authenticated || request.method !== "GET") return refused();
       if (pathname === "/api/view/meta") {
         // The share's answer says whether the link has a channel, so a lost one is retryable.
         const agent = agentCallers.get(request);
-        return await callRelay(request, authenticated, { path: "/sync/link/share", retryable: true,
+        return await callRelay(request, authenticated, {
+          path: "/sync/link/share",
+          retryable: true,
           // An agent's answer names its grant, which share-web keeps.
-          ...(agent ? { buffered: true, ok: async (relayResponse: Response) => {
-            const answer = takeAgentGrant(agent, asRecord(await relayResponse.json().catch(() => null)));
-            return answer ? jsonResponse(answer) : jsonResponse(linkRefusalBody("link_unavailable"), {status: 503});
-          } } : {}) });
+          ...(agent
+            ? {
+                buffered: true,
+                ok: async (relayResponse: Response) => {
+                  const answer = takeAgentGrant(
+                    agent,
+                    asRecord(await relayResponse.json().catch(() => null)),
+                  );
+                  return answer
+                    ? jsonResponse(answer)
+                    : jsonResponse(linkRefusalBody("link_unavailable"), { status: 503 });
+                },
+              }
+            : {}),
+        });
       }
       if (pathname === "/api/view/current") {
         const collectionPath = new URL(request.url).searchParams.get("collectionPath");
         const query = collectionPath === null ? "" : `?${new URLSearchParams({ collectionPath })}`;
-        return await callRelay(request, authenticated, { path: `/sync/link/current${query}`, retryable: true });
+        return await callRelay(request, authenticated, {
+          path: `/sync/link/current${query}`,
+          retryable: true,
+        });
       }
       if (pathname === "/api/view/log") {
         const hold = new URL(request.url).searchParams.get("hold") ?? "0";
@@ -1929,10 +2350,19 @@ export function createShareWebApplication({
     if (!isMcpCorsPath(new URL(request.url).pathname)) return result;
     const headers = new Headers(result.headers);
     for (const [key, value] of Object.entries(MCP_CORS_HEADERS)) headers.set(key, value);
-    return new Response(result.body, {status: result.status, statusText: result.statusText, headers});
+    return new Response(result.body, {
+      status: result.status,
+      statusText: result.statusText,
+      headers,
+    });
   };
-  return { handle, resolveLinkBrowserMaterial, ...(linkLive ? {linkLive} : {}),
-    resolveNamedBrowserSession: (request, discriminator) => namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null) };
+  return {
+    handle,
+    resolveLinkBrowserMaterial,
+    ...(linkLive ? { linkLive } : {}),
+    resolveNamedBrowserSession: (request, discriminator) =>
+      namedBrowser?.resolve(request, discriminator) ?? Promise.resolve(null),
+  };
 }
 
 export const shareWebRefusalBody = REFUSAL_BODY;
@@ -1942,5 +2372,9 @@ export const shareWebRefusalBody = REFUSAL_BODY;
  * deadline: an agent's MCP request and a Collection write can carry megabytes.
  */
 export function streamsRequestBody(url: URL): boolean {
-  return url.pathname.startsWith(MCP_PATH_PREFIX) || url.pathname.startsWith(PERSONAL_MCP_PATH_PREFIX) || url.pathname === COLLECTION_WRITES_PATH;
+  return (
+    url.pathname.startsWith(MCP_PATH_PREFIX) ||
+    url.pathname.startsWith(PERSONAL_MCP_PATH_PREFIX) ||
+    url.pathname === COLLECTION_WRITES_PATH
+  );
 }

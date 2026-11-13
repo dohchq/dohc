@@ -5,13 +5,25 @@ import { parseAppCollectionCapability, type AppCollectionCapability } from "./ap
 import { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppDatasetCapability, type AppDatasetCapability } from "./dataset";
 export { parseAppCollectionCapability, type AppCollectionCapability } from "./appCollection";
-export {parseAppCollectionCreateRequest,parseAppCollectionReadQuery,APP_COLLECTION_REQUEST_BYTES,APP_COLLECTION_FIELDS_BYTES,
-  APP_COLLECTION_CURSOR_BYTES,APP_COLLECTION_PAGE_BYTES,APP_COLLECTION_RESPONSE_BYTES,
-  type AppCollectionCreateRequest,type AppCollectionReadRequest,type AppCollectionReceipt,type AppCollectionPage} from "./appCollection";
+export {
+  parseAppCollectionCreateRequest,
+  parseAppCollectionReadQuery,
+  APP_COLLECTION_REQUEST_BYTES,
+  APP_COLLECTION_FIELDS_BYTES,
+  APP_COLLECTION_CURSOR_BYTES,
+  APP_COLLECTION_PAGE_BYTES,
+  APP_COLLECTION_RESPONSE_BYTES,
+  type AppCollectionCreateRequest,
+  type AppCollectionReadRequest,
+  type AppCollectionReceipt,
+  type AppCollectionPage,
+} from "./appCollection";
 
 /** A compiled bundle: the script, its styles, and, for an HTML entry, the page record. */
 const bundleContentTypes: Readonly<Record<string, string>> = {
-  "bundle.js": "text/javascript; charset=utf-8", "bundle.css": "text/css; charset=utf-8", "page.json": "application/json; charset=utf-8",
+  "bundle.js": "text/javascript; charset=utf-8",
+  "bundle.css": "text/css; charset=utf-8",
+  "page.json": "application/json; charset=utf-8",
 };
 
 /** Publication transport ceilings shared by desktop, relay, and browser launch. */
@@ -22,8 +34,16 @@ export const APP_PUBLICATION_MAX_REQUEST_BYTES = 256 * 1024;
 export const APP_PUBLICATION_MAX_METADATA_BYTES = APP_PUBLICATION_MAX_REQUEST_BYTES;
 export const APP_PUBLICATION_MAX_DOCUMENT_BYTES = APP_PUBLICATION_MAX_BUNDLE_BYTES * 6 + 64 * 1024;
 
-export interface AppPublicationLimits { maxFiles: number; maxMetadataBytes: number; maxBundleBytes: number }
-export interface AppPublicationFile { path: string; sha256: string; byteLength: number }
+export interface AppPublicationLimits {
+  maxFiles: number;
+  maxMetadataBytes: number;
+  maxBundleBytes: number;
+}
+export interface AppPublicationFile {
+  path: string;
+  sha256: string;
+  byteLength: number;
+}
 export interface AppPublicationCandidate {
   versionId: string;
   appRoot: string;
@@ -42,42 +62,87 @@ export interface AppPublicationCandidate {
 }
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
-const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 function object(value: unknown, keys: string[]): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join() !== [...keys].sort().join()) throw new Error("Invalid publication record.");
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join() !== [...keys].sort().join()
+  )
+    throw new Error("Invalid publication record.");
   return value as Record<string, unknown>;
 }
 function text(value: unknown, max: number): string {
-  if (typeof value !== "string" || !value || value.includes("\0") || bytes(value) > max) throw new Error("Invalid publication text.");
+  if (typeof value !== "string" || !value || value.includes("\0") || bytes(value) > max)
+    throw new Error("Invalid publication text.");
   return value;
 }
 function hash(value: unknown): string {
-  if (typeof value !== "string" || !SHA256_HEX_PATTERN.test(value)) throw new Error("Invalid publication digest.");
+  if (typeof value !== "string" || !SHA256_HEX_PATTERN.test(value))
+    throw new Error("Invalid publication digest.");
   return value;
 }
 function size(value: unknown): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("Invalid publication byte length.");
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error("Invalid publication byte length.");
   return value;
 }
 function path(value: unknown, max: number): string {
-  const raw = text(value, max), checked = validateUserWritePath(raw);
-  if (!checked.ok || checked.normalized !== raw || classifyEngineFilePath(raw).kind !== "tracked") throw new Error("Invalid publication source path.");
+  const raw = text(value, max),
+    checked = validateUserWritePath(raw);
+  if (!checked.ok || checked.normalized !== raw || classifyEngineFilePath(raw).kind !== "tracked")
+    throw new Error("Invalid publication source path.");
   return raw;
 }
 /** Fixed compiled bundles with at most one explicit data capability. */
-export function parseAppPublicationCandidate(value: unknown, limits: AppPublicationLimits): AppPublicationCandidate {
-  if (!limits || typeof limits !== "object" ||
-      !Number.isSafeInteger(limits.maxFiles) || limits.maxFiles < 1 ||
-      !Number.isSafeInteger(limits.maxMetadataBytes) || limits.maxMetadataBytes < 1 ||
-      !Number.isSafeInteger(limits.maxBundleBytes) || limits.maxBundleBytes < 1) {
+export function parseAppPublicationCandidate(
+  value: unknown,
+  limits: AppPublicationLimits,
+): AppPublicationCandidate {
+  if (
+    !limits ||
+    typeof limits !== "object" ||
+    !Number.isSafeInteger(limits.maxFiles) ||
+    limits.maxFiles < 1 ||
+    !Number.isSafeInteger(limits.maxMetadataBytes) ||
+    limits.maxMetadataBytes < 1 ||
+    !Number.isSafeInteger(limits.maxBundleBytes) ||
+    limits.maxBundleBytes < 1
+  ) {
     throw new Error("Invalid publication limits.");
   }
-  const row = object(value, ["versionId", "appRoot", "entryPath", "packageMap", "sourceRevision", "sourceDigest", "dependencyLockDigest", "bundleDigest", "buildDigest", "compilerIdentity", "inputs", "dependencies", "files", "capabilities"]);
-  if (!Array.isArray(row.inputs) || row.inputs.length < 1 || row.inputs.length > limits.maxFiles ||
-      row.inputs.length > limits.maxMetadataBytes ||
-      !Array.isArray(row.dependencies) || row.dependencies.length < 1 || row.dependencies.length > row.inputs.length ||
-      !Array.isArray(row.files) || row.files.length < 1 || row.files.length > 3 ||
-      !Array.isArray(row.capabilities) || row.capabilities.length > 1) throw new Error("Unsupported publication inventory or capabilities.");
+  const row = object(value, [
+    "versionId",
+    "appRoot",
+    "entryPath",
+    "packageMap",
+    "sourceRevision",
+    "sourceDigest",
+    "dependencyLockDigest",
+    "bundleDigest",
+    "buildDigest",
+    "compilerIdentity",
+    "inputs",
+    "dependencies",
+    "files",
+    "capabilities",
+  ]);
+  if (
+    !Array.isArray(row.inputs) ||
+    row.inputs.length < 1 ||
+    row.inputs.length > limits.maxFiles ||
+    row.inputs.length > limits.maxMetadataBytes ||
+    !Array.isArray(row.dependencies) ||
+    row.dependencies.length < 1 ||
+    row.dependencies.length > row.inputs.length ||
+    !Array.isArray(row.files) ||
+    row.files.length < 1 ||
+    row.files.length > 3 ||
+    !Array.isArray(row.capabilities) ||
+    row.capabilities.length > 1
+  )
+    throw new Error("Unsupported publication inventory or capabilities.");
   let remainingTextBytes = limits.maxMetadataBytes;
   const readText = (value: unknown): string => {
     const result = text(value, remainingTextBytes);
@@ -87,48 +152,97 @@ export function parseAppPublicationCandidate(value: unknown, limits: AppPublicat
   const readPath = (value: unknown) => path(readText(value), limits.maxMetadataBytes);
   const appRoot = readPath(row.appRoot);
   const seen = new Set<string>();
-  const inputs = row.inputs.map(value => {
-    const file = object(value, ["path", "sha256", "byteLength"]);
-    const filePath = readPath(file.path);
-    if (seen.has(filePath)) throw new Error("Publication input is duplicated.");
-    seen.add(filePath);
-    return { path: filePath, sha256: hash(file.sha256), byteLength: size(file.byteLength) };
-  }).sort((a, b) => compare(a.path, b.path));
+  const inputs = row.inputs
+    .map((value) => {
+      const file = object(value, ["path", "sha256", "byteLength"]);
+      const filePath = readPath(file.path);
+      if (seen.has(filePath)) throw new Error("Publication input is duplicated.");
+      seen.add(filePath);
+      return { path: filePath, sha256: hash(file.sha256), byteLength: size(file.byteLength) };
+    })
+    .sort((a, b) => compare(a.path, b.path));
   const dependencies = row.dependencies.map(readPath).sort(compare);
-  if (new Set(dependencies).size !== dependencies.length || dependencies.some(path => !seen.has(path))) throw new Error("Invalid publication dependency.");
+  if (
+    new Set(dependencies).size !== dependencies.length ||
+    dependencies.some((path) => !seen.has(path))
+  )
+    throw new Error("Invalid publication dependency.");
   const entryPath = readPath(row.entryPath);
-  if (!dependencies.includes(entryPath)) throw new Error("Publication entry dependency is missing.");
-  if (!row.packageMap || typeof row.packageMap !== "object" || Array.isArray(row.packageMap)) throw new Error("Invalid publication package map.");
+  if (!dependencies.includes(entryPath))
+    throw new Error("Publication entry dependency is missing.");
+  if (!row.packageMap || typeof row.packageMap !== "object" || Array.isArray(row.packageMap))
+    throw new Error("Invalid publication package map.");
   const entries = Object.entries(row.packageMap);
   if (entries.length > limits.maxFiles) throw new Error("Publication package map bound exceeded.");
-  const packageMap = Object.fromEntries(entries.map(([name, value]) => {
-    readText(name);
-    const target = readPath(value);
-    if (!seen.has(target)) throw new Error("Publication package is outside selected inputs.");
-    return [name, target] as const;
-  }).sort(([a], [b]) => compare(a, b)));
-  const capabilities = row.capabilities.map(value => value?.kind === "dataset" ? parseAppDatasetCapability(value) : parseAppCollectionCapability(value));
+  const packageMap = Object.fromEntries(
+    entries
+      .map(([name, value]) => {
+        readText(name);
+        const target = readPath(value);
+        if (!seen.has(target)) throw new Error("Publication package is outside selected inputs.");
+        return [name, target] as const;
+      })
+      .sort(([a], [b]) => compare(a, b)),
+  );
+  const capabilities = row.capabilities.map((value) =>
+    value?.kind === "dataset"
+      ? parseAppDatasetCapability(value)
+      : parseAppCollectionCapability(value),
+  );
   // Display words are for Review app. A candidate is what the approval binds, so it carries none.
-  if (capabilities.some(capability => capability.kind === "dataset" && capability.operations.some(operation => operation.display))) throw new Error("Invalid publication capability.");
-  const outputs = new Set<string>();let total = 0;
-  const files = row.files.map(value => {
-    const file = object(value, ["path", "sha256", "byteLength", "contentType"]);
-    if (typeof file.path !== "string" || !Object.hasOwn(bundleContentTypes, file.path)) throw new Error("Unsupported publication bundle path.");
-    const contentType = bundleContentTypes[file.path]!;
-    if (file.contentType !== contentType || outputs.has(file.path)) throw new Error("Invalid publication bundle type or duplicate.");
-    outputs.add(file.path);const byteLength = size(file.byteLength);total += byteLength;
-    if (!Number.isSafeInteger(total) || total > limits.maxBundleBytes || byteLength > APP_PUBLICATION_MAX_BLOB_BYTES) throw new Error("Publication bundle bound exceeded.");
-    return { path: file.path, sha256: hash(file.sha256), byteLength, contentType };
-  }).sort((a, b) => compare(a.path, b.path));
+  if (
+    capabilities.some(
+      (capability) =>
+        capability.kind === "dataset" &&
+        capability.operations.some((operation) => operation.display),
+    )
+  )
+    throw new Error("Invalid publication capability.");
+  const outputs = new Set<string>();
+  let total = 0;
+  const files = row.files
+    .map((value) => {
+      const file = object(value, ["path", "sha256", "byteLength", "contentType"]);
+      if (typeof file.path !== "string" || !Object.hasOwn(bundleContentTypes, file.path))
+        throw new Error("Unsupported publication bundle path.");
+      const contentType = bundleContentTypes[file.path]!;
+      if (file.contentType !== contentType || outputs.has(file.path))
+        throw new Error("Invalid publication bundle type or duplicate.");
+      outputs.add(file.path);
+      const byteLength = size(file.byteLength);
+      total += byteLength;
+      if (
+        !Number.isSafeInteger(total) ||
+        total > limits.maxBundleBytes ||
+        byteLength > APP_PUBLICATION_MAX_BLOB_BYTES
+      )
+        throw new Error("Publication bundle bound exceeded.");
+      return { path: file.path, sha256: hash(file.sha256), byteLength, contentType };
+    })
+    .sort((a, b) => compare(a.path, b.path));
   if (!outputs.has("bundle.js")) throw new Error("Publication script is missing.");
   const compiler = object(row.compilerIdentity, ["recipe", "version", "binarySha256"]);
   const candidate: AppPublicationCandidate = {
-    versionId: readText(row.versionId), appRoot, entryPath, packageMap,
-    sourceRevision: hash(row.sourceRevision), sourceDigest: hash(row.sourceDigest),
-    dependencyLockDigest: hash(row.dependencyLockDigest), bundleDigest: hash(row.bundleDigest), buildDigest: hash(row.buildDigest),
-    compilerIdentity: { recipe: readText(compiler.recipe), version: readText(compiler.version), binarySha256: hash(compiler.binarySha256) },
-    inputs, dependencies, files, capabilities,
+    versionId: readText(row.versionId),
+    appRoot,
+    entryPath,
+    packageMap,
+    sourceRevision: hash(row.sourceRevision),
+    sourceDigest: hash(row.sourceDigest),
+    dependencyLockDigest: hash(row.dependencyLockDigest),
+    bundleDigest: hash(row.bundleDigest),
+    buildDigest: hash(row.buildDigest),
+    compilerIdentity: {
+      recipe: readText(compiler.recipe),
+      version: readText(compiler.version),
+      binarySha256: hash(compiler.binarySha256),
+    },
+    inputs,
+    dependencies,
+    files,
+    capabilities,
   };
-  if (bytes(JSON.stringify(candidate)) > limits.maxMetadataBytes) throw new Error("Publication metadata bound exceeded.");
+  if (bytes(JSON.stringify(candidate)) > limits.maxMetadataBytes)
+    throw new Error("Publication metadata bound exceeded.");
   return candidate;
 }

@@ -46,21 +46,30 @@ export function createChatScopeCapability<State>(dependencies: {
     lease: WorkspaceAuthorityLease<RegistryEntry, State>,
   ): RegistryEntry & { attachmentId: symbol };
   requireEngineCapture(
-    workspaceId: string, feature: "Chats",
+    workspaceId: string,
+    feature: "Chats",
   ): Promise<{ workspace: RegistryEntry; capture: WorkspaceEngineCapture }>;
   linkedChatStoreFor(lease: WorkspaceAuthorityLease<RegistryEntry, State>): DesktopLinkedChatStore;
   openWorkspaceActivity(workspace: RegistryEntry): Promise<unknown>;
   receivedShareEngine: {
     workspaceFor(input: {
-      engineWorkspaceId: string; rootPath: string; attachmentId: symbol;
+      engineWorkspaceId: string;
+      rootPath: string;
+      attachmentId: symbol;
     }): EngineWorkspace;
   };
   resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
   readOwnedWorkspaceText(workspace: RegistryEntry, path: string): Promise<{ text: string }>;
 }) {
   const {
-    workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, resolveEngineFiles, readOwnedWorkspaceText,
+    workspaceAuthorities,
+    canonicalWorkspaceFor,
+    requireEngineCapture,
+    linkedChatStoreFor,
+    openWorkspaceActivity,
+    receivedShareEngine,
+    resolveEngineFiles,
+    readOwnedWorkspaceText,
   } = dependencies;
   async function requireChatScope(workspaceId: string): Promise<ChatScope> {
     return await workspaceAuthorities.withAuthority(workspaceId, async (lease) => {
@@ -94,8 +103,7 @@ export function createChatScopeCapability<State>(dependencies: {
         workspace,
         engineWorkspace,
         store: linkedChatStoreFor(lease),
-        withAuthority: (work) =>
-          workspaceAuthorities.withBinding(binding, () => work()),
+        withAuthority: (work) => workspaceAuthorities.withBinding(binding, () => work()),
         // The level the PINNED grant names, or null when the grant cannot be
         // read completely. Read through the same function the refresh path
         // uses, so this gate and the pull cannot disagree about what a share
@@ -109,7 +117,9 @@ export function createChatScopeCapability<State>(dependencies: {
 
   async function chatFileObjectId(scope: ChatScope, path: string): Promise<string | null> {
     if (scope.kind === "workspace") return await scope.capture.fileObjectIdForPath(path);
-    const [result] = await scope.withAuthority(() => resolveEngineFiles(scope.engineWorkspace, [{ path }]));
+    const [result] = await scope.withAuthority(() =>
+      resolveEngineFiles(scope.engineWorkspace, [{ path }]),
+    );
     return result?.status === "found" ? result.objectId : null;
   }
 
@@ -122,8 +132,7 @@ export function createChatScopeCapability<State>(dependencies: {
     references: readonly ChatFileReferenceInput[] | undefined,
   ) {
     const resolved: Array<{
-      objectId: Awaited<ReturnType<WorkspaceEngineCapture["fileObjectIdForPath"]>
-      > & string;
+      objectId: Awaited<ReturnType<WorkspaceEngineCapture["fileObjectIdForPath"]>> & string;
       pathHint: string;
       headingText?: string;
       headingAnchor?: string;
@@ -134,10 +143,7 @@ export function createChatScopeCapability<State>(dependencies: {
       const key = `${reference.path}\0${reference.headingAnchor ?? ""}\0${reference.headingOccurrence ?? 0}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const trackedFile = await resolveTrackedChatFilePath(
-        reference.path,
-        fileObjectIdForPath,
-      );
+      const trackedFile = await resolveTrackedChatFilePath(reference.path, fileObjectIdForPath);
       if (!trackedFile) {
         throw new Error(`Cannot mention ${reference.path} because dohc is not tracking it yet.`);
       }

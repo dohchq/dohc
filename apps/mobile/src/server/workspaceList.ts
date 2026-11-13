@@ -7,12 +7,12 @@ import { requestGenerations, shownProblem } from "./client";
 export type WorkspaceList =
   | { readonly status: "loading" }
   | {
-    readonly status: "ready";
-    readonly workspaces: readonly AccountWorkspace[];
-    readonly problem: ServerProblemKind | null;
-    /** Workspaces whose Show on phone change the server hasn't answered yet. */
-    readonly pending: ReadonlySet<string>;
-  }
+      readonly status: "ready";
+      readonly workspaces: readonly AccountWorkspace[];
+      readonly problem: ServerProblemKind | null;
+      /** Workspaces whose Show on phone change the server hasn't answered yet. */
+      readonly pending: ReadonlySet<string>;
+    }
   | { readonly status: "failed"; readonly problem: ServerProblemKind };
 
 /**
@@ -23,11 +23,16 @@ export type WorkspaceGap =
   | { readonly kind: "failed"; readonly problem: ServerProblemKind }
   | { readonly kind: "no-workspaces" | "none-synced" | "none-shown" };
 
-export function workspaceGap(list: WorkspaceList, currentWorkspaceId: string | null): WorkspaceGap | null {
+export function workspaceGap(
+  list: WorkspaceList,
+  currentWorkspaceId: string | null,
+): WorkspaceGap | null {
   if (list.status === "failed") return { kind: "failed", problem: list.problem };
   if (list.status !== "ready" || currentWorkspaceId !== null) return null;
   if (list.workspaces.length === 0) return { kind: "no-workspaces" };
-  return { kind: list.workspaces.some(entry => entry.showOnPhone) ? "none-synced" : "none-shown" };
+  return {
+    kind: list.workspaces.some((entry) => entry.showOnPhone) ? "none-synced" : "none-shown",
+  };
 }
 
 /** The list as this phone saved it for one sign-in (src/server/workspaceData.ts, `ReadCache.savedList`). */
@@ -46,7 +51,10 @@ export interface WorkspaceListStore {
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
 }
 
-export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">, saved?: SavedList | null): WorkspaceListStore {
+export function createWorkspaceList(
+  signIn: Pick<SignIn, "client" | "isCurrent">,
+  saved?: SavedList | null,
+): WorkspaceListStore {
   let state: WorkspaceList = { status: "loading" };
   const listeners = new Set<() => void>();
   const reads = requestGenerations();
@@ -67,19 +75,29 @@ export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">
 
   function setEntry(workspaceId: string, showOnPhone: boolean, problem: ServerProblemKind | null) {
     if (state.status !== "ready") return;
-    settle(state.workspaces.map(entry => entry.workspaceId === workspaceId ? { ...entry, showOnPhone } : entry), problem);
+    settle(
+      state.workspaces.map((entry) =>
+        entry.workspaceId === workspaceId ? { ...entry, showOnPhone } : entry,
+      ),
+      problem,
+    );
   }
 
-  void saved?.load().then(found => {
+  void saved?.load().then((found) => {
     if (found === null || state.status === "ready") return;
-    set({ status: "ready", workspaces: found, problem: state.status === "failed" ? state.problem : null, pending: new Set() });
+    set({
+      status: "ready",
+      workspaces: found,
+      problem: state.status === "failed" ? state.problem : null,
+      pending: new Set(),
+    });
   });
 
   /** Reads the list. A read after changes keeps the problem a failed change showed. */
   function read(afterChanges: boolean) {
     const request = reads.next();
     listWorkspaces(signIn.client).then(
-      workspaces => {
+      (workspaces) => {
         if (!reads.isLatest(request) || pending.size > 0) return;
         settle(workspaces, afterChanges && state.status === "ready" ? state.problem : null);
       },
@@ -100,23 +118,27 @@ export function createWorkspaceList(signIn: Pick<SignIn, "client" | "isCurrent">
     reload: () => read(false),
     setShowOnPhone(workspaceId, showOnPhone) {
       if (state.status !== "ready" || pending.has(workspaceId)) return;
-      const confirmed = state.workspaces.find(entry => entry.workspaceId === workspaceId)?.showOnPhone;
+      const confirmed = state.workspaces.find(
+        (entry) => entry.workspaceId === workspaceId,
+      )?.showOnPhone;
       if (confirmed === undefined || confirmed === showOnPhone) return;
       pending.add(workspaceId);
       reads.next();
       setEntry(workspaceId, showOnPhone, null);
-      void setShowOnPhone(signIn.client, workspaceId, showOnPhone).then(
-        stored => {
-          pending.delete(workspaceId);
-          setEntry(workspaceId, stored, null);
-        },
-        (error: unknown) => {
-          pending.delete(workspaceId);
-          setEntry(workspaceId, confirmed, shownProblem(error));
-        },
-      ).then(() => {
-        if (pending.size === 0 && signIn.isCurrent()) read(true);
-      });
+      void setShowOnPhone(signIn.client, workspaceId, showOnPhone)
+        .then(
+          (stored) => {
+            pending.delete(workspaceId);
+            setEntry(workspaceId, stored, null);
+          },
+          (error: unknown) => {
+            pending.delete(workspaceId);
+            setEntry(workspaceId, confirmed, shownProblem(error));
+          },
+        )
+        .then(() => {
+          if (pending.size === 0 && signIn.isCurrent()) read(true);
+        });
     },
   };
 }

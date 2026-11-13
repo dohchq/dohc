@@ -2,253 +2,799 @@ import { expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { createAppLaunchHandler } from "./appLaunch";
 import { parse } from "tldts";
-const config={viewerOrigin:'https://viewer.example.com',appDomain:'example.net'},publicationId='a'.repeat(64);
-function fixture(hold:()=>Promise<void>=async()=>{},appDomain=config.appDomain){let now=1000000,revision=1,active=true,capability="server-capability";const requests:Request[]=[];const bytes=Buffer.from("document.getElementById('root').textContent='App loaded';");const file={path:'bundle.js',sha256:createHash('sha256').update(bytes).digest('hex'),byteLength:bytes.length,contentType:'text/javascript; charset=utf-8'};
-const handler=createAppLaunchHandler({config:{...config,appDomain},relayUrl:'https://relay.example.org',nowMs:()=>now,resolveMaterial:async(_d,c)=>c==='viewer=session'?{ok:true,capabilityToken:'server-capability',profileSecret:'server-profile',setCookie:null,currentCapability:async()=>capability}:{ok:false,status:404},fetchRelay:async r=>{requests.push(r);await hold();if(r.headers.get('authorization')!==`LinkCapability ${capability}`)return new Response(null,{status:401});expect(r.headers.get('x-dohc-link-profile-secret')).toBe('server-profile');if(!active)return new Response(null,{status:404});const u=new URL(r.url);if(u.pathname.endsWith('/backend/invoke')){const body=await r.json();return body.authorityRevision===revision?Response.json({result:body.input,revision:1,replayed:false}):new Response(null,{status:404});}if(u.pathname.endsWith('/blobs/'+file.sha256))return u.search===`?authorityRevision=${revision}`?new Response(bytes,{headers:{'content-type':file.contentType}}):new Response(null,{status:404});return Response.json({publicationId,authorityRevision:revision,files:[file]});}});
-const request=(url:string,body:string,headers:Record<string,string>={})=>new Request(url,{method:'POST',body,headers:{host:new URL(url).host,...headers}});
-const issue=()=>handler.handle(request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{origin:config.viewerOrigin,'content-type':'application/json',cookie:'viewer=session'}));
-const redeem=(launch:{action:string;handoff:string})=>handler.handle(request(launch.action,new URLSearchParams({handoff:launch.handoff}).toString(),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded'}));
-return{handler,requests,request,issue,redeem,refresh(){capability="fresh-capability";},revoke(){active=false;},narrow(){revision++;},advance(ms:number){now+=ms;}};}
-async function launch(f:ReturnType<typeof fixture>){const issued=await f.issue();expect(issued.status).toBe(200);const handoff=await issued.json();const response=await f.redeem(handoff);expect(response.status).toBe(200);const html=await response.text(),proof=/const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!,cookie=response.headers.get('set-cookie')!.split(';')[0]!,origin=new URL(handoff.action).origin;const read=(path='/document',custom:Record<string,string>={})=>f.handler.handle(f.request(origin+path,'',{origin,cookie,'x-dohc-app-proof':proof,...custom}));return{handoff,response,html,proof,cookie,origin,read};}
-it.each(['/collection','/backend'])('uses identical refusal headers for revoked, bad-cookie and unknown launches on %s',async path=>{
-  const f=fixture(),app=await launch(f);f.revoke();
-  const body=path==='/collection'?{id:'list',op:'collection.list',limit:1}:{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{}};
-  const send=(origin:string,cookie:string)=>f.handler.handle(f.request(origin+path,JSON.stringify(body),{origin,cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
-  const responses=await Promise.all([send(app.origin,app.cookie),send(app.origin,'bad=cookie'),send('https://'+'z'.repeat(43)+'.example.net',app.cookie)]);
-  for(const response of responses){expect(response.status).toBe(404);expect(response.headers.get('referrer-policy')).toBe('no-referrer');expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));expect(await response.json()).toEqual({ok:false,error:'not found'});}
+const config = { viewerOrigin: "https://viewer.example.com", appDomain: "example.net" },
+  publicationId = "a".repeat(64);
+function fixture(hold: () => Promise<void> = async () => {}, appDomain = config.appDomain) {
+  let now = 1000000,
+    revision = 1,
+    active = true,
+    capability = "server-capability";
+  const requests: Request[] = [];
+  const bytes = Buffer.from("document.getElementById('root').textContent='App loaded';");
+  const file = {
+    path: "bundle.js",
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    byteLength: bytes.length,
+    contentType: "text/javascript; charset=utf-8",
+  };
+  const handler = createAppLaunchHandler({
+    config: { ...config, appDomain },
+    relayUrl: "https://relay.example.org",
+    nowMs: () => now,
+    resolveMaterial: async (_d, c) =>
+      c === "viewer=session"
+        ? {
+            ok: true,
+            capabilityToken: "server-capability",
+            profileSecret: "server-profile",
+            setCookie: null,
+            currentCapability: async () => capability,
+          }
+        : { ok: false, status: 404 },
+    fetchRelay: async (r) => {
+      requests.push(r);
+      await hold();
+      if (r.headers.get("authorization") !== `LinkCapability ${capability}`)
+        return new Response(null, { status: 401 });
+      expect(r.headers.get("x-dohc-link-profile-secret")).toBe("server-profile");
+      if (!active) return new Response(null, { status: 404 });
+      const u = new URL(r.url);
+      if (u.pathname.endsWith("/backend/invoke")) {
+        const body = await r.json();
+        return body.authorityRevision === revision
+          ? Response.json({ result: body.input, revision: 1, replayed: false })
+          : new Response(null, { status: 404 });
+      }
+      if (u.pathname.endsWith("/blobs/" + file.sha256))
+        return u.search === `?authorityRevision=${revision}`
+          ? new Response(bytes, { headers: { "content-type": file.contentType } })
+          : new Response(null, { status: 404 });
+      return Response.json({ publicationId, authorityRevision: revision, files: [file] });
+    },
+  });
+  const request = (url: string, body: string, headers: Record<string, string> = {}) =>
+    new Request(url, { method: "POST", body, headers: { host: new URL(url).host, ...headers } });
+  const issue = () =>
+    handler.handle(
+      request(
+        config.viewerOrigin + "/api/apps/launch",
+        JSON.stringify({ discriminator: "abcdefghijkl", publicationId }),
+        {
+          origin: config.viewerOrigin,
+          "content-type": "application/json",
+          cookie: "viewer=session",
+        },
+      ),
+    );
+  const redeem = (launch: { action: string; handoff: string }) =>
+    handler.handle(
+      request(launch.action, new URLSearchParams({ handoff: launch.handoff }).toString(), {
+        origin: config.viewerOrigin,
+        "content-type": "application/x-www-form-urlencoded",
+      }),
+    );
+  return {
+    handler,
+    requests,
+    request,
+    issue,
+    redeem,
+    refresh() {
+      capability = "fresh-capability";
+    },
+    revoke() {
+      active = false;
+    },
+    narrow() {
+      revision++;
+    },
+    advance(ms: number) {
+      now += ms;
+    },
+  };
+}
+async function launch(f: ReturnType<typeof fixture>) {
+  const issued = await f.issue();
+  expect(issued.status).toBe(200);
+  const handoff = await issued.json();
+  const response = await f.redeem(handoff);
+  expect(response.status).toBe(200);
+  const html = await response.text(),
+    proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!,
+    cookie = response.headers.get("set-cookie")!.split(";")[0]!,
+    origin = new URL(handoff.action).origin;
+  const read = (path = "/document", custom: Record<string, string> = {}) =>
+    f.handler.handle(
+      f.request(origin + path, "", { origin, cookie, "x-dohc-app-proof": proof, ...custom }),
+    );
+  return { handoff, response, html, proof, cookie, origin, read };
+}
+it.each(["/collection", "/backend"])(
+  "uses identical refusal headers for revoked, bad-cookie and unknown launches on %s",
+  async (path) => {
+    const f = fixture(),
+      app = await launch(f);
+    f.revoke();
+    const body =
+      path === "/collection"
+        ? { id: "list", op: "collection.list", limit: 1 }
+        : {
+            id: "invoke",
+            op: "backend.invoke",
+            operation: "register",
+            idempotencyKey: "attempt-1",
+            input: {},
+          };
+    const send = (origin: string, cookie: string) =>
+      f.handler.handle(
+        f.request(origin + path, JSON.stringify(body), {
+          origin,
+          cookie,
+          "x-dohc-app-proof": app.proof,
+          "content-type": "application/json",
+        }),
+      );
+    const responses = await Promise.all([
+      send(app.origin, app.cookie),
+      send(app.origin, "bad=cookie"),
+      send("https://" + "z".repeat(43) + ".example.net", app.cookie),
+    ]);
+    for (const response of responses) {
+      expect(response.status).toBe(404);
+      expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+      expect(Object.fromEntries(response.headers)).toEqual(
+        Object.fromEntries(responses[0]!.headers),
+      );
+      expect(await response.json()).toEqual({ ok: false, error: "not found" });
+    }
+  },
+);
+it.each(["vercel.app", "github.io"])(
+  "launches and serves apps under private suffix %s",
+  async (appDomain) => {
+    const f = fixture(undefined, appDomain),
+      app = await launch(f),
+      host = new URL(app.origin).hostname;
+    expect(host).toMatch(new RegExp("^[a-f0-9]{48}\\." + appDomain.replaceAll(".", "\\.") + "$"));
+    expect(parse(host, { allowPrivateDomains: true }).domain).toBe(host);
+    expect(f.handler.matches(f.request(app.origin + "/document", ""))).toBe(true);
+    for (const invalidHost of [
+      "a".repeat(47) + "." + appDomain,
+      "nested." + host,
+      host + ".example.org",
+    ]) {
+      expect(f.handler.matches(f.request("https://" + invalidHost + "/document", ""))).toBe(false);
+    }
+    const response = await app.read();
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("App loaded");
+  },
+);
+it("requires viewer cookies and exact origin", async () => {
+  const f = fixture();
+  for (const custom of [
+    { origin: "null", cookie: "viewer=session" },
+    { origin: config.viewerOrigin, cookie: "bad" },
+  ] as Array<Record<string, string>>)
+    expect(
+      (
+        await f.handler.handle(
+          f.request(
+            config.viewerOrigin + "/api/apps/launch",
+            JSON.stringify({ discriminator: "abcdefghijkl", publicationId }),
+            { ...custom, "content-type": "application/json" },
+          ),
+        )
+      ).status,
+    ).toBe(404);
+  expect(f.requests).toHaveLength(0);
 });
-it.each(['vercel.app','github.io'])('launches and serves apps under private suffix %s',async appDomain=>{
-  const f=fixture(undefined,appDomain),app=await launch(f),host=new URL(app.origin).hostname;
-  expect(host).toMatch(new RegExp('^[a-f0-9]{48}\\.'+appDomain.replaceAll('.','\\.')+'$'));
-  expect(parse(host,{allowPrivateDomains:true}).domain).toBe(host);
-  expect(f.handler.matches(f.request(app.origin+'/document',''))).toBe(true);
-  for(const invalidHost of ['a'.repeat(47)+'.'+appDomain,'nested.'+host,host+'.example.org']) {
-    expect(f.handler.matches(f.request('https://'+invalidHost+'/document',''))).toBe(false);
-  }
-  const response=await app.read();expect(response.status).toBe(200);expect(await response.text()).toContain('App loaded');
+it("rechecks relay and keeps credentials out of opaque document", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  expect(app.response.headers.get("set-cookie")).toContain(
+    "Secure; HttpOnly; SameSite=Strict; Path=/",
+  );
+  expect(app.html).toContain(
+    "frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox'",
+  );
+  expect(app.html).not.toContain("server-capability");
+  expect(app.html).not.toContain("server-profile");
+  const doc = await app.read();
+  expect(doc.status).toBe(200);
+  const text = await doc.text();
+  expect(text).toContain("App loaded");
+  expect(text).not.toContain(app.proof);
+  expect(text).not.toContain(app.cookie);
+  expect(f.requests).toHaveLength(4);
 });
-it('requires viewer cookies and exact origin',async()=>{const f=fixture();for(const custom of [{origin:'null',cookie:'viewer=session'},{origin:config.viewerOrigin,cookie:'bad'}] as Array<Record<string,string>>)expect((await f.handler.handle(f.request(config.viewerOrigin+'/api/apps/launch',JSON.stringify({discriminator:'abcdefghijkl',publicationId}),{...custom,'content-type':'application/json'}))).status).toBe(404);expect(f.requests).toHaveLength(0);});
-it('rechecks relay and keeps credentials out of opaque document',async()=>{const f=fixture(),app=await launch(f);expect(app.response.headers.get('set-cookie')).toContain('Secure; HttpOnly; SameSite=Strict; Path=/');expect(app.html).toContain("frame.sandbox='allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox'");expect(app.html).not.toContain('server-capability');expect(app.html).not.toContain('server-profile');const doc=await app.read();expect(doc.status).toBe(200);const text=await doc.text();expect(text).toContain('App loaded');expect(text).not.toContain(app.proof);expect(text).not.toContain(app.cookie);expect(f.requests).toHaveLength(4);});
-it('atomically consumes concurrent handoffs once',async()=>{const f=fixture(),handoff=await(await f.issue()).json();expect((await Promise.all([f.redeem(handoff),f.redeem(handoff)])).map(r=>r.status).sort()).toEqual([200,404]);});
-it('accepts a valid one-use handoff from the viewer no-referrer form origin',async()=>{
-  const f=fixture(),handoff=await(await f.issue()).json();
-  const redeem=()=>f.handler.handle(f.request(handoff.action,new URLSearchParams({handoff:handoff.handoff}).toString(),{origin:'null','content-type':'application/x-www-form-urlencoded'}));
-  expect((await redeem()).status).toBe(200);expect((await redeem()).status).toBe(404);
+it("atomically consumes concurrent handoffs once", async () => {
+  const f = fixture(),
+    handoff = await (await f.issue()).json();
+  expect(
+    (await Promise.all([f.redeem(handoff), f.redeem(handoff)])).map((r) => r.status).sort(),
+  ).toEqual([200, 404]);
 });
-it('refuses hostile null-origin handoffs, unrelated origins, and missing Origin',async()=>{
-  const f=fixture(),handoff=await(await f.issue()).json();
-  const redeem=(body:string,headers:Record<string,string>={origin:'null'},action=handoff.action)=>f.handler.handle(f.request(action,body,{'content-type':'application/x-www-form-urlencoded',...headers}));
-  const body=new URLSearchParams({handoff:handoff.handoff}).toString();
-  for(const bad of ['',new URLSearchParams({handoff:'Z'.repeat(43)}).toString(),body+'&extra=yes'])expect((await redeem(bad)).status).toBe(404);
-  for(const headers of [{origin:'https://unrelated.example.org'},{}] as Array<Record<string,string>>)expect((await redeem(body,headers)).status).toBe(404);
-  const other=await(await f.issue()).json();expect((await redeem(body,{origin:'null'},other.action)).status).toBe(404);
+it("accepts a valid one-use handoff from the viewer no-referrer form origin", async () => {
+  const f = fixture(),
+    handoff = await (await f.issue()).json();
+  const redeem = () =>
+    f.handler.handle(
+      f.request(handoff.action, new URLSearchParams({ handoff: handoff.handoff }).toString(), {
+        origin: "null",
+        "content-type": "application/x-www-form-urlencoded",
+      }),
+    );
+  expect((await redeem()).status).toBe(200);
+  expect((await redeem()).status).toBe(404);
+});
+it("refuses hostile null-origin handoffs, unrelated origins, and missing Origin", async () => {
+  const f = fixture(),
+    handoff = await (await f.issue()).json();
+  const redeem = (
+    body: string,
+    headers: Record<string, string> = { origin: "null" },
+    action = handoff.action,
+  ) =>
+    f.handler.handle(
+      f.request(action, body, { "content-type": "application/x-www-form-urlencoded", ...headers }),
+    );
+  const body = new URLSearchParams({ handoff: handoff.handoff }).toString();
+  for (const bad of [
+    "",
+    new URLSearchParams({ handoff: "Z".repeat(43) }).toString(),
+    body + "&extra=yes",
+  ])
+    expect((await redeem(bad)).status).toBe(404);
+  for (const headers of [{ origin: "https://unrelated.example.org" }, {}] as Array<
+    Record<string, string>
+  >)
+    expect((await redeem(body, headers)).status).toBe(404);
+  const other = await (await f.issue()).json();
+  expect((await redeem(body, { origin: "null" }, other.action)).status).toBe(404);
   expect((await redeem(body)).status).toBe(200);
-  const expired=await(await f.issue()).json();f.advance(30000);
-  expect((await redeem(new URLSearchParams({handoff:expired.handoff}).toString(),{origin:'null'},expired.action)).status).toBe(404);
+  const expired = await (await f.issue()).json();
+  f.advance(30000);
+  expect(
+    (
+      await redeem(
+        new URLSearchParams({ handoff: expired.handoff }).toString(),
+        { origin: "null" },
+        expired.action,
+      )
+    ).status,
+  ).toBe(404);
 });
-it('rechecks revoked and narrowed authority at redemption',async()=>{for(const change of ['revoke','narrow']as const){const f=fixture(),handoff=await(await f.issue()).json();f[change]();expect((await f.redeem(handoff)).status).toBe(404);}});
-it('rechecks revocation on document and status requests',async()=>{const f=fixture(),app=await launch(f);f.revoke();expect((await app.read()).status).toBe(404);expect((await app.read('/status')).status).toBe(404);});
-it('requires proof cookie host and exact non-null origin',async()=>{const f=fixture(),app=await launch(f);for(const custom of [{origin:'null'},{'x-dohc-app-proof':''},{cookie:app.cookie+'; '+app.cookie},{origin:config.viewerOrigin},{host:'wrong.example.net'}] as Array<Record<string,string>>)expect((await app.read('/document',custom)).status).toBe(404);});
-it('refuses cross-launch credentials',async()=>{const f=fixture(),first=await launch(f),second=await launch(f);expect(first.origin).not.toBe(second.origin);expect((await second.read('/document',{cookie:first.cookie,'x-dohc-app-proof':first.proof})).status).toBe(404);});
-it('expires handoffs and sessions',async()=>{const f=fixture(),handoff=await(await f.issue()).json();f.advance(30000);expect((await f.redeem(handoff)).status).toBe(404);const app=await launch(f);f.advance(600000);expect((await app.read()).status).toBe(404);});
+it("rechecks revoked and narrowed authority at redemption", async () => {
+  for (const change of ["revoke", "narrow"] as const) {
+    const f = fixture(),
+      handoff = await (await f.issue()).json();
+    f[change]();
+    expect((await f.redeem(handoff)).status).toBe(404);
+  }
+});
+it("rechecks revocation on document and status requests", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  f.revoke();
+  expect((await app.read()).status).toBe(404);
+  expect((await app.read("/status")).status).toBe(404);
+});
+it("requires proof cookie host and exact non-null origin", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  for (const custom of [
+    { origin: "null" },
+    { "x-dohc-app-proof": "" },
+    { cookie: app.cookie + "; " + app.cookie },
+    { origin: config.viewerOrigin },
+    { host: "wrong.example.net" },
+  ] as Array<Record<string, string>>)
+    expect((await app.read("/document", custom)).status).toBe(404);
+});
+it("refuses cross-launch credentials", async () => {
+  const f = fixture(),
+    first = await launch(f),
+    second = await launch(f);
+  expect(first.origin).not.toBe(second.origin);
+  expect(
+    (await second.read("/document", { cookie: first.cookie, "x-dohc-app-proof": first.proof }))
+      .status,
+  ).toBe(404);
+});
+it("expires handoffs and sessions", async () => {
+  const f = fixture(),
+    handoff = await (await f.issue()).json();
+  f.advance(30000);
+  expect((await f.redeem(handoff)).status).toBe(404);
+  const app = await launch(f);
+  f.advance(600000);
+  expect((await app.read()).status).toBe(404);
+});
 
-it('serves staged bytes once with fresh authority and one blob charge', async () => {
-  const f = fixture(), app = await launch(f);
+it("serves staged bytes once with fresh authority and one blob charge", async () => {
+  const f = fixture(),
+    app = await launch(f);
   expect((await app.read()).status).toBe(200);
   expect((await app.read()).status).toBe(404);
-  expect(f.requests.filter(request => new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(1);
+  expect(
+    f.requests.filter((request) => new URL(request.url).pathname.includes("/blobs/")),
+  ).toHaveLength(1);
 });
-it('evicts oldest ready stage instead of letting idle clients monopolize capacity', async () => {
-  const f = fixture(), first = await launch(f), second = await launch(f);
+it("evicts oldest ready stage instead of letting idle clients monopolize capacity", async () => {
+  const f = fixture(),
+    first = await launch(f),
+    second = await launch(f);
   const handoff = await (await f.issue()).json();
   expect((await f.redeem(handoff)).status).toBe(200);
   expect((await first.read()).status).toBe(404);
   expect((await second.read()).status).toBe(200);
 });
-it('keeps in-flight launch authorizations independent from status checks', async () => {
+it("keeps in-flight launch authorizations independent from status checks", async () => {
   let hold = async () => {};
-  const f = fixture(() => hold()), app = await launch(f);
-  let release!: () => void, admitted!: () => void, count = 0;
-  const barrier = new Promise<void>(resolve => {release = resolve;});
-  const allAdmitted = new Promise<void>(resolve => {admitted = resolve;});
-  hold = async () => {if (++count === 5) admitted();await barrier;};
-  const issues = Array.from({length: 4}, () => f.issue()), status = app.read('/status');
-  await allAdmitted;release();
-  expect((await status).status).toBe(204);await Promise.all(issues);
+  const f = fixture(() => hold()),
+    app = await launch(f);
+  let release!: () => void,
+    admitted!: () => void,
+    count = 0;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const allAdmitted = new Promise<void>((resolve) => {
+    admitted = resolve;
+  });
+  hold = async () => {
+    if (++count === 5) admitted();
+    await barrier;
+  };
+  const issues = Array.from({ length: 4 }, () => f.issue()),
+    status = app.read("/status");
+  await allAdmitted;
+  release();
+  expect((await status).status).toBe(204);
+  await Promise.all(issues);
 });
-it('keeps unverified transport failures opaque and permits a later authorized retry', async () => {
+it("keeps unverified transport failures opaque and permits a later authorized retry", async () => {
   let fail = false;
-  const f = fixture(async () => {if (fail) throw Error('Relay unavailable');}), app = await launch(f);
-  fail = true;expect((await app.read('/status')).status).toBe(404);
-  fail = false;expect((await app.read('/status')).status).toBe(204);
-  f.revoke();expect((await app.read('/status')).status).toBe(404);
+  const f = fixture(async () => {
+      if (fail) throw Error("Relay unavailable");
+    }),
+    app = await launch(f);
+  fail = true;
+  expect((await app.read("/status")).status).toBe(404);
+  fail = false;
+  expect((await app.read("/status")).status).toBe(204);
+  f.revoke();
+  expect((await app.read("/status")).status).toBe(404);
 });
 
-it('retains staged bytes through transient authorization checks but only delivers once', async () => {
+it("retains staged bytes through transient authorization checks but only delivers once", async () => {
   let fail = false;
-  const f = fixture(async () => {if (fail) throw Error('Temporary relay failure');}), app = await launch(f);
-  fail = true;expect((await app.read()).status).toBe(404);
-  fail = false;expect((await app.read()).status).toBe(200);
+  const f = fixture(async () => {
+      if (fail) throw Error("Temporary relay failure");
+    }),
+    app = await launch(f);
+  fail = true;
   expect((await app.read()).status).toBe(404);
-  expect(f.requests.filter(request => new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(1);
-});
-it('preserves staged bytes after invalid proof and expires abandoned stages', async () => {
-  const f = fixture(), app = await launch(f);
-  expect((await app.read('/document', {'x-dohc-app-proof': 'Z'.repeat(43)})).status).toBe(404);
+  fail = false;
   expect((await app.read()).status).toBe(200);
-  const expired = await launch(f);f.advance(30000);
+  expect((await app.read()).status).toBe(404);
+  expect(
+    f.requests.filter((request) => new URL(request.url).pathname.includes("/blobs/")),
+  ).toHaveLength(1);
+});
+it("preserves staged bytes after invalid proof and expires abandoned stages", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  expect((await app.read("/document", { "x-dohc-app-proof": "Z".repeat(43) })).status).toBe(404);
+  expect((await app.read()).status).toBe(200);
+  const expired = await launch(f);
+  f.advance(30000);
   expect((await expired.read()).status).toBe(404);
 });
-it('keeps collection rate exhaustion independent from document and status',async()=>{
-  const f=fixture(),app=await launch(f);
-  const request=()=>f.handler.handle(f.request(app.origin+'/collection',JSON.stringify({id:'list',op:'collection.list',limit:1}),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
-  const before=f.requests.length;for(let i=0;i<13;i++)await request();expect(f.requests.length-before).toBe(12);
-  expect((await app.read('/status')).status).toBe(204);expect((await app.read()).status).toBe(200);
+it("keeps collection rate exhaustion independent from document and status", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  const request = () =>
+    f.handler.handle(
+      f.request(
+        app.origin + "/collection",
+        JSON.stringify({ id: "list", op: "collection.list", limit: 1 }),
+        {
+          origin: app.origin,
+          cookie: app.cookie,
+          "x-dohc-app-proof": app.proof,
+          "content-type": "application/json",
+        },
+      ),
+    );
+  const before = f.requests.length;
+  for (let i = 0; i < 13; i++) await request();
+  expect(f.requests.length - before).toBe(12);
+  expect((await app.read("/status")).status).toBe(204);
+  expect((await app.read()).status).toBe(200);
 });
-it('keeps full collection admission independent from document builds and status',async()=>{
-  let hold=async()=>{};
-  const f=fixture(()=>hold()),apps=[await launch(f),await launch(f)];
-  let release!:()=>void,admitted!:()=>void,count=0;const barrier=new Promise<void>(resolve=>{release=resolve;}),ready=new Promise<void>(resolve=>{admitted=resolve;});
-  hold=async()=>{if(++count===16)admitted();await barrier;};
-  const request=(app:typeof apps[number])=>f.handler.handle(f.request(app.origin+'/collection',JSON.stringify({id:'list',op:'collection.list',limit:1}),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
-  const calls=Array.from({length:16},(_,i)=>request(apps[i%2]!));await ready;
+it("keeps full collection admission independent from document builds and status", async () => {
+  let hold = async () => {};
+  const f = fixture(() => hold()),
+    apps = [await launch(f), await launch(f)];
+  let release!: () => void,
+    admitted!: () => void,
+    count = 0;
+  const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+    ready = new Promise<void>((resolve) => {
+      admitted = resolve;
+    });
+  hold = async () => {
+    if (++count === 16) admitted();
+    await barrier;
+  };
+  const request = (app: (typeof apps)[number]) =>
+    f.handler.handle(
+      f.request(
+        app.origin + "/collection",
+        JSON.stringify({ id: "list", op: "collection.list", limit: 1 }),
+        {
+          origin: app.origin,
+          cookie: app.cookie,
+          "x-dohc-app-proof": app.proof,
+          "content-type": "application/json",
+        },
+      ),
+    );
+  const calls = Array.from({ length: 16 }, (_, i) => request(apps[i % 2]!));
+  await ready;
   expect((await request(apps[0]!)).status).toBe(404);
-  hold=async()=>{};expect((await apps[1]!.read()).status).toBe(200);expect((await apps[0]!.read('/status')).status).toBe(204);
-  const issued=await f.issue();expect(issued.status).toBe(200);expect((await f.redeem(await issued.json())).status).toBe(200);
-  release();await Promise.all(calls);
+  hold = async () => {};
+  expect((await apps[1]!.read()).status).toBe(200);
+  expect((await apps[0]!.read("/status")).status).toBe(204);
+  const issued = await f.issue();
+  expect(issued.status).toBe(200);
+  expect((await f.redeem(await issued.json())).status).toBe(200);
+  release();
+  await Promise.all(calls);
 });
 
-it('keeps the app alive when viewer refresh races a status request and preserves its TTL', async () => {
+it("keeps the app alive when viewer refresh races a status request and preserves its TTL", async () => {
   let intercept = () => {};
-  const f = fixture(async () => intercept()), app = await launch(f);
-  intercept = () => { f.refresh(); intercept = () => {}; };
-  expect((await app.read('/status')).status).toBe(204);
-  expect(f.requests.slice(-2).map(r => r.headers.get('authorization'))).toEqual(['LinkCapability server-capability','LinkCapability fresh-capability']);
+  const f = fixture(async () => intercept()),
+    app = await launch(f);
+  intercept = () => {
+    f.refresh();
+    intercept = () => {};
+  };
+  expect((await app.read("/status")).status).toBe(204);
+  expect(f.requests.slice(-2).map((r) => r.headers.get("authorization"))).toEqual([
+    "LinkCapability server-capability",
+    "LinkCapability fresh-capability",
+  ]);
   expect((await app.read()).status).toBe(200);
   f.advance(600000);
-  expect((await app.read('/status')).status).toBe(404);
+  expect((await app.read("/status")).status).toBe(404);
 });
 
-it('routes backend requests through the isolated launch proof and current relay authority',async()=>{
-  const f=fixture(),app=await launch(f);
+it("routes backend requests through the isolated launch proof and current relay authority", async () => {
+  const f = fixture(),
+    app = await launch(f);
   expect(app.html).toContain("body.op.startsWith('backend.')?'/backend':'/collection'");
-  const body={id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-1',input:{quantity:2}};
-  const send=(custom:Record<string,string>={},payload:unknown=body,path='/backend')=>f.handler.handle(f.request(app.origin+path,JSON.stringify(payload),{
-    origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json',...custom,
-  }));
-  const before=f.requests.length;
-  for(const custom of [{origin:'null'},{cookie:''},{'x-dohc-app-proof':''},{host:'wrong.example.net'}] as Array<Record<string,string>>)expect((await send(custom)).status).toBe(404);
-  expect((await send({},body,'/backend/invoke')).status).toBe(404);
+  const body = {
+    id: "invoke",
+    op: "backend.invoke",
+    operation: "register",
+    idempotencyKey: "attempt-1",
+    input: { quantity: 2 },
+  };
+  const send = (custom: Record<string, string> = {}, payload: unknown = body, path = "/backend") =>
+    f.handler.handle(
+      f.request(app.origin + path, JSON.stringify(payload), {
+        origin: app.origin,
+        cookie: app.cookie,
+        "x-dohc-app-proof": app.proof,
+        "content-type": "application/json",
+        ...custom,
+      }),
+    );
+  const before = f.requests.length;
+  for (const custom of [
+    { origin: "null" },
+    { cookie: "" },
+    { "x-dohc-app-proof": "" },
+    { host: "wrong.example.net" },
+  ] as Array<Record<string, string>>)
+    expect((await send(custom)).status).toBe(404);
+  expect((await send({}, body, "/backend/invoke")).status).toBe(404);
   expect(f.requests).toHaveLength(before);
-  expect((await send({},{...body,authorityRevision:99})).status).toBe(404);
-  const response=await send();expect(response.status).toBe(200);expect(await response.json()).toEqual({result:{quantity:2},revision:1,replayed:false});
-  f.refresh();expect((await send()).status).toBe(200);expect(f.requests.at(-1)!.headers.get('authorization')).toBe('LinkCapability fresh-capability');
-  f.narrow();expect((await send()).status).toBe(404);
-  f.revoke();expect((await send()).status).toBe(404);
+  expect((await send({}, { ...body, authorityRevision: 99 })).status).toBe(404);
+  const response = await send();
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ result: { quantity: 2 }, revision: 1, replayed: false });
+  f.refresh();
+  expect((await send()).status).toBe(200);
+  expect(f.requests.at(-1)!.headers.get("authorization")).toBe("LinkCapability fresh-capability");
+  f.narrow();
+  expect((await send()).status).toBe(404);
+  f.revoke();
+  expect((await send()).status).toBe(404);
 });
 
-it('bounds backend workflow bursts without changing collection or status admission',async()=>{
-  const f=fixture(),app=await launch(f);
-  const send=(path:string,body:unknown)=>f.handler.handle(f.request(app.origin+path,JSON.stringify(body),{origin:app.origin,cookie:app.cookie,'x-dohc-app-proof':app.proof,'content-type':'application/json'}));
-  for(let index=0;index<30;index++)expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'register',idempotencyKey:'attempt-'+index,input:{}})).status).toBe(200);
-  for(let index=0;index<12;index++)await send('/collection',{id:'list',op:'collection.list',limit:1});
-  expect((await send('/collection',{id:'list',op:'collection.list',limit:1})).status).toBe(404);
-  expect((await send('/backend',{id:'invoke',op:'backend.invoke',operation:'read',idempotencyKey:'attempt-13',input:{}})).status).toBe(404);
-  expect((await app.read('/status')).status).toBe(204);
+it("bounds backend workflow bursts without changing collection or status admission", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  const send = (path: string, body: unknown) =>
+    f.handler.handle(
+      f.request(app.origin + path, JSON.stringify(body), {
+        origin: app.origin,
+        cookie: app.cookie,
+        "x-dohc-app-proof": app.proof,
+        "content-type": "application/json",
+      }),
+    );
+  for (let index = 0; index < 30; index++)
+    expect(
+      (
+        await send("/backend", {
+          id: "invoke",
+          op: "backend.invoke",
+          operation: "register",
+          idempotencyKey: "attempt-" + index,
+          input: {},
+        })
+      ).status,
+    ).toBe(200);
+  for (let index = 0; index < 12; index++)
+    await send("/collection", { id: "list", op: "collection.list", limit: 1 });
+  expect((await send("/collection", { id: "list", op: "collection.list", limit: 1 })).status).toBe(
+    404,
+  );
+  expect(
+    (
+      await send("/backend", {
+        id: "invoke",
+        op: "backend.invoke",
+        operation: "read",
+        idempotencyKey: "attempt-13",
+        input: {},
+      })
+    ).status,
+  ).toBe(404);
+  expect((await app.read("/status")).status).toBe(204);
 });
 
-
-it('authenticates refresh from its cookie, rebuilds current bytes, and rotates only the parent proof', async () => {
-  const f=fixture(),app=await launch(f);
+it("authenticates refresh from its cookie, rebuilds current bytes, and rotates only the parent proof", async () => {
+  const f = fixture(),
+    app = await launch(f);
   expect((await app.read()).status).toBe(200);
-  const refresh=(cookie=app.cookie,extra:Record<string,string>={})=>f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie,...extra}}));
-  for(const [cookie,extra]of [['',{}],[app.cookie+'; '+app.cookie,{}],[app.cookie,{origin:'null'}],[app.cookie,{'sec-fetch-site':'cross-site'}]]as [string,Record<string,string>][])expect((await refresh(cookie,extra)).status).toBe(404);
-  const response=await refresh();expect(response.status).toBe(200);
-  const html=await response.text(),proof=/const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!;
-  expect(proof).not.toBe(app.proof);expect(html).toContain("history.replaceState(null,'','/bootstrap')");
-  expect((await app.read('/document')).status).toBe(404);
-  const read=()=>app.read('/document',{'x-dohc-app-proof':proof});
-  expect((await read()).status).toBe(200);expect((await read()).status).toBe(404);
-  expect(f.requests.filter(request=>new URL(request.url).pathname.includes('/blobs/'))).toHaveLength(2);
+  const refresh = (cookie = app.cookie, extra: Record<string, string> = {}) =>
+    f.handler.handle(
+      new Request(app.origin + "/bootstrap", {
+        headers: { host: new URL(app.origin).host, cookie, ...extra },
+      }),
+    );
+  for (const [cookie, extra] of [
+    ["", {}],
+    [app.cookie + "; " + app.cookie, {}],
+    [app.cookie, { origin: "null" }],
+    [app.cookie, { "sec-fetch-site": "cross-site" }],
+  ] as [string, Record<string, string>][])
+    expect((await refresh(cookie, extra)).status).toBe(404);
+  const response = await refresh();
+  expect(response.status).toBe(200);
+  const html = await response.text(),
+    proof = /const proof="([A-Za-z0-9_-]{43})"/.exec(html)![1]!;
+  expect(proof).not.toBe(app.proof);
+  expect(html).toContain("history.replaceState(null,'','/bootstrap')");
+  expect((await app.read("/document")).status).toBe(404);
+  const read = () => app.read("/document", { "x-dohc-app-proof": proof });
+  expect((await read()).status).toBe(200);
+  expect((await read()).status).toBe(404);
+  expect(
+    f.requests.filter((request) => new URL(request.url).pathname.includes("/blobs/")),
+  ).toHaveLength(2);
   expect((await f.redeem(app.handoff)).status).toBe(404);
 });
 
-it('refresh refuses changed authority and never extends the original session deadline',async()=>{
-  for(const change of ['narrow','revoke']as const){const f=fixture(),app=await launch(f);f[change]();expect((await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}))).status).toBe(404);}
-  const f=fixture(),app=await launch(f);f.advance(590000);
-  const refresh=()=>f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}));
-  const refreshed=await refresh();expect(refreshed.status).toBe(200);expect(refreshed.headers.get('set-cookie')).toContain('Max-Age=10');
-  f.advance(10000);expect((await refresh()).status).toBe(404);
-});
-
-it('keeps revoked bootstrap cookies opaque when their local request budget is exhausted',async()=>{
-  const f=fixture(),app=await launch(f);f.revoke();
-  for(let index=0;index<25;index++){
-    const response=await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host,cookie:app.cookie}}));
-    expect(response.status).toBe(404);expect(await response.json()).toEqual({ok:false,error:'not found'});
+it("refresh refuses changed authority and never extends the original session deadline", async () => {
+  for (const change of ["narrow", "revoke"] as const) {
+    const f = fixture(),
+      app = await launch(f);
+    f[change]();
+    expect(
+      (
+        await f.handler.handle(
+          new Request(app.origin + "/bootstrap", {
+            headers: { host: new URL(app.origin).host, cookie: app.cookie },
+          }),
+        )
+      ).status,
+    ).toBe(404);
   }
-  const unknown=await f.handler.handle(new Request(app.origin+'/bootstrap',{headers:{host:new URL(app.origin).host}}));
-  expect(unknown.status).toBe(404);expect(await unknown.json()).toEqual({ok:false,error:'not found'});
+  const f = fixture(),
+    app = await launch(f);
+  f.advance(590000);
+  const refresh = () =>
+    f.handler.handle(
+      new Request(app.origin + "/bootstrap", {
+        headers: { host: new URL(app.origin).host, cookie: app.cookie },
+      }),
+    );
+  const refreshed = await refresh();
+  expect(refreshed.status).toBe(200);
+  expect(refreshed.headers.get("set-cookie")).toContain("Max-Age=10");
+  f.advance(10000);
+  expect((await refresh()).status).toBe(404);
 });
 
-it('shows a reload of an ended session the stopped page, the same for every refusal',async()=>{
-  const reload=(f:ReturnType<typeof fixture>,origin:string,cookie='')=>f.handler.handle(new Request(origin+'/bootstrap',{headers:{host:new URL(origin).host,cookie,'sec-fetch-mode':'navigate'}}));
-  const revoked=fixture(),narrowed=fixture(),expired=fixture(),live=fixture(),a=await launch(revoked),d=await launch(narrowed),b=await launch(expired),c=await launch(live);
-  revoked.revoke();narrowed.narrow();expired.advance(600000);
-  const responses=[await reload(revoked,a.origin,a.cookie),await reload(narrowed,d.origin,d.cookie),await reload(expired,b.origin,b.cookie),await reload(live,c.origin,'__Host-dohc-app='+'Z'.repeat(43)),
-    await reload(live,c.origin),await reload(live,'https://'+'b'.repeat(48)+'.example.net',c.cookie),
-    await live.handler.handle(live.request(c.origin+'/bootstrap','handoff='+'Z'.repeat(43),{origin:config.viewerOrigin,'content-type':'application/x-www-form-urlencoded','sec-fetch-mode':'navigate'}))];
-  const page=await responses[0]!.text();
-  for(const response of responses.slice(1)){expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));expect(await response.text()).toBe(page);}
-  expect(responses.map(response=>response.status)).toEqual([404,404,404,404,404,404,404]);
-  expect(responses[0]!.headers.get('content-type')).toBe('text/html; charset=utf-8');expect(responses[0]!.headers.get('content-security-policy')).not.toContain('script');
-  expect(page).toContain('<body data-state="stopped">');expect(page).toContain('<p id="status" role="status">This app session ended. Reopen the share link.</p>');
-  for(const named of ['<script',publicationId,...[a,b,c,d].map(app=>new URL(app.origin).hostname.split('.')[0]!)])expect(page).not.toContain(named);
+it("keeps revoked bootstrap cookies opaque when their local request budget is exhausted", async () => {
+  const f = fixture(),
+    app = await launch(f);
+  f.revoke();
+  for (let index = 0; index < 25; index++) {
+    const response = await f.handler.handle(
+      new Request(app.origin + "/bootstrap", {
+        headers: { host: new URL(app.origin).host, cookie: app.cookie },
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ ok: false, error: "not found" });
+  }
+  const unknown = await f.handler.handle(
+    new Request(app.origin + "/bootstrap", { headers: { host: new URL(app.origin).host } }),
+  );
+  expect(unknown.status).toBe(404);
+  expect(await unknown.json()).toEqual({ ok: false, error: "not found" });
+});
+
+it("shows a reload of an ended session the stopped page, the same for every refusal", async () => {
+  const reload = (f: ReturnType<typeof fixture>, origin: string, cookie = "") =>
+    f.handler.handle(
+      new Request(origin + "/bootstrap", {
+        headers: { host: new URL(origin).host, cookie, "sec-fetch-mode": "navigate" },
+      }),
+    );
+  const revoked = fixture(),
+    narrowed = fixture(),
+    expired = fixture(),
+    live = fixture(),
+    a = await launch(revoked),
+    d = await launch(narrowed),
+    b = await launch(expired),
+    c = await launch(live);
+  revoked.revoke();
+  narrowed.narrow();
+  expired.advance(600000);
+  const responses = [
+    await reload(revoked, a.origin, a.cookie),
+    await reload(narrowed, d.origin, d.cookie),
+    await reload(expired, b.origin, b.cookie),
+    await reload(live, c.origin, "__Host-dohc-app=" + "Z".repeat(43)),
+    await reload(live, c.origin),
+    await reload(live, "https://" + "b".repeat(48) + ".example.net", c.cookie),
+    await live.handler.handle(
+      live.request(c.origin + "/bootstrap", "handoff=" + "Z".repeat(43), {
+        origin: config.viewerOrigin,
+        "content-type": "application/x-www-form-urlencoded",
+        "sec-fetch-mode": "navigate",
+      }),
+    ),
+  ];
+  const page = await responses[0]!.text();
+  for (const response of responses.slice(1)) {
+    expect(Object.fromEntries(response.headers)).toEqual(Object.fromEntries(responses[0]!.headers));
+    expect(await response.text()).toBe(page);
+  }
+  expect(responses.map((response) => response.status)).toEqual([404, 404, 404, 404, 404, 404, 404]);
+  expect(responses[0]!.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(responses[0]!.headers.get("content-security-policy")).not.toContain("script");
+  expect(page).toContain('<body data-state="stopped">');
+  expect(page).toContain(
+    '<p id="status" role="status">This app session ended. Reopen the share link.</p>',
+  );
+  for (const named of [
+    "<script",
+    publicationId,
+    ...[a, b, c, d].map((app) => new URL(app.origin).hostname.split(".")[0]!),
+  ])
+    expect(page).not.toContain(named);
 });
 
 it("drops a publication's launch and staged document when its owner is deleted", async () => {
-  const f = fixture(), app = await launch(f);
+  const f = fixture(),
+    app = await launch(f);
   f.handler.deleteAccount("deleted-owner", [], [publicationId]);
   expect((await app.read()).status).toBe(404);
   expect((await f.redeem(app.handoff)).status).toBe(404);
 });
 it("refuses an in-flight launch after its publication is deleted", async () => {
   let release!: () => void, entered!: () => void;
-  const waiting = new Promise<void>(resolve => {entered = resolve;});
-  const hold = new Promise<void>(resolve => {release = resolve;});
-  const f = fixture(async () => {entered(); await hold;});
-  const pending = f.issue(); await waiting;
-  f.handler.deleteAccount("deleted-owner", [], [publicationId]); release();
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const f = fixture(async () => {
+    entered();
+    await hold;
+  });
+  const pending = f.issue();
+  await waiting;
+  f.handler.deleteAccount("deleted-owner", [], [publicationId]);
+  release();
   expect((await pending).status).toBe(404);
 });
 
-it('shows opening and a stopped session as a centered dohc message in both themes', async () => {
-  const {html} = await launch(fixture()), style = /<style>([^<]+)<\/style>/.exec(html)?.[1] ?? '';
+it("shows opening and a stopped session as a centered dohc message in both themes", async () => {
+  const { html } = await launch(fixture()),
+    style = /<style>([^<]+)<\/style>/.exec(html)?.[1] ?? "";
   expect(html).toContain('<meta name="color-scheme" content="light dark">');
-  expect(style).toContain(':root{color-scheme:light dark;--bg:#faf9f5;--ink:#1c1b18;--muted:#55524a;--danger:#a43e2a}');
-  expect(style).toContain('@media (prefers-color-scheme:dark){:root{--bg:#131211;--ink:#f6f4ee;--muted:#a9a599;--danger:#e08065}}');
+  expect(style).toContain(
+    ":root{color-scheme:light dark;--bg:#faf9f5;--ink:#1c1b18;--muted:#55524a;--danger:#a43e2a}",
+  );
+  expect(style).toContain(
+    "@media (prefers-color-scheme:dark){:root{--bg:#131211;--ink:#f6f4ee;--muted:#a9a599;--danger:#e08065}}",
+  );
   expect(style).toContain('font:14px/1.5 system-ui,"Segoe UI",sans-serif');
-  expect(style).toContain('align-items:center;justify-content:center;gap:16px;padding:24px 16px;text-align:center');
-  expect(html).toMatch(/<body data-state="opening"><main id="message"><svg id="mark"[^>]* aria-hidden="true">.*<\/svg><p id="status" role="status">Opening app<\/p><\/main><script>/);
-  expect(style).toContain('#status{max-width:320px;margin:0;color:var(--muted);text-wrap:balance}');
-  expect(style).toContain('#mark{display:none;color:var(--danger)}[data-state=stopped] #mark{display:block}');
-  expect(html).toContain("document.body.dataset.state='stopped';document.getElementById('status').textContent=\"This app session ended. Reopen the share link.\";");
-  expect(html).toContain("document.body.dataset.state='running';document.getElementById('status').textContent='';");
+  expect(style).toContain(
+    "align-items:center;justify-content:center;gap:16px;padding:24px 16px;text-align:center",
+  );
+  expect(html).toMatch(
+    /<body data-state="opening"><main id="message"><svg id="mark"[^>]* aria-hidden="true">.*<\/svg><p id="status" role="status">Opening app<\/p><\/main><script>/,
+  );
+  expect(style).toContain("#status{max-width:320px;margin:0;color:var(--muted);text-wrap:balance}");
+  expect(style).toContain(
+    "#mark{display:none;color:var(--danger)}[data-state=stopped] #mark{display:block}",
+  );
+  expect(html).toContain(
+    "document.body.dataset.state='stopped';document.getElementById('status').textContent=\"This app session ended. Reopen the share link.\";",
+  );
+  expect(html).toContain(
+    "document.body.dataset.state='running';document.getElementById('status').textContent='';",
+  );
   // A hidden live region drops out of the accessibility tree and misses the session-ended announcement.
-  expect(style).toContain('[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}');
-  expect(style).toContain('[data-state=running]{background:Canvas}');
+  expect(style).toContain(
+    "[data-state=running] #message{position:absolute;width:1px;height:1px;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}",
+  );
+  expect(style).toContain("[data-state=running]{background:Canvas}");
   expect(style).not.toMatch(/#(message|status)\{display:none/);
   expect(html).not.toMatch(/style="|<link|@import|@font-face|url\(/);
 });
-it('keeps the launch page policy strict and its words free of link and workspace details', async () => {
-  const app = await launch(fixture()), csp = app.response.headers.get('content-security-policy') ?? '';
-  expect(csp.replace(/script-src [^;]+;/, 'script-src HASHES;')).toBe("default-src 'none'; script-src HASHES; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+it("keeps the launch page policy strict and its words free of link and workspace details", async () => {
+  const app = await launch(fixture()),
+    csp = app.response.headers.get("content-security-policy") ?? "";
+  expect(csp.replace(/script-src [^;]+;/, "script-src HASHES;")).toBe(
+    "default-src 'none'; script-src HASHES; style-src 'unsafe-inline'; connect-src https: http: wss: ws:; img-src data: blob: https: http:; font-src data: https: http:; media-src data: blob: https: http:; frame-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  );
   expect(app.html.match(/<script/g)).toHaveLength(1);
-  const script = /<script>([\s\S]*)<\/script>/.exec(app.html)?.[1] ?? '';
-  expect(csp).toContain(`script-src 'sha256-${createHash('sha256').update(script).digest('base64')}' `);
-  const words = [/<title>([^<]*)</, /role="status"[^>]*>([^<]*)</, /frame\.title='([^']*)'/].map(pattern => pattern.exec(app.html)?.[1]);
-  words.push(...[...app.html.matchAll(/textContent=(?:'([^']*)'|"([^"]*)")/g)].map(match => match[1] ?? match[2]));
-  expect(words).toEqual(['Shared app', 'Opening app', 'Shared app', 'This app session ended. Reopen the share link.', "This app can't find its data. Ask the person who shared it with you.", '']);
-  for (const detail of [publicationId, 'abcdefghijkl', 'server-capability', 'server-profile', 'viewer=session', 'relay.example.org', 'viewer.example.com'])
+  const script = /<script>([\s\S]*)<\/script>/.exec(app.html)?.[1] ?? "";
+  expect(csp).toContain(
+    `script-src 'sha256-${createHash("sha256").update(script).digest("base64")}' `,
+  );
+  const words = [/<title>([^<]*)</, /role="status"[^>]*>([^<]*)</, /frame\.title='([^']*)'/].map(
+    (pattern) => pattern.exec(app.html)?.[1],
+  );
+  words.push(
+    ...[...app.html.matchAll(/textContent=(?:'([^']*)'|"([^"]*)")/g)].map(
+      (match) => match[1] ?? match[2],
+    ),
+  );
+  expect(words).toEqual([
+    "Shared app",
+    "Opening app",
+    "Shared app",
+    "This app session ended. Reopen the share link.",
+    "This app can't find its data. Ask the person who shared it with you.",
+    "",
+  ]);
+  for (const detail of [
+    publicationId,
+    "abcdefghijkl",
+    "server-capability",
+    "server-profile",
+    "viewer=session",
+    "relay.example.org",
+    "viewer.example.com",
+  ])
     expect(app.html).not.toContain(detail);
 });

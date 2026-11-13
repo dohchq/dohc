@@ -1,22 +1,27 @@
-import { sameVisibilityPolicy, type VisibilityPolicyRule } from "@dohc/security-contract/visibility-policy";
+import {
+  sameVisibilityPolicy,
+  type VisibilityPolicyRule,
+} from "@dohc/security-contract/visibility-policy";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { WorkspaceFileEntry, WorkspaceListingVisibility } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { indexFileListing } from "../workbench/file-listing-index";
-import {
-  pruneMissingRestoredTabs,
-  type WorkbenchState,
-} from "../workbench/workbenchState";
+import { pruneMissingRestoredTabs, type WorkbenchState } from "../workbench/workbenchState";
 
-type ListingVisibility = { status: WorkspaceListingVisibility["status"]; rules: readonly VisibilityPolicyRule[] };
+type ListingVisibility = {
+  status: WorkspaceListingVisibility["status"];
+  rules: readonly VisibilityPolicyRule[];
+};
 const unavailableVisibility: ListingVisibility = { status: "unavailable", rules: [] };
 
 export function useWorkspaceListing(workspaceId: string) {
   const workspaceToken = useRef({ workspaceId, visibilityGeneration: 0 });
-  if (workspaceToken.current.workspaceId !== workspaceId) workspaceToken.current = { workspaceId, visibilityGeneration: 0 };
+  if (workspaceToken.current.workspaceId !== workspaceId)
+    workspaceToken.current = { workspaceId, visibilityGeneration: 0 };
   const token = workspaceToken.current;
   const [visibilitySnapshot, setVisibility] = useState({ token, verdict: unavailableVisibility });
-  const visibility = visibilitySnapshot.token === token ? visibilitySnapshot.verdict : unavailableVisibility;
+  const visibility =
+    visibilitySnapshot.token === token ? visibilitySnapshot.verdict : unavailableVisibility;
   const invalidateVisibility = useCallback(() => {
     if (workspaceToken.current !== token) return;
     token.visibilityGeneration += 1;
@@ -92,12 +97,18 @@ export function useWorkspaceListing(workspaceId: string) {
             ? current
             : nextFolders,
         );
-        if (visibilityGeneration === token.visibilityGeneration && request > failedFilesRequest.current) setVisibility(current => {
-          const next = result.visibility;
-          return current.token === token && current.verdict.status === next.status &&
-            sameVisibilityPolicy(current.verdict.rules, next.rules)
-            ? current : { token, verdict: { status: next.status, rules: next.rules } };
-        });
+        if (
+          visibilityGeneration === token.visibilityGeneration &&
+          request > failedFilesRequest.current
+        )
+          setVisibility((current) => {
+            const next = result.visibility;
+            return current.token === token &&
+              current.verdict.status === next.status &&
+              sameVisibilityPolicy(current.verdict.rules, next.rules)
+              ? current
+              : { token, verdict: { status: next.status, rules: next.rules } };
+          });
         setFilesRevalidated(result.cached !== true);
         setFileListingCommit({
           request,
@@ -107,7 +118,8 @@ export function useWorkspaceListing(workspaceId: string) {
       } catch (error) {
         if (workspaceToken.current === token && request > failedFilesRequest.current) {
           failedFilesRequest.current = request;
-          if (request > committedFilesRequest.current) setVisibility({ token, verdict: unavailableVisibility });
+          if (request > committedFilesRequest.current)
+            setVisibility({ token, verdict: unavailableVisibility });
         }
         throw error;
       } finally {
@@ -120,10 +132,7 @@ export function useWorkspaceListing(workspaceId: string) {
     [workspaceId, token],
   );
 
-  const hasCommittedListing = useCallback(
-    () => committedFilesRequest.current !== 0,
-    [],
-  );
+  const hasCommittedListing = useCallback(() => committedFilesRequest.current !== 0, []);
   // The newest listing asked for, answered or not.
   const newestFilesRequest = useCallback(() => filesRequest.current, []);
   const prepareRestoredTabPruning = useCallback(
@@ -151,12 +160,9 @@ export function useWorkspaceListing(workspaceId: string) {
       // exists; the write fails, the failure is swallowed, and the draft is
       // gone with no error and no way back. Waiting costs nothing: this re-runs
       // when the draft settles, and closes the tab then.
-      const closable = new Set(
-        [...restoredTabPaths].filter((path) => !dirtyPaths.has(path)),
-      );
+      const closable = new Set([...restoredTabPaths].filter((path) => !dirtyPaths.has(path)));
       const fileExists = (path: string) => presentPaths.has(path);
-      return (state: WorkbenchState) =>
-        pruneMissingRestoredTabs(state, closable, fileExists);
+      return (state: WorkbenchState) => pruneMissingRestoredTabs(state, closable, fileExists);
     },
     [filesRevalidated, presentPaths],
   );

@@ -25,11 +25,7 @@ test("opens a temp workspace and shows direct disk file creation in the explorer
       },
     ]);
 
-    await waitForWorkspaceFile(
-      desktop.page,
-      workspace.workspaceId,
-      "notes/outside-agent.md",
-    );
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "notes/outside-agent.md");
     await revealExplorerPath(desktop.page, "notes/outside-agent.md");
     await expectVisibleContent(desktop.page, "outside-agent.md");
   } finally {

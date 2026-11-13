@@ -1,13 +1,15 @@
 import type { App, BrowserWindow, Dialog, Menu, WebContents } from "electron";
-import type { AgentColorChangedEvent, DesktopUserSettingsResult, MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
+import type {
+  AgentColorChangedEvent,
+  DesktopUserSettingsResult,
+  MenuCommand,
+  WorkspaceSummary,
+} from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import { createWorkspaceWindowRegistry } from "../quitGuard";
 import { buildMenuTemplate } from "./applicationMenu";
 import { resolvePersistedZoomApplication } from "./windowZoom";
-import {
-  focusShareHandoffWindow,
-  focusShareHandoffWindowWhenReady,
-} from "../shareHandoffIngress";
+import { focusShareHandoffWindow, focusShareHandoffWindowWhenReady } from "../shareHandoffIngress";
 import type { createMainWindow as createMainWindowImplementation } from "./createMainWindow";
 import type { ZoomStep } from "../settings/userSettings";
 import type { readCachedUserSettingsFile as readSettings } from "../settings/userSettingsStore";
@@ -17,7 +19,12 @@ import { whenRendererReady } from "./openPathFailureTarget";
 interface DesktopWindowsDependencies {
   app: Pick<
     App,
-    "isReady" | "isPackaged" | "getVersion" | "clearRecentDocuments" | "addRecentDocument" | "setUserTasks"
+    | "isReady"
+    | "isPackaged"
+    | "getVersion"
+    | "clearRecentDocuments"
+    | "addRecentDocument"
+    | "setUserTasks"
     | "setAboutPanelOptions"
   >;
   Menu: Pick<typeof Menu, "setApplicationMenu" | "buildFromTemplate">;
@@ -35,7 +42,8 @@ interface DesktopWindowsDependencies {
   preloadArguments?: readonly string[];
   afterRendererCrashLoop?: () => void;
   readonly rendererWorkspaceSessions: Pick<
-    RendererWorkspaceSessionOwner<WebContents>, "current" | "currentDocumentId" | "retireForReload" | "retireAfterCrash"
+    RendererWorkspaceSessionOwner<WebContents>,
+    "current" | "currentDocumentId" | "retireForReload" | "retireAfterCrash"
   >;
   // A workspace window that finishes loading during a pending exit round
   // joins it; one that closes leaves it.
@@ -48,7 +56,10 @@ interface DesktopWindowsDependencies {
 function lastOpenedWorkspaceId(workspaces: WorkspaceSummary[]): string | undefined {
   let latest: WorkspaceSummary | undefined;
   for (const workspace of workspaces) {
-    if (workspace.lastOpenedAt !== undefined && workspace.lastOpenedAt > (latest?.lastOpenedAt ?? -1)) {
+    if (
+      workspace.lastOpenedAt !== undefined &&
+      workspace.lastOpenedAt > (latest?.lastOpenedAt ?? -1)
+    ) {
       latest = workspace;
     }
   }
@@ -57,8 +68,15 @@ function lastOpenedWorkspaceId(workspaces: WorkspaceSummary[]): string | undefin
 
 export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   const {
-    app, Menu, dialog, process, workspaceSummaries, currentUpdateState,
-    stateDir, readCachedUserSettingsFile, createMainWindow,
+    app,
+    Menu,
+    dialog,
+    process,
+    workspaceSummaries,
+    currentUpdateState,
+    stateDir,
+    readCachedUserSettingsFile,
+    createMainWindow,
   } = dependencies;
 
   let applicationMenuCanInstallUpdate: boolean | null = null;
@@ -94,11 +112,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       (workspace) => workspace.workspaceId === preferredWorkspaceId,
     );
     if (index <= 0) return workspaces;
-    return [
-      workspaces[index],
-      ...workspaces.slice(0, index),
-      ...workspaces.slice(index + 1),
-    ];
+    return [workspaces[index], ...workspaces.slice(0, index), ...workspaces.slice(index + 1)];
   }
 
   // The windows that RUN the workspace renderer. Not every BrowserWindow does:
@@ -160,10 +174,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       .catch(() => null);
     const applyPersistedZoom = () => {
       void persistedZoom.then((zoomLevel) => {
-        const application = resolvePersistedZoomApplication(
-          zoomLevel,
-          knownZoomLevel,
-        );
+        const application = resolvePersistedZoomApplication(zoomLevel, knownZoomLevel);
         if (application === null) return;
         if ("applyEverywhere" in application) {
           // Every window opened before the read resolved takes the level.
@@ -186,7 +197,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // export window, which shows nothing.
   function targetWindow(window: BrowserWindow | undefined): BrowserWindow | undefined {
     if (window && showsNotices(window)) return window;
-    return liveWorkspaceWindow() ?? (managerWindow && !managerWindow.isDestroyed() ? managerWindow : undefined);
+    return (
+      liveWorkspaceWindow() ??
+      (managerWindow && !managerWindow.isDestroyed() ? managerWindow : undefined)
+    );
   }
 
   // Activation opens a workspace in a window that runs the workspace
@@ -254,7 +268,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
 
   function broadcastAgentColor(event: AgentColorChangedEvent): void {
     for (const window of liveZoomedWindows()) {
-      if (dependencies.rendererWorkspaceSessions.current(window.webContents)?.workspaceId === event.workspaceId) {
+      if (
+        dependencies.rendererWorkspaceSessions.current(window.webContents)?.workspaceId ===
+        event.workspaceId
+      ) {
         window.webContents.send(CHANNELS.agentColorChanged, event);
       }
     }
@@ -299,7 +316,11 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     // Without these, an unpackaged About panel names Electron, and a packaged
     // one adds the bundle's build number after the version.
     if (process.platform === "darwin") {
-      app.setAboutPanelOptions({ applicationName: "dohc", applicationVersion: app.getVersion(), version: "" });
+      app.setAboutPanelOptions({
+        applicationName: "dohc",
+        applicationVersion: app.getVersion(),
+        version: "",
+      });
     }
     Menu.setApplicationMenu(
       Menu.buildFromTemplate(
@@ -318,9 +339,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
               // must reach the user here.
               dialog.showErrorBox(
                 "Zoom",
-                error instanceof Error
-                  ? error.message
-                  : "dohc could not change the window zoom.",
+                error instanceof Error ? error.message : "dohc could not change the window zoom.",
               );
             });
           },
@@ -355,7 +374,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       if (
         appliedNativeWorkspaceRoots?.length === roots.length &&
         roots.every((root, index) => root === appliedNativeWorkspaceRoots?.[index])
-      ) return;
+      )
+        return;
 
       // A partial refresh invalidates the previous list even if we later return to it.
       appliedNativeWorkspaceRoots = null;
@@ -369,16 +389,18 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
         // Linux and some dev shells do not expose native recent-document storage.
         recentDocumentsApplied = false;
       }
-      const userTasksApplied = process.platform !== "win32" || app.setUserTasks(
-        roots.slice(0, 10).map((root) => ({
-          program: process.execPath,
-          arguments: `--open-workspace ${quoteWindowsArg(root)}`,
-          iconPath: process.execPath,
-          iconIndex: 0,
-          title: `Open ${root.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace"}`,
-          description: root,
-        })),
-      );
+      const userTasksApplied =
+        process.platform !== "win32" ||
+        app.setUserTasks(
+          roots.slice(0, 10).map((root) => ({
+            program: process.execPath,
+            arguments: `--open-workspace ${quoteWindowsArg(root)}`,
+            iconPath: process.execPath,
+            iconIndex: 0,
+            title: `Open ${root.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace"}`,
+            description: root,
+          })),
+        );
       if (recentDocumentsApplied && userTasksApplied) {
         appliedNativeWorkspaceRoots = roots;
       }
@@ -429,7 +451,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     const window = followAppZoom(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
-        currentRendererDocumentId: (sender) => dependencies.rendererWorkspaceSessions.currentDocumentId(sender),
+        currentRendererDocumentId: (sender) =>
+          dependencies.rendererWorkspaceSessions.currentDocumentId(sender),
         prepareForRendererReload,
         afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         role: "manager",
@@ -446,14 +469,20 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // A window whose renderer shows Notices: a live workspace window, or the
   // manager. Never the hidden export window.
   function showsNotices(window: BrowserWindow): boolean {
-    return workspaceWindows.allLive().includes(window) || (window === managerWindow && !window.isDestroyed());
+    return (
+      workspaceWindows.allLive().includes(window) ||
+      (window === managerWindow && !window.isDestroyed())
+    );
   }
 
-  function createWorkspaceWindow(workspaceId: string | null = lastActivatedWorkspaceId): BrowserWindow {
+  function createWorkspaceWindow(
+    workspaceId: string | null = lastActivatedWorkspaceId,
+  ): BrowserWindow {
     const window = trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
-        currentRendererDocumentId: (sender) => dependencies.rendererWorkspaceSessions.currentDocumentId(sender),
+        currentRendererDocumentId: (sender) =>
+          dependencies.rendererWorkspaceSessions.currentDocumentId(sender),
         prepareForRendererReload,
         afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         preloadArguments: dependencies.preloadArguments,
@@ -486,7 +515,9 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
         isMainFrame: boolean,
       ) => {
         if (!isMainFrame) return;
-        settle(() => reject(new Error(`The window failed to load (${errorCode} ${errorDescription}).`)));
+        settle(() =>
+          reject(new Error(`The window failed to load (${errorCode} ${errorDescription}).`)),
+        );
       };
       contents.on("did-finish-load", onLoad);
       contents.on("did-fail-load", onFail);
@@ -502,7 +533,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
   // against the window's real session: it stands while the window is live
   // and has no session yet, and retires once the window shows this
   // workspace (the caller's lookup finds it), shows another, or closes.
-  const pendingOpens = new Map<string, { window: BrowserWindow; opening: Promise<BrowserWindow> }>();
+  const pendingOpens = new Map<
+    string,
+    { window: BrowserWindow; opening: Promise<BrowserWindow> }
+  >();
 
   function pendingOpenFor(workspaceId: string): Promise<BrowserWindow> | null {
     const pending = pendingOpens.get(workspaceId);
@@ -527,10 +561,11 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       return Promise.resolve(existing);
     }
     const pending = pendingOpenFor(workspace.workspaceId);
-    if (pending) return pending.then((window) => {
-      focusShareHandoffWindow(window);
-      return window;
-    });
+    if (pending)
+      return pending.then((window) => {
+        focusShareHandoffWindow(window);
+        return window;
+      });
     const window = createWorkspaceWindow(workspace.workspaceId);
     const entry = {
       window,
@@ -581,7 +616,8 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     sendWorkspaceActivated,
     reportActivationFailure,
     applyZoomLevelToWindows,
-    broadcastUserSettings, broadcastAgentColor,
+    broadcastUserSettings,
+    broadcastAgentColor,
     refreshApplicationMenu,
     refreshNativeWorkspaceSurfaces,
     prepareForRendererReload,
@@ -590,8 +626,12 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     showOrCreateManagerWindow,
     showsNotices,
     openWorkspaceInWindow,
-    get applicationMenuCanInstallUpdate(): boolean | null { return applicationMenuCanInstallUpdate; },
+    get applicationMenuCanInstallUpdate(): boolean | null {
+      return applicationMenuCanInstallUpdate;
+    },
     setPreferredWorkspaceId,
-    seedZoomLevel(zoomLevel: number): void { knownZoomLevel ??= zoomLevel; },
+    seedZoomLevel(zoomLevel: number): void {
+      knownZoomLevel ??= zoomLevel;
+    },
   };
 }

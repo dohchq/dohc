@@ -60,15 +60,11 @@ function externallySetTitle(editor: Editor, title: string): void {
   const pos = calloutPos(editor);
   const node = editor.state.doc.nodeAt(pos);
   if (!node) throw new Error("callout node missing");
-  editor.view.dispatch(
-    editor.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, title }),
-  );
+  editor.view.dispatch(editor.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, title }));
 }
 
 function titleInput(editor: Editor): HTMLInputElement {
-  const input = editor.view.dom.querySelector<HTMLInputElement>(
-    ".dohc-callout-title-input",
-  );
+  const input = editor.view.dom.querySelector<HTMLInputElement>(".dohc-callout-title-input");
   if (!input) throw new Error("callout title input not rendered");
   return input;
 }
@@ -179,7 +175,6 @@ describe("callout header title staleness", () => {
     expect(input.value).toBe("First commit");
     expect(liveTitle(editor)).toBe("First commit");
   });
-
 });
 
 describe("callout header fold control", () => {
@@ -198,12 +193,8 @@ describe("callout header fold control", () => {
 describe("callout type menu", () => {
   it("opens a consistent menu with every supported callout type", () => {
     const editor = makeEditor("> [!note] Original\n> body");
-    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(
-      ".dohc-callout-type-trigger",
-    );
-    const menu = editor.view.dom.querySelector<HTMLElement>(
-      ".dohc-callout-type-menu",
-    );
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(".dohc-callout-type-trigger");
+    const menu = editor.view.dom.querySelector<HTMLElement>(".dohc-callout-type-menu");
     if (!trigger || !menu) throw new Error("callout type menu not rendered");
 
     expect(menu.hidden).toBe(true);
@@ -212,18 +203,13 @@ describe("callout type menu", () => {
     expect(menu.hidden).toBe(false);
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
     expect(
-      Array.from(
-        menu.querySelectorAll("[role='option']"),
-        (option) => option.textContent,
-      ),
+      Array.from(menu.querySelectorAll("[role='option']"), (option) => option.textContent),
     ).toEqual(["Note", "Tip", "Info", "Warning", "Danger", "Quote"]);
   });
 
   it("changes the live callout type and renders the new selection", () => {
     const editor = makeEditor("> [!note] Original\n> body");
-    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(
-      ".dohc-callout-type-trigger",
-    );
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(".dohc-callout-type-trigger");
     if (!trigger) throw new Error("callout type trigger not rendered");
     click(trigger);
 
@@ -239,21 +225,15 @@ describe("callout type menu", () => {
     );
     expect(nextTrigger?.textContent).toBe("Tip");
     expect(
-      editor.view.dom
-        .querySelector(".dohc-callout-type-option[aria-selected='true']")
-        ?.textContent,
+      editor.view.dom.querySelector(".dohc-callout-type-option[aria-selected='true']")?.textContent,
     ).toBe("Tip");
   });
 
   it("supports keyboard navigation and Escape from the type options", () => {
     const editor = makeEditor("> [!note] Original\n> body");
-    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(
-      ".dohc-callout-type-trigger",
-    );
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(".dohc-callout-type-trigger");
     const options = Array.from(
-      editor.view.dom.querySelectorAll<HTMLButtonElement>(
-        ".dohc-callout-type-option",
-      ),
+      editor.view.dom.querySelectorAll<HTMLButtonElement>(".dohc-callout-type-option"),
     );
     if (!trigger || options.length === 0) throw new Error("callout type menu not rendered");
 
@@ -275,12 +255,8 @@ describe("callout type menu", () => {
 
   it("closes when focus leaves the type picker", async () => {
     const editor = makeEditor("> [!note] Original\n> body");
-    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(
-      ".dohc-callout-type-trigger",
-    );
-    const menu = editor.view.dom.querySelector<HTMLElement>(
-      ".dohc-callout-type-menu",
-    );
+    const trigger = editor.view.dom.querySelector<HTMLButtonElement>(".dohc-callout-type-trigger");
+    const menu = editor.view.dom.querySelector<HTMLElement>(".dohc-callout-type-menu");
     if (!trigger || !menu) throw new Error("callout type menu not rendered");
     trigger.focus();
     click(trigger);
@@ -324,9 +300,7 @@ describe("callout header selection", () => {
     const input = editor.view.dom.querySelector(".dohc-callout-title-input");
     if (!input) throw new Error("title input not rendered");
 
-    input.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
-    );
+    input.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
 
     expect(selectedNodeName(editor)).toBeNull();
   });

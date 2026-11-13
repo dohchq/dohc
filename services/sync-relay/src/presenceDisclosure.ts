@@ -138,7 +138,6 @@ export function sanitizePresenceState(
   return state;
 }
 
-
 export interface PreparedPresencePeer {
   peer: PresenceEntry;
   isOwner: boolean;
@@ -231,5 +230,9 @@ export function createPresenceProjection(
     });
     return { version: snapshot.version, peers };
   };
-  return Object.assign(project, {deleteAccount(userId: string) {labels.delete(userId);}});
+  return Object.assign(project, {
+    deleteAccount(userId: string) {
+      labels.delete(userId);
+    },
+  });
 }

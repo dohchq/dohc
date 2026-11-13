@@ -4,10 +4,7 @@ import { DangerButton, SecondaryButton } from "./ui/controls";
 import { useContext, useEffect, useRef, useState } from "react";
 import { ShellErrorReporter } from "./shell/useShellError";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
-import {
-  dismissOrphanedDraft,
-  type OrphanedDraftRow,
-} from "./orphanedDrafts";
+import { dismissOrphanedDraft, type OrphanedDraftRow } from "./orphanedDrafts";
 
 // The path-independent recovery surface. The in-document
 // notice needs a mounted inspector, and three states have none: a path whose
@@ -33,38 +30,63 @@ export function DismissDraftControls(props: { onDismiss: () => void | Promise<vo
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    return () => {
+      mounted.current = false;
+    };
   }, []);
   const dismiss = () => {
     setDismissing(true);
-    void Promise.resolve().then(props.onDismiss).catch(cause => {
-      if (mounted.current) report?.({
-        message: "dohc could not dismiss this draft. Your saved copy remains available.",
-        cause,
-        retry: dismiss,
+    void Promise.resolve()
+      .then(props.onDismiss)
+      .catch((cause) => {
+        if (mounted.current)
+          report?.({
+            message: "dohc could not dismiss this draft. Your saved copy remains available.",
+            cause,
+            retry: dismiss,
+          });
+      })
+      .finally(() => {
+        if (mounted.current) setDismissing(false);
       });
-    }).finally(() => {
-      if (mounted.current) setDismissing(false);
-    });
   };
   // Every control is a 24px row button, so the confirm takes the row's
   // height and nothing below it moves.
   if (!confirming) {
     return (
-      <SecondaryButton size="row" data-testid="recovery-dismiss" onClick={() => setConfirming(true)}>
+      <SecondaryButton
+        size="row"
+        data-testid="recovery-dismiss"
+        onClick={() => setConfirming(true)}
+      >
         Dismiss
       </SecondaryButton>
     );
   }
-  return <DismissConfirm dismissing={dismissing} onDismiss={dismiss} onKeep={() => setConfirming(false)} />;
+  return (
+    <DismissConfirm
+      dismissing={dismissing}
+      onDismiss={dismiss}
+      onKeep={() => setConfirming(false)}
+    />
+  );
 }
 
 // What Dismiss turns into. The states page draws it too.
-export function DismissConfirm(props: { dismissing: boolean; onDismiss: () => void; onKeep: () => void }) {
+export function DismissConfirm(props: {
+  dismissing: boolean;
+  onDismiss: () => void;
+  onKeep: () => void;
+}) {
   return (
     <span className="flex items-center gap-2">
       <span className="text-[11px] text-danger">Deletes the only copy.</span>
-      <DangerButton size="row" data-testid="recovery-dismiss-confirm" disabled={props.dismissing} onClick={props.onDismiss}>
+      <DangerButton
+        size="row"
+        data-testid="recovery-dismiss-confirm"
+        disabled={props.dismissing}
+        onClick={props.onDismiss}
+      >
         Dismiss edit
       </DangerButton>
       <SecondaryButton size="row" data-testid="recovery-dismiss-cancel" onClick={props.onKeep}>
@@ -122,11 +144,13 @@ export function RecoveryList(props: {
             ) : null}
           </span>
           <div className="flex shrink-0 items-center gap-2">
-            <CopyButton testId="recovery-list-copy" label="Copy edits" getText={() => restoreRecoveryDraftText(row.draft.text)} />
+            <CopyButton
+              testId="recovery-list-copy"
+              label="Copy edits"
+              getText={() => restoreRecoveryDraftText(row.draft.text)}
+            />
             <DismissDraftControls
-              onDismiss={() =>
-                dismissOrphanedDraft(row.workspaceId, row.path, row.draft.id)
-              }
+              onDismiss={() => dismissOrphanedDraft(row.workspaceId, row.path, row.draft.id)}
             />
           </div>
         </li>

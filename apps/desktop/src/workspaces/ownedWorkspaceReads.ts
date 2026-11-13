@@ -21,15 +21,10 @@ export function createOwnedWorkspaceReads(input: {
   listFiles(scope?: WorkspaceFileListingScope): Promise<WorkspacePathListing>;
   lookupFiles(paths: readonly string[]): Promise<WorkspacePathListing>;
   repairProjection(target: ShareViewFilesTarget): Promise<ReadonlySet<string>>;
-  onSearchSourceFailure?: (
-    source: OwnedWorkspaceSearchSource,
-    error: unknown,
-  ) => void;
+  onSearchSourceFailure?: (source: OwnedWorkspaceSearchSource, error: unknown) => void;
 }): OwnedWorkspaceReadPort {
   const mounts = storedShareMounts(input.workspace);
-  const searchSources: OwnedWorkspaceSearchSource[] = shareViewIsPresent(
-    input.workspace.shareView,
-  )
+  const searchSources: OwnedWorkspaceSearchSource[] = shareViewIsPresent(input.workspace.shareView)
     ? [
         {
           target: {

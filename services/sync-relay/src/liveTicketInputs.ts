@@ -1,62 +1,142 @@
 import { types } from "node:util";
-import { parseHostEpoch, parseHostMode, parseHostControlIdentifier } from "@dohc/live-session-contract/host-control";
-import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { parseLiveUpdateIdentifier, parseLiveUpdateDigest } from "@dohc/live-session-contract/live-update-admission";
+import {
+  parseHostEpoch,
+  parseHostMode,
+  parseHostControlIdentifier,
+} from "@dohc/live-session-contract/host-control";
+import {
+  LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT,
+  parseLiveObjectBinding,
+} from "@dohc/live-session-contract/live-object-binding";
+import {
+  parseLiveUpdateIdentifier,
+  parseLiveUpdateDigest,
+} from "@dohc/live-session-contract/live-update-admission";
 import type { LiveTicketScope } from "./liveBrowserContext.js";
 import type { LiveHostConnectionCoordinate, TicketHostReport } from "./storage.js";
 
 export function ticketRecord(value: unknown, fields: readonly string[]): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || types.isProxy(value) || Array.isArray(value) ||
-    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    types.isProxy(value) ||
+    Array.isArray(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
     throw new TypeError("Invalid live-ticket input.");
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
-  if (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key))) {
+  if (
+    keys.length !== fields.length ||
+    keys.some((key) => typeof key !== "string" || !fields.includes(key))
+  ) {
     throw new TypeError("Invalid live-ticket input.");
   }
   const result: Record<string, unknown> = {};
   for (const field of fields) {
     const descriptor = descriptors[field];
-    if (!descriptor || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid live-ticket input.");
+    if (!descriptor || !Object.hasOwn(descriptor, "value"))
+      throw new TypeError("Invalid live-ticket input.");
     result[field] = descriptor.value;
   }
   return result;
 }
 
 export function snapshotLiveTicketScope(value: unknown): LiveTicketScope {
-  if (typeof value !== "object" || value === null || types.isProxy(value)) throw new TypeError("Invalid live-ticket scope.");
+  if (typeof value !== "object" || value === null || types.isProxy(value))
+    throw new TypeError("Invalid live-ticket scope.");
   const kind = Object.getOwnPropertyDescriptor(value, "kind")?.value;
   if (kind === "personal") {
-    const scope = ticketRecord(value, ["kind", "workspaceId", "agentId", "connectionId", "accessTokenHash", "resourceHash", "fenceEpoch"]);
+    const scope = ticketRecord(value, [
+      "kind",
+      "workspaceId",
+      "agentId",
+      "connectionId",
+      "accessTokenHash",
+      "resourceHash",
+      "fenceEpoch",
+    ]);
     const fenceEpoch = scope.fenceEpoch;
-    if (typeof fenceEpoch !== "number" || !Number.isSafeInteger(fenceEpoch) || fenceEpoch < 0) throw new TypeError("Invalid live-ticket fence epoch.");
-    return { kind: "personal", workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
-      agentId: parseLiveUpdateIdentifier(scope.agentId, "agent ID"), connectionId: parseLiveUpdateIdentifier(scope.connectionId, "connection ID"),
-      accessTokenHash: parseTicketHash(scope.accessTokenHash), resourceHash: parseTicketHash(scope.resourceHash), fenceEpoch };
+    if (typeof fenceEpoch !== "number" || !Number.isSafeInteger(fenceEpoch) || fenceEpoch < 0)
+      throw new TypeError("Invalid live-ticket fence epoch.");
+    return {
+      kind: "personal",
+      workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
+      agentId: parseLiveUpdateIdentifier(scope.agentId, "agent ID"),
+      connectionId: parseLiveUpdateIdentifier(scope.connectionId, "connection ID"),
+      accessTokenHash: parseTicketHash(scope.accessTokenHash),
+      resourceHash: parseTicketHash(scope.resourceHash),
+      fenceEpoch,
+    };
   }
   if (kind !== "named" && kind !== "link") throw new TypeError("Invalid live-ticket scope kind.");
-  const agent = kind === "link" && Object.getOwnPropertyDescriptor(value, "agentConnectionId") !== undefined;
-  const scope = ticketRecord(value, kind === "named" ? ["kind", "workspaceId", "shareId", "grantId", "userId"] :
-    agent ? ["kind", "workspaceId", "shareId", "grantId", "agentConnectionId", "accessTokenHash", "resourceHash"] :
-    ["kind", "workspaceId", "shareId", "grantId", "sessionId", "capabilityHash", "profileTokenHash"]);
+  const agent =
+    kind === "link" && Object.getOwnPropertyDescriptor(value, "agentConnectionId") !== undefined;
+  const scope = ticketRecord(
+    value,
+    kind === "named"
+      ? ["kind", "workspaceId", "shareId", "grantId", "userId"]
+      : agent
+        ? [
+            "kind",
+            "workspaceId",
+            "shareId",
+            "grantId",
+            "agentConnectionId",
+            "accessTokenHash",
+            "resourceHash",
+          ]
+        : [
+            "kind",
+            "workspaceId",
+            "shareId",
+            "grantId",
+            "sessionId",
+            "capabilityHash",
+            "profileTokenHash",
+          ],
+  );
   const common = {
     workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
     shareId: parseLiveUpdateIdentifier(scope.shareId, "share ID"),
     grantId: parseLiveUpdateIdentifier(scope.grantId, "grant ID"),
   };
-  if (kind === "named") return { ...common, kind, userId: parseLiveUpdateIdentifier(scope.userId, "user ID") };
-  return agent ? { ...common, kind, agentConnectionId: parseLiveUpdateIdentifier(scope.agentConnectionId, "agent connection ID"),
-      accessTokenHash: parseTicketHash(scope.accessTokenHash), resourceHash: parseTicketHash(scope.resourceHash) } :
-    { ...common, kind, sessionId: parseLiveUpdateIdentifier(scope.sessionId, "link session ID"),
-      capabilityHash: parseTicketHash(scope.capabilityHash), profileTokenHash: parseTicketHash(scope.profileTokenHash) };
+  if (kind === "named")
+    return { ...common, kind, userId: parseLiveUpdateIdentifier(scope.userId, "user ID") };
+  return agent
+    ? {
+        ...common,
+        kind,
+        agentConnectionId: parseLiveUpdateIdentifier(
+          scope.agentConnectionId,
+          "agent connection ID",
+        ),
+        accessTokenHash: parseTicketHash(scope.accessTokenHash),
+        resourceHash: parseTicketHash(scope.resourceHash),
+      }
+    : {
+        ...common,
+        kind,
+        sessionId: parseLiveUpdateIdentifier(scope.sessionId, "link session ID"),
+        capabilityHash: parseTicketHash(scope.capabilityHash),
+        profileTokenHash: parseTicketHash(scope.profileTokenHash),
+      };
 }
 
 export function snapshotHostCoordinate(value: unknown): LiveHostConnectionCoordinate {
-  const coordinate = ticketRecord(value, ["mode", "hostId", "hostEpoch", "instanceId", "connectionId"]);
+  const coordinate = ticketRecord(value, [
+    "mode",
+    "hostId",
+    "hostEpoch",
+    "instanceId",
+    "connectionId",
+  ]);
   return {
-    mode: parseHostMode(coordinate.mode), hostId: parseHostControlIdentifier(coordinate.hostId, "host ID"),
-    hostEpoch: parseHostEpoch(coordinate.hostEpoch), instanceId: parseHostControlIdentifier(coordinate.instanceId, "host instance ID"),
+    mode: parseHostMode(coordinate.mode),
+    hostId: parseHostControlIdentifier(coordinate.hostId, "host ID"),
+    hostEpoch: parseHostEpoch(coordinate.hostEpoch),
+    instanceId: parseHostControlIdentifier(coordinate.instanceId, "host instance ID"),
     connectionId: parseHostControlIdentifier(coordinate.connectionId, "connection ID"),
   };
 }
@@ -64,31 +144,57 @@ export function snapshotHostCoordinate(value: unknown): LiveHostConnectionCoordi
 export function snapshotTicketHostReport(value: unknown): TicketHostReport {
   const report = ticketRecord(value, ["connection", "binding"]);
   const connection = snapshotHostCoordinate(report.connection);
-  const raw = ticketRecord(report.binding, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"]);
+  const raw = ticketRecord(report.binding, [
+    "workspaceId",
+    "mainVersionId",
+    "objectId",
+    "lineageClaimId",
+    "currentPath",
+    "selectorPaths",
+    "restoreFenceGeneration",
+  ]);
   const selectors = raw.selectorPaths;
-  if (!Array.isArray(selectors) || types.isProxy(selectors) || Object.getPrototypeOf(selectors) !== Array.prototype) {
+  if (
+    !Array.isArray(selectors) ||
+    types.isProxy(selectors) ||
+    Object.getPrototypeOf(selectors) !== Array.prototype
+  ) {
     throw new TypeError("Invalid live-ticket selectors.");
   }
   const length = Object.getOwnPropertyDescriptor(selectors, "length")?.value;
-  if (!Number.isSafeInteger(length) || length < 1 || length > LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT || Reflect.ownKeys(selectors).length !== length + 1) {
+  if (
+    !Number.isSafeInteger(length) ||
+    length < 1 ||
+    length > LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT ||
+    Reflect.ownKeys(selectors).length !== length + 1
+  ) {
     throw new TypeError("Invalid live-ticket selectors.");
   }
   const paths: unknown[] = [];
   for (let i = 0; i < length; i++) {
     const descriptor = Object.getOwnPropertyDescriptor(selectors, String(i));
-    if (!descriptor || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid live-ticket selectors.");
+    if (!descriptor || !Object.hasOwn(descriptor, "value"))
+      throw new TypeError("Invalid live-ticket selectors.");
     paths.push(descriptor.value);
   }
   const binding = parseLiveObjectBinding({ ...raw, selectorPaths: paths });
-  if (binding.mainVersionId !== "main" || binding.currentPath !== raw.currentPath ||
-    JSON.stringify(binding.selectorPaths) !== JSON.stringify(paths)) throw new TypeError("Invalid live-ticket binding.");
+  if (
+    binding.mainVersionId !== "main" ||
+    binding.currentPath !== raw.currentPath ||
+    JSON.stringify(binding.selectorPaths) !== JSON.stringify(paths)
+  )
+    throw new TypeError("Invalid live-ticket binding.");
   parseLiveUpdateDigest(binding.lineageClaimId);
   return { binding, connection };
 }
 
 export function parseTicketHash(value: unknown): string {
-  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value) ||
-    Buffer.from(value, "base64url").length !== 32 || Buffer.from(value, "base64url").toString("base64url") !== value) {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/.test(value) ||
+    Buffer.from(value, "base64url").length !== 32 ||
+    Buffer.from(value, "base64url").toString("base64url") !== value
+  ) {
     throw new TypeError("Invalid live-ticket credential.");
   }
   return value;

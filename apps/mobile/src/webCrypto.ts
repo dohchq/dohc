@@ -14,7 +14,10 @@ export function installWebCrypto(): void {
   }
   if (typeof target.subtle?.digest !== "function") {
     const digest: Subtle["digest"] = async (algorithm, data) => {
-      if (algorithm !== "SHA-256" && (typeof algorithm !== "object" || algorithm.name !== "SHA-256")) {
+      if (
+        algorithm !== "SHA-256" &&
+        (typeof algorithm !== "object" || algorithm.name !== "SHA-256")
+      ) {
         throw new Error("Only SHA-256 is available");
       }
       return ExpoCrypto.digest(ExpoCrypto.CryptoDigestAlgorithm.SHA256, data as BufferSource);

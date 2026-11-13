@@ -8,11 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
-import {
-  EDGE_FRONTMATTER,
-  EDGE_MARKDOWN,
-  receivedYDoc,
-} from "./markdown/frontmatter.edge-fixture";
+import { EDGE_FRONTMATTER, EDGE_MARKDOWN, receivedYDoc } from "./markdown/frontmatter.edge-fixture";
 
 // Finding: in engine mode the DocumentMenu export must serialize the live
 // editor (collab-bound to the engine Y.Doc), not the stale props.body that
@@ -37,7 +33,7 @@ const engineDocState: UseEngineDoc = {
   versionId: null,
   saveState: { kind: "saved-here" },
   saveError: null,
-    authorCapacity: false,
+  authorCapacity: false,
   notInVersion: false,
   documentUnavailable: false,
   liveHostUnavailable: false,
@@ -71,17 +67,25 @@ vi.mock("./collab/useEngineDoc", () => ({
 
 // A stub editor that reports a live body distinct from the disk body, so the
 // test can tell whether the menu read the editor or the stale prop.
-const editorSerialize=vi.hoisted(()=>vi.fn());
-vi.mock('./editor/artifactSource',()=>({prepareArtifactSource:()=>undefined,projectArtifactSource:vi.fn(async(doc:Y.Doc)=>(await import('@dohc/ydoc-projection')).yDocToArtifactMarkdown(doc))}));
-import {projectArtifactSource} from './editor/artifactSource';
-import {forgedSources} from '../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts';
+const editorSerialize = vi.hoisted(() => vi.fn());
+vi.mock("./editor/artifactSource", () => ({
+  prepareArtifactSource: () => undefined,
+  projectArtifactSource: vi.fn(async (doc: Y.Doc) =>
+    (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc),
+  ),
+}));
+import { projectArtifactSource } from "./editor/artifactSource";
+import { forgedSources } from "../../../../packages/ydoc-projection/src/artifact-witness.fixture.ts";
 const LIVE_BODY = "# Live engine body\n";
 vi.mock("./editor/MarkdownEditor", () => ({
   MarkdownEditor: forwardRef<{ focus: () => void; getMarkdown: () => string }>(
     function MarkdownEditorStub(_props, ref) {
       useImperativeHandle(ref, () => ({
         focus: () => {},
-        getMarkdown: () => {editorSerialize();return LIVE_BODY;},
+        getMarkdown: () => {
+          editorSerialize();
+          return LIVE_BODY;
+        },
       }));
       return <div data-testid="editor-stub" />;
     },
@@ -119,7 +123,9 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
   };
 
   beforeEach(() => {
-  vi.mocked(projectArtifactSource).mockImplementation(async doc => (await import('@dohc/ydoc-projection')).yDocToArtifactMarkdown(doc));
+    vi.mocked(projectArtifactSource).mockImplementation(async (doc) =>
+      (await import("@dohc/ydoc-projection")).yDocToArtifactMarkdown(doc),
+    );
     engineDocState.available = true;
     engineDocState.doc = markdownToYDoc(LIVE_BODY);
     engineDocState.saveState = { kind: "saved-here" };
@@ -143,7 +149,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
   });
 
   it("copies the witnessed settled artifact from the live Y.Doc", async () => {
-    const source = "---\nzebra: last\ntitle: \"Outside\"\nalpha: first\n---\n\n- one\n- two\n\n";
+    const source = '---\nzebra: last\ntitle: "Outside"\nalpha: first\n---\n\n- one\n- two\n\n';
     const doc = markdownToYDoc(source);
     const sha = (text: string) => createHash("sha256").update(text).digest("hex");
     doc.getMap("meta").set("dohcMarkdownSource", source);
@@ -151,7 +157,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
     engineDocState.doc = doc;
     const user = userEvent.setup();
-    Object.defineProperty(navigator, "clipboard", {value: {writeText}, configurable: true});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("editor-stub");
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -268,9 +274,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
 
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}Body\n`),
-    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${EDGE_FRONTMATTER}Body\n`));
   });
 
   it("exports shared-type frontmatter over the live body", async () => {
@@ -293,49 +297,113 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     );
   });
 
-  it.each(forgedSources)('Copy and Export keep markup inert: %s',async source=>{
-    const doc=markdownToYDoc(source);const canonical=yDocToMarkdown(doc);const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
-    doc.getMap('meta').set('dohcMarkdownSource',source);doc.getMap('meta').set('dohcMarkdownSourceSha256',sha(source));doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256',sha(canonical));engineDocState.doc=doc;
-    const user=userEvent.setup();Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true});render(<FileInspector workspaceId="ws-1" path="a.md"/>);await screen.findByTestId('editor-stub');
-    await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await waitFor(()=>expect(writeText).toHaveBeenCalledWith(canonical));
-    await user.click(screen.getByTestId('document-menu-item-export-markdown'));await waitFor(()=>expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content:canonical})));
-    expect(editorSerialize).not.toHaveBeenCalled();expect(projectArtifactSource).not.toHaveBeenCalled();doc.destroy();
+  it.each(forgedSources)("Copy and Export keep markup inert: %s", async (source) => {
+    const doc = markdownToYDoc(source);
+    const canonical = yDocToMarkdown(doc);
+    const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(canonical));
+    engineDocState.doc = doc;
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(canonical));
+    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+    await waitFor(() =>
+      expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(
+        expect.objectContaining({ content: canonical }),
+      ),
+    );
+    expect(editorSerialize).not.toHaveBeenCalled();
+    expect(projectArtifactSource).not.toHaveBeenCalled();
+    doc.destroy();
   });
 
-  it.each(['without witness','worker error'])('Copy and Export use canonical output %s', async kind => {
-    const doc=markdownToYDoc('Body\n\n'); engineDocState.doc=doc;
-    if(kind==='worker error'){for(const key of ['dohcMarkdownSource','dohcMarkdownSourceSha256','dohcMarkdownSourceProjectionSha256']) doc.getMap('meta').set(key,'plain');}
-    vi.mocked(projectArtifactSource).mockRejectedValue(Error('worker failed'));
-    const user=userEvent.setup(); Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true}); render(<FileInspector workspaceId="ws-1" path="a.md"/>); await screen.findByTestId('editor-stub');
-    await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await waitFor(()=>expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
-    await user.click(screen.getByTestId('document-menu-item-export-markdown'));await waitFor(()=>expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(expect.objectContaining({content:yDocToMarkdown(doc)})));
-    if(kind==='without witness') expect(projectArtifactSource).not.toHaveBeenCalled(); doc.destroy();
-  });
+  it.each(["without witness", "worker error"])(
+    "Copy and Export use canonical output %s",
+    async (kind) => {
+      const doc = markdownToYDoc("Body\n\n");
+      engineDocState.doc = doc;
+      if (kind === "worker error") {
+        for (const key of [
+          "dohcMarkdownSource",
+          "dohcMarkdownSourceSha256",
+          "dohcMarkdownSourceProjectionSha256",
+        ])
+          doc.getMap("meta").set(key, "plain");
+      }
+      vi.mocked(projectArtifactSource).mockRejectedValue(Error("worker failed"));
+      const user = userEvent.setup();
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      await screen.findByTestId("editor-stub");
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
+      await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+      await waitFor(() =>
+        expect(bridgeMock.exportDocumentFile).toHaveBeenCalledWith(
+          expect.objectContaining({ content: yDocToMarkdown(doc) }),
+        ),
+      );
+      if (kind === "without witness") expect(projectArtifactSource).not.toHaveBeenCalled();
+      doc.destroy();
+    },
+  );
 
-  it('Copy uses canonical output within 2 s when the source proof is stuck', async () => {
-    const doc = markdownToYDoc('Body\n\n'); engineDocState.doc = doc;
-    for (const key of ['dohcMarkdownSource', 'dohcMarkdownSourceSha256', 'dohcMarkdownSourceProjectionSha256']) doc.getMap('meta').set(key, 'plain');
+  it("Copy uses canonical output within 2 s when the source proof is stuck", async () => {
+    const doc = markdownToYDoc("Body\n\n");
+    engineDocState.doc = doc;
+    for (const key of [
+      "dohcMarkdownSource",
+      "dohcMarkdownSourceSha256",
+      "dohcMarkdownSourceProjectionSha256",
+    ])
+      doc.getMap("meta").set(key, "plain");
     // A stuck proof worker answers only when its own 15 s limit rejects it.
-    vi.mocked(projectArtifactSource).mockImplementation(() => new Promise((_, reject) => {
-      setTimeout(() => reject(Error('Source projection timed out.')), 15_000);
-    }));
-    const user = userEvent.setup(); Object.defineProperty(navigator, 'clipboard', {value: {writeText}, configurable: true});
-    render(<FileInspector workspaceId="ws-1" path="a.md"/>); await screen.findByTestId('editor-stub');
-    await user.click(screen.getByTestId('document-menu-trigger'));
+    vi.mocked(projectArtifactSource).mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          setTimeout(() => reject(Error("Source projection timed out.")), 15_000);
+        }),
+    );
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+    await user.click(screen.getByTestId("document-menu-trigger"));
     vi.useFakeTimers();
     try {
-      fireEvent.click(screen.getByTestId('document-menu-item-copy-markdown'));
+      fireEvent.click(screen.getByTestId("document-menu-item-copy-markdown"));
       await vi.advanceTimersByTimeAsync(2_000);
-    } finally { vi.useRealTimers(); }
+    } finally {
+      vi.useRealTimers();
+    }
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(yDocToMarkdown(doc)));
     doc.destroy();
   });
 
-  it('reuses worker output without serializing the editor for readiness',async()=>{
-    const source='Body\n\n';const doc=markdownToYDoc(source);const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
-    doc.getMap('meta').set('dohcMarkdownSource',source);doc.getMap('meta').set('dohcMarkdownSourceSha256',sha(source));doc.getMap('meta').set('dohcMarkdownSourceProjectionSha256',sha(yDocToMarkdown(doc)));engineDocState.doc=doc;
-    const user=userEvent.setup();Object.defineProperty(navigator,'clipboard',{value:{writeText},configurable:true});render(<FileInspector workspaceId="ws-1" path="a.md"/>);await screen.findByTestId('editor-stub');
-    await user.click(screen.getByTestId('document-menu-trigger'));await user.click(screen.getByTestId('document-menu-item-copy-markdown'));await waitFor(()=>expect(writeText).toHaveBeenCalledWith(source));
-    expect(editorSerialize).not.toHaveBeenCalled();expect(projectArtifactSource).toHaveBeenCalledWith(doc);doc.destroy();
+  it("reuses worker output without serializing the editor for readiness", async () => {
+    const source = "Body\n\n";
+    const doc = markdownToYDoc(source);
+    const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+    doc.getMap("meta").set("dohcMarkdownSource", source);
+    doc.getMap("meta").set("dohcMarkdownSourceSha256", sha(source));
+    doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", sha(yDocToMarkdown(doc)));
+    engineDocState.doc = doc;
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("editor-stub");
+    await user.click(screen.getByTestId("document-menu-trigger"));
+    await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(source));
+    expect(editorSerialize).not.toHaveBeenCalled();
+    expect(projectArtifactSource).toHaveBeenCalledWith(doc);
+    doc.destroy();
   });
 });

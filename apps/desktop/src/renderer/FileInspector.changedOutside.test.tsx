@@ -67,7 +67,11 @@ function setEngine(state: UseEngineDoc): void {
 }
 
 // `headSha256` is the head of the file the session opened on.
-function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"], headSha256?: string): UseEngineDoc {
+function engineState(
+  doc: Y.Doc,
+  changedOutside: UseEngineDoc["changedOutside"],
+  headSha256?: string,
+): UseEngineDoc {
   return {
     available: true,
     headSha256,
@@ -77,7 +81,10 @@ function engineState(doc: Y.Doc, changedOutside: UseEngineDoc["changedOutside"],
     doc,
     objectId: "object-1",
     versionId: "version-1",
-    saveState: changedOutside === "unsaved" ? saveProblem("changed-on-disk", "The file changed on disk.") : { kind: "saved-here" },
+    saveState:
+      changedOutside === "unsaved"
+        ? saveProblem("changed-on-disk", "The file changed on disk.")
+        : { kind: "saved-here" },
     saveError: null,
     authorCapacity: false,
     notInVersion: false,
@@ -113,11 +120,24 @@ function makeBridge(): DohcDesktopBridge {
     onWorkspaceActivity: vi.fn(() => () => undefined),
     onNoticesChanged: vi.fn(() => () => undefined),
     readHeldChange: vi.fn(async () => ({ change: null })),
-    readWorkspaceText: vi.fn(async () => ({ text: "# Plan\n", truncated: false, contentHash: "sha256:test" })),
-    writeWorkspaceText: vi.fn(async () => ({ status: "written" as const, contentHash: "sha256:test" })),
-    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" as const }], folders: [] })),
+    readWorkspaceText: vi.fn(async () => ({
+      text: "# Plan\n",
+      truncated: false,
+      contentHash: "sha256:test",
+    })),
+    writeWorkspaceText: vi.fn(async () => ({
+      status: "written" as const,
+      contentHash: "sha256:test",
+    })),
+    listWorkspaceFiles: vi.fn(async () => ({
+      files: [{ path: "a.md", kind: "file" as const }],
+      folders: [],
+    })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
     writeWorkspaceAsset: vi.fn(async () => undefined),
   } as unknown as DohcDesktopBridge;
 }
@@ -126,7 +146,12 @@ function seededFrom(markdown: string, contentHash: string): Y.Doc {
   const doc = markdownToYDoc(markdown);
   doc.getMap("meta").set("dohcMarkdownSource", markdown);
   doc.getMap("meta").set("dohcMarkdownSourceSha256", contentHash);
-  doc.getMap("meta").set("dohcMarkdownSourceProjectionSha256", createHash("sha256").update(yDocToMarkdown(doc)).digest("hex"));
+  doc
+    .getMap("meta")
+    .set(
+      "dohcMarkdownSourceProjectionSha256",
+      createHash("sha256").update(yDocToMarkdown(doc)).digest("hex"),
+    );
   return doc;
 }
 
@@ -136,7 +161,14 @@ describe("FileInspector when an open note changed outside dohc", () => {
     engine.boundRetryKey = 0;
     engine.closedWhenDisabled = false;
     engine.sharedLease = false;
-    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
     vi.stubGlobal("dohcDesktop", makeBridge());
   });
 
@@ -151,7 +183,9 @@ describe("FileInspector when an open note changed outside dohc", () => {
   async function openNote(): Promise<void> {
     engine.state = engineState(markdownToYDoc("# Plan\n"), null);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    await waitFor(() => expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved"));
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved"),
+    );
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
@@ -168,14 +202,19 @@ describe("FileInspector when an open note changed outside dohc", () => {
     const chip = screen.getByTestId("markdown-save-state");
     expect(chip.getAttribute("data-state")).toBe("reloaded");
     expect(chip.textContent).toBe("Reloaded");
-    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
     expect(screen.getByTestId("markdown-save-state").getAttribute("data-state")).toBe("saved");
     expect(retryKeys).toEqual([0, 1]);
   });
 
   it("does not reload by itself over an edit main has not confirmed", async () => {
     await openNote();
-    setEngine({ ...engineState(markdownToYDoc("# Plan typed\n"), "saved"), unsavedEditsPending: () => true });
+    setEngine({
+      ...engineState(markdownToYDoc("# Plan typed\n"), "saved"),
+      unsavedEditsPending: () => true,
+    });
     expect(await screen.findByTestId("changed-outside-notice")).toBeTruthy();
     expect(retryKeys).toEqual([0]);
   });
@@ -187,7 +226,9 @@ describe("FileInspector when an open note changed outside dohc", () => {
     expect(CHANGED_OUTSIDE_NOTICE).toBe("This file changed outside dohc.");
     expect(notice.textContent).toContain(CHANGED_OUTSIDE_NOTICE);
     expect(notice.textContent).not.toContain("History");
-    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(CHANGED_OUTSIDE_NOTICE);
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+      CHANGED_OUTSIDE_NOTICE,
+    );
     expect(retryKeys).toEqual([0]);
     const reload = screen.getByRole("button", { name: "Reload" });
     reload.focus();
@@ -196,63 +237,87 @@ describe("FileInspector when an open note changed outside dohc", () => {
     await waitFor(() => expect(retryKeys).toEqual([0, 1]));
   });
 
-  it.each([true])("rereads another pane before Edit anyway after a shared reload (lossy: %s)", async (lossy) => {
-    const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(10);
-    const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
-    const versionB = lossy
-      ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`
-      : `# Readme\n\nVersion B, from another app.\n\n* A list item.\n\n${filler}`;
-    expect(isLossyMarkdown(versionB)).toBe(lossy);
-    expect(versionB).not.toBe(yDocToMarkdown(markdownToYDoc(versionB)));
-    expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
-    const hashA = createHash("sha256").update(versionA).digest("hex");
-    const hashB = createHash("sha256").update(versionB).digest("hex");
-    let disk = { text: versionA, contentHash: hashA };
-    const bridge = makeBridge();
-    vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({ ...disk, truncated: false }));
-    vi.stubGlobal("dohcDesktop", bridge);
-    engine.closedWhenDisabled = true;
-    engine.sharedLease = true;
-    engine.state = engineState(seededFrom(versionA, hashA), null, hashA);
-    render(
-      <>
-        <div data-testid="pane-1"><FileInspector workspaceId="ws-1" path="a.md" /></div>
-        <div data-testid="pane-2"><FileInspector workspaceId="ws-1" path="a.md" /></div>
-      </>,
-    );
-    const pane1 = within(screen.getByTestId("pane-1"));
-    const pane2 = within(screen.getByTestId("pane-2"));
-    for (const pane of [pane1, pane2]) {
-      fireEvent.click(await pane.findByTestId("lossy-note-edit-anyway"));
-      fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
-    }
-    await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
+  it.each([true])(
+    "rereads another pane before Edit anyway after a shared reload (lossy: %s)",
+    async (lossy) => {
+      const filler = "A paragraph that makes this note larger than read mode's limit.\n\n".repeat(
+        10,
+      );
+      const versionA = `# Readme\n\n<details>\n\nVersion A.\n</details>\n\n${filler}`;
+      const versionB = lossy
+        ? `# Readme\n\n<details>\n\nVersion B, from another app.\n</details>\n\n${filler}`
+        : `# Readme\n\nVersion B, from another app.\n\n* A list item.\n\n${filler}`;
+      expect(isLossyMarkdown(versionB)).toBe(lossy);
+      expect(versionB).not.toBe(yDocToMarkdown(markdownToYDoc(versionB)));
+      expect(versionA.length).toBeGreaterThan(WYSIWYG_MARKDOWN_THRESHOLD_BYTES);
+      const hashA = createHash("sha256").update(versionA).digest("hex");
+      const hashB = createHash("sha256").update(versionB).digest("hex");
+      let disk = { text: versionA, contentHash: hashA };
+      const bridge = makeBridge();
+      vi.mocked(bridge.readWorkspaceText).mockImplementation(async () => ({
+        ...disk,
+        truncated: false,
+      }));
+      vi.stubGlobal("dohcDesktop", bridge);
+      engine.closedWhenDisabled = true;
+      engine.sharedLease = true;
+      engine.state = engineState(seededFrom(versionA, hashA), null, hashA);
+      render(
+        <>
+          <div data-testid="pane-1">
+            <FileInspector workspaceId="ws-1" path="a.md" />
+          </div>
+          <div data-testid="pane-2">
+            <FileInspector workspaceId="ws-1" path="a.md" />
+          </div>
+        </>,
+      );
+      const pane1 = within(screen.getByTestId("pane-1"));
+      const pane2 = within(screen.getByTestId("pane-2"));
+      for (const pane of [pane1, pane2]) {
+        fireEvent.click(await pane.findByTestId("lossy-note-edit-anyway"));
+        fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+      }
+      await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
 
-    // Another app writes version B over unsaved text, and pane 1 reloads it
-    // into the session both panes share.
-    disk = { text: versionB, contentHash: hashB };
-    setEngine(engineState(seededFrom(versionA, hashA), "unsaved", hashA));
-    fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));
-    setEngine(engineState(seededFrom(versionB, hashB), null, hashB));
+      // Another app writes version B over unsaved text, and pane 1 reloads it
+      // into the session both panes share.
+      disk = { text: versionB, contentHash: hashB };
+      setEngine(engineState(seededFrom(versionA, hashA), "unsaved", hashA));
+      fireEvent.click(await pane1.findByRole("button", { name: "Reload" }));
+      setEngine(engineState(seededFrom(versionB, hashB), null, hashB));
 
-    await waitFor(() => expect(pane2.getByTestId("view-markdown").textContent).toContain("Version B, from another app."));
-    if (lossy) {
-      expect(screen.getByTestId("pane-2").querySelector('[contenteditable="true"]')).toBeNull();
-      fireEvent.click(await pane2.findByTestId("lossy-note-edit-anyway"));
-      fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
-    }
-    await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
-    await waitFor(() => expect(pane2.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
-    expect(pane2.getByTestId("markdown-editor").textContent).toContain("Version B, from another app.");
-    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
-  });
+      await waitFor(() =>
+        expect(pane2.getByTestId("view-markdown").textContent).toContain(
+          "Version B, from another app.",
+        ),
+      );
+      if (lossy) {
+        expect(screen.getByTestId("pane-2").querySelector('[contenteditable="true"]')).toBeNull();
+        fireEvent.click(await pane2.findByTestId("lossy-note-edit-anyway"));
+        fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
+      }
+      await waitFor(() => expect(pane2.queryByTestId("lossy-note-notice")).toBeNull());
+      await waitFor(() =>
+        expect(pane2.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"),
+      );
+      expect(pane2.getByTestId("markdown-editor").textContent).toContain(
+        "Version B, from another app.",
+      );
+      expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["workspace"])("drops a stale-pane reread after its %s changes", async (changed) => {
     const versionA = "# Readme\n\n<details>\n\nVersion A.\n</details>\n";
     const versionB = versionA.replace("Version A.", "Version B, from another app.");
     const other = "# Other note\n\nCurrent text.\n";
     const bridge = makeBridge();
-    vi.mocked(bridge.readWorkspaceText).mockResolvedValue({ text: versionA, contentHash: "a".repeat(64), truncated: false });
+    vi.mocked(bridge.readWorkspaceText).mockResolvedValue({
+      text: versionA,
+      contentHash: "a".repeat(64),
+      truncated: false,
+    });
     vi.stubGlobal("dohcDesktop", bridge);
     engine.closedWhenDisabled = true;
     engine.sharedLease = true;
@@ -260,22 +325,47 @@ describe("FileInspector when an open note changed outside dohc", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" refreshKey={0} />);
     fireEvent.click(await screen.findByTestId("lossy-note-edit-anyway"));
     fireEvent.click(screen.getByTestId("lossy-note-edit-anyway-confirm"));
-    await waitFor(() => expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"));
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("true"),
+    );
 
     const readsBeforeReload = vi.mocked(bridge.readWorkspaceText).mock.calls.length;
     let answer!: (read: Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>) => void;
-    vi.mocked(bridge.readWorkspaceText).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    vi.mocked(bridge.readWorkspaceText).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
     setEngine(engineState(seededFrom(versionB, "b".repeat(64)), null, "b".repeat(64)));
-    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(readsBeforeReload + 1));
+    await waitFor(() =>
+      expect(bridge.readWorkspaceText).toHaveBeenCalledTimes(readsBeforeReload + 1),
+    );
     expect(screen.queryByTestId("lossy-note-edit-anyway")).toBeNull();
 
-    vi.mocked(bridge.readWorkspaceText).mockResolvedValue({ text: other, contentHash: "c".repeat(64), truncated: false });
+    vi.mocked(bridge.readWorkspaceText).mockResolvedValue({
+      text: other,
+      contentHash: "c".repeat(64),
+      truncated: false,
+    });
     setEngine(engineState(markdownToYDoc(other), null, "c".repeat(64)));
-    view.rerender(<FileInspector workspaceId={changed === "workspace" ? "ws-2" : "ws-1"} path={changed === "path" ? "b.md" : "a.md"} refreshKey={1} />);
-    await waitFor(() => expect(screen.getByTestId("view-markdown").textContent).toContain("Current text."));
-    await act(async () => { answer({ text: versionB, contentHash: "b".repeat(64), truncated: false }); });
+    view.rerender(
+      <FileInspector
+        workspaceId={changed === "workspace" ? "ws-2" : "ws-1"}
+        path={changed === "path" ? "b.md" : "a.md"}
+        refreshKey={1}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("view-markdown").textContent).toContain("Current text."),
+    );
+    await act(async () => {
+      answer({ text: versionB, contentHash: "b".repeat(64), truncated: false });
+    });
     expect(screen.getByTestId("view-markdown").textContent).toContain("Current text.");
-    expect(screen.getByTestId("view-markdown").textContent).not.toContain("Version B, from another app.");
+    expect(screen.getByTestId("view-markdown").textContent).not.toContain(
+      "Version B, from another app.",
+    );
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
   });
 });

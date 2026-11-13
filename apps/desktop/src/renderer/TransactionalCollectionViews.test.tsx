@@ -5,601 +5,1469 @@ import type { BoardViewProps, CalendarViewProps } from "@dohc/collection-views";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 import { shortDate } from "@dohc/collection-views/values";
 import { deferred } from "../testing/deferred";
-import { resetKeptCollectionEditsForTests, TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
+import {
+  resetKeptCollectionEditsForTests,
+  TransactionalCollectionPage,
+  type TransactionalInvoke,
+  type TransactionalDatasetDescription,
+} from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
-vi.mock("@dohc/collection-views",()=>({
-  BoardView: (props:BoardViewProps)=><div data-testid="board" data-open-record={props.openRecordId??""} data-field-names={props.schema.fields.map(field=>props.fieldLabel?.(field.name)??field.name).join("|")}>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}{props.onNewRecord?<><button onClick={()=>props.onNewRecord?.("Done")}>New in Done</button><button onClick={()=>props.onNewRecord?.(null)}>New with no value</button></>:null}</div>,
-  CalendarView: (props:CalendarViewProps)=><div data-testid="calendar" data-open-record={props.openRecordId??""}><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}{props.onNewRecord?<button onClick={()=>props.onNewRecord?.("2026-11-20")}>New on November 20</button>:null}</div>,
+vi.mock("@dohc/collection-views", () => ({
+  BoardView: (props: BoardViewProps) => (
+    <div
+      data-testid="board"
+      data-open-record={props.openRecordId ?? ""}
+      data-field-names={props.schema.fields
+        .map((field) => props.fieldLabel?.(field.name) ?? field.name)
+        .join("|")}
+    >
+      {props.groups.map((group, index) => (
+        <section key={index} aria-label={String(group.value)}>
+          {group.records.map((record) => (
+            <div key={record.id}>
+              {record.values.find((value) => value.field === "name")?.value as string}
+              <button
+                disabled={!props.onCellChange}
+                onClick={() =>
+                  props.onCellChange?.({
+                    recordId: record.id,
+                    recordPath: "",
+                    field: props.groupBy,
+                    value: "Done",
+                  })
+                }
+              >
+                Move {record.id}
+              </button>
+              <button onClick={() => props.onOpenRecord?.(record)}>Show {record.id}</button>
+            </div>
+          ))}
+          {props.groupFooter?.(group, index)}
+        </section>
+      ))}
+      {props.onNewRecord ? (
+        <>
+          <button onClick={() => props.onNewRecord?.("Done")}>New in Done</button>
+          <button onClick={() => props.onNewRecord?.(null)}>New with no value</button>
+        </>
+      ) : null}
+    </div>
+  ),
+  CalendarView: (props: CalendarViewProps) => (
+    <div data-testid="calendar" data-open-record={props.openRecordId ?? ""}>
+      <button onClick={() => props.onNavigate?.(new Date(2027, 0, 1))}>January</button>
+      {props.nearbyDates?.length ? <span>Nearby {props.nearbyDates.join(" ")}</span> : null}
+      {props.records.map((record) => (
+        <span key={record.id}>
+          {record.id}
+          <button onClick={() => props.onOpenRecord?.(record)}>Show {record.id}</button>
+        </span>
+      ))}
+      {props.onNewRecord ? (
+        <button onClick={() => props.onNewRecord?.("2026-11-20")}>New on November 20</button>
+      ) : null}
+    </div>
+  ),
 }));
-const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
-  {fieldId:"name",name:"Name",type:"text",required:true,unique:false},
-  {fieldId:"status",name:"Status",type:"select",options:["Todo","Done"],required:true,unique:false},
-  {fieldId:"date",name:"Date",type:"date",required:false,unique:false},
-]}],operations:[
-  {operationId:"read",name:"read",label:"Read",kind:"read",tableId:"table",readOnly:true,access:"owner",fieldIds:["name","status","date"]},
-  {operationId:"edit",name:"edit",label:"Edit",kind:"edit",tableId:"table",readOnly:false,reversible:true,access:"owner",fieldIds:["status","date"]},
-]};
-const board:CollectionTableView={viewId:"board",name:"Board",kind:"board",groupBy:"status",search:"",filters:[],sort:null};
-const calendar:CollectionTableView={...board,viewId:"calendar",name:"Calendar",kind:"calendar",dateField:"date"};
-const empty={rows:[],nextCursor:null};
-function setup(invoke:(request:TransactionalInvoke,signal:AbortSignal)=>Promise<{result:AppBackendJson}>,view=board) {
-  const props={workspaceId:"w",dataset,tableId:"table",invoke,onError:vi.fn(),onSettled:vi.fn(),onNotice:vi.fn(),activeView:view};
+const dataset: TransactionalDatasetDescription = {
+  datasetId: "dataset",
+  name: "Work",
+  revision: 1,
+  revisionSha256: "a".repeat(64),
+  tables: [
+    {
+      tableId: "table",
+      name: "Tasks",
+      fields: [
+        { fieldId: "name", name: "Name", type: "text", required: true, unique: false },
+        {
+          fieldId: "status",
+          name: "Status",
+          type: "select",
+          options: ["Todo", "Done"],
+          required: true,
+          unique: false,
+        },
+        { fieldId: "date", name: "Date", type: "date", required: false, unique: false },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: "read",
+      name: "read",
+      label: "Read",
+      kind: "read",
+      tableId: "table",
+      readOnly: true,
+      access: "owner",
+      fieldIds: ["name", "status", "date"],
+    },
+    {
+      operationId: "edit",
+      name: "edit",
+      label: "Edit",
+      kind: "edit",
+      tableId: "table",
+      readOnly: false,
+      reversible: true,
+      access: "owner",
+      fieldIds: ["status", "date"],
+    },
+  ],
+};
+const board: CollectionTableView = {
+  viewId: "board",
+  name: "Board",
+  kind: "board",
+  groupBy: "status",
+  search: "",
+  filters: [],
+  sort: null,
+};
+const calendar: CollectionTableView = {
+  ...board,
+  viewId: "calendar",
+  name: "Calendar",
+  kind: "calendar",
+  dateField: "date",
+};
+const empty = { rows: [], nextCursor: null };
+function setup(
+  invoke: (
+    request: TransactionalInvoke,
+    signal: AbortSignal,
+  ) => Promise<{ result: AppBackendJson }>,
+  view = board,
+) {
+  const props = {
+    workspaceId: "w",
+    dataset,
+    tableId: "table",
+    invoke,
+    onError: vi.fn(),
+    onSettled: vi.fn(),
+    onNotice: vi.fn(),
+    activeView: view,
+  };
   // The window shows the page's workspace and main has admitted it, so its changes send.
-  openCollectionChangeShell(props.workspaceId,props);
+  openCollectionChangeShell(props.workspaceId, props);
   admitCollectionChanges(props.workspaceId);
-  return {...render(<TransactionalCollectionPage {...props}/>),props};
+  return { ...render(<TransactionalCollectionPage {...props} />), props };
 }
 // A view ignores clicks while it reads, and it can show its records a render before its read ends.
 // A test waits for the view to finish reading before it clicks a control that does not show it is disabled.
-const viewIdle=(view:"board"|"calendar")=>waitFor(()=>expect(screen.getByTestId(view).closest("[aria-busy]")?.getAttribute("aria-busy")).toBe("false"));
-const enabled=(name:string)=>waitFor(()=>expect(screen.getByRole<HTMLButtonElement>("button",{name}).disabled).toBe(false));
+const viewIdle = (view: "board" | "calendar") =>
+  waitFor(() =>
+    expect(screen.getByTestId(view).closest("[aria-busy]")?.getAttribute("aria-busy")).toBe(
+      "false",
+    ),
+  );
+const enabled = (name: string) =>
+  waitFor(() =>
+    expect(screen.getByRole<HTMLButtonElement>("button", { name }).disabled).toBe(false),
+  );
 // The table's virtualizer reads offsetWidth and offsetHeight, which jsdom reports as 0, so every element
 // gets a nonzero box and a table view's rows render.
-const offsetDescriptors = { offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"), offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth") };
+const offsetDescriptors = {
+  offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"),
+  offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),
+};
 beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, value: 600 });
   Object.defineProperty(HTMLElement.prototype, "offsetWidth", { configurable: true, value: 900 });
 });
 afterEach(() => {
-  cleanup(); resetKeptCollectionEditsForTests();
-  for (const [key, descriptor] of Object.entries(offsetDescriptors)) if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
+  cleanup();
+  resetKeptCollectionEditsForTests();
+  for (const [key, descriptor] of Object.entries(offsetDescriptors))
+    if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
 });
-it("queries every board group beyond the first table page and pages each independently",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>,group=input.group as {fieldId:string;value:string};
-    if(!group)throw Error("A board must not request the first table page");
-    const next=input.after ? null : {id:50,value:50};
-    return {result:{group,rows:group.value==="Todo"?[{id:input.after?51:1,version:7,values:{name:input.after?"Later task":"First task",status:"Todo"}}]:[{id:99,version:1,values:{name:"Other group",status:"Done"}}],nextCursor:group.value==="Todo"?next:null}};
-  });
-  const result=setup(invoke);
-  const paged=()=>invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).after!==undefined);
+it("queries every board group beyond the first table page and pages each independently", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>,
+        group = input.group as { fieldId: string; value: string };
+      if (!group) throw Error("A board must not request the first table page");
+      const next = input.after ? null : { id: 50, value: 50 };
+      return {
+        result: {
+          group,
+          rows:
+            group.value === "Todo"
+              ? [
+                  {
+                    id: input.after ? 51 : 1,
+                    version: 7,
+                    values: { name: input.after ? "Later task" : "First task", status: "Todo" },
+                  },
+                ]
+              : [{ id: 99, version: 1, values: { name: "Other group", status: "Done" } }],
+          nextCursor: group.value === "Todo" ? next : null,
+        },
+      };
+    },
+  );
+  const result = setup(invoke);
+  const paged = () =>
+    invoke.mock.calls.some(
+      ([request]) => (request.input as Record<string, AppBackendJson>).after !== undefined,
+    );
   await screen.findByText("Other group");
   await enabled("Next records in Todo");
-  fireEvent.click(screen.getByRole("button",{name:"Next records in Todo"}));
-  await waitFor(()=>expect(paged()).toBe(true));
+  fireEvent.click(screen.getByRole("button", { name: "Next records in Todo" }));
+  await waitFor(() => expect(paged()).toBe(true));
   await screen.findByText("Later task");
   expect(result.props.onError).not.toHaveBeenCalled();
 });
-it("names a board's fields as the Collection does, not by their ids",async()=>{
-  setup(async request=>{
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{group,rows:group.value==="Todo"?[{id:1,version:1,values:{name:"First task",status:"Todo"}}]:[],nextCursor:null}};
+it("names a board's fields as the Collection does, not by their ids", async () => {
+  setup(async (request) => {
+    const group = (request.input as Record<string, AppBackendJson>).group as {
+      fieldId: string;
+      value: string;
+    };
+    return {
+      result: {
+        group,
+        rows:
+          group.value === "Todo"
+            ? [{ id: 1, version: 1, values: { name: "First task", status: "Todo" } }]
+            : [],
+        nextCursor: null,
+      },
+    };
   });
   await screen.findByText("First task");
   expect(screen.getByTestId("board").getAttribute("data-field-names")).toBe("Name|Status|Date");
 });
-it("shows a board's failed read in the page under the table's Notices row, and drops both when the board loads",async()=>{
-  const waiting=new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.");
-  let open=false;
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(!open)throw waiting;
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
-  });
-  const result=setup(invoke);
-  expect(await screen.findByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
-  expect(result.props.onError).toHaveBeenCalledWith("dohc could not open this view.",waiting,expect.any(Function),"collection-load:dataset:table");
+it("shows a board's failed read in the page under the table's Notices row, and drops both when the board loads", async () => {
+  const waiting = new Error(
+    "Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.",
+  );
+  let open = false;
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (!open) throw waiting;
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo"
+              ? [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }]
+              : [],
+        },
+      };
+    },
+  );
+  const result = setup(invoke);
+  expect(
+    await screen.findByText("This Collection is waiting to reopen. Try again in 5 seconds."),
+  ).toBeTruthy();
+  expect(result.props.onError).toHaveBeenCalledWith(
+    "dohc could not open this view.",
+    waiting,
+    expect.any(Function),
+    "collection-load:dataset:table",
+  );
   expect(result.props.onSettled).not.toHaveBeenCalled();
-  open=true;
-  fireEvent.click(screen.getByRole("button",{name:"Try again"}));
+  open = true;
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
   expect(await screen.findByText("Task")).toBeTruthy();
   expect(screen.queryByText(/waiting to reopen/)).toBeNull();
   expect(result.props.onSettled).toHaveBeenCalledWith("collection-load:dataset:table");
 });
-it("keeps a board's failure when a table read from before the switch answers late",async()=>{
-  const table:CollectionTableView={viewId:"table",name:"Table",kind:"table",search:"",filters:[],sort:null};
-  const late=deferred<{result:AppBackendJson}>();
-  const tableReads:Array<()=>Promise<{result:AppBackendJson}>>=[async()=>({result:{...empty,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}),()=>late.promise];
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if((request.input as Record<string,AppBackendJson>).group)throw Error("The board read failed.");
-    return tableReads.shift()!();
-  });
-  const result=setup(invoke,table);
+it("keeps a board's failure when a table read from before the switch answers late", async () => {
+  const table: CollectionTableView = {
+    viewId: "table",
+    name: "Table",
+    kind: "table",
+    search: "",
+    filters: [],
+    sort: null,
+  };
+  const late = deferred<{ result: AppBackendJson }>();
+  const tableReads: Array<() => Promise<{ result: AppBackendJson }>> = [
+    async () => ({
+      result: { ...empty, rows: [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }] },
+    }),
+    () => late.promise,
+  ];
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if ((request.input as Record<string, AppBackendJson>).group)
+        throw Error("The board read failed.");
+      return tableReads.shift()!();
+    },
+  );
+  const result = setup(invoke, table);
   await screen.findByText("Task");
   // An automation run starts a read in place, which is still out when the page switches to Board.
-  result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1}/>);
-  await waitFor(()=>expect(invoke).toHaveBeenCalledTimes(2));
-  result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1} activeView={board}/>);
+  result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  result.rerender(
+    <TransactionalCollectionPage {...result.props} recordsChanged={1} activeView={board} />,
+  );
   expect(await screen.findByText("dohc could not open this view.")).toBeTruthy();
-  const settled=result.props.onSettled.mock.calls.length;
-  await act(async()=>late.resolve({result:{...empty,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}));
+  const settled = result.props.onSettled.mock.calls.length;
+  await act(async () =>
+    late.resolve({
+      result: { ...empty, rows: [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }] },
+    }),
+  );
   expect(screen.getByText("dohc could not open this view.")).toBeTruthy();
-  expect(screen.getByRole("button",{name:"Try again"})).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   expect(result.props.onSettled).toHaveBeenCalledTimes(settled);
 });
-it("routes board moves through approved edits with the real version, then offers Undo",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(request.operationId==="edit")return {result:{id:4,version:8,priorValues:{status:"Todo"}}};
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
-  });
+it("routes board moves through approved edits with the real version, then offers Undo", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === "edit")
+        return { result: { id: 4, version: 8, priorValues: { status: "Todo" } } };
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo"
+              ? [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }]
+              : [],
+        },
+      };
+    },
+  );
   setup(invoke);
   await enabled("Move 4");
-  fireEvent.click(screen.getByRole("button",{name:"Move 4"}));
-  await screen.findByRole("button",{name:"Undo last edit"});
-  expect(invoke.mock.calls.find(([request])=>request.operationId==="edit")?.[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,operationId:"edit",input:{id:4,expectedVersion:7,values:{status:"Done"}}});
-});
-it("opens a board card's record in the panel, marks its card, and changes its field through the approved edit with the record's version",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(request.operationId==="edit")return {result:{id:4,version:8,priorValues:{status:"Todo"}}};
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
+  fireEvent.click(screen.getByRole("button", { name: "Move 4" }));
+  await screen.findByRole("button", { name: "Undo last edit" });
+  expect(invoke.mock.calls.find(([request]) => request.operationId === "edit")?.[0]).toMatchObject({
+    workspaceId: "w",
+    datasetId: "dataset",
+    revision: 1,
+    operationId: "edit",
+    input: { id: 4, expectedVersion: 7, values: { status: "Done" } },
   });
+});
+it("opens a board card's record in the panel, marks its card, and changes its field through the approved edit with the record's version", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === "edit")
+        return { result: { id: 4, version: 8, priorValues: { status: "Todo" } } };
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo"
+              ? [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }]
+              : [],
+        },
+      };
+    },
+  );
   setup(invoke);
   expect((await screen.findByTestId("board")).getAttribute("data-open-record")).toBe("");
   await viewIdle("board");
-  fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
-  const record=screen.getByRole("complementary",{name:"Task"});
+  fireEvent.click(screen.getByRole("button", { name: "Show 4" }));
+  const record = screen.getByRole("complementary", { name: "Task" });
   // The board stays beside the panel, with the open record's card marked.
   expect(screen.getByTestId("board").getAttribute("data-open-record")).toBe("4");
   expect(document.activeElement).toBe(record);
-  fireEvent.click(within(within(record).getByRole("group",{name:"Status"})).getAllByRole("button")[0]!);
-  fireEvent.click(within(within(record).getByRole("listbox",{name:"Status options"})).getByRole("option",{name:"Done"}));
-  await waitFor(()=>expect(invoke.mock.calls.find(([request])=>request.operationId==="edit")?.[0]).toMatchObject({operationId:"edit",input:{id:4,expectedVersion:7,values:{status:"Done"}}}));
-  fireEvent.click(within(record).getByRole("button",{name:"Close record"}));
+  fireEvent.click(
+    within(within(record).getByRole("group", { name: "Status" })).getAllByRole("button")[0]!,
+  );
+  fireEvent.click(
+    within(within(record).getByRole("listbox", { name: "Status options" })).getByRole("option", {
+      name: "Done",
+    }),
+  );
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls.find(([request]) => request.operationId === "edit")?.[0],
+    ).toMatchObject({
+      operationId: "edit",
+      input: { id: 4, expectedVersion: 7, values: { status: "Done" } },
+    }),
+  );
+  fireEvent.click(within(record).getByRole("button", { name: "Close record" }));
   expect(screen.queryByRole("complementary")).toBeNull();
   expect(screen.getByTestId("board").getAttribute("data-open-record")).toBe("");
 });
-it("moves a board's card through the approved edit with the record's version, without holding the page, and reads the board again in place",async()=>{
-  const answer=deferred<{result:AppBackendJson}>();
-  let moved=false;
-  const invoke=vi.fn((request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(request.operationId==="edit")return answer.promise;
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return Promise.resolve({result:{...empty,group,rows:group.value===(moved?"Done":"Todo")?[{id:4,version:moved?8:7,values:{name:"Task",status:group.value}}]:[]}});
+it("moves a board's card through the approved edit with the record's version, without holding the page, and reads the board again in place", async () => {
+  const answer = deferred<{ result: AppBackendJson }>();
+  let moved = false;
+  const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+    if (request.operationId === "edit") return answer.promise;
+    const group = (request.input as Record<string, AppBackendJson>).group as {
+      fieldId: string;
+      value: string;
+    };
+    return Promise.resolve({
+      result: {
+        ...empty,
+        group,
+        rows:
+          group.value === (moved ? "Done" : "Todo")
+            ? [{ id: 4, version: moved ? 8 : 7, values: { name: "Task", status: group.value } }]
+            : [],
+      },
+    });
   });
-  const result=setup(invoke);
+  const result = setup(invoke);
   await enabled("Move 4");
-  fireEvent.click(screen.getByRole("button",{name:"Move 4"}));
-  const edits=()=>invoke.mock.calls.map(([request])=>request).filter(request=>request.operationId==="edit");
+  fireEvent.click(screen.getByRole("button", { name: "Move 4" }));
+  const edits = () =>
+    invoke.mock.calls
+      .map(([request]) => request)
+      .filter((request) => request.operationId === "edit");
   expect(edits()).toHaveLength(1);
-  expect(edits()[0]).toMatchObject({workspaceId:"w",datasetId:"dataset",revision:1,input:{id:4,expectedVersion:7,values:{status:"Done"}}});
+  expect(edits()[0]).toMatchObject({
+    workspaceId: "w",
+    datasetId: "dataset",
+    revision: 1,
+    input: { id: 4, expectedVersion: 7, values: { status: "Done" } },
+  });
   // The page does not lock while the move waits to be confirmed.
   expect(screen.queryByText("Loading view…")).toBeNull();
-  expect((screen.getByRole("button",{name:"Move 4"}) as HTMLButtonElement).disabled).toBe(false);
-  moved=true;
-  await act(async()=>answer.resolve({result:{id:4,version:8,priorValues:{status:"Todo"}}}));
-  await waitFor(()=>expect(within(screen.getByRole("region",{name:"Done"})).getByText("Task")).toBeTruthy());
+  expect((screen.getByRole("button", { name: "Move 4" }) as HTMLButtonElement).disabled).toBe(
+    false,
+  );
+  moved = true;
+  await act(async () =>
+    answer.resolve({ result: { id: 4, version: 8, priorValues: { status: "Todo" } } }),
+  );
+  await waitFor(() =>
+    expect(within(screen.getByRole("region", { name: "Done" })).getByText("Task")).toBeTruthy(),
+  );
   expect(screen.queryByText("Loading view…")).toBeNull();
   expect(result.props.onError).not.toHaveBeenCalled();
 });
-it("lists a board move dohc could not confirm with Try again, which sends the exact request again",async()=>{
-  let fail=true;
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(request.operationId==="edit"){if(fail)throw new Error("Lost reply");return {result:{id:4,version:8}};}
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
-  });
-  const result=setup(invoke);
+it("lists a board move dohc could not confirm with Try again, which sends the exact request again", async () => {
+  let fail = true;
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === "edit") {
+        if (fail) throw new Error("Lost reply");
+        return { result: { id: 4, version: 8 } };
+      }
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo"
+              ? [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }]
+              : [],
+        },
+      };
+    },
+  );
+  const result = setup(invoke);
   await enabled("Move 4");
-  fireEvent.click(screen.getByRole("button",{name:"Move 4"}));
+  fireEvent.click(screen.getByRole("button", { name: "Move 4" }));
   // A board has no cell to say so, so the page lists the change.
-  const list=within(await screen.findByRole("group",{name:"Changes dohc did not confirm"}));
+  const list = within(await screen.findByRole("group", { name: "Changes dohc did not confirm" }));
   expect(list.getByText("dohc could not confirm a change to record 4.")).toBeTruthy();
-  expect(result.props.onError).toHaveBeenCalledWith("dohc could not confirm this change.",expect.objectContaining({message:"Lost reply"}),expect.any(Function),expect.any(String));
-  fail=false;
-  fireEvent.click(list.getByRole("button",{name:"Try again"}));
-  await waitFor(()=>expect(screen.queryByRole("group",{name:"Changes dohc did not confirm"})).toBeNull());
-  const edits=invoke.mock.calls.map(([request])=>request).filter(request=>request.operationId==="edit");
-  expect(edits).toHaveLength(2);expect(edits[1]).toEqual(edits[0]);
+  expect(result.props.onError).toHaveBeenCalledWith(
+    "dohc could not confirm this change.",
+    expect.objectContaining({ message: "Lost reply" }),
+    expect.any(Function),
+    expect.any(String),
+  );
+  fail = false;
+  fireEvent.click(list.getByRole("button", { name: "Try again" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("group", { name: "Changes dohc did not confirm" })).toBeNull(),
+  );
+  const edits = invoke.mock.calls
+    .map(([request]) => request)
+    .filter((request) => request.operationId === "edit");
+  expect(edits).toHaveLength(2);
+  expect(edits[1]).toEqual(edits[0]);
 });
-it("does not move offline records and refuses an authored read that ignores board filtering",async()=>{
-  const invoke=vi.fn(async()=>({result:{...empty,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}));
-  const result=setup(invoke);
-  await waitFor(()=>expect(result.props.onError).toHaveBeenCalled());
+it("does not move offline records and refuses an authored read that ignores board filtering", async () => {
+  const invoke = vi.fn(async () => ({
+    result: { ...empty, rows: [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }] },
+  }));
+  const result = setup(invoke);
+  await waitFor(() => expect(result.props.onError).toHaveBeenCalled());
   expect(screen.queryByText("Task")).toBeNull();
-  invoke.mockImplementation(async(request?:TransactionalInvoke)=>({result:{...empty,group:(request!.input as Record<string,AppBackendJson>).group!,rows:[{id:4,version:7,values:{name:"Task",status:"Todo"}}]}}));
-  result.rerender(<TransactionalCollectionPage {...result.props} dataset={{...dataset,tables:[{...dataset.tables[0]!,fields:dataset.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo"]}:field)}]}} copy={{offline:true,savedAtMs:1}}/>);
-  expect((await screen.findByRole("button",{name:"Move 4"})).hasAttribute("disabled")).toBe(true);
+  invoke.mockImplementation(async (request?: TransactionalInvoke) => ({
+    result: {
+      ...empty,
+      group: (request!.input as Record<string, AppBackendJson>).group!,
+      rows: [{ id: 4, version: 7, values: { name: "Task", status: "Todo" } }],
+    },
+  }));
+  result.rerender(
+    <TransactionalCollectionPage
+      {...result.props}
+      dataset={{
+        ...dataset,
+        tables: [
+          {
+            ...dataset.tables[0]!,
+            fields: dataset.tables[0]!.fields.map((field) =>
+              field.fieldId === "status" ? { ...field, options: ["Todo"] } : field,
+            ),
+          },
+        ],
+      }}
+      copy={{ offline: true, savedAtMs: 1 }}
+    />,
+  );
+  expect((await screen.findByRole("button", { name: "Move 4" })).hasAttribute("disabled")).toBe(
+    true,
+  );
 });
 /** The same Collection with a create action that takes every field. */
-const creating=(fieldIds=["name","status","date"]):TransactionalDatasetDescription=>({...dataset,operations:[...dataset.operations,{operationId:"create",name:"create",label:"Create",kind:"create",tableId:"table",readOnly:false,access:"owner",fieldIds}]});
-const draftPanel=()=>screen.getByRole("complementary",{name:"New record"});
-const draftValue=(field:string)=>within(draftPanel()).getByRole("group",{name:field}).querySelector("[data-property-value]")!.textContent;
-function typeDraft(field:string,text:string){
-  const row=within(draftPanel()).getByRole("group",{name:field});
+const creating = (fieldIds = ["name", "status", "date"]): TransactionalDatasetDescription => ({
+  ...dataset,
+  operations: [
+    ...dataset.operations,
+    {
+      operationId: "create",
+      name: "create",
+      label: "Create",
+      kind: "create",
+      tableId: "table",
+      readOnly: false,
+      access: "owner",
+      fieldIds,
+    },
+  ],
+});
+const draftPanel = () => screen.getByRole("complementary", { name: "New record" });
+const draftValue = (field: string) =>
+  within(draftPanel()).getByRole("group", { name: field }).querySelector("[data-property-value]")!
+    .textContent;
+function typeDraft(field: string, text: string) {
+  const row = within(draftPanel()).getByRole("group", { name: field });
   fireEvent.click(within(row).getAllByRole("button")[0]!);
-  const input=row.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
-  fireEvent.change(input,{target:{value:text}}); fireEvent.keyDown(input,{key:"Enter"});
+  const input = row.querySelector<HTMLInputElement>("[data-cell-editor] input")!;
+  fireEvent.change(input, { target: { value: text } });
+  fireEvent.keyDown(input, { key: "Enter" });
 }
-it("opens a board column's new record in the panel with the column's value filled in, and sends one create from Create record",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(request.operationId==="create")return {result:{id:9,version:1}};
-    return {result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}};
-  });
-  const view=setup(invoke);
-  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating()}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"New in Done"}));
+it("opens a board column's new record in the panel with the column's value filled in, and sends one create from Create record", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === "create") return { result: { id: 9, version: 1 } };
+      return {
+        result: { ...empty, group: (request.input as Record<string, AppBackendJson>).group! },
+      };
+    },
+  );
+  const view = setup(invoke);
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "New in Done" }));
   // The record does not exist yet: the panel holds it, with the column's value, and the board stays beside it.
-  expect(within(draftPanel()).getByRole("heading",{name:"New record"})).toBeTruthy();
+  expect(within(draftPanel()).getByRole("heading", { name: "New record" })).toBeTruthy();
   expect(draftValue("Status")).toBe("Done");
   expect(screen.getByTestId("board")).toBeTruthy();
-  expect(invoke.mock.calls.some(([request])=>request.operationId==="create")).toBe(false);
-  typeDraft("Name","Ship it");
-  fireEvent.click(screen.getByRole("button",{name:"Create record"}));
-  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>request.operationId==="create").map(([request])=>request.input)).toEqual([{values:{name:"Ship it",status:"Done",date:null}}]));
-  await waitFor(()=>expect(screen.queryByRole("complementary",{name:"New record"})).toBeNull());
+  expect(invoke.mock.calls.some(([request]) => request.operationId === "create")).toBe(false);
+  typeDraft("Name", "Ship it");
+  fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls
+        .filter(([request]) => request.operationId === "create")
+        .map(([request]) => request.input),
+    ).toEqual([{ values: { name: "Ship it", status: "Done", date: null } }]),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("complementary", { name: "New record" })).toBeNull(),
+  );
 });
-it("opens the no value column's new record with the group field empty, over the field's default",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>({result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}}));
-  const view=setup(invoke);
-  const base=creating();
+it("opens the no value column's new record with the group field empty, over the field's default", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({
+      result: { ...empty, group: (request.input as Record<string, AppBackendJson>).group! },
+    }),
+  );
+  const view = setup(invoke);
+  const base = creating();
   // Status starts as Todo in a new record, unless the column says it has no value.
-  const defaulted={...base,tables:[{...base.tables[0]!,fields:base.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,default:"Todo"}:field)}]};
-  view.rerender(<TransactionalCollectionPage {...view.props} dataset={defaulted}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"New in Done"}));
+  const defaulted = {
+    ...base,
+    tables: [
+      {
+        ...base.tables[0]!,
+        fields: base.tables[0]!.fields.map((field) =>
+          field.fieldId === "status" ? { ...field, default: "Todo" } : field,
+        ),
+      },
+    ],
+  };
+  view.rerender(<TransactionalCollectionPage {...view.props} dataset={defaulted} />);
+  fireEvent.click(await screen.findByRole("button", { name: "New in Done" }));
   expect(draftValue("Status")).toBe("Done");
-  fireEvent.click(within(draftPanel()).getByRole("button",{name:"Cancel"}));
-  fireEvent.click(screen.getByRole("button",{name:"New with no value"}));
+  fireEvent.click(within(draftPanel()).getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "New with no value" }));
   expect(draftValue("Status")).toBe("Empty");
-  fireEvent.click(within(draftPanel()).getByRole("button",{name:"Cancel"}));
+  fireEvent.click(within(draftPanel()).getByRole("button", { name: "Cancel" }));
   // New record beside the board fills nothing in, so the default shows.
   fireEvent.click(screen.getByTestId("collection-new-record"));
   expect(draftValue("Status")).toBe("Todo");
 });
-it("opens New record beside a board in the panel with no value filled in, and offers a column no New where the create does not take its field",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>({result:{...empty,group:(request.input as Record<string,AppBackendJson>).group!}}));
-  const view=setup(invoke);
+it("opens New record beside a board in the panel with no value filled in, and offers a column no New where the create does not take its field", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => ({
+      result: { ...empty, group: (request.input as Record<string, AppBackendJson>).group! },
+    }),
+  );
+  const view = setup(invoke);
   // No create action: nothing offers a new record.
   await screen.findByTestId("board");
-  expect(screen.queryByRole("button",{name:"New in Done"})).toBeNull();
+  expect(screen.queryByRole("button", { name: "New in Done" })).toBeNull();
   expect(screen.queryByTestId("collection-new-record")).toBeNull();
   // A create that does not take the group field: the frame's button, and no column's.
-  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating(["name","date"])}/>);
+  view.rerender(
+    <TransactionalCollectionPage {...view.props} dataset={creating(["name", "date"])} />,
+  );
   await screen.findByTestId("board");
-  expect(screen.queryByRole("button",{name:"New in Done"})).toBeNull();
-  await waitFor(()=>expect(screen.getByTestId<HTMLButtonElement>("collection-new-record").disabled).toBe(false));
+  expect(screen.queryByRole("button", { name: "New in Done" })).toBeNull();
+  await waitFor(() =>
+    expect(screen.getByTestId<HTMLButtonElement>("collection-new-record").disabled).toBe(false),
+  );
   fireEvent.click(screen.getByTestId("collection-new-record"));
-  expect(within(draftPanel()).getAllByRole("group").map(row=>row.getAttribute("data-property"))).toEqual(["name","date"]);
+  expect(
+    within(draftPanel())
+      .getAllByRole("group")
+      .map((row) => row.getAttribute("data-property")),
+  ).toEqual(["name", "date"]);
   expect(draftValue("Name")).toBe("Empty");
-  fireEvent.click(within(draftPanel()).getByRole("button",{name:"Cancel"}));
+  fireEvent.click(within(draftPanel()).getByRole("button", { name: "Cancel" }));
   expect(screen.queryByRole("complementary")).toBeNull();
 });
-it("opens a calendar day's new record in the panel with the day in the calendar's date field",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    if(request.operationId==="create")return {result:{id:9,version:1}};
-    return {result:{...empty,range:(request.input as Record<string,AppBackendJson>).range!}};
-  });
-  const view=setup(invoke,calendar);
+it("opens a calendar day's new record in the panel with the day in the calendar's date field", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      if (request.operationId === "create") return { result: { id: 9, version: 1 } };
+      return {
+        result: { ...empty, range: (request.input as Record<string, AppBackendJson>).range! },
+      };
+    },
+  );
+  const view = setup(invoke, calendar);
   // A create that does not take the date field offers no day.
-  view.rerender(<TransactionalCollectionPage {...view.props} dataset={creating(["name","status"])}/>);
+  view.rerender(
+    <TransactionalCollectionPage {...view.props} dataset={creating(["name", "status"])} />,
+  );
   await screen.findByTestId("calendar");
-  expect(screen.queryByRole("button",{name:"New on November 20"})).toBeNull();
-  view.rerender(<TransactionalCollectionPage {...view.props} dataset={{...creating(),revision:2,revisionSha256:"b".repeat(64)}}/>);
-  fireEvent.click(await screen.findByRole("button",{name:"New on November 20"}));
+  expect(screen.queryByRole("button", { name: "New on November 20" })).toBeNull();
+  view.rerender(
+    <TransactionalCollectionPage
+      {...view.props}
+      dataset={{ ...creating(), revision: 2, revisionSha256: "b".repeat(64) }}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "New on November 20" }));
   expect(draftValue("Date")).toBe(shortDate("2026-11-20"));
-  typeDraft("Name","Launch");
+  typeDraft("Name", "Launch");
   // Status is required and has no default, so Create record says so and sends nothing.
-  fireEvent.click(screen.getByRole("button",{name:"Create record"}));
+  fireEvent.click(screen.getByRole("button", { name: "Create record" }));
   expect(within(draftPanel()).getByRole("alert").textContent).toBe("Enter Status.");
-  expect(invoke.mock.calls.some(([request])=>request.operationId==="create")).toBe(false);
-  fireEvent.click(within(within(draftPanel()).getByRole("group",{name:"Status"})).getAllByRole("button")[0]!);
-  fireEvent.click(within(within(draftPanel()).getByRole("listbox",{name:"Status options"})).getByRole("option",{name:"Todo"}));
-  fireEvent.click(screen.getByRole("button",{name:"Create record"}));
-  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>request.operationId==="create").map(([request])=>request.input)).toEqual([{values:{name:"Launch",status:"Todo",date:"2026-11-20"}}]));
+  expect(invoke.mock.calls.some(([request]) => request.operationId === "create")).toBe(false);
+  fireEvent.click(
+    within(within(draftPanel()).getByRole("group", { name: "Status" })).getAllByRole("button")[0]!,
+  );
+  fireEvent.click(
+    within(within(draftPanel()).getByRole("listbox", { name: "Status options" })).getByRole(
+      "option",
+      { name: "Todo" },
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Create record" }));
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls
+        .filter(([request]) => request.operationId === "create")
+        .map(([request]) => request.input),
+    ).toEqual([{ values: { name: "Launch", status: "Todo", date: "2026-11-20" } }]),
+  );
 });
-it("loads the visible calendar range and changes range on navigation",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,range:input.range!}};});
-  setup(invoke,calendar);
+it("loads the visible calendar range and changes range on navigation", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      return { result: { ...empty, range: input.range! } };
+    },
+  );
+  setup(invoke, calendar);
   await viewIdle("calendar");
-  fireEvent.click(screen.getByRole("button",{name:"January"}));
-  await waitFor(()=>expect(invoke.mock.calls.some(([request])=>JSON.stringify(request.input)===JSON.stringify({limit:50,range:{fieldId:"date",start:"2026-12-27",end:"2027-02-07"}}))).toBe(true));
+  fireEvent.click(screen.getByRole("button", { name: "January" }));
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls.some(
+        ([request]) =>
+          JSON.stringify(request.input) ===
+          JSON.stringify({
+            limit: 50,
+            range: { fieldId: "date", start: "2026-12-27", end: "2027-02-07" },
+          }),
+      ),
+    ).toBe(true),
+  );
 });
-it("reads the nearest record on each side of an empty month for the calendar to offer",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>,range=input.range as {fieldId:string;start:string;end:string};
-    if(input.limit!==1)return {result:{...empty,range}};
-    return {result:{range,rows:range.start==="0001-01-01"?[]:[{id:7,version:1,values:{date:"2027-03-04"}}],nextCursor:null}};
-  });
-  setup(invoke,calendar);
+it("reads the nearest record on each side of an empty month for the calendar to offer", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>,
+        range = input.range as { fieldId: string; start: string; end: string };
+      if (input.limit !== 1) return { result: { ...empty, range } };
+      return {
+        result: {
+          range,
+          rows:
+            range.start === "0001-01-01"
+              ? []
+              : [{ id: 7, version: 1, values: { date: "2027-03-04" } }],
+          nextCursor: null,
+        },
+      };
+    },
+  );
+  setup(invoke, calendar);
   await screen.findByText("Nearby 2027-03-04");
-  const outside=invoke.mock.calls.map(([request])=>request.input as Record<string,AppBackendJson>).filter(input=>input.limit===1);
-  expect(outside.map(input=>[input.range,input.sort])).toEqual([
-    [{fieldId:"date",start:"0001-01-01",end:expect.any(String)},{fieldId:"date",direction:"desc"}],
-    [{fieldId:"date",start:expect.any(String),end:"9999-12-31"},{fieldId:"date",direction:"asc"}],
+  const outside = invoke.mock.calls
+    .map(([request]) => request.input as Record<string, AppBackendJson>)
+    .filter((input) => input.limit === 1);
+  expect(outside.map((input) => [input.range, input.sort])).toEqual([
+    [
+      { fieldId: "date", start: "0001-01-01", end: expect.any(String) },
+      { fieldId: "date", direction: "desc" },
+    ],
+    [
+      { fieldId: "date", start: expect.any(String), end: "9999-12-31" },
+      { fieldId: "date", direction: "asc" },
+    ],
   ]);
 });
-it("leaves the offer out when only one side's read fails, since that side might be closer",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>,range=input.range as {fieldId:string;start:string;end:string};
-    if(input.limit!==1)return {result:{...empty,range}};
-    if(range.start==="0001-01-01")throw Error("The earlier read failed.");
-    return {result:{range,rows:[{id:7,version:1,values:{date:"2027-03-04"}}],nextCursor:null}};
-  });
-  const result=setup(invoke,calendar);
-  await screen.findByRole("button",{name:"January"});
-  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>(request.input as Record<string,AppBackendJson>).limit===1)).toHaveLength(2));
-  await act(async()=>{});
+it("leaves the offer out when only one side's read fails, since that side might be closer", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>,
+        range = input.range as { fieldId: string; start: string; end: string };
+      if (input.limit !== 1) return { result: { ...empty, range } };
+      if (range.start === "0001-01-01") throw Error("The earlier read failed.");
+      return {
+        result: {
+          range,
+          rows: [{ id: 7, version: 1, values: { date: "2027-03-04" } }],
+          nextCursor: null,
+        },
+      };
+    },
+  );
+  const result = setup(invoke, calendar);
+  await screen.findByRole("button", { name: "January" });
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls.filter(
+        ([request]) => (request.input as Record<string, AppBackendJson>).limit === 1,
+      ),
+    ).toHaveLength(2),
+  );
+  await act(async () => {});
   expect(screen.queryByText(/^Nearby/)).toBeNull();
   expect(result.props.onError).not.toHaveBeenCalled();
 });
-it("leaves the offer out when the read action cannot find records outside the month",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>;
-    if(input.limit===1)throw Error("This read action does not sort by date.");
-    return {result:{...empty,range:input.range!}};
-  });
-  const result=setup(invoke,calendar);
-  await screen.findByRole("button",{name:"January"});
-  await waitFor(()=>expect(invoke.mock.calls.filter(([request])=>(request.input as Record<string,AppBackendJson>).limit===1)).toHaveLength(2));
+it("leaves the offer out when the read action cannot find records outside the month", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      if (input.limit === 1) throw Error("This read action does not sort by date.");
+      return { result: { ...empty, range: input.range! } };
+    },
+  );
+  const result = setup(invoke, calendar);
+  await screen.findByRole("button", { name: "January" });
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls.filter(
+        ([request]) => (request.input as Record<string, AppBackendJson>).limit === 1,
+      ),
+    ).toHaveLength(2),
+  );
   expect(screen.queryByText(/^Nearby/)).toBeNull();
   expect(result.props.onError).not.toHaveBeenCalled();
 });
-it("offers layout changes to readers without owner view-source controls",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.range?{range:input.range}:{}),...(input.group?{group:input.group}:{})}};});
-  setup(invoke,{...board,kind:"table"});
-  const tabs=()=>within(screen.getByTestId("collection-view-switcher")).getAllByRole<HTMLButtonElement>("button");
-  const tab=(name:string)=>tabs().find(tab=>tab.textContent===name)!;
-  await waitFor(()=>expect(tab("Calendar").disabled).toBe(false));
+it("offers layout changes to readers without owner view-source controls", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      return {
+        result: {
+          ...empty,
+          ...(input.range ? { range: input.range } : {}),
+          ...(input.group ? { group: input.group } : {}),
+        },
+      };
+    },
+  );
+  setup(invoke, { ...board, kind: "table" });
+  const tabs = () =>
+    within(screen.getByTestId("collection-view-switcher")).getAllByRole<HTMLButtonElement>(
+      "button",
+    );
+  const tab = (name: string) => tabs().find((tab) => tab.textContent === name)!;
+  await waitFor(() => expect(tab("Calendar").disabled).toBe(false));
   // The layouts are tabs that change what this computer shows. None is a saved view.
-  expect(tabs().map(tab=>[tab.textContent,tab.getAttribute("aria-pressed")])).toEqual([["Table","true"],["Board","false"],["Calendar","false"]]);
+  expect(tabs().map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")])).toEqual([
+    ["Table", "true"],
+    ["Board", "false"],
+    ["Calendar", "false"],
+  ]);
   fireEvent.click(tab("Calendar"));
-  await screen.findByRole("button",{name:"January"});
+  await screen.findByRole("button", { name: "January" });
   expect(tab("Calendar").getAttribute("aria-pressed")).toBe("true");
-  expect(screen.queryByRole("button",{name:"Add a view"})).toBeNull();
-  expect(screen.queryByRole("button",{name:"View actions"})).toBeNull();
+  expect(screen.queryByRole("button", { name: "Add a view" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "View actions" })).toBeNull();
   fireEvent.contextMenu(tab("Calendar"));
   expect(screen.queryByRole("menu")).toBeNull();
-  fireEvent.click(screen.getByRole("button",{name:"Manage Collection"}));
-  expect(screen.queryByRole("menuitem",{name:"Views"})).toBeNull();
-  fireEvent.keyDown(screen.getByRole("menu"),{key:"Escape"});
-  expect(screen.getByRole("button",{name:"Date Date"}).title).toBe("Calendar date");
+  fireEvent.click(screen.getByRole("button", { name: "Manage Collection" }));
+  expect(screen.queryByRole("menuitem", { name: "Views" })).toBeNull();
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  expect(screen.getByRole("button", { name: "Date Date" }).title).toBe("Calendar date");
   // A board groups by the first select field, and its field changes here only.
-  await waitFor(()=>expect(tab("Board").disabled).toBe(false));
+  await waitFor(() => expect(tab("Board").disabled).toBe(false));
   fireEvent.click(tab("Board"));
   await enabled("Group by Status");
-  fireEvent.click(screen.getByRole("button",{name:"Group by Status"}));
-  expect(within(screen.getByRole("menu",{name:"Group board by"})).getAllByRole("menuitemradio").map(row=>[row.textContent,row.getAttribute("aria-checked")])).toEqual([["Name","false"],["Status","true"],["Date","false"]]);
-  fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
-  expect(await screen.findByRole("button",{name:"Group by Name"})).toBeTruthy();
-  expect(invoke.mock.calls.some(([request])=>JSON.stringify(request.input).includes('"name"'))).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Group by Status" }));
+  expect(
+    within(screen.getByRole("menu", { name: "Group board by" }))
+      .getAllByRole("menuitemradio")
+      .map((row) => [row.textContent, row.getAttribute("aria-checked")]),
+  ).toEqual([
+    ["Name", "false"],
+    ["Status", "true"],
+    ["Date", "false"],
+  ]);
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "Name" }));
+  expect(await screen.findByRole("button", { name: "Group by Name" })).toBeTruthy();
+  expect(
+    invoke.mock.calls.some(([request]) => JSON.stringify(request.input).includes('"name"')),
+  ).toBe(true);
 });
-it("saves the field a saved board groups by, and changes nothing here until its file does",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.group?{group:input.group}:{})}};});
-  const views={list:[board],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
-  const result=setup(invoke,board);
-  result.rerender(<TransactionalCollectionPage {...result.props} views={views}/>);
+it("saves the field a saved board groups by, and changes nothing here until its file does", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      return { result: { ...empty, ...(input.group ? { group: input.group } : {}) } };
+    },
+  );
+  const views = {
+    list: [board],
+    busy: false,
+    select: vi.fn(),
+    create: vi.fn(async () => null),
+    rename: vi.fn(async () => null),
+    remove: vi.fn(),
+    setField: vi.fn(),
+    edit: vi.fn(),
+    manage: vi.fn(),
+  };
+  const result = setup(invoke, board);
+  result.rerender(<TransactionalCollectionPage {...result.props} views={views} />);
   await enabled("Group by Status");
-  fireEvent.click(screen.getByRole("button",{name:"Group by Status"}));
-  fireEvent.click(screen.getByRole("menuitemradio",{name:"Name"}));
-  expect(views.setField).toHaveBeenCalledExactlyOnceWith("board",{groupBy:"name"});
-  expect(screen.getByRole("button",{name:"Group by Status"})).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Group by Status" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "Name" }));
+  expect(views.setField).toHaveBeenCalledExactlyOnceWith("board", { groupBy: "name" });
+  expect(screen.getByRole("button", { name: "Group by Status" })).toBeTruthy();
   // The saved view's tab is the open one, among All records and the saved views.
-  expect(within(screen.getByTestId("collection-view-switcher")).getAllByRole("button").filter(tab=>tab.hasAttribute("aria-pressed")).map(tab=>[tab.textContent,tab.getAttribute("aria-pressed")])).toEqual([["All records","false"],["Board","true"]]);
+  expect(
+    within(screen.getByTestId("collection-view-switcher"))
+      .getAllByRole("button")
+      .filter((tab) => tab.hasAttribute("aria-pressed"))
+      .map((tab) => [tab.textContent, tab.getAttribute("aria-pressed")]),
+  ).toEqual([
+    ["All records", "false"],
+    ["Board", "true"],
+  ]);
 });
-it("saves the date field of a saved calendar",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{const input=request.input as Record<string,AppBackendJson>;return {result:{...empty,...(input.range?{range:input.range}:{})}};});
-  const due={fieldId:"due",name:"Due",type:"date" as const,required:false,unique:false};
-  const dated={...dataset,tables:[{...dataset.tables[0]!,fields:[...dataset.tables[0]!.fields,due]}],operations:dataset.operations.map(operation=>operation.operationId==="read"?{...operation,fieldIds:[...operation.fieldIds,"due"]}:operation)};
-  const views={list:[calendar],busy:false,select:vi.fn(),create:vi.fn(async()=>null),rename:vi.fn(async()=>null),remove:vi.fn(),setField:vi.fn(),edit:vi.fn(),manage:vi.fn()};
-  const result=setup(invoke,calendar);
-  result.rerender(<TransactionalCollectionPage {...result.props} dataset={dated} views={views}/>);
+it("saves the date field of a saved calendar", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      return { result: { ...empty, ...(input.range ? { range: input.range } : {}) } };
+    },
+  );
+  const due = {
+    fieldId: "due",
+    name: "Due",
+    type: "date" as const,
+    required: false,
+    unique: false,
+  };
+  const dated = {
+    ...dataset,
+    tables: [{ ...dataset.tables[0]!, fields: [...dataset.tables[0]!.fields, due] }],
+    operations: dataset.operations.map((operation) =>
+      operation.operationId === "read"
+        ? { ...operation, fieldIds: [...operation.fieldIds, "due"] }
+        : operation,
+    ),
+  };
+  const views = {
+    list: [calendar],
+    busy: false,
+    select: vi.fn(),
+    create: vi.fn(async () => null),
+    rename: vi.fn(async () => null),
+    remove: vi.fn(),
+    setField: vi.fn(),
+    edit: vi.fn(),
+    manage: vi.fn(),
+  };
+  const result = setup(invoke, calendar);
+  result.rerender(<TransactionalCollectionPage {...result.props} dataset={dated} views={views} />);
   await enabled("Date Date");
-  fireEvent.click(screen.getByRole("button",{name:"Date Date"}));
-  fireEvent.click(screen.getByRole("menuitemradio",{name:"Due"}));
-  expect(views.setField).toHaveBeenCalledExactlyOnceWith("calendar",{dateField:"due"});
+  fireEvent.click(screen.getByRole("button", { name: "Date Date" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "Due" }));
+  expect(views.setField).toHaveBeenCalledExactlyOnceWith("calendar", { dateField: "due" });
 });
-it("paginates calendar results without implying the first 50 events cover the month",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>,range=input.range as {fieldId:string;start:string;end:string};
-    return {result:{range,rows:[{id:input.after?51:1,version:1,values:{date:range.start}}],nextCursor:input.after?null:{id:1,value:1}}};
-  });
-  setup(invoke,calendar);
+it("paginates calendar results without implying the first 50 events cover the month", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>,
+        range = input.range as { fieldId: string; start: string; end: string };
+      return {
+        result: {
+          range,
+          rows: [{ id: input.after ? 51 : 1, version: 1, values: { date: range.start } }],
+          nextCursor: input.after ? null : { id: 1, value: 1 },
+        },
+      };
+    },
+  );
+  setup(invoke, calendar);
   await screen.findByText("1 on this page · More records");
   await enabled("Next records in this calendar");
-  fireEvent.click(screen.getByRole("button",{name:"Next records in this calendar"}));
+  fireEvent.click(screen.getByRole("button", { name: "Next records in this calendar" }));
   await screen.findByText("51");
-  expect(invoke.mock.calls.at(-1)?.[0].input).toMatchObject({after:{id:1,value:1}});
+  expect(invoke.mock.calls.at(-1)?.[0].input).toMatchObject({ after: { id: 1, value: 1 } });
 });
-it("ignores reads from a previous workspace",async()=>{
-  const pending=deferred<{result:AppBackendJson}>();
-  const invoke=vi.fn(async(request:TransactionalInvoke)=>request.workspaceId==="w"?pending.promise:{result:{...empty,range:(request.input as Record<string,AppBackendJson>).range!}});
-  const result=setup(invoke,calendar);
-  await waitFor(()=>expect(invoke).toHaveBeenCalled());
-  result.rerender(<TransactionalCollectionPage {...result.props} workspaceId="next"/>);
-  await screen.findByRole("button",{name:"January"});
-  await act(async()=>pending.resolve({result:{rows:[{id:"private",version:1,values:{name:"Private"}}],nextCursor:null}}));
-  expect(result.props.onError).not.toHaveBeenCalled();expect(screen.queryByText("private")).toBeNull();
+it("ignores reads from a previous workspace", async () => {
+  const pending = deferred<{ result: AppBackendJson }>();
+  const invoke = vi.fn(async (request: TransactionalInvoke) =>
+    request.workspaceId === "w"
+      ? pending.promise
+      : { result: { ...empty, range: (request.input as Record<string, AppBackendJson>).range! } },
+  );
+  const result = setup(invoke, calendar);
+  await waitFor(() => expect(invoke).toHaveBeenCalled());
+  result.rerender(<TransactionalCollectionPage {...result.props} workspaceId="next" />);
+  await screen.findByRole("button", { name: "January" });
+  await act(async () =>
+    pending.resolve({
+      result: {
+        rows: [{ id: "private", version: 1, values: { name: "Private" } }],
+        nextCursor: null,
+      },
+    }),
+  );
+  expect(result.props.onError).not.toHaveBeenCalled();
+  expect(screen.queryByText("private")).toBeNull();
 });
-it("shows board records an automation changed in place, keeping the board on screen while it reads",async()=>{
-  let name="First task",gate:Promise<void>|null=null;
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    await gate;
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name,status:"Todo"}}]:[]}};
-  });
-  const result=setup(invoke);
+it("shows board records an automation changed in place, keeping the board on screen while it reads", async () => {
+  let name = "First task",
+    gate: Promise<void> | null = null;
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      await gate;
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo" ? [{ id: 4, version: 7, values: { name, status: "Todo" } }] : [],
+        },
+      };
+    },
+  );
+  const result = setup(invoke);
   await screen.findByText("First task");
-  const before=invoke.mock.calls.length,held=deferred();
-  gate=held.promise;name="Changed task";
-  result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1}/>);
-  await waitFor(()=>expect(invoke.mock.calls.length).toBeGreaterThan(before));
+  const before = invoke.mock.calls.length,
+    held = deferred();
+  gate = held.promise;
+  name = "Changed task";
+  result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1} />);
+  await waitFor(() => expect(invoke.mock.calls.length).toBeGreaterThan(before));
   expect(screen.queryByText("Loading view…")).toBeNull();
   expect(screen.getByText("First task")).toBeTruthy();
-  expect((screen.getByRole("button",{name:"Move 4"}) as HTMLButtonElement).disabled).toBe(false);
-  await act(async()=>held.resolve());
+  expect((screen.getByRole("button", { name: "Move 4" }) as HTMLButtonElement).disabled).toBe(
+    false,
+  );
+  await act(async () => held.resolve());
   await screen.findByText("Changed task");
   expect(result.props.onError).not.toHaveBeenCalled();
 });
-it("finishes a board read and a read in place asked for in one render, and shows an open record's new values",async()=>{
-  let name="First task",gate:Promise<void>|null=null;
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    await gate;
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name,status:"Todo"}}]:[]}};
-  });
-  const result=setup(invoke);
+it("finishes a board read and a read in place asked for in one render, and shows an open record's new values", async () => {
+  let name = "First task",
+    gate: Promise<void> | null = null;
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      await gate;
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo" ? [{ id: 4, version: 7, values: { name, status: "Todo" } }] : [],
+        },
+      };
+    },
+  );
+  const result = setup(invoke);
   await viewIdle("board");
-  fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
+  fireEvent.click(screen.getByRole("button", { name: "Show 4" }));
   expect(screen.getByRole("complementary").textContent).toContain("First task");
-  fireEvent.click(screen.getByRole("button",{name:"Close record"}));
-  const held=deferred();gate=held.promise;name="Second task";
-  result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={1}/>);
+  fireEvent.click(screen.getByRole("button", { name: "Close record" }));
+  const held = deferred();
+  gate = held.promise;
+  name = "Second task";
+  result.rerender(
+    <TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={1} />,
+  );
   expect(await screen.findByText("Loading view…")).toBeTruthy();
-  await act(async()=>held.resolve());
+  await act(async () => held.resolve());
   await screen.findByText("Second task");
   // Neither read is left holding the view.
-  await waitFor(()=>expect((screen.getByRole("button",{name:"Move 4"}) as HTMLButtonElement).disabled).toBe(false));
-  fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
-  name="Third task";
-  result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={2}/>);
-  await waitFor(()=>expect(screen.getByRole("complementary").textContent).toContain("Third task"));
+  await waitFor(() =>
+    expect((screen.getByRole("button", { name: "Move 4" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    ),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Show 4" }));
+  name = "Third task";
+  result.rerender(
+    <TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={2} />,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("complementary").textContent).toContain("Third task"),
+  );
   expect(screen.queryByText("Loading view…")).toBeNull();
   expect(result.props.onError).not.toHaveBeenCalled();
 });
-it("reads an open Calendar record by its id once an automation moves it out of the shown month, and says when it is gone",async()=>{
-  const table=dataset.tables[0]!;
-  const keyed:TransactionalDatasetDescription={...dataset,tables:[{...table,primaryKeyFieldId:"key",fields:[{fieldId:"key",name:"Record ID",type:"text",required:true,unique:true,generated:"record-id"},...table.fields]}],
-    operations:dataset.operations.map(operation=>operation.kind==="read"?{...operation,fieldIds:["key",...operation.fieldIds]}:operation)};
-  const day=(date:Date)=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
-  const now=new Date(),inMonth=day(new Date(now.getFullYear(),now.getMonth(),15)),later=day(new Date(now.getFullYear(),now.getMonth()+3,15));
-  let date:string|null=inMonth;
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>;
-    const row={id:7,version:date===inMonth?1:2,values:{key:"7",name:"Pay rent",status:"Todo",date}};
-    if(input.filters)return {result:{rows:date===null?[]:[row],nextCursor:null}};
-    const range=input.range as {start:string;end:string};
-    return {result:{range:input.range!,rows:date!==null&&date>=range.start&&date<range.end?[row]:[],nextCursor:null}};
-  });
-  const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
-  const {rerender}=render(<TransactionalCollectionPage {...props}/>);
+it("reads an open Calendar record by its id once an automation moves it out of the shown month, and says when it is gone", async () => {
+  const table = dataset.tables[0]!;
+  const keyed: TransactionalDatasetDescription = {
+    ...dataset,
+    tables: [
+      {
+        ...table,
+        primaryKeyFieldId: "key",
+        fields: [
+          {
+            fieldId: "key",
+            name: "Record ID",
+            type: "text",
+            required: true,
+            unique: true,
+            generated: "record-id",
+          },
+          ...table.fields,
+        ],
+      },
+    ],
+    operations: dataset.operations.map((operation) =>
+      operation.kind === "read"
+        ? { ...operation, fieldIds: ["key", ...operation.fieldIds] }
+        : operation,
+    ),
+  };
+  const day = (date: Date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const now = new Date(),
+    inMonth = day(new Date(now.getFullYear(), now.getMonth(), 15)),
+    later = day(new Date(now.getFullYear(), now.getMonth() + 3, 15));
+  let date: string | null = inMonth;
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      const row = {
+        id: 7,
+        version: date === inMonth ? 1 : 2,
+        values: { key: "7", name: "Pay rent", status: "Todo", date },
+      };
+      if (input.filters) return { result: { rows: date === null ? [] : [row], nextCursor: null } };
+      const range = input.range as { start: string; end: string };
+      return {
+        result: {
+          range: input.range!,
+          rows: date !== null && date >= range.start && date < range.end ? [row] : [],
+          nextCursor: null,
+        },
+      };
+    },
+  );
+  const props = {
+    workspaceId: "w",
+    dataset: keyed,
+    tableId: "table",
+    invoke,
+    onError: vi.fn(),
+    onNotice: vi.fn(),
+    activeView: calendar,
+  };
+  const { rerender } = render(<TransactionalCollectionPage {...props} />);
   await viewIdle("calendar");
-  fireEvent.click(screen.getByRole("button",{name:"Show 7"}));
-  const details=()=>screen.getByRole("complementary");
+  fireEvent.click(screen.getByRole("button", { name: "Show 7" }));
+  const details = () => screen.getByRole("complementary");
   // A calendar entry opens its record in the panel, and the calendar marks the entry.
   expect(screen.getByTestId("calendar").getAttribute("data-open-record")).toBe("7");
   expect(details().textContent).toContain(shortDate(inMonth));
-  date=later;
-  rerender(<TransactionalCollectionPage {...props} recordsChanged={1}/>);
-  await waitFor(()=>expect(details().textContent).toContain(shortDate(later)));
-  expect(invoke.mock.calls.some(([request])=>JSON.stringify((request.input as Record<string,AppBackendJson>).filters)===JSON.stringify([{fieldId:"key",value:7}]))).toBe(true);
-  date=null;
-  rerender(<TransactionalCollectionPage {...props} recordsChanged={2}/>);
-  await waitFor(()=>expect(details().textContent).toContain("This record is no longer in this Collection."));
+  date = later;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
+  await waitFor(() => expect(details().textContent).toContain(shortDate(later)));
+  expect(
+    invoke.mock.calls.some(
+      ([request]) =>
+        JSON.stringify((request.input as Record<string, AppBackendJson>).filters) ===
+        JSON.stringify([{ fieldId: "key", value: 7 }]),
+    ),
+  ).toBe(true);
+  date = null;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={2} />);
+  await waitFor(() =>
+    expect(details().textContent).toContain("This record is no longer in this Collection."),
+  );
   expect(details().textContent).not.toContain(shortDate(later));
   expect(props.onError).not.toHaveBeenCalled();
 });
-it("drops a by-id read of an open Calendar record once a newer read finds it back in the month",async()=>{
-  const table=dataset.tables[0]!;
-  const keyed:TransactionalDatasetDescription={...dataset,tables:[{...table,primaryKeyFieldId:"key",fields:[{fieldId:"key",name:"Record ID",type:"text",required:true,unique:true,generated:"record-id"},...table.fields]}],
-    operations:dataset.operations.map(operation=>operation.kind==="read"?{...operation,fieldIds:["key",...operation.fieldIds]}:operation)};
-  const day=(date:Date)=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
-  const now=new Date(),first=day(new Date(now.getFullYear(),now.getMonth(),10)),later=day(new Date(now.getFullYear(),now.getMonth()+3,15)),back=day(new Date(now.getFullYear(),now.getMonth(),20));
-  let date=first,version=1;
-  const byId=deferred<{result:AppBackendJson}>();
-  const row=()=>({id:7,version,values:{key:"7",name:"Pay rent",status:"Todo",date}});
-  const invoke=vi.fn(async(request:TransactionalInvoke,_signal:AbortSignal):Promise<{result:AppBackendJson}>=>{
-    const input=request.input as Record<string,AppBackendJson>;
-    if(input.filters)return byId.promise;
-    const range=input.range as {start:string;end:string};
-    return {result:{range:input.range!,rows:date>=range.start&&date<range.end?[row()]:[],nextCursor:null}};
+it("drops a by-id read of an open Calendar record once a newer read finds it back in the month", async () => {
+  const table = dataset.tables[0]!;
+  const keyed: TransactionalDatasetDescription = {
+    ...dataset,
+    tables: [
+      {
+        ...table,
+        primaryKeyFieldId: "key",
+        fields: [
+          {
+            fieldId: "key",
+            name: "Record ID",
+            type: "text",
+            required: true,
+            unique: true,
+            generated: "record-id",
+          },
+          ...table.fields,
+        ],
+      },
+    ],
+    operations: dataset.operations.map((operation) =>
+      operation.kind === "read"
+        ? { ...operation, fieldIds: ["key", ...operation.fieldIds] }
+        : operation,
+    ),
+  };
+  const day = (date: Date) =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const now = new Date(),
+    first = day(new Date(now.getFullYear(), now.getMonth(), 10)),
+    later = day(new Date(now.getFullYear(), now.getMonth() + 3, 15)),
+    back = day(new Date(now.getFullYear(), now.getMonth(), 20));
+  let date = first,
+    version = 1;
+  const byId = deferred<{ result: AppBackendJson }>();
+  const row = () => ({
+    id: 7,
+    version,
+    values: { key: "7", name: "Pay rent", status: "Todo", date },
   });
-  const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
-  const {rerender}=render(<TransactionalCollectionPage {...props}/>);
+  const invoke = vi.fn(
+    async (
+      request: TransactionalInvoke,
+      _signal: AbortSignal,
+    ): Promise<{ result: AppBackendJson }> => {
+      const input = request.input as Record<string, AppBackendJson>;
+      if (input.filters) return byId.promise;
+      const range = input.range as { start: string; end: string };
+      return {
+        result: {
+          range: input.range!,
+          rows: date >= range.start && date < range.end ? [row()] : [],
+          nextCursor: null,
+        },
+      };
+    },
+  );
+  const props = {
+    workspaceId: "w",
+    dataset: keyed,
+    tableId: "table",
+    invoke,
+    onError: vi.fn(),
+    onNotice: vi.fn(),
+    activeView: calendar,
+  };
+  const { rerender } = render(<TransactionalCollectionPage {...props} />);
   await viewIdle("calendar");
-  fireEvent.click(screen.getByRole("button",{name:"Show 7"}));
-  const details=()=>screen.getByRole("complementary");
+  fireEvent.click(screen.getByRole("button", { name: "Show 7" }));
+  const details = () => screen.getByRole("complementary");
   // Out of the month: the page reads the record by its id, and that read waits.
-  date=later;version=2;
-  rerender(<TransactionalCollectionPage {...props} recordsChanged={1}/>);
-  await waitFor(()=>expect(invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).filters!==undefined)).toBe(true));
+  date = later;
+  version = 2;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
+  await waitFor(() =>
+    expect(
+      invoke.mock.calls.some(
+        ([request]) => (request.input as Record<string, AppBackendJson>).filters !== undefined,
+      ),
+    ).toBe(true),
+  );
   // Back in the month before it answers: the newer read in place shows the record.
-  date=back;version=3;
-  rerender(<TransactionalCollectionPage {...props} recordsChanged={2}/>);
-  await waitFor(()=>expect(details().textContent).toContain(shortDate(back)));
-  const signal=invoke.mock.calls.find(([request])=>(request.input as Record<string,AppBackendJson>).filters!==undefined)![1];
+  date = back;
+  version = 3;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={2} />);
+  await waitFor(() => expect(details().textContent).toContain(shortDate(back)));
+  const signal = invoke.mock.calls.find(
+    ([request]) => (request.input as Record<string, AppBackendJson>).filters !== undefined,
+  )![1];
   expect(signal.aborted).toBe(true);
   // The late answer, from while it was out of the month, changes nothing; nor would one saying it was gone.
-  await act(async()=>byId.resolve({result:{rows:[{id:7,version:2,values:{key:"7",name:"Pay rent",status:"Todo",date:later}}],nextCursor:null}}));
+  await act(async () =>
+    byId.resolve({
+      result: {
+        rows: [
+          {
+            id: 7,
+            version: 2,
+            values: { key: "7", name: "Pay rent", status: "Todo", date: later },
+          },
+        ],
+        nextCursor: null,
+      },
+    }),
+  );
   expect(details().textContent).toContain(shortDate(back));
   expect(details().textContent).not.toContain(shortDate(later));
   expect(details().textContent).not.toContain("no longer");
 });
-it("reads a board again in place when fields it does not group by change, and opens it afresh when its group field changes",async()=>{
-  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:1,version:1,values:{name:"First task",status:"Todo"}}]:[]}};
-  });
-  const result=setup(invoke);
-  const card=await screen.findByText("First task");
-  const reads=()=>invoke.mock.calls.filter(([request])=>request.revision===2).length;
-  const added={...dataset,revision:2,revisionSha256:"b".repeat(64),tables:[{...dataset.tables[0]!,fields:[...dataset.tables[0]!.fields,{fieldId:"notes",name:"Notes",type:"text" as const,required:false,unique:false}]}]};
-  result.rerender(<TransactionalCollectionPage {...result.props} dataset={added}/>);
-  await waitFor(()=>expect(reads()).toBeGreaterThan(0));
-  expect(screen.queryByText("Loading view…")).toBeNull();
-  await waitFor(()=>expect(screen.getByText("First task")).toBe(card));
-  const regrouped={...added,revision:3,revisionSha256:"c".repeat(64),tables:[{...added.tables[0]!,fields:added.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo","Doing","Done"]}:field)}]};
-  result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);
-  await waitFor(()=>expect(screen.getByText("First task")).not.toBe(card));
-});
-describe("when the Collection's rules change",()=>{
-  const revision=(n:number,fields=dataset.tables[0]!.fields)=>({...dataset,revision:n,revisionSha256:String(n).repeat(64),tables:[{...dataset.tables[0]!,fields}]});
-  const notes={fieldId:"notes",name:"Notes",type:"text" as const,required:false,unique:false};
-  const answer=(request:TransactionalInvoke,name:string)=>{
-    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
-    return {result:{...empty,group,rows:group.value==="Todo"?[{id:1,version:1,values:{name,status:"Todo"}}]:[]}};
+it("reads a board again in place when fields it does not group by change, and opens it afresh when its group field changes", async () => {
+  const invoke = vi.fn(
+    async (request: TransactionalInvoke): Promise<{ result: AppBackendJson }> => {
+      const group = (request.input as Record<string, AppBackendJson>).group as {
+        fieldId: string;
+        value: string;
+      };
+      return {
+        result: {
+          ...empty,
+          group,
+          rows:
+            group.value === "Todo"
+              ? [{ id: 1, version: 1, values: { name: "First task", status: "Todo" } }]
+              : [],
+        },
+      };
+    },
+  );
+  const result = setup(invoke);
+  const card = await screen.findByText("First task");
+  const reads = () => invoke.mock.calls.filter(([request]) => request.revision === 2).length;
+  const added = {
+    ...dataset,
+    revision: 2,
+    revisionSha256: "b".repeat(64),
+    tables: [
+      {
+        ...dataset.tables[0]!,
+        fields: [
+          ...dataset.tables[0]!.fields,
+          {
+            fieldId: "notes",
+            name: "Notes",
+            type: "text" as const,
+            required: false,
+            unique: false,
+          },
+        ],
+      },
+    ],
   };
-  it("drops a board read that started under the old rules, and reads under the new ones",async()=>{
-    const old=deferred(), now=deferred();
-    const invoke=vi.fn(async(request:TransactionalInvoke)=>{ await (request.revision===1?old:now).promise; return answer(request,request.revision===1?"Old task":"New task"); });
-    const result=setup(invoke);
-    await waitFor(()=>expect(invoke).toHaveBeenCalled());
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(2,[...dataset.tables[0]!.fields,notes])}/>);
-    await act(async()=>old.resolve());
+  result.rerender(<TransactionalCollectionPage {...result.props} dataset={added} />);
+  await waitFor(() => expect(reads()).toBeGreaterThan(0));
+  expect(screen.queryByText("Loading view…")).toBeNull();
+  await waitFor(() => expect(screen.getByText("First task")).toBe(card));
+  const regrouped = {
+    ...added,
+    revision: 3,
+    revisionSha256: "c".repeat(64),
+    tables: [
+      {
+        ...added.tables[0]!,
+        fields: added.tables[0]!.fields.map((field) =>
+          field.fieldId === "status" ? { ...field, options: ["Todo", "Doing", "Done"] } : field,
+        ),
+      },
+    ],
+  };
+  result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped} />);
+  await waitFor(() => expect(screen.getByText("First task")).not.toBe(card));
+});
+describe("when the Collection's rules change", () => {
+  const revision = (n: number, fields = dataset.tables[0]!.fields) => ({
+    ...dataset,
+    revision: n,
+    revisionSha256: String(n).repeat(64),
+    tables: [{ ...dataset.tables[0]!, fields }],
+  });
+  const notes = {
+    fieldId: "notes",
+    name: "Notes",
+    type: "text" as const,
+    required: false,
+    unique: false,
+  };
+  const answer = (request: TransactionalInvoke, name: string) => {
+    const group = (request.input as Record<string, AppBackendJson>).group as {
+      fieldId: string;
+      value: string;
+    };
+    return {
+      result: {
+        ...empty,
+        group,
+        rows:
+          group.value === "Todo" ? [{ id: 1, version: 1, values: { name, status: "Todo" } }] : [],
+      },
+    };
+  };
+  it("drops a board read that started under the old rules, and reads under the new ones", async () => {
+    const old = deferred(),
+      now = deferred();
+    const invoke = vi.fn(async (request: TransactionalInvoke) => {
+      await (request.revision === 1 ? old : now).promise;
+      return answer(request, request.revision === 1 ? "Old task" : "New task");
+    });
+    const result = setup(invoke);
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    result.rerender(
+      <TransactionalCollectionPage
+        {...result.props}
+        dataset={revision(2, [...dataset.tables[0]!.fields, notes])}
+      />,
+    );
+    await act(async () => old.resolve());
     expect(screen.queryByText("Old task")).toBeNull();
-    await act(async()=>now.resolve());
+    await act(async () => now.resolve());
     expect(await screen.findByText("New task")).toBeTruthy();
     expect(screen.queryByText("Old task")).toBeNull();
   });
-  it("shows the refusal and Try again when the board's read under new rules fails",async()=>{
-    const refusal=Error("The read action changed.");
-    const invoke=vi.fn(async(request:TransactionalInvoke)=>{ if(request.revision===2)throw refusal; return answer(request,"First task"); });
-    const result=setup(invoke);
+  it("shows the refusal and Try again when the board's read under new rules fails", async () => {
+    const refusal = Error("The read action changed.");
+    const invoke = vi.fn(async (request: TransactionalInvoke) => {
+      if (request.revision === 2) throw refusal;
+      return answer(request, "First task");
+    });
+    const result = setup(invoke);
     await screen.findByText("First task");
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(2,[...dataset.tables[0]!.fields,notes])}/>);
-    await waitFor(()=>expect(result.props.onError).toHaveBeenCalledWith("dohc could not open this view.",refusal,expect.any(Function),expect.anything()));
+    result.rerender(
+      <TransactionalCollectionPage
+        {...result.props}
+        dataset={revision(2, [...dataset.tables[0]!.fields, notes])}
+      />,
+    );
+    await waitFor(() =>
+      expect(result.props.onError).toHaveBeenCalledWith(
+        "dohc could not open this view.",
+        refusal,
+        expect.any(Function),
+        expect.anything(),
+      ),
+    );
     expect(screen.queryByText("First task")).toBeNull();
   });
-  it("reads a board again in place when a field it doesn't show changes type",async()=>{
-    const invoke=vi.fn(async(request:TransactionalInvoke)=>answer(request,"First task"));
-    const result=setup(invoke);
-    const card=await screen.findByText("First task");
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(2,[...dataset.tables[0]!.fields,notes])}/>);
-    await waitFor(()=>expect(invoke.mock.calls.some(([request])=>request.revision===2)).toBe(true));
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={revision(3,[...dataset.tables[0]!.fields,{...notes,type:"number" as const}])}/>);
-    await waitFor(()=>expect(invoke.mock.calls.some(([request])=>request.revision===3)).toBe(true));
+  it("reads a board again in place when a field it doesn't show changes type", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke) => answer(request, "First task"));
+    const result = setup(invoke);
+    const card = await screen.findByText("First task");
+    result.rerender(
+      <TransactionalCollectionPage
+        {...result.props}
+        dataset={revision(2, [...dataset.tables[0]!.fields, notes])}
+      />,
+    );
+    await waitFor(() =>
+      expect(invoke.mock.calls.some(([request]) => request.revision === 2)).toBe(true),
+    );
+    result.rerender(
+      <TransactionalCollectionPage
+        {...result.props}
+        dataset={revision(3, [...dataset.tables[0]!.fields, { ...notes, type: "number" as const }])}
+      />,
+    );
+    await waitFor(() =>
+      expect(invoke.mock.calls.some(([request]) => request.revision === 3)).toBe(true),
+    );
     expect(screen.queryByText("Loading view…")).toBeNull();
-    await waitFor(()=>expect(screen.getByText("First task")).toBe(card));
+    await waitFor(() => expect(screen.getByText("First task")).toBe(card));
   });
-  it("fills in an open record's changed values once a board opens afresh",async()=>{
-    const invoke=vi.fn(async(request:TransactionalInvoke)=>answer(request,"First task"));
-    const result=setup(invoke);
+  it("fills in an open record's changed values once a board opens afresh", async () => {
+    const invoke = vi.fn(async (request: TransactionalInvoke) => answer(request, "First task"));
+    const result = setup(invoke);
     await screen.findByText("First task");
     await viewIdle("board");
-    fireEvent.click(screen.getByRole("button",{name:"Show 1"}));
-    const details=screen.getByRole("complementary");
+    fireEvent.click(screen.getByRole("button", { name: "Show 1" }));
+    const details = screen.getByRole("complementary");
     expect(within(details).getByText("Todo")).toBeTruthy();
-    const regrouped=revision(2,dataset.tables[0]!.fields.map(field=>field.fieldId==="status"?{...field,options:["Todo","Doing","Done"]}:field));
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped}/>);
-    await waitFor(()=>expect(within(details).getByText("Todo")).toBeTruthy());
+    const regrouped = revision(
+      2,
+      dataset.tables[0]!.fields.map((field) =>
+        field.fieldId === "status" ? { ...field, options: ["Todo", "Doing", "Done"] } : field,
+      ),
+    );
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={regrouped} />);
+    await waitFor(() => expect(within(details).getByText("Todo")).toBeTruthy());
   });
-  it("keeps Try again working when a later read fails too after the rules change",async()=>{
-    let failing=false;
-    const refusal=Error("The read action changed.");
-    const invoke=vi.fn(async(request:TransactionalInvoke)=>{ if(failing)throw refusal; return answer(request,request.revision===2?"Second task":"First task"); });
-    const result=setup(invoke);
+  it("keeps Try again working when a later read fails too after the rules change", async () => {
+    let failing = false;
+    const refusal = Error("The read action changed.");
+    const invoke = vi.fn(async (request: TransactionalInvoke) => {
+      if (failing) throw refusal;
+      return answer(request, request.revision === 2 ? "Second task" : "First task");
+    });
+    const result = setup(invoke);
     await screen.findByText("First task");
-    failing=true;
-    const next=revision(2,[...dataset.tables[0]!.fields,notes]);
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={next}/>);
-    await waitFor(()=>expect(result.props.onError).toHaveBeenCalledTimes(1));
-    const calls=invoke.mock.calls.length;
-    result.rerender(<TransactionalCollectionPage {...result.props} dataset={next} recordsChanged={1}/>);
-    await waitFor(()=>expect(invoke.mock.calls.length).toBeGreaterThan(calls));
-    await act(async()=>undefined);
-    failing=false;
-    fireEvent.click(screen.getByRole("button",{name:"Try again"}));
+    failing = true;
+    const next = revision(2, [...dataset.tables[0]!.fields, notes]);
+    result.rerender(<TransactionalCollectionPage {...result.props} dataset={next} />);
+    await waitFor(() => expect(result.props.onError).toHaveBeenCalledTimes(1));
+    const calls = invoke.mock.calls.length;
+    result.rerender(
+      <TransactionalCollectionPage {...result.props} dataset={next} recordsChanged={1} />,
+    );
+    await waitFor(() => expect(invoke.mock.calls.length).toBeGreaterThan(calls));
+    await act(async () => undefined);
+    failing = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("Second task")).toBeTruthy();
   });
 });

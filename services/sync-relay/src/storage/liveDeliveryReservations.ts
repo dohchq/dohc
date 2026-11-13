@@ -1,14 +1,33 @@
 import { HOST_CONTROL_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/host-control";
-import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import { LIVE_OBJECT_BINDING_PATH_MAX_BYTES,LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT } from "@dohc/live-session-contract/live-object-binding";
+import {
+  LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
+  type LiveDocumentKey,
+} from "@dohc/live-session-contract/live-update-admission";
+import {
+  LIVE_OBJECT_BINDING_PATH_MAX_BYTES,
+  LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT,
+} from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
 import { assertWorkspaceQuota } from "./workspaces";
-import { LIVE_DELIVERY_BOOTSTRAPS, LIVE_DELIVERY_EDGES, LIVE_DELIVERY_HOSTS, LIVE_DELIVERY_RESERVATIONS, LIVE_DELIVERY_DOCUMENTS, LIVE_DELIVERY_OWNERS } from "./liveCommittedDeliverySchema";
+import {
+  LIVE_DELIVERY_BOOTSTRAPS,
+  LIVE_DELIVERY_EDGES,
+  LIVE_DELIVERY_HOSTS,
+  LIVE_DELIVERY_RESERVATIONS,
+  LIVE_DELIVERY_DOCUMENTS,
+  LIVE_DELIVERY_OWNERS,
+} from "./liveCommittedDeliverySchema";
 import { LIVE_DELIVERY_OWNER_HISTORY, SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { readServiceActivation, serviceActivationState } from "./serviceActivationAccess";
 
-const WHERE_DOCUMENT = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
-const parameters = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+const WHERE_DOCUMENT =
+  "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
+const parameters = (document: LiveDocumentKey) => [
+  document.workspaceId,
+  document.mainVersionId,
+  document.objectId,
+  document.lineageClaimId,
+];
 // These contracts refuse control characters; quotes and backslashes cost two JSON bytes.
 const identifier = "\\".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
 const hostIdentifier = "\\".repeat(HOST_CONTROL_IDENTIFIER_MAX_BYTES);
@@ -22,46 +41,164 @@ function integrity(condition: unknown): asserts condition {
 function charge(storage: StorageContext, workspaceId: string, amount: number): void {
   integrity(Number.isSafeInteger(amount) && amount > 0);
   assertWorkspaceQuota(storage, workspaceId, amount);
-  const result = storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?").run(amount, workspaceId);
+  const result = storage.db
+    .prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+? WHERE workspace_id=?")
+    .run(amount, workspaceId);
   integrity(result.changes === 1);
 }
-function reserve(storage: StorageContext, document: LiveDocumentKey, hostId: string, cursor: number, amount: number): void {
+function reserve(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+  cursor: number,
+  amount: number,
+): void {
   const overhead = bytes([...parameters(document), hostId, cursor, maximum]);
   charge(storage, document.workspaceId, amount + overhead);
-  storage.db.prepare(`INSERT INTO ${LIVE_DELIVERY_RESERVATIONS}(workspace_id,main_version_id,object_id,lineage_claim_id,host_id,journal_cursor,reserved_bytes,accounted_bytes) VALUES (?,?,?,?,?,?,?,?)`)
+  storage.db
+    .prepare(
+      `INSERT INTO ${LIVE_DELIVERY_RESERVATIONS}(workspace_id,main_version_id,object_id,lineage_claim_id,host_id,journal_cursor,reserved_bytes,accounted_bytes) VALUES (?,?,?,?,?,?,?,?)`,
+    )
     .run(...parameters(document), hostId, cursor, amount, overhead);
 }
 function documentFrom(row: Record<string, unknown>): LiveDocumentKey {
-  return { workspaceId: String(row.workspace_id), mainVersionId: "main", objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id) };
+  return {
+    workspaceId: String(row.workspace_id),
+    mainVersionId: "main",
+    objectId: String(row.object_id),
+    lineageClaimId: String(row.lineage_claim_id),
+  };
 }
-export function prepareLiveDeliveryWorkspace(storage: StorageContext, workspaceId: string, hostId: string): void {
-  if (storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_HOSTS} WHERE workspace_id=? AND host_id=?`).get(workspaceId, hostId)) return;
-  integrity(!storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
+export function prepareLiveDeliveryWorkspace(
+  storage: StorageContext,
+  workspaceId: string,
+  hostId: string,
+): void {
+  if (
+    storage.db
+      .prepare(`SELECT 1 FROM ${LIVE_DELIVERY_HOSTS} WHERE workspace_id=? AND host_id=?`)
+      .get(workspaceId, hostId)
+  )
+    return;
+  integrity(
+    !storage.db
+      .prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1")
+      .get(workspaceId),
+  );
   provisionWorkspaceHost(storage, hostId, workspaceId);
 }
-export function bindLiveDeliveryHostNamespace(storage: StorageContext, workspaceId: string, hostId: string, namespace: string): void {
-  const row = storage.db.prepare(`SELECT history_namespace FROM ${LIVE_DELIVERY_HOSTS} WHERE host_id=? AND workspace_id=?`).get(hostId, workspaceId);
+export function bindLiveDeliveryHostNamespace(
+  storage: StorageContext,
+  workspaceId: string,
+  hostId: string,
+  namespace: string,
+): void {
+  const row = storage.db
+    .prepare(
+      `SELECT history_namespace FROM ${LIVE_DELIVERY_HOSTS} WHERE host_id=? AND workspace_id=?`,
+    )
+    .get(hostId, workspaceId);
   integrity(row && (row.history_namespace === null || row.history_namespace === namespace));
-  if (row.history_namespace === null) storage.db.prepare(`UPDATE ${LIVE_DELIVERY_HOSTS} SET history_namespace=? WHERE host_id=? AND workspace_id=?`).run(namespace, hostId, workspaceId);
+  if (row.history_namespace === null)
+    storage.db
+      .prepare(
+        `UPDATE ${LIVE_DELIVERY_HOSTS} SET history_namespace=? WHERE host_id=? AND workspace_id=?`,
+      )
+      .run(namespace, hostId, workspaceId);
 }
-function reserveLiveDeliveryBaseline(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
-  const row = storage.db.prepare(`SELECT baseline_moment_relay_seq,registered_at_ms,baseline_digest,length(baseline_bytes) AS baseline_length,baseline_projected_sha256,baseline_projected_byte_length FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`).get(...parameters(document));
+function reserveLiveDeliveryBaseline(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+): void {
+  const row = storage.db
+    .prepare(
+      `SELECT baseline_moment_relay_seq,registered_at_ms,baseline_digest,length(baseline_bytes) AS baseline_length,baseline_projected_sha256,baseline_projected_byte_length FROM sync_relay_live_documents WHERE ${WHERE_DOCUMENT}`,
+    )
+    .get(...parameters(document));
   integrity(row);
-  const binding = { ...document, currentPath: path, selectorPaths: [path], restoreFenceGeneration: maximum };
-  const bootstrap = bytes([identifier, identifier, identifier, ...parameters(document), hostId, JSON.stringify(binding),
-    row.baseline_moment_relay_seq, row.registered_at_ms, row.baseline_digest, row.baseline_length,
-    row.baseline_projected_sha256, row.baseline_projected_byte_length]) + acknowledgementBytes;
-  const terminalReceipt = {deliveryId: identifier,updateDigest: "a".repeat(64),journalCursor: maximum,acceptingHostEpoch: maximum};
-  const origin = {relayDatabaseNamespace: identifier,adoptionId: identifier,sourceMomentId: identifier,sourceDigest: "a".repeat(64),sourceByteLength: maximum,
-    baselineMomentRelaySequence: maximum,baselineRegisteredAtMs: maximum,expectedLocalSequence: maximum,terminalReceipt,bindingDigest: "a".repeat(64),
-    originEvidenceDigest: "a".repeat(64),originEventCount: maximum,originHistoryEvidenceDigest: "a".repeat(64),originalBinding:{...binding,selectorPaths:Array.from({length:LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT},()=>path)}};
-  const owner = bytes([identifier,...parameters(document),hostId,JSON.stringify(origin),JSON.stringify(terminalReceipt),maximum,maximum,maximum]);
-  const amount = Math.max(bootstrap,owner);
+  const binding = {
+    ...document,
+    currentPath: path,
+    selectorPaths: [path],
+    restoreFenceGeneration: maximum,
+  };
+  const bootstrap =
+    bytes([
+      identifier,
+      identifier,
+      identifier,
+      ...parameters(document),
+      hostId,
+      JSON.stringify(binding),
+      row.baseline_moment_relay_seq,
+      row.registered_at_ms,
+      row.baseline_digest,
+      row.baseline_length,
+      row.baseline_projected_sha256,
+      row.baseline_projected_byte_length,
+    ]) + acknowledgementBytes;
+  const terminalReceipt = {
+    deliveryId: identifier,
+    updateDigest: "a".repeat(64),
+    journalCursor: maximum,
+    acceptingHostEpoch: maximum,
+  };
+  const origin = {
+    relayDatabaseNamespace: identifier,
+    adoptionId: identifier,
+    sourceMomentId: identifier,
+    sourceDigest: "a".repeat(64),
+    sourceByteLength: maximum,
+    baselineMomentRelaySequence: maximum,
+    baselineRegisteredAtMs: maximum,
+    expectedLocalSequence: maximum,
+    terminalReceipt,
+    bindingDigest: "a".repeat(64),
+    originEvidenceDigest: "a".repeat(64),
+    originEventCount: maximum,
+    originHistoryEvidenceDigest: "a".repeat(64),
+    originalBinding: {
+      ...binding,
+      selectorPaths: Array.from(
+        { length: LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT },
+        () => path,
+      ),
+    },
+  };
+  const owner = bytes([
+    identifier,
+    ...parameters(document),
+    hostId,
+    JSON.stringify(origin),
+    JSON.stringify(terminalReceipt),
+    maximum,
+    maximum,
+    maximum,
+  ]);
+  const amount = Math.max(bootstrap, owner);
   reserve(storage, document, hostId, 0, amount);
 }
-function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumentKey, hostId: string, row: Record<string, unknown>): void {
-  const amount = bytes([identifier, document.workspaceId, row.journal_cursor, maximum, row.delivery_id, row.update_digest,
-    row.accepting_host_epoch, maximum, "service", maximum, hostIdentifier, hostIdentifier]);
+function reserveLiveDeliveryEvent(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+  row: Record<string, unknown>,
+): void {
+  const amount = bytes([
+    identifier,
+    document.workspaceId,
+    row.journal_cursor,
+    maximum,
+    row.delivery_id,
+    row.update_digest,
+    row.accepting_host_epoch,
+    maximum,
+    "service",
+    maximum,
+    hostIdentifier,
+    hostIdentifier,
+  ]);
   reserve(storage, document, hostId, Number(row.journal_cursor), amount);
 }
 /**
@@ -69,17 +206,37 @@ function reserveLiveDeliveryEvent(storage: StorageContext, document: LiveDocumen
  * the same transaction. Its quota decision is Resume's; another host is
  * funded only when a transition makes it the configured host.
  */
-export function reserveLiveDeliverySuccessor(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+export function reserveLiveDeliverySuccessor(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+): void {
   reserveLiveDeliveryBaseline(storage, document, hostId);
 }
 // Deletes the lineage's reservations `condition` selects, refunding each whole.
-function releaseReservations(storage: StorageContext, document: LiveDocumentKey, condition: string, values: readonly unknown[]): void {
-  const where = `${WHERE_DOCUMENT} AND ${condition}`, params = [...parameters(document), ...values];
-  const bytes = storage.db.prepare(`SELECT COALESCE(SUM(reserved_bytes+accounted_bytes),0) AS bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`).get(...params)?.bytes;
+function releaseReservations(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  condition: string,
+  values: readonly unknown[],
+): void {
+  const where = `${WHERE_DOCUMENT} AND ${condition}`,
+    params = [...parameters(document), ...values];
+  const bytes = storage.db
+    .prepare(
+      `SELECT COALESCE(SUM(reserved_bytes+accounted_bytes),0) AS bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`,
+    )
+    .get(...params)?.bytes;
   integrity(typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0);
   if (bytes === 0) return;
   storage.db.prepare(`DELETE FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${where}`).run(...params);
-  integrity(storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?").run(bytes, document.workspaceId, bytes).changes === 1);
+  integrity(
+    storage.db
+      .prepare(
+        "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?",
+      )
+      .run(bytes, document.workspaceId, bytes).changes === 1,
+  );
 }
 /**
  * A retired chain tail adopts nothing until a successor reserves its own
@@ -88,28 +245,65 @@ function releaseReservations(storage: StorageContext, document: LiveDocumentKey,
  * and every reservation the lineage holds on another host. A transition to
  * another host funds it again. A bootstrap keeps its own.
  */
-export function releaseRetiredLiveDelivery(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
-  releaseReservations(storage, document, `(journal_cursor=0 OR host_id<>?) AND host_id NOT IN (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT})`,
-    [hostId, ...parameters(document)]);
+export function releaseRetiredLiveDelivery(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+): void {
+  releaseReservations(
+    storage,
+    document,
+    `(journal_cursor=0 OR host_id<>?) AND host_id NOT IN (SELECT host_id FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT})`,
+    [hostId, ...parameters(document)],
+  );
 }
 /** A successor adopted on `hostId` at its predecessor's released terminal needs no delivery through it there. */
-export function adoptLiveDeliveryPrefix(storage: StorageContext, document: LiveDocumentKey, hostId: string, terminalCursor: number): void {
-  releaseReservations(storage, document, "host_id=? AND journal_cursor BETWEEN 1 AND ?", [hostId, terminalCursor]);
+export function adoptLiveDeliveryPrefix(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+  terminalCursor: number,
+): void {
+  releaseReservations(storage, document, "host_id=? AND journal_cursor BETWEEN 1 AND ?", [
+    hostId,
+    terminalCursor,
+  ]);
 }
-export function registerLiveDeliveryBaseline(storage: StorageContext, document: LiveDocumentKey, hostId: string): void {
+export function registerLiveDeliveryBaseline(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+): void {
   const overhead = bytes([maximum, ...parameters(document)]);
   charge(storage, document.workspaceId, overhead);
-  const inserted = storage.db.prepare(`INSERT INTO ${LIVE_DELIVERY_DOCUMENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,accounted_bytes) VALUES (?,?,?,?,?)`).run(...parameters(document), overhead);
+  const inserted = storage.db
+    .prepare(
+      `INSERT INTO ${LIVE_DELIVERY_DOCUMENTS}(workspace_id,main_version_id,object_id,lineage_claim_id,accounted_bytes) VALUES (?,?,?,?,?)`,
+    )
+    .run(...parameters(document), overhead);
   reserveLiveDeliveryBaseline(storage, document, hostId);
   const sequence = Number(inserted.lastInsertRowid);
   integrity(Number.isSafeInteger(sequence) && sequence > 0);
-  const advanced = storage.db.prepare(`UPDATE ${LIVE_DELIVERY_HOSTS} SET funded_document_sequence=? WHERE host_id=? AND workspace_id=? AND funded_document_sequence<?`).run(sequence, hostId, document.workspaceId, sequence);
+  const advanced = storage.db
+    .prepare(
+      `UPDATE ${LIVE_DELIVERY_HOSTS} SET funded_document_sequence=? WHERE host_id=? AND workspace_id=? AND funded_document_sequence<?`,
+    )
+    .run(sequence, hostId, document.workspaceId, sequence);
   integrity(advanced.changes === 1);
 }
-export function registerLiveDeliveryEvent(storage: StorageContext, document: LiveDocumentKey, hostId: string, row: Record<string, unknown>): void {
+export function registerLiveDeliveryEvent(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+  row: Record<string, unknown>,
+): void {
   reserveLiveDeliveryEvent(storage, document, hostId, row);
   const cursor = Number(row.journal_cursor);
-  const advanced = storage.db.prepare(`UPDATE ${LIVE_DELIVERY_HOSTS} SET funded_journal_cursor=? WHERE host_id=? AND workspace_id=? AND funded_journal_cursor<?`).run(cursor, hostId, document.workspaceId, cursor);
+  const advanced = storage.db
+    .prepare(
+      `UPDATE ${LIVE_DELIVERY_HOSTS} SET funded_journal_cursor=? WHERE host_id=? AND workspace_id=? AND funded_journal_cursor<?`,
+    )
+    .run(cursor, hostId, document.workspaceId, cursor);
   integrity(advanced.changes === 1);
 }
 
@@ -118,53 +312,143 @@ export function registerLiveDeliveryEvent(storage: StorageContext, document: Liv
  * Only that explicit change, `transition`, funds a new host, or a known one
  * whose reservations for a lineage its retirement released.
  */
-export function provisionLiveDeliveryHost(storage: StorageContext, hostId: string, transition = false): void {
-  for (const workspace of storage.db.prepare("SELECT DISTINCT workspace_id FROM sync_relay_live_documents").all()) {
+export function provisionLiveDeliveryHost(
+  storage: StorageContext,
+  hostId: string,
+  transition = false,
+): void {
+  for (const workspace of storage.db
+    .prepare("SELECT DISTINCT workspace_id FROM sync_relay_live_documents")
+    .all()) {
     provisionWorkspaceHost(storage, hostId, String(workspace.workspace_id), transition);
   }
 }
-function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspaceId: string, transition = false): void {
-  const known = storage.db.prepare(`SELECT funded_document_sequence,funded_journal_cursor FROM ${LIVE_DELIVERY_HOSTS} WHERE host_id=? AND workspace_id=?`).get(hostId, workspaceId);
+function provisionWorkspaceHost(
+  storage: StorageContext,
+  hostId: string,
+  workspaceId: string,
+  transition = false,
+): void {
+  const known = storage.db
+    .prepare(
+      `SELECT funded_document_sequence,funded_journal_cursor FROM ${LIVE_DELIVERY_HOSTS} WHERE host_id=? AND workspace_id=?`,
+    )
+    .get(hostId, workspaceId);
   if (!known) {
-    integrity(transition || !storage.db.prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1").get(workspaceId));
-    integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
-    integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId,hostId));
-    integrity(!storage.db.prepare(`SELECT 1 FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE workspace_id=? AND host_id=? LIMIT 1`).get(workspaceId, hostId));
+    integrity(
+      transition ||
+        !storage.db
+          .prepare("SELECT 1 FROM sync_relay_live_documents WHERE workspace_id=? LIMIT 1")
+          .get(workspaceId),
+    );
+    integrity(
+      !storage.db
+        .prepare(
+          `SELECT 1 FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE workspace_id=? AND host_id=? LIMIT 1`,
+        )
+        .get(workspaceId, hostId),
+    );
+    integrity(
+      !storage.db
+        .prepare(`SELECT 1 FROM ${LIVE_DELIVERY_OWNERS} WHERE workspace_id=? AND host_id=? LIMIT 1`)
+        .get(workspaceId, hostId),
+    );
+    integrity(
+      !storage.db
+        .prepare(
+          `SELECT 1 FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE workspace_id=? AND host_id=? LIMIT 1`,
+        )
+        .get(workspaceId, hostId),
+    );
     const overhead = bytes([hostId, workspaceId, identifier, maximum, maximum]);
     charge(storage, workspaceId, overhead);
-    storage.db.prepare(`INSERT INTO ${LIVE_DELIVERY_HOSTS}(host_id,workspace_id,funded_document_sequence,funded_journal_cursor,accounted_bytes) VALUES (?,?,0,0,?)`).run(hostId, workspaceId, overhead);
+    storage.db
+      .prepare(
+        `INSERT INTO ${LIVE_DELIVERY_HOSTS}(host_id,workspace_id,funded_document_sequence,funded_journal_cursor,accounted_bytes) VALUES (?,?,0,0,?)`,
+      )
+      .run(hostId, workspaceId, overhead);
   }
-  const fundedDocument = Number(known?.funded_document_sequence ?? 0), fundedCursor = Number(known?.funded_journal_cursor ?? 0);
-  integrity(Number.isSafeInteger(fundedDocument) && fundedDocument >= 0 && Number.isSafeInteger(fundedCursor) && fundedCursor >= 0);
-  const missingDocument = storage.db.prepare(`SELECT 1 FROM sync_relay_live_documents d LEFT JOIN ${LIVE_DELIVERY_DOCUMENTS} f USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE d.workspace_id=? AND f.registration_sequence IS NULL LIMIT 1`).get(workspaceId);
+  const fundedDocument = Number(known?.funded_document_sequence ?? 0),
+    fundedCursor = Number(known?.funded_journal_cursor ?? 0);
+  integrity(
+    Number.isSafeInteger(fundedDocument) &&
+      fundedDocument >= 0 &&
+      Number.isSafeInteger(fundedCursor) &&
+      fundedCursor >= 0,
+  );
+  const missingDocument = storage.db
+    .prepare(
+      `SELECT 1 FROM sync_relay_live_documents d LEFT JOIN ${LIVE_DELIVERY_DOCUMENTS} f USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE d.workspace_id=? AND f.registration_sequence IS NULL LIMIT 1`,
+    )
+    .get(workspaceId);
   integrity(!missingDocument);
-  const documents = storage.db.prepare(`SELECT workspace_id,main_version_id,object_id,lineage_claim_id,registration_sequence FROM ${LIVE_DELIVERY_DOCUMENTS} WHERE workspace_id=?`).all(workspaceId);
-  let documentHighWater = fundedDocument, journalHighWater = fundedCursor;
+  const documents = storage.db
+    .prepare(
+      `SELECT workspace_id,main_version_id,object_id,lineage_claim_id,registration_sequence FROM ${LIVE_DELIVERY_DOCUMENTS} WHERE workspace_id=?`,
+    )
+    .all(workspaceId);
+  let documentHighWater = fundedDocument,
+    journalHighWater = fundedCursor;
   for (const raw of documents) {
     const document = documentFrom(raw);
     const documentSequence = Number(raw.registration_sequence);
     documentHighWater = Math.max(documentHighWater, documentSequence);
-    const bootstrap = storage.db.prepare(`SELECT bootstrap_id,local_ydoc_sequence FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document), hostId);
+    const bootstrap = storage.db
+      .prepare(
+        `SELECT bootstrap_id,local_ydoc_sequence FROM ${LIVE_DELIVERY_BOOTSTRAPS} WHERE ${WHERE_DOCUMENT} AND host_id=?`,
+      )
+      .all(...parameters(document), hostId);
     integrity(bootstrap.length <= 1);
-    const reserved = storage.db.prepare(`SELECT journal_cursor,reserved_bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document), hostId);
-    const cursors = new Set(reserved.map(row => Number(row.journal_cursor)));
-    const owner = storage.db.prepare(`SELECT tip_cursor FROM ${LIVE_DELIVERY_OWNERS} WHERE ${WHERE_DOCUMENT} AND host_id=?`).all(...parameters(document),hostId);
+    const reserved = storage.db
+      .prepare(
+        `SELECT journal_cursor,reserved_bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=?`,
+      )
+      .all(...parameters(document), hostId);
+    const cursors = new Set(reserved.map((row) => Number(row.journal_cursor)));
+    const owner = storage.db
+      .prepare(
+        `SELECT tip_cursor FROM ${LIVE_DELIVERY_OWNERS} WHERE ${WHERE_DOCUMENT} AND host_id=?`,
+      )
+      .all(...parameters(document), hostId);
     integrity(owner.length <= 1 && !(owner.length && bootstrap.length));
     // A retired owner's archived tip still covers what it applied: its successor adopts there.
-    const archived = bootstrap.length ? null : storage.db.prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
-      WHERE ${WHERE_DOCUMENT} AND host_id=?`).get(...parameters(document),hostId)?.tip ?? null;
+    const archived = bootstrap.length
+      ? null
+      : (storage.db
+          .prepare(`SELECT MAX(tip_cursor) AS tip FROM ${LIVE_DELIVERY_OWNER_HISTORY}
+      WHERE ${WHERE_DOCUMENT} AND host_id=?`)
+          .get(...parameters(document), hostId)?.tip ?? null);
     // A retired chain tail that no successor follows yet has no adoption to fund.
-    const tail = readServiceActivation(storage, document), state = serviceActivationState(tail);
+    const tail = readServiceActivation(storage, document),
+      state = serviceActivationState(tail);
     const retired = !owner.length && !bootstrap.length && state === "retired";
     // A successor adopts at the lineage's latest retired boundary, the tail's own or its predecessor's, so a host without an owner needs no delivery through it.
-    const floor = owner.length || bootstrap.length || !tail ? null : state === "retired" ? tail.activation_id : tail.predecessor_activation_id;
-    const boundary = floor === null ? 0 : storage.db.prepare(`SELECT json_extract(retired_boundary_json,'$.terminalReceipt.journalCursor') AS cursor FROM ${SERVICE_ACTIVATIONS}
-      WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`).get(tail!.relay_database_namespace, floor)?.cursor ?? 0;
+    const floor =
+      owner.length || bootstrap.length || !tail
+        ? null
+        : state === "retired"
+          ? tail.activation_id
+          : tail.predecessor_activation_id;
+    const boundary =
+      floor === null
+        ? 0
+        : (storage.db
+            .prepare(`SELECT json_extract(retired_boundary_json,'$.terminalReceipt.journalCursor') AS cursor FROM ${SERVICE_ACTIVATIONS}
+      WHERE relay_database_namespace=? AND activation_id=? AND retired_at_ms IS NOT NULL`)
+            .get(tail!.relay_database_namespace, floor)?.cursor ?? 0);
     integrity(typeof boundary === "number" && Number.isSafeInteger(boundary) && boundary >= 0);
-    const applied = owner[0]?.tip_cursor ?? (floor === null ? archived : Math.max(Number(archived ?? 0), boundary));
+    const applied =
+      owner[0]?.tip_cursor ??
+      (floor === null ? archived : Math.max(Number(archived ?? 0), boundary));
     // A transition funds again what a retirement of the lineage released below this host's watermarks. Retirement never releases a bootstrap's.
-    const released = transition && !bootstrap.length && !!storage.db.prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} AND retired_at_ms IS NOT NULL LIMIT 1`)
-      .get(...parameters(document));
+    const released =
+      transition &&
+      !bootstrap.length &&
+      !!storage.db
+        .prepare(
+          `SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE ${WHERE_DOCUMENT} AND retired_at_ms IS NOT NULL LIMIT 1`,
+        )
+        .get(...parameters(document));
     if (retired) integrity(!cursors.has(0));
     else if ((!bootstrap[0] || bootstrap[0].local_ydoc_sequence === null) && !owner.length) {
       if (!cursors.has(0)) {
@@ -172,38 +456,86 @@ function provisionWorkspaceHost(storage: StorageContext, hostId: string, workspa
         reserveLiveDeliveryBaseline(storage, document, hostId);
       }
     } else integrity(!cursors.has(0));
-    const edges = bootstrap[0] ? storage.db.prepare(`SELECT journal_cursor FROM ${LIVE_DELIVERY_EDGES} WHERE bootstrap_id=?`).all(bootstrap[0].bootstrap_id) : [];
-    const acknowledged = new Set(edges.map(row => Number(row.journal_cursor)));
-    const events = storage.db.prepare(`SELECT journal_cursor,delivery_id,update_digest,accepting_host_epoch FROM sync_relay_live_update_journal WHERE ${WHERE_DOCUMENT}`).all(...parameters(document));
+    const edges = bootstrap[0]
+      ? storage.db
+          .prepare(`SELECT journal_cursor FROM ${LIVE_DELIVERY_EDGES} WHERE bootstrap_id=?`)
+          .all(bootstrap[0].bootstrap_id)
+      : [];
+    const acknowledged = new Set(edges.map((row) => Number(row.journal_cursor)));
+    const events = storage.db
+      .prepare(
+        `SELECT journal_cursor,delivery_id,update_digest,accepting_host_epoch FROM sync_relay_live_update_journal WHERE ${WHERE_DOCUMENT}`,
+      )
+      .all(...parameters(document));
     for (const event of events) {
       const cursor = Number(event.journal_cursor);
       journalHighWater = Math.max(journalHighWater, cursor);
-      if (acknowledged.has(cursor) || (applied !== null && cursor <= Number(applied))) { integrity(!cursors.has(cursor)); continue; }
+      if (acknowledged.has(cursor) || (applied !== null && cursor <= Number(applied))) {
+        integrity(!cursors.has(cursor));
+        continue;
+      }
       if (!cursors.has(cursor)) {
         integrity(released || cursor > fundedCursor);
         reserveLiveDeliveryEvent(storage, document, hostId, event);
       }
     }
   }
-  storage.db.prepare(`UPDATE ${LIVE_DELIVERY_HOSTS} SET funded_document_sequence=?,funded_journal_cursor=? WHERE host_id=? AND workspace_id=?`).run(documentHighWater, journalHighWater, hostId, workspaceId);
+  storage.db
+    .prepare(
+      `UPDATE ${LIVE_DELIVERY_HOSTS} SET funded_document_sequence=?,funded_journal_cursor=? WHERE host_id=? AND workspace_id=?`,
+    )
+    .run(documentHighWater, journalHighWater, hostId, workspaceId);
 }
 
 /** Transfer a precharged reservation into durable progress without another quota decision. */
-export function consumeLiveDeliveryReservation(storage: StorageContext, document: LiveDocumentKey, hostId: string, cursor: number, amount: number, complete: boolean): void {
+export function consumeLiveDeliveryReservation(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  hostId: string,
+  cursor: number,
+  amount: number,
+  complete: boolean,
+): void {
   const params = [...parameters(document), hostId, cursor];
-  const row = storage.db.prepare(`SELECT reserved_bytes,accounted_bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=? AND journal_cursor=?`).get(...params);
-  integrity(row && typeof row.reserved_bytes === "number" && Number.isSafeInteger(row.reserved_bytes) && row.reserved_bytes >= amount && amount > 0);
+  const row = storage.db
+    .prepare(
+      `SELECT reserved_bytes,accounted_bytes FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=? AND journal_cursor=?`,
+    )
+    .get(...params);
+  integrity(
+    row &&
+      typeof row.reserved_bytes === "number" &&
+      Number.isSafeInteger(row.reserved_bytes) &&
+      row.reserved_bytes >= amount &&
+      amount > 0,
+  );
   const remaining = row.reserved_bytes - amount;
   if (complete) {
-    storage.db.prepare(`DELETE FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=? AND journal_cursor=?`).run(...params);
-    integrity(typeof row.accounted_bytes === "number" && Number.isSafeInteger(row.accounted_bytes) && row.accounted_bytes > 0);
+    storage.db
+      .prepare(
+        `DELETE FROM ${LIVE_DELIVERY_RESERVATIONS} WHERE ${WHERE_DOCUMENT} AND host_id=? AND journal_cursor=?`,
+      )
+      .run(...params);
+    integrity(
+      typeof row.accounted_bytes === "number" &&
+        Number.isSafeInteger(row.accounted_bytes) &&
+        row.accounted_bytes > 0,
+    );
     const refund = remaining + row.accounted_bytes;
     if (refund > 0) {
-      const refunded = storage.db.prepare("UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?").run(refund, document.workspaceId, refund);
+      const refunded = storage.db
+        .prepare(
+          "UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-? WHERE workspace_id=? AND usage_bytes>=?",
+        )
+        .run(refund, document.workspaceId, refund);
       integrity(refunded.changes === 1);
     }
   } else {
     integrity(remaining >= acknowledgementBytes);
-    storage.db.prepare(`UPDATE ${LIVE_DELIVERY_RESERVATIONS} SET reserved_bytes=? WHERE ${WHERE_DOCUMENT} AND host_id=? AND journal_cursor=?`).run(remaining, ...params);
+    storage.db
+      .prepare(
+        `UPDATE ${LIVE_DELIVERY_RESERVATIONS} SET reserved_bytes=? WHERE ${WHERE_DOCUMENT} AND host_id=? AND journal_cursor=?`,
+      )
+      .run(remaining, ...params);
   }
 }

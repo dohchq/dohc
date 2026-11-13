@@ -16,7 +16,15 @@
 
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { connect, createServer } from "node:net";
 import { uptime } from "node:os";
 import { join, resolve } from "node:path";
@@ -28,40 +36,70 @@ export const instanceVariable = "DOHC_VERIFICATION_SERVICE_INSTANCE";
 /** The environment variable that names the request a verifier and everything it starts belong to. */
 export const requestVariable = "DOHC_VERIFICATION_REQUEST";
 /** The environment entry that marks a process as one of a service instance's, or one of a request's. */
-export const instanceMarker = id => `${instanceVariable}=${id}`;
-export const requestMarker = id => `${requestVariable}=${id}`;
+export const instanceMarker = (id) => `${instanceVariable}=${id}`;
+export const requestMarker = (id) => `${requestVariable}=${id}`;
 
 // Every read of the process table has a deadline, so a hung read can never leave processes stopped.
 const readTimeoutMs = 10_000;
-const ps = args => execFileSync("ps", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: readTimeoutMs, env: { ...process.env, LC_ALL: "C" } });
+const ps = (args) =>
+  execFileSync("ps", args, {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: readTimeoutMs,
+    env: { ...process.env, LC_ALL: "C" },
+  });
 
 /** The processes on this host as `{ pid, ppid, start, zombie }`. A pid with another start is another process. */
 export function processTable(text = ps(["-A", "-o", "pid=,ppid=,stat=,lstart="])) {
-  return text.split("\n").flatMap(line => {
-    const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]{8}\s+\d{4})\s*$/u.exec(line);
-    return row ? [{ pid: Number(row[1]), ppid: Number(row[2]), zombie: row[3].startsWith("Z"), start: row[4].replace(/\s+/gu, " ") }] : [];
+  return text.split("\n").flatMap((line) => {
+    const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]{8}\s+\d{4})\s*$/u.exec(
+      line,
+    );
+    return row
+      ? [
+          {
+            pid: Number(row[1]),
+            ppid: Number(row[2]),
+            zombie: row[3].startsWith("Z"),
+            start: row[4].replace(/\s+/gu, " "),
+          },
+        ]
+      : [];
   });
 }
 
 /** The procenv helper in a queue root. */
-export const envHelper = root => join(root, "procenv");
+export const envHelper = (root) => join(root, "procenv");
 
 /**
  * Build the procenv helper at `target` with the system cc, replacing any helper there only once the build succeeds.
  * It is /usr/bin/cc, never a cc found on PATH, which under pnpm starts with a checkout's node_modules/.bin.
  */
-export function buildEnvHelper(target, source = fileURLToPath(new URL("./procenv.c", import.meta.url))) {
-  const built = spawnSync("/usr/bin/cc", ["-O2", "-Wall", "-o", `${target}.tmp`, source], { encoding: "utf8", timeout: 120_000 });
+export function buildEnvHelper(
+  target,
+  source = fileURLToPath(new URL("./procenv.c", import.meta.url)),
+) {
+  const built = spawnSync("/usr/bin/cc", ["-O2", "-Wall", "-o", `${target}.tmp`, source], {
+    encoding: "utf8",
+    timeout: 120_000,
+  });
   if (built.status !== 0) {
     rmSync(`${target}.tmp`, { force: true });
-    throw new Error(`cc could not build the procenv helper, which reads process environments exactly: ${(built.stderr || built.error?.message || "").trim()}. Install the Xcode Command Line Tools with xcode-select --install, then install again.`);
+    throw new Error(
+      `cc could not build the procenv helper, which reads process environments exactly: ${(built.stderr || built.error?.message || "").trim()}. Install the Xcode Command Line Tools with xcode-select --install, then install again.`,
+    );
   }
   renameSync(`${target}.tmp`, target);
 }
 
 /** The pids whose environment holds exactly `marker`, such as `instanceMarker(id)`, as an entry. */
 export function markedPids(marker, helper) {
-  return new Set(execFileSync(helper, [marker], { encoding: "utf8", timeout: readTimeoutMs }).split("\n").filter(Boolean).map(Number));
+  return new Set(
+    execFileSync(helper, [marker], { encoding: "utf8", timeout: readTimeoutMs })
+      .split("\n")
+      .filter(Boolean)
+      .map(Number),
+  );
 }
 
 /**
@@ -70,8 +108,12 @@ export function markedPids(marker, helper) {
  * descendant of those. Neither launchd nor this process is ever one.
  */
 export function members(table, marked = new Set(), known = new Map()) {
-  const own = row => row.pid > 1 && row.pid !== process.pid;
-  const found = new Map(table.filter(row => own(row) && (marked.has(row.pid) || known.get(row.pid) === row.start)).map(row => [row.pid, row.start]));
+  const own = (row) => row.pid > 1 && row.pid !== process.pid;
+  const found = new Map(
+    table
+      .filter((row) => own(row) && (marked.has(row.pid) || known.get(row.pid) === row.start))
+      .map((row) => [row.pid, row.start]),
+  );
   for (let grew = true; grew;) {
     grew = false;
     for (const row of table) {
@@ -92,20 +134,38 @@ export function members(table, marked = new Set(), known = new Map()) {
  * new member; then every stopped member gets SIGKILL. If anything fails midway, the members already confirmed
  * get SIGKILL and the others SIGCONT, so no process stays stopped. Resolves with the members' pids once none runs.
  */
-export async function stopProcesses({ marker = null, helper = null, known = new Map(), table = () => processTable(),
-  marked = () => marker ? markedPids(marker, helper) : new Set(), signal = (pid, name) => process.kill(pid, name), timeoutMs = 15_000 }) {
-  const send = (pid, name) => { try { signal(pid, name); return true; } catch (error) { if (error.code === "ESRCH") return false; throw error; } };
+export async function stopProcesses({
+  marker = null,
+  helper = null,
+  known = new Map(),
+  table = () => processTable(),
+  marked = () => (marker ? markedPids(marker, helper) : new Set()),
+  signal = (pid, name) => process.kill(pid, name),
+  timeoutMs = 15_000,
+}) {
+  const send = (pid, name) => {
+    try {
+      signal(pid, name);
+      return true;
+    } catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw error;
+    }
+  };
   const stopped = new Map();
   // Stopped but not yet confirmed as members.
   const pending = new Map();
   try {
     for (let round = 0; ; round += 1) {
-      if (round > 100) throw new Error("the service's processes kept changing while they were stopped");
+      if (round > 100)
+        throw new Error("the service's processes kept changing while they were stopped");
       const rows = table();
-      const fresh = [...members(rows, marked(), new Map([...known, ...stopped]))].filter(([pid]) => !stopped.has(pid));
+      const fresh = [...members(rows, marked(), new Map([...known, ...stopped]))].filter(
+        ([pid]) => !stopped.has(pid),
+      );
       if (!fresh.length) break;
       for (const [pid, start] of fresh) if (send(pid, "SIGSTOP")) pending.set(pid, start);
-      const now = new Map(table().map(row => [row.pid, row]));
+      const now = new Map(table().map((row) => [row.pid, row]));
       for (const [pid, start] of pending) {
         const row = now.get(pid);
         pending.delete(pid);
@@ -114,27 +174,51 @@ export async function stopProcesses({ marker = null, helper = null, known = new 
       }
     }
   } finally {
-    for (const pid of pending.keys()) { try { send(pid, "SIGCONT"); } catch { /* Gone or not ours. */ } }
-    for (const pid of stopped.keys()) { try { send(pid, "SIGKILL"); } catch { /* Gone or not ours. */ } }
+    for (const pid of pending.keys()) {
+      try {
+        send(pid, "SIGCONT");
+      } catch {
+        /* Gone or not ours. */
+      }
+    }
+    for (const pid of stopped.keys()) {
+      try {
+        send(pid, "SIGKILL");
+      } catch {
+        /* Gone or not ours. */
+      }
+    }
   }
   for (const deadline = Date.now() + timeoutMs; ;) {
-    const left = table().filter(row => !row.zombie && stopped.get(row.pid) === row.start);
+    const left = table().filter((row) => !row.zombie && stopped.get(row.pid) === row.start);
     if (!left.length) return [...stopped.keys()];
-    if (Date.now() > deadline) throw new Error(`processes ${left.map(row => row.pid).join(", ")} did not stop after SIGKILL`);
+    if (Date.now() > deadline)
+      throw new Error(
+        `processes ${left.map((row) => row.pid).join(", ")} did not stop after SIGKILL`,
+      );
     await sleep(50);
   }
 }
 
 const bootedAt = () => Date.now() - uptime() * 1000;
 
-export const treePath = root => join(root, "service-tree.json");
+export const treePath = (root) => join(root, "service-tree.json");
 /** Present while the supervisor could not stop the last service's processes, so no service runs. */
-export const heldPath = root => join(root, "supervisor-held.json");
+export const heldPath = (root) => join(root, "supervisor-held.json");
 
-const writeFile = (path, value) => { writeFileSync(`${path}.tmp`, JSON.stringify(value) + "\n"); renameSync(`${path}.tmp`, path); };
+const writeFile = (path, value) => {
+  writeFileSync(`${path}.tmp`, JSON.stringify(value) + "\n");
+  renameSync(`${path}.tmp`, path);
+};
 
 /** Record a service instance's marker and processes for the next cleanup, so readers see the old or the new record. */
-export const writeTree = (root, instance, known) => writeFile(treePath(root), { at: Date.now(), bootedAt: bootedAt(), instance, processes: [...known] });
+export const writeTree = (root, instance, known) =>
+  writeFile(treePath(root), {
+    at: Date.now(),
+    bootedAt: bootedAt(),
+    instance,
+    processes: [...known],
+  });
 
 /**
  * Stop every process of the last recorded service instance. A record from before the computer restarted names
@@ -143,9 +227,21 @@ export const writeTree = (root, instance, known) => writeFile(treePath(root), { 
  */
 export async function stopRecorded(root, options = {}) {
   let record = null;
-  try { record = JSON.parse(readFileSync(treePath(root), "utf8")); } catch { /* No record, or a torn one. */ }
-  if (!record || Math.abs(record.bootedAt - bootedAt()) > 60_000) { rmSync(treePath(root), { force: true }); return []; }
-  const stopped = await stopProcesses({ marker: instanceMarker(record.instance), helper: envHelper(root), known: new Map(record.processes), ...options });
+  try {
+    record = JSON.parse(readFileSync(treePath(root), "utf8"));
+  } catch {
+    /* No record, or a torn one. */
+  }
+  if (!record || Math.abs(record.bootedAt - bootedAt()) > 60_000) {
+    rmSync(treePath(root), { force: true });
+    return [];
+  }
+  const stopped = await stopProcesses({
+    marker: instanceMarker(record.instance),
+    helper: envHelper(root),
+    known: new Map(record.processes),
+    ...options,
+  });
   rmSync(treePath(root), { force: true });
   return stopped;
 }
@@ -155,22 +251,37 @@ export async function stopRecorded(root, options = {}) {
  * null when another live process holds it. A socket file outlives a killed holder, so one that nothing answers is replaced.
  */
 export async function holdSocket(path) {
-  const listen = () => new Promise((done, fail) => {
-    const server = createServer(socket => socket.end());
-    server.once("error", fail);
-    server.listen(path, () => { server.removeListener("error", fail); server.unref(); done(server); });
-  });
-  try { return await listen(); }
-  catch (error) { if (error.code !== "EADDRINUSE") throw error; }
-  const answered = await new Promise(done => {
+  const listen = () =>
+    new Promise((done, fail) => {
+      const server = createServer((socket) => socket.end());
+      server.once("error", fail);
+      server.listen(path, () => {
+        server.removeListener("error", fail);
+        server.unref();
+        done(server);
+      });
+    });
+  try {
+    return await listen();
+  } catch (error) {
+    if (error.code !== "EADDRINUSE") throw error;
+  }
+  const answered = await new Promise((done) => {
     const socket = connect(path);
-    socket.once("connect", () => { socket.destroy(); done(true); });
-    socket.once("error", fault => done(fault.code !== "ECONNREFUSED" && fault.code !== "ENOENT"));
+    socket.once("connect", () => {
+      socket.destroy();
+      done(true);
+    });
+    socket.once("error", (fault) => done(fault.code !== "ECONNREFUSED" && fault.code !== "ENOENT"));
   });
   if (answered) return null;
   rmSync(path, { force: true });
-  try { return await listen(); }
-  catch (error) { if (error.code === "EADDRINUSE") return null; throw error; }
+  try {
+    return await listen();
+  } catch (error) {
+    if (error.code === "EADDRINUSE") return null;
+    throw error;
+  }
 }
 
 /**
@@ -178,26 +289,51 @@ export async function holdSocket(path) {
  * `stopLast` replaces stopping the last recorded service's processes, `retryMs` the first wait before trying again,
  * and `restartMs` the first wait before restarting a service that stopped, for tests.
  */
-export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats = 24, stopLast = stopRecorded, retryMs = 5000, restartMs = 5000, table = processTable, signal: abort } = {}) {
+export async function supervise(
+  root,
+  {
+    pollMs = 1000,
+    beatEvery = 5,
+    quietBeats = 24,
+    stopLast = stopRecorded,
+    retryMs = 5000,
+    restartMs = 5000,
+    table = processTable,
+    signal: abort,
+  } = {},
+) {
   root = resolve(root);
   const logPath = join(root, "supervisor.log");
-  const log = line => {
+  const log = (line) => {
     try {
-      if (existsSync(logPath) && statSync(logPath).size > 5 * 1024 * 1024) renameSync(logPath, `${logPath}.1`);
+      if (existsSync(logPath) && statSync(logPath).size > 5 * 1024 * 1024)
+        renameSync(logPath, `${logPath}.1`);
       appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
-    } catch { /* The log is a record; losing a line must not stop the service. */ }
+    } catch {
+      /* The log is a record; losing a line must not stop the service. */
+    }
   };
   // One supervisor per queue root.
   const lock = await holdSocket(join(root, "supervisor.sock"));
   if (!lock) return;
   let stopping = false;
   let wake = () => {};
-  const stop = () => { stopping = true; wake(); };
+  const stop = () => {
+    stopping = true;
+    wake();
+  };
   if (abort) abort.addEventListener("abort", stop, { once: true });
   else for (const name of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(name, stop);
-  const pause = ms => new Promise(done => { const timer = setTimeout(done, ms); wake = () => { clearTimeout(timer); done(); }; });
+  const pause = (ms) =>
+    new Promise((done) => {
+      const timer = setTimeout(done, ms);
+      wake = () => {
+        clearTimeout(timer);
+        done();
+      };
+    });
   // Stop the last service's processes, trying again until it succeeds. No service starts meanwhile, so none shares the lanes with them.
-  const cleanUp = async what => {
+  const cleanUp = async (what) => {
     for (let wait = retryMs; ; wait = Math.min(wait * 2, 60_000)) {
       try {
         const stopped = await stopLast(root);
@@ -205,8 +341,14 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
         if (stopped.length) log(`stopped ${stopped.length} process(es) ${what}`);
         return true;
       } catch (error) {
-        log(`could not stop everything ${what}: ${error.message}. No service starts until they stop; trying again in ${Math.round(wait / 1000)} s`);
-        try { writeFile(heldPath(root), { at: new Date().toISOString(), reason: error.message }); } catch { /* The log says it too. */ }
+        log(
+          `could not stop everything ${what}: ${error.message}. No service starts until they stop; trying again in ${Math.round(wait / 1000)} s`,
+        );
+        try {
+          writeFile(heldPath(root), { at: new Date().toISOString(), reason: error.message });
+        } catch {
+          /* The log says it too. */
+        }
       }
       if (stopping) return false;
       await pause(wait);
@@ -215,7 +357,7 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
   };
   log(`supervisor ${process.pid} started for ${root}`);
   // launchd stops only this supervisor when it kills it, so the last service and its commands may still run.
-  if (!await cleanUp("the last service left")) stopping = true;
+  if (!(await cleanUp("the last service left"))) stopping = true;
   let backoff = restartMs;
   while (!stopping) {
     let current = null;
@@ -228,15 +370,33 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
       const service = join(root, "service", current);
       const id = randomUUID();
       // A group of its own keeps the service alive when launchd kills this supervisor's group, so the next supervisor stops it in order.
-      const child = spawn(process.execPath, [join(service, "scripts", "verification", "queue-service.mjs"), "--supervised", "--root", root],
-        { cwd: service, detached: true, stdio: ["pipe", "ignore", "pipe"], env: { ...process.env, [instanceVariable]: id } });
-      const exited = new Promise(done => { child.once("exit", (exit, signal) => done({ exit, signal })); child.once("error", error => done({ error })); });
-      child.stderr.on("data", chunk => { errors = (errors + chunk).slice(-4096); });
+      const child = spawn(
+        process.execPath,
+        [
+          join(service, "scripts", "verification", "queue-service.mjs"),
+          "--supervised",
+          "--root",
+          root,
+        ],
+        {
+          cwd: service,
+          detached: true,
+          stdio: ["pipe", "ignore", "pipe"],
+          env: { ...process.env, [instanceVariable]: id },
+        },
+      );
+      const exited = new Promise((done) => {
+        child.once("exit", (exit, signal) => done({ exit, signal }));
+        child.once("error", (error) => done({ error }));
+      });
+      child.stderr.on("data", (chunk) => {
+        errors = (errors + chunk).slice(-4096);
+      });
       child.stdin.on("error", () => {});
       // The record names the instance before the service may start anything.
       let known = new Map();
       try {
-        const row = table().find(candidate => candidate.pid === child.pid);
+        const row = table().find((candidate) => candidate.pid === child.pid);
         if (row) known = new Map([[row.pid, row.start]]);
         writeTree(root, id, known);
       } catch (error) {
@@ -249,24 +409,51 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
       // Apple's programs hide their environment, so each process below the service is recorded by its start time too.
       const follow = () => {
         const found = members(table(), new Set(), known);
-        if (found.size !== known.size || [...found].some(([pid, start]) => known.get(pid) !== start)) writeTree(root, id, found);
+        if (
+          found.size !== known.size ||
+          [...found].some(([pid, start]) => known.get(pid) !== start)
+        )
+          writeTree(root, id, found);
         known = found;
       };
       let lastBeat = null;
       let quiet = 0;
       for (let tick = 1; ; tick += 1) {
         const outcome = await Promise.race([exited, pause(pollMs).then(() => null)]);
-        if (outcome) { code = outcome.exit ?? outcome.signal ?? null; if (outcome.error) reason = `failed to start: ${outcome.error.message}`; break; }
-        if (stopping) { reason = "stopped with the supervisor"; break; }
+        if (outcome) {
+          code = outcome.exit ?? outcome.signal ?? null;
+          if (outcome.error) reason = `failed to start: ${outcome.error.message}`;
+          break;
+        }
+        if (stopping) {
+          reason = "stopped with the supervisor";
+          break;
+        }
         // A failed reading of the process table keeps the last record; it is no reason to stop the service.
-        try { follow(); } catch (error) { log(`could not read the process table: ${error.message}`); }
+        try {
+          follow();
+        } catch (error) {
+          log(`could not read the process table: ${error.message}`);
+        }
         // Polls without a new heartbeat, not wall-clock age: a timer does not advance while the machine sleeps,
         // so a service that just woke is never mistaken for a hung one.
         if (tick % beatEvery) continue;
         let seen = lastBeat;
-        try { seen = existsSync(join(root, "service.json")) ? statSync(join(root, "service.json")).mtimeMs : null; } catch { /* Read as unchanged. */ }
-        if (seen !== lastBeat) { lastBeat = seen; quiet = 0; } else quiet += 1;
-        if (quiet >= quietBeats) { reason = `heartbeat stopped for ${quietBeats} polls`; break; }
+        try {
+          seen = existsSync(join(root, "service.json"))
+            ? statSync(join(root, "service.json")).mtimeMs
+            : null;
+        } catch {
+          /* Read as unchanged. */
+        }
+        if (seen !== lastBeat) {
+          lastBeat = seen;
+          quiet = 0;
+        } else quiet += 1;
+        if (quiet >= quietBeats) {
+          reason = `heartbeat stopped for ${quietBeats} polls`;
+          break;
+        }
       }
     } catch (error) {
       reason = `failed to start: ${error.message}`;
@@ -274,8 +461,11 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
     // A service that failed prints why last; a killed one printed only its runs' output.
     const why = typeof code === "number" && code !== 0 && code !== 75 ? errors.trim() : "";
     log(`service ${current} ${reason} (exit ${code})${why ? `\n${why}` : ""}`);
-    if (!await cleanUp(`that service ${current} started`) || stopping) break;
-    if (code === 75) { backoff = restartMs; continue; }
+    if (!(await cleanUp(`that service ${current} started`)) || stopping) break;
+    if (code === 75) {
+      backoff = restartMs;
+      continue;
+    }
     if (Date.now() - started > 10 * 60_000) backoff = restartMs;
     await pause(backoff);
     backoff = Math.min(backoff * 2, 60_000);
@@ -288,5 +478,11 @@ export async function supervise(root, { pollMs = 1000, beatEvery = 5, quietBeats
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const index = process.argv.indexOf("--root");
   if (index < 0 || !process.argv[index + 1]) throw new Error("Use --root <queue root>.");
-  supervise(process.argv[index + 1]).then(() => process.exit(0), error => { console.error(error.stack ?? error.message); process.exit(1); });
+  supervise(process.argv[index + 1]).then(
+    () => process.exit(0),
+    (error) => {
+      console.error(error.stack ?? error.message);
+      process.exit(1);
+    },
+  );
 }

@@ -1,5 +1,9 @@
 // Phase 0 checks: do dohc's shared TypeScript packages run under Hermes?
-import { decodeLiveFrame, encodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
+import {
+  decodeLiveFrame,
+  encodeLiveFrame,
+  type LiveFrame,
+} from "@dohc/live-session-contract/live-frame";
 import { isPortableNamePath, nameByteLength } from "@dohc/workspace-contracts/names";
 import * as Y from "yjs";
 
@@ -34,7 +38,12 @@ const probes: readonly Probe[] = [
     run: () => {
       const frame: LiveFrame = {
         kind: "hello",
-        receivePolicy: { maxFrameBytes: 65_536, maxStateVectorBytes: 4_096, maxUpdateBytes: 32_768, maxSyncBytes: 65_536 },
+        receivePolicy: {
+          maxFrameBytes: 65_536,
+          maxStateVectorBytes: 4_096,
+          maxUpdateBytes: 32_768,
+          maxSyncBytes: 65_536,
+        },
       };
       const bytes = encodeLiveFrame(frame, 65_536);
       const back = decodeLiveFrame(bytes, 65_536);
@@ -60,8 +69,11 @@ const probes: readonly Probe[] = [
     name: "Web Crypto SHA-256",
     run: async () => {
       const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("abc"));
-      const hex = [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("");
-      if (hex !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") throw new Error(`Wrong digest ${hex}`);
+      const hex = [...new Uint8Array(hash)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      if (hex !== "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        throw new Error(`Wrong digest ${hex}`);
       return "matches the known digest";
     },
   },
@@ -69,7 +81,8 @@ const probes: readonly Probe[] = [
     name: "crypto.randomUUID",
     run: () => {
       const id = crypto.randomUUID();
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id)) throw new Error(`Bad UUID ${id}`);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(id))
+        throw new Error(`Bad UUID ${id}`);
       return id;
     },
   },

@@ -1,5 +1,15 @@
 import { execFile } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,25 +24,62 @@ it("builds when invoked through a linked checkout and stays idle when imported",
   try {
     const checkout = join(root, "checkout");
     const linked = join(root, "linked");
-    await Promise.all(["scripts", "src", "dist", "node_modules"].map(path => mkdir(join(checkout, path), { recursive: true })));
+    await Promise.all(
+      ["scripts", "src", "dist", "node_modules"].map((path) =>
+        mkdir(join(checkout, path), { recursive: true }),
+      ),
+    );
     await copyFile(join(packageRoot, "scripts/build.mjs"), join(checkout, "scripts/build.mjs"));
-    await symlink(await realpath(join(packageRoot, "node_modules/esbuild")), join(checkout, "node_modules/esbuild"), process.platform === "win32" ? "junction" : "dir");
+    await symlink(
+      await realpath(join(packageRoot, "node_modules/esbuild")),
+      join(checkout, "node_modules/esbuild"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     await symlink(checkout, linked, process.platform === "win32" ? "junction" : "dir");
-    const entries = ["main", "liveValidationWorker", "deviceHostConnectCommand", "appPublicationTakedownCommand", "relayDeploymentCommand", "deviceHostCredentialCommand", "relaySnapshotCommand"];
-    await Promise.all(entries.map(name => writeFile(join(checkout, "src", `${name}.ts`), `export const entry: string = ${JSON.stringify(name)};\n`)));
+    const entries = [
+      "main",
+      "liveValidationWorker",
+      "deviceHostConnectCommand",
+      "appPublicationTakedownCommand",
+      "relayDeploymentCommand",
+      "deviceHostCredentialCommand",
+      "relaySnapshotCommand",
+    ];
+    await Promise.all(
+      entries.map((name) =>
+        writeFile(
+          join(checkout, "src", `${name}.ts`),
+          `export const entry: string = ${JSON.stringify(name)};\n`,
+        ),
+      ),
+    );
     await writeFile(join(checkout, "dist/stale.txt"), "previous build");
 
-    await run(process.execPath, ["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(join(linked, "scripts/build.mjs")).href)})`]);
+    await run(process.execPath, [
+      "--input-type=module",
+      "-e",
+      `await import(${JSON.stringify(pathToFileURL(join(linked, "scripts/build.mjs")).href)})`,
+    ]);
     expect(await readdir(join(checkout, "dist"))).toEqual(["stale.txt"]);
 
     await run(process.execPath, [join(linked, "scripts/build.mjs")]);
     const output = await readdir(join(checkout, "dist"));
     expect(output).not.toContain("stale.txt");
-    for (const name of ["main", "liveValidationWorker", "device-host-connect", "app-publication-takedown", "relay-deployment", "device-host-credential", "relay-snapshot"]) {
+    for (const name of [
+      "main",
+      "liveValidationWorker",
+      "device-host-connect",
+      "app-publication-takedown",
+      "relay-deployment",
+      "device-host-credential",
+      "relay-snapshot",
+    ]) {
       expect(output).toContain(`${name}.js`);
       expect(output).toContain(`${name}.js.map`);
     }
-    expect(await readFile(join(checkout, "dist/liveValidationWorker.js"), "utf8")).toContain("liveValidationWorker");
+    expect(await readFile(join(checkout, "dist/liveValidationWorker.js"), "utf8")).toContain(
+      "liveValidationWorker",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

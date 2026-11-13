@@ -4,8 +4,36 @@ import { onOverlayOpen } from "../overlayStack";
 import { createPortal, flushSync } from "react-dom";
 import { onComposerRoomChange } from "./toastClearance";
 import { automationReachCopy } from "../automationReachCopy";
-import { AlertTriangle, Bell, Check, CheckCircle2, ChevronDown, CloudOff, GitPullRequestArrow, Info, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type HTMLAttributes, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  Bell,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  CloudOff,
+  GitPullRequestArrow,
+  Info,
+  RefreshCw,
+  Sparkles,
+  User,
+  X,
+  Zap,
+} from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type HTMLAttributes,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -25,10 +53,18 @@ import { PathLine } from "../ui/PathLine";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { AUTOMATION_NOTICE_KINDS, type NoticeTarget } from "../../notices/noticeTarget";
 import { cornerTime } from "../relativeTime";
-import { neutralPresentation, presentationClasses, subscribePresentation } from "./actorPresentation";
+import {
+  neutralPresentation,
+  presentationClasses,
+  subscribePresentation,
+} from "./actorPresentation";
 import { personalAgentName } from "./chosenColors";
 import { UPDATE_REQUIRED_LABEL, titleBarNamesServer } from "./WorkspaceSyncStatus";
-import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
+import {
+  SYNC_NOT_CONNECTED,
+  SYNC_SIGN_IN_EXPIRED,
+  SYNC_UNCONFIRMED_ACCOUNT,
+} from "../cloudSyncWords";
 import { unjournalablePathMessages } from "../../workspaces/shareViewRecords";
 
 export type NoticeAction = {
@@ -85,9 +121,7 @@ export type Notice = {
 // work to use elsewhere, so it keeps its own Copy and has no Details.
 export type NoticeRevision = string | number;
 
-export type NoticeCopy =
-  | { report: string }
-  | { label: "Copy file paths"; text: string };
+export type NoticeCopy = { report: string } | { label: "Copy file paths"; text: string };
 
 // A workspace error the shell reported. `seen` means its toast was closed and
 // only the row in Notices remains. `read` means the row was read, not only its
@@ -155,13 +189,16 @@ export interface SentNotice {
 // A failed run's notice offers Try again on the computer that ran it, which
 // holds the run. Anywhere else its text names that computer instead.
 const retriesRun = (notice: NoticeRow): boolean =>
-  notice.kind === "automation-failed" && notice.postedHere && Boolean(notice.target?.automation && notice.target.run);
+  notice.kind === "automation-failed" &&
+  notice.postedHere &&
+  Boolean(notice.target?.automation && notice.target.run);
 
 // A failed automation run, or an agent run that says why it didn't reply. Its
 // toast stays until closed, and Copy sits beside its text. A run's reply
 // names its message, and its body is the reply's opening words.
 const isFailure = (notice: NoticeRow): boolean =>
-  notice.kind === "markdown-write-held" || notice.kind === "automation-failed" ||
+  notice.kind === "markdown-write-held" ||
+  notice.kind === "automation-failed" ||
   (notice.kind === "agent-run" && notice.body !== "" && notice.target?.message === undefined);
 
 // A held change to a lossy note, from another workspace. dohc held it on
@@ -199,12 +236,20 @@ const PERSONAL_AGENT_SIGNED_IN: NoticeKind = "personal-agent-signed-in";
 // A toast sets the mark on its text's first line; a row passes its own place.
 // A personal agent's sign-in takes the hue of the agent its target names
 // while the roster holds it.
-function SenderMark(props: { notice: Pick<NoticeRow, "kind" | "senderKind" | "target">; className?: string }) {
+function SenderMark(props: {
+  notice: Pick<NoticeRow, "kind" | "senderKind" | "target">;
+  className?: string;
+}) {
   const kind = props.notice.senderKind;
-  const agentId = props.notice.kind === PERSONAL_AGENT_SIGNED_IN && kind === "agent" ? props.notice.target?.agent ?? null : null;
+  const agentId =
+    props.notice.kind === PERSONAL_AGENT_SIGNED_IN && kind === "agent"
+      ? (props.notice.target?.agent ?? null)
+      : null;
   const agentTint = useSyncExternalStore(subscribePresentation, () =>
-    agentId === null || personalAgentName(agentId) === null ? null
-      : presentationClasses({ ...neutralPresentation, agentId }, "agent"));
+    agentId === null || personalAgentName(agentId) === null
+      ? null
+      : presentationClasses({ ...neutralPresentation, agentId }, "agent"),
+  );
   const place = props.className ?? "mt-0.5 shrink-0";
   if (kind === null) {
     return <Info size={14} aria-hidden className={`${place} text-subtle`} />;
@@ -252,7 +297,8 @@ const ROW_CONTROLS_CLASS = "ml-auto flex h-6 shrink-0 items-center gap-2";
 const ROW_ACTIONS_CLASS = "mt-1 flex flex-wrap items-center gap-1";
 // A worded action is a bordered button on a toast and on its row, so inside
 // a row that opens it still reads as its own target.
-const ACTION_CLASS = "h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
+const ACTION_CLASS =
+  "h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink";
 const ROW_ACTION_CLASS = `${ACTION_CLASS} disabled:opacity-50 aria-busy:opacity-50`;
 
 // A row counts as read the moment the pointer or keyboard focus reaches it.
@@ -284,9 +330,19 @@ const ROW_OPEN = "[data-notice-open]";
 // A click that ends a drag selecting this text selects; it opens nothing.
 function selecting(element: Element): boolean {
   const selection = window.getSelection();
-  return selection !== null && !selection.isCollapsed && selection.anchorNode !== null && element.contains(selection.anchorNode);
+  return (
+    selection !== null &&
+    !selection.isCollapsed &&
+    selection.anchorNode !== null &&
+    element.contains(selection.anchorNode)
+  );
 }
-function RowTitle(props: { title: ReactNode; testId: string; onOpen?: () => void; busy?: boolean }) {
+function RowTitle(props: {
+  title: ReactNode;
+  testId: string;
+  onOpen?: () => void;
+  busy?: boolean;
+}) {
   if (!props.onOpen) return props.title;
   return (
     <button
@@ -330,7 +386,9 @@ function RowCorner(props: {
   if (props.busy) {
     return (
       <span className="flex h-6 items-center gap-1">
-        <span data-testid={`${props.testId}-opening`} className={wordClass}>Opening…</span>
+        <span data-testid={`${props.testId}-opening`} className={wordClass}>
+          Opening…
+        </span>
         {dismiss}
       </span>
     );
@@ -400,7 +458,8 @@ function useDetails(props: {
   );
   if (!("report" in copy)) return { ...NO_COPY, icon: copyIcon(copy.label, copy.text) };
   const { report } = copy;
-  if (report === props.shown.filter(Boolean).join("\n")) return { ...NO_COPY, icon: copyIcon("Copy details", report) };
+  if (report === props.shown.filter(Boolean).join("\n"))
+    return { ...NO_COPY, icon: copyIcon("Copy details", report) };
   const blockId = `${id}-details`;
   const toggle = () => {
     setOpenFor(open ? null : { revision: props.revision });
@@ -418,16 +477,35 @@ function useDetails(props: {
         className={`flex items-center gap-0.5 ${props.actionClass}`}
       >
         {open ? "Hide details" : "Details"}
-        <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out motion-reduce:transition-none${open ? " rotate-180" : ""}`} />
+        <ChevronDown
+          size={12}
+          strokeWidth={1.9}
+          aria-hidden
+          className={`transition-transform duration-150 ease-out motion-reduce:transition-none${open ? " rotate-180" : ""}`}
+        />
       </button>
     ),
     // Copy comes first, so the Tab after Details reaches it.
     block: open ? (
-      <div id={blockId} data-testid={`${testId}-details-text`} data-row-above="" className="relative mt-1.5 rounded-md border border-line bg-panel-2">
+      <div
+        id={blockId}
+        data-testid={`${testId}-details-text`}
+        data-row-above=""
+        className="relative mt-1.5 rounded-md border border-line bg-panel-2"
+      >
         <span className="absolute right-1 top-1">
-          <CopyButton iconOnly pinName label="Copy details" testId={`${testId}-details-copy`} getText={() => report} />
+          <CopyButton
+            iconOnly
+            pinName
+            label="Copy details"
+            testId={`${testId}-details-copy`}
+            getText={() => report}
+          />
         </span>
-        <pre tabIndex={0} className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[11px] leading-snug text-muted">
+        <pre
+          tabIndex={0}
+          className="m-0 max-h-[240px] overflow-y-auto overscroll-contain whitespace-pre-wrap wrap-anywhere select-text py-1.5 pl-2 pr-8 font-sans text-[11px] leading-snug text-muted"
+        >
           {report}
         </pre>
       </div>
@@ -500,7 +578,7 @@ function NoticeText(props: {
       if (title?.clientHeight === 0) return;
       setClipped(
         (title !== null && title.scrollHeight > title.clientHeight + 1) ||
-        (clamp && !byFacts && body !== null && body.scrollHeight > body.clientHeight + 1),
+          (clamp && !byFacts && body !== null && body.scrollHeight > body.clientHeight + 1),
       );
     };
     measure();
@@ -514,20 +592,22 @@ function NoticeText(props: {
   const shownPaths = byFacts && !open ? paths.slice(0, Math.max(0, 3 - lines.length)) : paths;
   // A click that ends a selection, or the second of a double click, opens nothing.
   const { onOpenRow } = props;
-  const openOnClick = hidden && !open && !onOpenRow
-    ? (event: MouseEvent<HTMLElement>) => {
-        if (event.detail > 1 || selecting(event.currentTarget)) return;
-        show(true);
-      }
-    : undefined;
+  const openOnClick =
+    hidden && !open && !onOpenRow
+      ? (event: MouseEvent<HTMLElement>) => {
+          if (event.detail > 1 || selecting(event.currentTarget)) return;
+          show(true);
+        }
+      : undefined;
   // Opened text sits above the row's open control, so it can be selected;
   // a click that selects nothing still opens the row.
-  const openRowOnClick = open && onOpenRow
-    ? (event: MouseEvent<HTMLElement>) => {
-        if (event.detail > 1 || selecting(event.currentTarget)) return;
-        onOpenRow();
-      }
-    : undefined;
+  const openRowOnClick =
+    open && onOpenRow
+      ? (event: MouseEvent<HTMLElement>) => {
+          if (event.detail > 1 || selecting(event.currentTarget)) return;
+          onOpenRow();
+        }
+      : undefined;
   const pointer = open ? " cursor-text" : openOnClick ? " cursor-pointer" : "";
   return props.children({
     title: (
@@ -555,16 +635,27 @@ function NoticeText(props: {
           </p>
         ) : null}
         {shownPaths.length > 0 ? (
-          <ul data-testid={`${props.testId}-paths`} data-row-above={open ? "" : undefined} onClick={openRowOnClick} className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-muted">
+          <ul
+            data-testid={`${props.testId}-paths`}
+            data-row-above={open ? "" : undefined}
+            onClick={openRowOnClick}
+            className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-muted"
+          >
             {shownPaths.map((path) => (
-              <li key={path} title={path} className={open ? "select-text wrap-anywhere" : "flex min-w-0"}>
+              <li
+                key={path}
+                title={path}
+                className={open ? "select-text wrap-anywhere" : "flex min-w-0"}
+              >
                 {open ? path : <PathLine path={path} />}
               </li>
             ))}
           </ul>
         ) : null}
         {props.after && (open || !hidden) ? (
-          <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">{props.after}</p>
+          <p className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted">
+            {props.after}
+          </p>
         ) : null}
         {!copy.open && (hidden || more) ? (
           <button
@@ -576,7 +667,12 @@ function NoticeText(props: {
             className="-ml-1 mt-0.5 flex items-center gap-0.5 rounded-md px-1 text-[11px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink"
           >
             {more ? "Show less" : "Show more"}
-            <ChevronDown size={12} strokeWidth={1.9} aria-hidden className={`transition-transform duration-150 ease-out${more ? " rotate-180" : ""}`} />
+            <ChevronDown
+              size={12}
+              strokeWidth={1.9}
+              aria-hidden
+              className={`transition-transform duration-150 ease-out${more ? " rotate-180" : ""}`}
+            />
           </button>
         ) : null}
       </>
@@ -586,17 +682,25 @@ function NoticeText(props: {
 }
 
 // A toast that is not a NoticeText takes its copy control from here.
-function WithDetails(props: Parameters<typeof useDetails>[0] & { children: (copy: CopyControls) => ReactNode }) {
+function WithDetails(
+  props: Parameters<typeof useDetails>[0] & { children: (copy: CopyControls) => ReactNode },
+) {
   return props.children(useDetails(props));
 }
 
 // The one notice for every step a narrower share stopped. It names each
 // automation it will dismiss, with its file, and who cannot reach what.
-function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: string; body: string } {
+function automationStopsCopy(stops: readonly AutomationStopNotice[]): {
+  title: string;
+  body: string;
+} {
   const automations = new Map<string, { name: string; file: string; reasons: Set<string> }>();
   for (const stop of stops) {
-    const entry = automations.get(stop.automationId) ??
-      { name: stop.automationName, file: `${stop.collectionPath}/automations.yaml`, reasons: new Set<string>() };
+    const entry = automations.get(stop.automationId) ?? {
+      name: stop.automationName,
+      file: `${stop.collectionPath}/automations.yaml`,
+      reasons: new Set<string>(),
+    };
     const who = stop.stoppedFor ?? "Someone you shared with";
     entry.reasons.add(`${who} cannot ${automationReachCopy(stop, true)}.`);
     automations.set(stop.automationId, entry);
@@ -608,8 +712,9 @@ function automationStopsCopy(stops: readonly AutomationStopNotice[]): { title: s
       body: `${[...only.reasons].join(" ")} Open ${only.file} to change the step.`,
     };
   }
-  const named = [...automations.values()]
-    .map((entry) => `"${entry.name}" in ${entry.file}: ${[...entry.reasons].join(" ")}`);
+  const named = [...automations.values()].map(
+    (entry) => `"${entry.name}" in ${entry.file}: ${[...entry.reasons].join(" ")}`,
+  );
   return {
     title: `${automations.size} automations stopped`,
     body: `${named.join(" ")} Open each file to change its steps.`,
@@ -632,7 +737,12 @@ function liveDeliveryCopy(
 ): { title: string; body: string; recovery: LiveDeliveryRecovery; Icon: typeof Bell } {
   // Delivering the waiting edits lifts it, so Try again is the way forward.
   if (reason === "unsent-edits-limit") {
-    const subject = pausedPaths.length === 1 ? `"${pausedPaths[0]}" has` : pausedPaths.length > 1 ? `${pausedPaths.length} files have` : "A file has";
+    const subject =
+      pausedPaths.length === 1
+        ? `"${pausedPaths[0]}" has`
+        : pausedPaths.length > 1
+          ? `${pausedPaths.length} files have`
+          : "A file has";
     return {
       title: "Live editing paused",
       body: `${subject} too many edits waiting to reach the server. They are saved on this device, and live editing is paused there until they arrive.`,
@@ -790,15 +900,15 @@ function syncBlockedNotice(input: {
 // Nobody is connected. Disconnecting is a choice, so the row is neutral and
 // offers the way back: the same connect flow as Settings' Connect server.
 const NOT_CONNECTED_TITLE = "Not connected to your server";
-export function notConnectedNotice(input: {
-  onConnectServer: (() => void) | undefined;
-}): Notice {
+export function notConnectedNotice(input: { onConnectServer: (() => void) | undefined }): Notice {
   return syncBlockedNotice({
     id: "not-connected",
     tone: "neutral",
     title: NOT_CONNECTED_TITLE,
     body: `${SYNC_NOT_CONNECTED} Your changes stay on this computer.`,
-    actions: [input.onConnectServer ? { label: "Connect server", onClick: input.onConnectServer } : null],
+    actions: [
+      input.onConnectServer ? { label: "Connect server", onClick: input.onConnectServer } : null,
+    ],
     target: { to: "server-connection" },
     Icon: CloudOff,
   });
@@ -818,7 +928,9 @@ export function accountUnconfirmedNotice(input: {
     body: `${SYNC_UNCONFIRMED_ACCOUNT} Your changes stay on this computer.`,
     actions: [
       input.onTryAgain ? { label: "Try again", onClick: input.onTryAgain } : null,
-      input.onOpenSyncSettings ? { label: "Sync settings", onClick: input.onOpenSyncSettings } : null,
+      input.onOpenSyncSettings
+        ? { label: "Sync settings", onClick: input.onOpenSyncSettings }
+        : null,
     ],
     target: { to: "sync-settings" },
     Icon: AlertTriangle,
@@ -828,15 +940,15 @@ export function accountUnconfirmedNotice(input: {
 // The server stopped accepting this computer's sign-in. Sign in again
 // renews it at the same server, the same action as Settings' row.
 const SIGN_IN_EXPIRED_TITLE = "Your sign-in expired";
-export function signInExpiredNotice(input: {
-  onSignInAgain: (() => void) | undefined;
-}): Notice {
+export function signInExpiredNotice(input: { onSignInAgain: (() => void) | undefined }): Notice {
   return syncBlockedNotice({
     id: "sign-in-expired",
     tone: "danger",
     title: SIGN_IN_EXPIRED_TITLE,
     body: `${SYNC_SIGN_IN_EXPIRED} Your changes stay on this computer.`,
-    actions: [input.onSignInAgain ? { label: "Sign in again", onClick: input.onSignInAgain } : null],
+    actions: [
+      input.onSignInAgain ? { label: "Sign in again", onClick: input.onSignInAgain } : null,
+    ],
     target: { to: "server-connection" },
     Icon: AlertTriangle,
   });
@@ -885,7 +997,8 @@ function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
   rail: "fixed bottom-[calc(var(--dohc-composer-room,0px)+0.75rem)] right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
+  corner:
+    "fixed bottom-[max(3.5rem,calc(var(--dohc-composer-room,0px)+0.75rem))] right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -937,21 +1050,26 @@ export function WorkspaceErrorToast(props: {
   const [open, setOpen] = useState(false);
   const fades = error.tone === "success" && !error.stays;
   const held = pointer || focus || open;
-  const retry = error.canRetry && props.onRetry ? (
-    <button
-      type="button"
-      data-testid="workspace-shell-error-retry"
-      disabled={error.retryBusy || error.retryBlocked !== undefined}
-      aria-describedby={error.retryBlocked === undefined ? undefined : reasonId}
-      aria-busy={error.retryBusy || undefined}
-      onClick={() => props.onRetry?.(error.id)}
-      className={TOAST_ACTION_CLASS}
-    >
-      Try again
-    </button>
-  ) : null;
-  const message = retry ? besideTryAgain(error.message, error.retryBlocked !== undefined) : error.message;
-  const steps = Boolean(props.onAction && (error.actionLabel || error.additionalActionLabels?.length)) || retry !== null;
+  const retry =
+    error.canRetry && props.onRetry ? (
+      <button
+        type="button"
+        data-testid="workspace-shell-error-retry"
+        disabled={error.retryBusy || error.retryBlocked !== undefined}
+        aria-describedby={error.retryBlocked === undefined ? undefined : reasonId}
+        aria-busy={error.retryBusy || undefined}
+        onClick={() => props.onRetry?.(error.id)}
+        className={TOAST_ACTION_CLASS}
+      >
+        Try again
+      </button>
+    ) : null;
+  const message = retry
+    ? besideTryAgain(error.message, error.retryBlocked !== undefined)
+    : error.message;
+  const steps =
+    Boolean(props.onAction && (error.actionLabel || error.additionalActionLabels?.length)) ||
+    retry !== null;
   useEffect(() => {
     if (!fades || held || !onHide) return;
     const timer = setTimeout(() => onHide(error.id), FADING_TOAST_MS);
@@ -970,9 +1088,15 @@ export function WorkspaceErrorToast(props: {
       className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
     >
       <span className="flex h-6 shrink-0 items-center">
-        {error.tone === "success"
-          ? <CheckCircle2 size={14} aria-hidden className="text-success" />
-          : <AlertTriangle size={14} aria-hidden className={error.tone === "warning" ? "text-warning" : "text-danger"} />}
+        {error.tone === "success" ? (
+          <CheckCircle2 size={14} aria-hidden className="text-success" />
+        ) : (
+          <AlertTriangle
+            size={14}
+            aria-hidden
+            className={error.tone === "warning" ? "text-warning" : "text-danger"}
+          />
+        )}
       </span>
       <NoticeText
         title={error.title ?? message}
@@ -989,53 +1113,71 @@ export function WorkspaceErrorToast(props: {
       >
         {(text) => (
           <>
-          <div className="min-w-0 flex-1">
-            <div className="min-w-0 select-text">
-              <div className="flex min-w-0">{text.title}</div>
-              {text.body}
-              {error.command ? (
-                <div className="mt-1 flex min-w-0 items-start gap-1">
-                  <code data-testid="workspace-shell-toast-command" className="min-w-0 flex-1 select-text break-all font-mono text-[11px] text-muted">
-                    {error.command}
-                  </code>
-                  <CopyButton iconOnly pinName label="Copy command" testId="workspace-shell-toast-command-copy"
-                    getText={() => error.command ?? ""} />
+            <div className="min-w-0 flex-1">
+              <div className="min-w-0 select-text">
+                <div className="flex min-w-0">{text.title}</div>
+                {text.body}
+                {error.command ? (
+                  <div className="mt-1 flex min-w-0 items-start gap-1">
+                    <code
+                      data-testid="workspace-shell-toast-command"
+                      className="min-w-0 flex-1 select-text break-all font-mono text-[11px] text-muted"
+                    >
+                      {error.command}
+                    </code>
+                    <CopyButton
+                      iconOnly
+                      pinName
+                      label="Copy command"
+                      testId="workspace-shell-toast-command-copy"
+                      getText={() => error.command ?? ""}
+                    />
+                  </div>
+                ) : null}
+              </div>
+              {steps || text.copy.action ? (
+                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                  {error.actionAfterRetry ? retry : null}
+                  {error.actionLabel && props.onAction ? (
+                    <button
+                      type="button"
+                      data-testid="workspace-shell-error-action"
+                      onClick={() => props.onAction?.(error.id)}
+                      className={TOAST_ACTION_CLASS}
+                    >
+                      {error.actionLabel}
+                    </button>
+                  ) : null}
+                  {props.onAction
+                    ? error.additionalActionLabels?.map((label, index) => (
+                        <button
+                          type="button"
+                          key={label}
+                          data-testid="workspace-shell-error-additional-action"
+                          onClick={() => props.onAction?.(error.id, index + 1)}
+                          className={TOAST_ACTION_CLASS}
+                        >
+                          {label}
+                        </button>
+                      ))
+                    : null}
+                  {error.actionAfterRetry ? null : retry}
+                  {text.copy.action}
                 </div>
               ) : null}
+              {/* A disabled control says why, where the keyboard can't miss it. */}
+              {retry && error.retryBlocked !== undefined ? (
+                <p
+                  id={reasonId}
+                  data-testid="workspace-shell-error-retry-reason"
+                  className="m-0 mt-0.5 select-text text-[11px] leading-snug text-muted"
+                >
+                  {error.retryBlocked}
+                </p>
+              ) : null}
+              {text.copy.block}
             </div>
-            {steps || text.copy.action ? (
-              <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
-                {error.actionAfterRetry ? retry : null}
-                {error.actionLabel && props.onAction ? (
-                  <button
-                    type="button"
-                    data-testid="workspace-shell-error-action"
-                    onClick={() => props.onAction?.(error.id)}
-                    className={TOAST_ACTION_CLASS}
-                  >
-                    {error.actionLabel}
-                  </button>
-                ) : null}
-                {props.onAction ? error.additionalActionLabels?.map((label, index) => (
-                  <button type="button" key={label} data-testid="workspace-shell-error-additional-action"
-                    onClick={() => props.onAction?.(error.id, index + 1)}
-                    className={TOAST_ACTION_CLASS}>
-                    {label}
-                  </button>
-                )) : null}
-                {error.actionAfterRetry ? null : retry}
-                {text.copy.action}
-              </div>
-            ) : null}
-            {/* A disabled control says why, where the keyboard can't miss it. */}
-            {retry && error.retryBlocked !== undefined ? (
-              <p id={reasonId} data-testid="workspace-shell-error-retry-reason" className="m-0 mt-0.5 select-text text-[11px] leading-snug text-muted">
-                {error.retryBlocked}
-              </p>
-            ) : null}
-            {text.copy.block}
-          </div>
-          {text.copy.icon}
+            {text.copy.icon}
           </>
         )}
       </NoticeText>
@@ -1098,7 +1240,12 @@ export function LocalNoticeRow(props: {
         {(text) => (
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-start gap-2">
-              <RowTitle title={text.title} testId={`notice-${notice.id}`} onOpen={props.onOpen} busy={props.opening} />
+              <RowTitle
+                title={text.title}
+                testId={`notice-${notice.id}`}
+                onOpen={props.onOpen}
+                busy={props.opening}
+              />
               <span className={ROW_CONTROLS_CLASS}>
                 {notice.filePaths?.length ? null : text.copy.icon}
                 <RowCorner
@@ -1112,17 +1259,29 @@ export function LocalNoticeRow(props: {
             {props.note === undefined ? text.body : <RowNote note={props.note} />}
             {notice.command ? (
               <div className="mt-1 flex items-start gap-2">
-                <code data-testid={`notice-${notice.id}-command`} className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted">
+                <code
+                  data-testid={`notice-${notice.id}-command`}
+                  className="min-w-0 flex-1 select-text break-all font-mono text-[12px] text-muted"
+                >
                   {notice.command}
                 </code>
-                <CopyButton iconOnly pinName label="Copy command" testId={`notice-${notice.id}-command-copy`}
-                  getText={() => notice.command ?? ""} />
+                <CopyButton
+                  iconOnly
+                  pinName
+                  label="Copy command"
+                  testId={`notice-${notice.id}-command-copy`}
+                  getText={() => notice.command ?? ""}
+                />
               </div>
             ) : null}
             {notice.filePaths?.length ? (
               <div className="mt-1 flex items-start gap-2">
                 <ul className="m-0 min-w-0 flex-1 list-none p-0 text-[12px] text-muted">
-                  {notice.filePaths.slice(0, 5).map(path => <li key={path} className="select-text break-all">{path}</li>)}
+                  {notice.filePaths.slice(0, 5).map((path) => (
+                    <li key={path} className="select-text break-all">
+                      {path}
+                    </li>
+                  ))}
                   {notice.filePaths.length > 5 ? <li>{notice.filePaths.length - 5} more</li> : null}
                 </ul>
                 {text.copy.icon}
@@ -1136,7 +1295,9 @@ export function LocalNoticeRow(props: {
                       key={action.label}
                       type="button"
                       disabled={action.disabled}
-                      aria-describedby={action.reason === undefined ? undefined : `${reasonId}-${index}`}
+                      aria-describedby={
+                        action.reason === undefined ? undefined : `${reasonId}-${index}`
+                      }
                       aria-busy={action.busy || undefined}
                       onClick={() => props.onAction(action)}
                       className={ROW_ACTION_CLASS}
@@ -1146,11 +1307,17 @@ export function LocalNoticeRow(props: {
                   ))}
                   {text.copy.action}
                 </div>
-                {notice.actions?.map((action, index) => action.reason === undefined ? null : (
-                  <p key={action.label} id={`${reasonId}-${index}`} className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                    {action.reason}
-                  </p>
-                ))}
+                {notice.actions?.map((action, index) =>
+                  action.reason === undefined ? null : (
+                    <p
+                      key={action.label}
+                      id={`${reasonId}-${index}`}
+                      className="m-0 mt-0.5 text-[11px] leading-snug text-muted"
+                    >
+                      {action.reason}
+                    </p>
+                  ),
+                )}
               </>
             ) : null}
             {text.copy.block}
@@ -1291,7 +1458,10 @@ export function NoticeCenter(props: {
     if (!stack) return;
     const root = document.documentElement;
     const measure = () => {
-      const room = stack.offsetHeight > 0 ? Math.ceil(window.innerHeight - stack.getBoundingClientRect().top) : 0;
+      const room =
+        stack.offsetHeight > 0
+          ? Math.ceil(window.innerHeight - stack.getBoundingClientRect().top)
+          : 0;
       root.style.setProperty("--dohc-toast-room", `${room}px`);
     };
     measure();
@@ -1375,40 +1545,43 @@ export function NoticeCenter(props: {
   // for the first. Once it opened, Notices closes and focus goes back where
   // it came from, for the target to take; a sentence instead takes the place
   // of the row's text. An open that aborts opens nothing and says nothing.
-  const openRow = useCallback((key: string, run: (signal: AbortSignal) => RowOpen) => {
-    if (opening.current?.key === key) return;
-    cancelOpen();
-    const controller = new AbortController();
-    setRowNotes((current) => {
-      if (!current.has(key)) return current;
-      const next = new Map(current);
-      next.delete(key);
-      return next;
-    });
-    const settle = (note: string | null) => {
-      if (controller.signal.aborted) return;
-      if (note === null) {
-        (modalReturnTarget() ?? toggleRef.current)?.focus({ preventScroll: true });
-        setOpen(false);
-        return;
-      }
-      setOpen(true);
-      setRowNotes((current) => new Map(current).set(key, note));
-    };
-    const result = run(controller.signal);
-    opening.current = { key, controller };
-    setOpeningKey(key);
-    const done = () => {
-      if (opening.current?.controller !== controller) return;
-      opening.current = null;
-      setOpeningKey(null);
-    };
-    // A lookup that throws reports itself; the row opens nothing.
-    void result.then((note) => {
-      done();
-      settle(note);
-    }, done);
-  }, [cancelOpen]);
+  const openRow = useCallback(
+    (key: string, run: (signal: AbortSignal) => RowOpen) => {
+      if (opening.current?.key === key) return;
+      cancelOpen();
+      const controller = new AbortController();
+      setRowNotes((current) => {
+        if (!current.has(key)) return current;
+        const next = new Map(current);
+        next.delete(key);
+        return next;
+      });
+      const settle = (note: string | null) => {
+        if (controller.signal.aborted) return;
+        if (note === null) {
+          (modalReturnTarget() ?? toggleRef.current)?.focus({ preventScroll: true });
+          setOpen(false);
+          return;
+        }
+        setOpen(true);
+        setRowNotes((current) => new Map(current).set(key, note));
+      };
+      const result = run(controller.signal);
+      opening.current = { key, controller };
+      setOpeningKey(key);
+      const done = () => {
+        if (opening.current?.controller !== controller) return;
+        opening.current = null;
+        setOpeningKey(null);
+      };
+      // A lookup that throws reports itself; the row opens nothing.
+      void result.then((note) => {
+        done();
+        settle(note);
+      }, done);
+    },
+    [cancelOpen],
+  );
   const { onOpenSentNotice } = props;
   const openSentNotice = useCallback(
     (notice: NoticeRow) => {
@@ -1444,9 +1617,7 @@ export function NoticeCenter(props: {
   )
     ? liveRetryKey
     : null;
-  const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<
-    string | null
-  >(null);
+  const [dismissedLiveDeliveryKey, setDismissedLiveDeliveryKey] = useState<string | null>(null);
   // Recovery forgets the dismissal, so the next failure is announced again
   // instead of staying silent behind an answer about an older one.
   if (liveRetryKey === null && dismissedLiveDeliveryKey !== null) {
@@ -1456,7 +1627,10 @@ export function NoticeCenter(props: {
   // the toast below both hang off its identity.
   const pausedPaths = props.syncStatus?.ownerLivePausedPaths?.join("\n") ?? "";
   const liveDelivery = useMemo(
-    () => (liveDeliveryKey ? liveDeliveryCopy(liveDeliveryReason, pausedPaths ? pausedPaths.split("\n") : []) : null),
+    () =>
+      liveDeliveryKey
+        ? liveDeliveryCopy(liveDeliveryReason, pausedPaths ? pausedPaths.split("\n") : [])
+        : null,
     [liveDeliveryKey, liveDeliveryReason, pausedPaths],
   );
   // One report for the row and the toast, so a person who copies from either
@@ -1480,14 +1654,10 @@ export function NoticeCenter(props: {
   const liveDeliveryAction = useMemo(() => {
     if (!liveDelivery) return null;
     if (liveDelivery.recovery === "retry") {
-      return onRetryLiveDelivery
-        ? { label: "Try again", onClick: onRetryLiveDelivery }
-        : null;
+      return onRetryLiveDelivery ? { label: "Try again", onClick: onRetryLiveDelivery } : null;
     }
     if (liveDelivery.recovery === "live-documents") {
-      return onOpenLiveDocuments
-        ? { label: "Live documents", onClick: onOpenLiveDocuments }
-        : null;
+      return onOpenLiveDocuments ? { label: "Live documents", onClick: onOpenLiveDocuments } : null;
     }
     return null;
   }, [liveDelivery, onOpenLiveDocuments, onRetryLiveDelivery]);
@@ -1498,14 +1668,11 @@ export function NoticeCenter(props: {
   const refusalsKey = props.syncStatus?.hasOwnerLiveRefusals
     ? `${props.workspaceId}:live-refusals`
     : null;
-  const [dismissedRefusalsKey, setDismissedRefusalsKey] = useState<string | null>(
-    null,
-  );
+  const [dismissedRefusalsKey, setDismissedRefusalsKey] = useState<string | null>(null);
   if (refusalsKey === null && dismissedRefusalsKey !== null) {
     setDismissedRefusalsKey(null);
   }
-  const refusalsToastVisible =
-    refusalsKey !== null && refusalsKey !== dismissedRefusalsKey;
+  const refusalsToastVisible = refusalsKey !== null && refusalsKey !== dismissedRefusalsKey;
   // The row and toast copy the same safe report.
   const refusalsDetails = useMemo(
     () =>
@@ -1577,10 +1744,12 @@ export function NoticeCenter(props: {
         body: "Review them to choose what to keep.",
         ...(props.onReviewShareChanges
           ? {
-              actions: [{
-                label: "Review",
-                onClick: () => props.onReviewShareChanges?.(sent.proposalId),
-              }],
+              actions: [
+                {
+                  label: "Review",
+                  onClick: () => props.onReviewShareChanges?.(sent.proposalId),
+                },
+              ],
               target: { to: "share-changes", proposalId: sent.proposalId },
             }
           : {}),
@@ -1609,30 +1778,40 @@ export function NoticeCenter(props: {
     // Automation failures: durable until dismissed, like the share-refusal
     // banner. Dismissing acknowledges the generation on screen; a failure
     // recorded after this render has a higher generation and comes back.
-    for (const error of [...(props.workspaceErrors ?? [])].reverse().sort(
-      (a, b) => b.atMs - a.atMs,
-    )) {
+    for (const error of [...(props.workspaceErrors ?? [])]
+      .reverse()
+      .sort((a, b) => b.atMs - a.atMs)) {
       const steps: NoticeAction[] = [
         ...(error.actionLabel && props.onWorkspaceErrorAction
-          ? [{
-              label: error.actionLabel,
-              onClick: () => props.onWorkspaceErrorAction?.(error.id),
-            }]
+          ? [
+              {
+                label: error.actionLabel,
+                onClick: () => props.onWorkspaceErrorAction?.(error.id),
+              },
+            ]
           : []),
-        ...(props.onWorkspaceErrorAction ? (error.additionalActionLabels ?? []).map((label, index) => ({
-          label, onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
-        })) : []),
+        ...(props.onWorkspaceErrorAction
+          ? (error.additionalActionLabels ?? []).map((label, index) => ({
+              label,
+              onClick: () => props.onWorkspaceErrorAction?.(error.id, index + 1),
+            }))
+          : []),
       ];
-      const retry: NoticeAction[] = error.canRetry && props.onRetryWorkspaceError
-        ? [{
-            label: "Try again",
-            onClick: () => props.onRetryWorkspaceError?.(error.id),
-            disabled: error.retryBusy || error.retryBlocked !== undefined,
-            busy: error.retryBusy,
-            ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
-          }]
-        : [];
-      const message = retry.length ? besideTryAgain(error.message, error.retryBlocked !== undefined) : error.message;
+      const retry: NoticeAction[] =
+        error.canRetry && props.onRetryWorkspaceError
+          ? [
+              {
+                label: "Try again",
+                onClick: () => props.onRetryWorkspaceError?.(error.id),
+                disabled: error.retryBusy || error.retryBlocked !== undefined,
+                busy: error.retryBusy,
+                ...(error.retryBlocked ? { reason: error.retryBlocked } : {}),
+              },
+            ]
+          : [];
+      const message = retry.length
+        ? besideTryAgain(error.message, error.retryBlocked !== undefined)
+        : error.message;
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
@@ -1644,11 +1823,14 @@ export function NoticeCenter(props: {
         ...(props.onDismissWorkspaceError && !error.noDismiss
           ? { onDismiss: () => props.onDismissWorkspaceError?.(error.id) }
           : {}),
-        ...((!error.seen && props.onHideWorkspaceError) || (!error.read && props.onReadWorkspaceError)
-          ? { onRead: () => {
-            if (!error.seen) props.onHideWorkspaceError?.(error.id);
-            return error.read ? undefined : props.onReadWorkspaceError?.(error.id);
-          } }
+        ...((!error.seen && props.onHideWorkspaceError) ||
+        (!error.read && props.onReadWorkspaceError)
+          ? {
+              onRead: () => {
+                if (!error.seen) props.onHideWorkspaceError?.(error.id);
+                return error.read ? undefined : props.onReadWorkspaceError?.(error.id);
+              },
+            }
           : {}),
         read: error.read === true,
         ...(error.target ? { target: error.target } : {}),
@@ -1667,8 +1849,12 @@ export function NoticeCenter(props: {
         body: AUTOMATION_HOLDS_UNREADABLE,
         Icon: AlertTriangle,
         actions: [
-          ...(props.onResetAutomationHolds ? [{ label: "Reset holds", onClick: props.onResetAutomationHolds }] : []),
-          ...(props.onRevealAutomationHolds ? [{ label: "Open folder", onClick: props.onRevealAutomationHolds }] : []),
+          ...(props.onResetAutomationHolds
+            ? [{ label: "Reset holds", onClick: props.onResetAutomationHolds }]
+            : []),
+          ...(props.onRevealAutomationHolds
+            ? [{ label: "Open folder", onClick: props.onRevealAutomationHolds }]
+            : []),
         ],
       });
     }
@@ -1712,7 +1898,9 @@ export function NoticeCenter(props: {
         body: liveDelivery.body,
         ...(liveDeliveryAction ? { actions: [liveDeliveryAction] } : {}),
         // Try again changes state, so the row goes only where Live documents goes.
-        ...(liveDelivery.recovery === "live-documents" && onOpenLiveDocuments ? { target: { to: "live-documents" } as const } : {}),
+        ...(liveDelivery.recovery === "live-documents" && onOpenLiveDocuments
+          ? { target: { to: "live-documents" } as const }
+          : {}),
         onRead: () => setDismissedLiveDeliveryKey(liveDeliveryKey),
         ...(liveDeliveryKey ? { revision: liveDeliveryKey } : {}),
         copy: { report: liveDeliveryDetails },
@@ -1729,7 +1917,10 @@ export function NoticeCenter(props: {
         title: OWNER_LIVE_REFUSALS_TITLE,
         body: OWNER_LIVE_REFUSALS_BODY,
         ...(onOpenLiveDocuments
-          ? { actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }], target: { to: "live-documents" } as const }
+          ? {
+              actions: [{ label: "Live documents", onClick: onOpenLiveDocuments }],
+              target: { to: "live-documents" } as const,
+            }
           : {}),
         onRead: () => setDismissedRefusalsKey(refusalsKey),
         revision: refusalsKey,
@@ -1753,10 +1944,11 @@ export function NoticeCenter(props: {
       next.push({
         id: "share-projection-held",
         tone: "warning",
-        title: projection.heldPathCount === 1
-          ? "dohc held back a shared file"
-          : `dohc held back ${projection.heldPathCount} shared files`,
-        ...(projection.heldPaths.some(entry => entry.reason === "local-collision")
+        title:
+          projection.heldPathCount === 1
+            ? "dohc held back a shared file"
+            : `dohc held back ${projection.heldPathCount} shared files`,
+        ...(projection.heldPaths.some((entry) => entry.reason === "local-collision")
           ? {
               body: `${unjournalablePathMessages(projection.heldPaths).join(" ")} Then choose Refresh.`,
               actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
@@ -1769,8 +1961,7 @@ export function NoticeCenter(props: {
         id: "share-projection-pending",
         tone: "warning",
         title: "Shared files need repair",
-        body:
-          "Some shared files are not current in this folder. Refresh the shared view to repair them.",
+        body: "Some shared files are not current in this folder. Refresh the shared view to repair them.",
         actions: [{ label: "Refresh", onClick: props.onRefreshShareView }],
         Icon: AlertTriangle,
       });
@@ -1811,10 +2002,12 @@ export function NoticeCenter(props: {
     } else if (state === "sign-in-expired") {
       next.push(signInExpiredNotice({ onSignInAgain: props.onSignInAgain }));
     } else if (state === "account-unconfirmed") {
-      next.push(accountUnconfirmedNotice({
-        onTryAgain: props.onConfirmSyncAccount,
-        onOpenSyncSettings: props.onOpenSyncSettings,
-      }));
+      next.push(
+        accountUnconfirmedNotice({
+          onTryAgain: props.onConfirmSyncAccount,
+          onOpenSyncSettings: props.onOpenSyncSettings,
+        }),
+      );
     }
 
     for (const pending of props.syncStatus?.ownerAdmissionPending ?? []) {
@@ -1836,14 +2029,20 @@ export function NoticeCenter(props: {
         body: sharingDeclinedBody(declined),
         ...(onOpenSharingDeclined
           ? {
-              actions: [{
-                label: "Open document",
-                onClick: () => {
-                  closeDecline(declined);
-                  onOpenSharingDeclined(declined.versionId, declined.objectId);
+              actions: [
+                {
+                  label: "Open document",
+                  onClick: () => {
+                    closeDecline(declined);
+                    onOpenSharingDeclined(declined.versionId, declined.objectId);
+                  },
                 },
-              }],
-              target: { to: "sharing-declined", versionId: declined.versionId, objectId: declined.objectId } as const,
+              ],
+              target: {
+                to: "sharing-declined",
+                versionId: declined.versionId,
+                objectId: declined.objectId,
+              } as const,
             }
           : {}),
         onDismiss: () =>
@@ -1871,12 +2070,14 @@ export function NoticeCenter(props: {
           : ENGINE_STORE_UPDATE_NEXT_STEP,
         ...(rebuild
           ? {
-              actions: [{
-                label: "Rebuild",
-                onClick: () => {
-                  if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
+              actions: [
+                {
+                  label: "Rebuild",
+                  onClick: () => {
+                    if (toggleRef.current) props.onRebuildEngineStore(toggleRef.current);
+                  },
                 },
-              }],
+              ],
             }
           : {}),
         Icon: AlertTriangle,
@@ -1973,21 +2174,27 @@ export function NoticeCenter(props: {
   // workspace.
   const allRecoveryRows = useAllOrphanedDrafts();
   const recoveryRows = useMemo(
-    () =>
-      allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
+    () => allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
   const keptTyping = props.keptTyping ?? [];
-  const localCount = notices.length + (recoveryRows.length > 0 ? 1 : 0) + (keptTyping.length > 0 ? 1 : 0);
+  const localCount =
+    notices.length + (recoveryRows.length > 0 ? 1 : 0) + (keptTyping.length > 0 ? 1 : 0);
   // This computer's rows read in this window. A row that goes and comes back
   // is unread again.
   const [localRead, setLocalRead] = useState<ReadonlySet<string>>(new Set());
-  const setAsideKey = recoveryRows.length > 0
-    ? JSON.stringify([props.workspaceId, "set-aside", recoveryRows.map((row) => [row.path, row.draft.id])])
-    : null;
-  const keptTypingKey = keptTyping.length > 0
-    ? JSON.stringify(["kept-typing", keptTyping.map((row) => row.recordId)])
-    : null;
+  const setAsideKey =
+    recoveryRows.length > 0
+      ? JSON.stringify([
+          props.workspaceId,
+          "set-aside",
+          recoveryRows.map((row) => [row.path, row.draft.id]),
+        ])
+      : null;
+  const keptTypingKey =
+    keptTyping.length > 0
+      ? JSON.stringify(["kept-typing", keptTyping.map((row) => row.recordId)])
+      : null;
   useEffect(() => {
     const present = new Set(notices.map((notice) => localReadKey(props.workspaceId, notice)));
     if (setAsideKey !== null) present.add(setAsideKey);
@@ -2000,13 +2207,17 @@ export function NoticeCenter(props: {
   // Main saves whether the crash report is read, so its row follows main. A
   // read main could not save shows unread again, and reading it saves again.
   const savedRead = (notice: Notice) => notice.id === "crash-report" && notice.onRead !== undefined;
-  const unreadNotices = notices.filter((notice) =>
-    !notice.read && (savedRead(notice) || !localRead.has(localReadKey(props.workspaceId, notice))));
+  const unreadNotices = notices.filter(
+    (notice) =>
+      !notice.read &&
+      (savedRead(notice) || !localRead.has(localReadKey(props.workspaceId, notice))),
+  );
   const setAsideUnread = setAsideKey !== null && !localRead.has(setAsideKey);
   const keptTypingUnread = keptTypingKey !== null && !localRead.has(keptTypingKey);
   const unreadLocal = unreadNotices.length + (setAsideUnread ? 1 : 0) + (keptTypingUnread ? 1 : 0);
   const count = unreadLocal + unreadSent;
-  const canReadAll = unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
+  const canReadAll =
+    unreadLocal > 0 || (unreadSent > 0 && props.onReadAllSentNotices !== undefined);
   // Reading a row of this computer's keeps the row and closes its toast. A
   // read dohc could not save shows the row unread again.
   // `sections` are the keys of the list rows read with them.
@@ -2022,14 +2233,18 @@ export function NoticeCenter(props: {
       if (!(saving instanceof Promise)) continue;
       const key = localReadKey(props.workspaceId, row);
       void saving.then((saved) => {
-        if (!saved) setLocalRead((current) => (current.has(key) ? new Set([...current].filter((read) => read !== key)) : current));
+        if (!saved)
+          setLocalRead((current) =>
+            current.has(key) ? new Set([...current].filter((read) => read !== key)) : current,
+          );
       });
     }
   };
   // How to read each unread row as it is now, by a name that stays with the
   // row while its words change.
   const readers = new Map<string, () => void>();
-  for (const notice of unreadNotices) readers.set(`local:${notice.id}`, () => readLocal([notice], []));
+  for (const notice of unreadNotices)
+    readers.set(`local:${notice.id}`, () => readLocal([notice], []));
   if (setAsideUnread) readers.set("set-aside", () => readLocal([], [setAsideKey]));
   if (keptTypingUnread) readers.set("kept-typing", () => readLocal([], [keptTypingKey]));
   for (const { notice } of sentNotices) {
@@ -2070,8 +2285,12 @@ export function NoticeCenter(props: {
   const { onHideSentNoticeToast } = props;
   const sentToastFails = sentToast !== null && isFailure(sentToast.notice);
   const sentToastFades = sentToast !== null && !sentToastFails;
-  const sentToastRetries = sentToast !== null && (retriesRun(sentToast.notice) || sentToast.retryable) && Boolean(props.onRetrySentNotice);
-  const sentToastOpens = sentToast !== null && sentToast.openable && Boolean(props.onOpenSentNotice);
+  const sentToastRetries =
+    sentToast !== null &&
+    (retriesRun(sentToast.notice) || sentToast.retryable) &&
+    Boolean(props.onRetrySentNotice);
+  const sentToastOpens =
+    sentToast !== null && sentToast.openable && Boolean(props.onOpenSentNotice);
   useEffect(() => {
     if (sentToastKey === null || !sentToastFades || !onHideSentNoticeToast) return;
     const timer = setTimeout(onHideSentNoticeToast, FADING_TOAST_MS);
@@ -2089,26 +2308,27 @@ export function NoticeCenter(props: {
   // A row answers Delete while it, or its open control, holds focus, not
   // another control inside it. Enter and Space open a row through its open
   // control, as a press does; a row with nowhere to go does nothing.
-  const rowKeys = (dismiss?: () => void) =>
-    (event: KeyboardEvent<HTMLElement>) => {
-      const target = event.target as HTMLElement;
-      if (target !== event.currentTarget && !target.matches(ROW_OPEN)) return;
-      if ((event.key === "Delete" || event.key === "Backspace") && dismiss) {
-        event.preventDefault();
-        focusPastRow(event.currentTarget);
-        dismiss();
-      }
-    };
+  const rowKeys = (dismiss?: () => void) => (event: KeyboardEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    if (target !== event.currentTarget && !target.matches(ROW_OPEN)) return;
+    if ((event.key === "Delete" || event.key === "Backspace") && dismiss) {
+      event.preventDefault();
+      focusPastRow(event.currentTarget);
+      dismiss();
+    }
+  };
   // Each row's focus stop: its open control, or the row itself.
-  const rowStop = (row: Element | undefined) => row?.querySelector<HTMLElement>(ROW_OPEN) ?? (row as HTMLElement | undefined);
+  const rowStop = (row: Element | undefined) =>
+    row?.querySelector<HTMLElement>(ROW_OPEN) ?? (row as HTMLElement | undefined);
   const moveBetweenRows = (event: KeyboardEvent<HTMLElement>) => {
     const rows = [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
     if (rows.length === 0) return;
     const current = document.activeElement?.closest<HTMLElement>(NOTICE_ROW) ?? null;
     const index = current ? rows.indexOf(current) : -1;
-    const next = event.key === "ArrowDown"
-      ? rows[Math.min(index + 1, rows.length - 1)]
-      : rows[index < 0 ? rows.length - 1 : Math.max(index - 1, 0)];
+    const next =
+      event.key === "ArrowDown"
+        ? rows[Math.min(index + 1, rows.length - 1)]
+        : rows[index < 0 ? rows.length - 1 : Math.max(index - 1, 0)];
     event.preventDefault();
     rowStop(next)?.focus();
   };
@@ -2133,597 +2353,693 @@ export function NoticeCenter(props: {
 
   return (
     <>
-      {open ? null : inToastLayer(host, (
-        <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
-          {errorToast ? (
-            <WorkspaceErrorToast
-              key={errorToast.id}
-              error={errorToast}
-              onAction={props.onWorkspaceErrorAction}
-              onRetry={props.onRetryWorkspaceError}
-              onHide={props.onHideWorkspaceError}
-            />
-          ) : null}
-          {sentToast ? (
-            <WithDetails
-              key={sentToastKey}
-              copy={sentToastFails ? { report: failureDetails(sentToast.notice) } : undefined}
-              shown={[sentToast.notice.title, sentToast.notice.body]}
-              actionClass={TOAST_ACTION_CLASS}
-              testId="sent-notice-toast"
-            >
-            {(details) => (
+      {open
+        ? null
+        : inToastLayer(
+            host,
             <div
-              data-testid="sent-notice-toast"
-              role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+              ref={toastsRef}
+              data-testid="notice-toasts"
+              data-dohc-toasts
+              className={TOAST_STACK_CLASS[host]}
             >
-              {isHeld(sentToast.notice)
-                ? <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-                : <SenderMark notice={sentToast.notice} />}
-              <div className="min-w-0 flex-1">
-                <span className="block break-words leading-snug">
-                  {sentToast.notice.title}
-                  {/* A failure's reason shows about four lines, then scrolls, so
+              {errorToast ? (
+                <WorkspaceErrorToast
+                  key={errorToast.id}
+                  error={errorToast}
+                  onAction={props.onWorkspaceErrorAction}
+                  onRetry={props.onRetryWorkspaceError}
+                  onHide={props.onHideWorkspaceError}
+                />
+              ) : null}
+              {sentToast ? (
+                <WithDetails
+                  key={sentToastKey}
+                  copy={sentToastFails ? { report: failureDetails(sentToast.notice) } : undefined}
+                  shown={[sentToast.notice.title, sentToast.notice.body]}
+                  actionClass={TOAST_ACTION_CLASS}
+                  testId="sent-notice-toast"
+                >
+                  {(details) => (
+                    <div
+                      data-testid="sent-notice-toast"
+                      role={sentToastFades || isHeld(sentToast.notice) ? "status" : "alert"}
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                    >
+                      {isHeld(sentToast.notice) ? (
+                        <AlertTriangle
+                          size={14}
+                          aria-hidden
+                          className="mt-0.5 shrink-0 text-warning"
+                        />
+                      ) : (
+                        <SenderMark notice={sentToast.notice} />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <span className="block break-words leading-snug">
+                          {sentToast.notice.title}
+                          {/* A failure's reason shows about four lines, then scrolls, so
                       it never pushes the title and controls out of a short
                       window. Anything else shows two lines, as a reply's words. */}
-                  {sentToast.notice.body ? (
-                    <span
-                      data-testid="sent-notice-toast-body"
-                      className={`mt-0.5 block text-[11px] text-muted ${sentToastFails ? "max-h-[5.5em] overflow-y-auto overscroll-contain" : "line-clamp-2"}`}
-                    >
-                      {sentToast.notice.body}
-                    </span>
-                  ) : null}
-                </span>
-                {sentToastRetries || sentToastOpens || details.action ? (
-                  <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
-                    {sentToastRetries ? (
-                      <button
-                        type="button"
-                        data-testid="sent-notice-toast-retry"
-                        onClick={() => {
-                          onHideSentNoticeToast?.();
-                          props.onRetrySentNotice?.(sentToast.notice);
-                        }}
-                        className={TOAST_ACTION_CLASS}
-                      >
-                        Try again
-                      </button>
-                    ) : null}
-                    {sentToastOpens ? (
-                      <button
-                        type="button"
-                        data-testid="sent-notice-toast-open"
-                        onClick={() => {
-                          onHideSentNoticeToast?.();
-                          openSentNotice(sentToast.notice);
-                        }}
-                        className={TOAST_ACTION_CLASS}
-                      >
-                        {isHeld(sentToast.notice) ? "Open note" : "Open"}
-                      </button>
-                    ) : null}
-                    {details.action}
-                  </div>
-                ) : null}
-                {details.block}
-              </div>
-              {details.icon}
-              {onHideSentNoticeToast ? (
-                <button
-                  type="button"
-                  aria-label="Close"
-                  onClick={onHideSentNoticeToast}
-                  className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-                >
-                  <X size={12} aria-hidden />
-                </button>
-              ) : null}
-            </div>
-            )}
-            </WithDetails>
-          ) : null}
-          {liveDeliveryToastVisible && liveDelivery ? (
-            <WithDetails
-              key={liveDeliveryKey}
-              copy={{ report: liveDeliveryDetails }}
-              shown={[`${liveDelivery.title}. ${liveDelivery.body}`]}
-              actionClass={TOAST_ACTION_CLASS}
-              testId="owner-live-delivery-toast"
-            >
-            {(details) => (
-            <div
-              data-testid="owner-live-delivery-toast"
-              role="status"
-              aria-live="polite"
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <liveDelivery.Icon size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <div className="min-w-0 flex-1">
-                <span className="block select-text cursor-text break-words leading-snug">
-                  {liveDelivery.title}. {liveDelivery.body}
-                </span>
-                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
-                  {liveDeliveryAction ? (
-                    <button
-                      type="button"
-                      data-testid="owner-live-delivery-toast-action"
-                      onClick={liveDeliveryAction.onClick}
-                      className={TOAST_ACTION_CLASS}
-                    >
-                      {liveDeliveryAction.label}
-                    </button>
-                  ) : null}
-                  {details.action}
-                </div>
-                {details.block}
-              </div>
-              {details.icon}
-              <button
-                type="button"
-                aria-label="Dismiss live editing notice"
-                onClick={() => setDismissedLiveDeliveryKey(liveDeliveryKey)}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-            )}
-            </WithDetails>
-          ) : null}
-          {refusalsToastVisible ? (
-            <WithDetails
-              key={refusalsKey}
-              copy={{ report: refusalsDetails }}
-              shown={[`${OWNER_LIVE_REFUSALS_TITLE}. ${OWNER_LIVE_REFUSALS_BODY}`]}
-              actionClass={TOAST_ACTION_CLASS}
-              testId="owner-live-refusals-toast"
-            >
-            {(details) => (
-            <div
-              data-testid="owner-live-refusals-toast"
-              role="status"
-              aria-live="polite"
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <div className="min-w-0 flex-1">
-                <span className="block select-text cursor-text break-words leading-snug">
-                  {OWNER_LIVE_REFUSALS_TITLE}. {OWNER_LIVE_REFUSALS_BODY}
-                </span>
-                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
-                  {onOpenLiveDocuments ? (
-                    <button
-                      type="button"
-                      data-testid="owner-live-refusals-toast-action"
-                      onClick={onOpenLiveDocuments}
-                      className={TOAST_ACTION_CLASS}
-                    >
-                      Live documents
-                    </button>
-                  ) : null}
-                  {details.action}
-                </div>
-                {details.block}
-              </div>
-              {details.icon}
-              {/* Closing ends the announcement; the row stays in Notices. */}
-              <button
-                type="button"
-                aria-label="Dismiss live editing refusals notice"
-                onClick={() => setDismissedRefusalsKey(refusalsKey)}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-            )}
-            </WithDetails>
-          ) : null}
-          {declineToast ? (
-            <WithDetails
-              key={sharingDeclinedKey(props.workspaceId, declineToast)}
-              copy={{ report: sharingDeclinedDetails(props.workspaceId, declineToast) }}
-              shown={[`${SHARING_DECLINED_TITLE}. ${sharingDeclinedBody(declineToast)}`]}
-              actionClass={TOAST_ACTION_CLASS}
-              testId="sharing-declined-toast"
-            >
-            {(details) => (
-            <div
-              data-testid="sharing-declined-toast"
-              role="status"
-              aria-live="polite"
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-              <div className="min-w-0 flex-1">
-                <span className="block select-text cursor-text break-words leading-snug">
-                  {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
-                </span>
-                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
-                  {onOpenSharingDeclined ? (
-                    <button
-                      type="button"
-                      data-testid="sharing-declined-toast-open"
-                      onClick={() => {
-                        closeDecline(declineToast);
-                        onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
-                      }}
-                      className={TOAST_ACTION_CLASS}
-                    >
-                      Open document
-                    </button>
-                  ) : null}
-                  {details.action}
-                </div>
-                {details.block}
-              </div>
-              {details.icon}
-              {/* Closing ends the announcement; the row stays in Notices. */}
-              <button
-                type="button"
-                aria-label={`Close notice for ${declineToast.path}`}
-                onClick={() => closeDecline(declineToast)}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-            )}
-            </WithDetails>
-          ) : null}
-          {crashToastVisible && crashReport ? (
-            <WithDetails
-              key={crashReport.revision}
-              copy={{ report: crashReport.text }}
-              shown={[crashReport.title]}
-              actionClass={TOAST_ACTION_CLASS}
-              testId="crash-report-toast"
-            >
-            {(details) => (
-            <div
-              data-testid="crash-report-toast"
-              role="alert"
-              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
-            >
-              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />
-              <div className="min-w-0 flex-1">
-                <span className="block select-text cursor-text break-words leading-snug">
-                  {crashReport.title}
-                </span>
-                <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
-                  {props.onSendCrashReport ? (
-                    <button
-                      type="button"
-                      data-testid="crash-report-toast-send"
-                      onClick={props.onSendCrashReport}
-                      className={TOAST_ACTION_CLASS}
-                    >
-                      Send report
-                    </button>
-                  ) : null}
-                  {details.action}
-                </div>
-                {details.block}
-              </div>
-              {details.icon}
-              {/* Closing ends the announcement; the row stays in Notices. */}
-              <button
-                type="button"
-                aria-label="Close crash report notice"
-                onClick={props.onReadCrashReport}
-                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-            )}
-            </WithDetails>
-          ) : null}
-        </div>
-      ))}
-
-      {open ? inToastLayer(host, (
-        <div
-          ref={centerRef}
-          data-focus-surface="notices"
-          data-testid="notice-center"
-          role="dialog"
-          aria-label="Notices"
-          tabIndex={-1}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-              moveBetweenRows(event);
-              return;
-            }
-            if (event.key !== "Escape" || event.defaultPrevented) return;
-            event.preventDefault();
-            event.stopPropagation();
-            setOpen(false);
-          }}
-          onBlur={(event) => {
-            // Focus moved out by Tab, F6 or a dialog's trap closes Notices, as
-            // a press outside does. Focus leaving the window keeps it open.
-            const next = event.relatedTarget;
-            if (!(next instanceof Element) || event.currentTarget.contains(next) || toggleRef.current?.contains(next)) return;
-            setOpen(false);
-          }}
-          className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-60 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
-        >
-          <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
-            <Bell size={13} aria-hidden className="text-subtle" />
-            <span className="text-sm font-semibold text-ink">
-              Notices
-            </span>
-            {canReadAll ? (
-              <button
-                type="button"
-                data-testid="notice-center-read-all"
-                onClick={() => {
-                  centerRef.current?.focus();
-                  readLocal(unreadNotices, [setAsideKey, keptTypingKey]);
-                  if (unreadSent > 0) props.onReadAllSentNotices?.();
-                }}
-                className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-              >
-                Mark all read
-              </button>
-            ) : null}
-            {count > 0 ? (
-              <span
-                data-testid="notice-center-count"
-                className={`${canReadAll ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
-              >
-                {count}
-              </span>
-            ) : null}
-          </header>
-          {localCount === 0 && sentNotices.length === 0 ? (
-            props.sentNoticesLoading ? null : (
-              <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
-                <Check size={14} aria-hidden />
-                All clear
-              </div>
-            )
-          ) : (
-            <div className="min-h-0 max-h-[28rem] overflow-y-auto">
-              {localCount > 0 ? (
-                <section data-testid="notice-group-local">
-                  <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
-                    On this computer
-                  </SectionLabel>
-              {recoveryRows.length > 0 ? (
-                <section
-                  data-testid="notice-set-aside-edits"
-                  {...readOnReach("set-aside")}
-                  className="flex gap-2 border-b border-line px-3 py-2"
-                >
-                  <UnreadMark unread={setAsideUnread} testId="notice-set-aside-edits-unread" className="h-4" />
-                  <div className="min-w-0 flex-1">
-                    <p className={`m-0 text-[12px] ${setAsideUnread ? "font-medium text-ink" : "text-muted"}`}>
-                      {recoveryRows.length === 1
-                        ? "1 set-aside edit is waiting"
-                        : `${recoveryRows.length} set-aside edits are waiting`}
-                    </p>
-                    <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                      Copy an edit to keep its text. Dismiss deletes it for good.
-                    </p>
-                    <RecoveryList rows={recoveryRows} />
-                  </div>
-                </section>
-              ) : null}
-              {keptTyping.length > 0 ? (
-                <section
-                  data-testid="notice-kept-typing"
-                  {...readOnReach("kept-typing")}
-                  className="flex gap-2 border-b border-line px-3 py-2"
-                >
-                  <UnreadMark unread={keptTypingUnread} testId="notice-kept-typing-unread" className="h-4" />
-                  <div className="min-w-0 flex-1">
-                    <p className={`m-0 text-[12px] ${keptTypingUnread ? "font-medium text-ink" : "text-muted"}`}>
-                      Typing kept from a workspace no longer in your list
-                    </p>
-                    <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
-                      Copy the typing to keep it. Dismiss deletes it for good.
-                    </p>
-                    <ul className="m-0 list-none p-0">
-                      {keptTyping.map((kept) => (
-                        <li
-                          key={kept.recordId}
-                          className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
-                        >
-                          <span className="min-w-0 flex-1 truncate font-mono text-muted">{kept.path}</span>
-                          <div className="flex shrink-0 items-center gap-2">
-                            <CopyButton testId="kept-typing-copy" label="Copy typing" getText={() => kept.text} />
-                            <DismissDraftControls onDismiss={() => props.onDismissKeptTyping?.(kept)} />
+                          {sentToast.notice.body ? (
+                            <span
+                              data-testid="sent-notice-toast-body"
+                              className={`mt-0.5 block text-[11px] text-muted ${sentToastFails ? "max-h-[5.5em] overflow-y-auto overscroll-contain" : "line-clamp-2"}`}
+                            >
+                              {sentToast.notice.body}
+                            </span>
+                          ) : null}
+                        </span>
+                        {sentToastRetries || sentToastOpens || details.action ? (
+                          <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                            {sentToastRetries ? (
+                              <button
+                                type="button"
+                                data-testid="sent-notice-toast-retry"
+                                onClick={() => {
+                                  onHideSentNoticeToast?.();
+                                  props.onRetrySentNotice?.(sentToast.notice);
+                                }}
+                                className={TOAST_ACTION_CLASS}
+                              >
+                                Try again
+                              </button>
+                            ) : null}
+                            {sentToastOpens ? (
+                              <button
+                                type="button"
+                                data-testid="sent-notice-toast-open"
+                                onClick={() => {
+                                  onHideSentNoticeToast?.();
+                                  openSentNotice(sentToast.notice);
+                                }}
+                                className={TOAST_ACTION_CLASS}
+                              >
+                                {isHeld(sentToast.notice) ? "Open note" : "Open"}
+                              </button>
+                            ) : null}
+                            {details.action}
                           </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </section>
-              ) : null}
-            <ul className="m-0 list-none p-0">
-              {notices.map((notice) => {
-                const key = `local:${notice.id}`;
-                const note = rowNotes.get(key);
-                return (
-                  <LocalNoticeRow
-                    key={notice.id}
-                    notice={notice}
-                    unread={unreadNotices.includes(notice)}
-                    reach={readOnReach(key)}
-                    onKeyDown={rowKeys(notice.onDismiss)}
-                    // A row that says why it cannot open goes nowhere.
-                    onOpen={note === undefined ? openLocal(notice) : undefined}
-                    note={note}
-                    opening={openingKey === key}
-                    onAction={runLocalAction}
-                    onDismiss={(event) => {
-                      focusPastRow(event.currentTarget);
-                      notice.onDismiss?.();
-                    }}
-                  />
-                );
-              })}
-            </ul>
-                </section>
-              ) : null}
-              {sentNotices.length > 0 ? (
-                <section
-                  data-testid="notice-group-sent"
-                  className={localCount > 0 ? "border-t border-line" : undefined}
-                >
-                  <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
-                    Sent to you
-                  </SectionLabel>
-                  <ul className="m-0 list-none p-0">
-                    {sentShownRows.map(({ notice, folder, openable, retryable }) => {
-                      const key = sentKey(sentAccount, notice);
-                      const unread = notice.readAtMs === null;
-                      const note = sentNotes.get(key);
-                      // Why Open could not go there, in place of the text.
-                      const openNote = rowNotes.get(key);
-                      const busy = openingKey === key;
-                      const openNotice = openable && props.onOpenSentNotice
-                        ? () => openSentNotice(notice)
-                        : undefined;
-                      // A row that says why it cannot open goes nowhere; its
-                      // Open stays, to try again once the person has acted.
-                      const openRowNotice = openNote === undefined ? openNotice : undefined;
-                      // A row that opens is its own Open, so the button shows
-                      // only while the row cannot.
-                      const openButton = openRowNotice ? undefined : openNotice;
-                      const runNow = notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
-                        ? () => void runSentNoticeNow(notice)
-                        : undefined;
-                      const retry = (retriesRun(notice) || retryable) && props.onRetrySentNotice
-                        ? () => props.onRetrySentNotice?.(notice)
-                        : undefined;
-                      const copies = isFailure(notice);
-                      const running = runningKey === key;
-                      // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
-                      const dismissNotice = props.onDismissSentNotice && notice.kind !== "automation-wake"
-                        ? () => {
-                            cancelOpen(key);
-                            props.onDismissSentNotice?.(notice);
-                          }
-                        : undefined;
-                      return (
-                        <li
-                          key={key}
-                          data-testid={`sent-notice-${notice.noticeId}`}
-                          data-notice-row=""
-                          tabIndex={openRowNotice ? undefined : -1}
-                          onKeyDown={rowKeys(dismissNotice)}
-                          {...readOnReach(`sent:${key}`)}
-                          className={`${ROW_CLASS}${openRowNotice ? " dohc-row-open" : ""}`}
+                        ) : null}
+                        {details.block}
+                      </div>
+                      {details.icon}
+                      {onHideSentNoticeToast ? (
+                        <button
+                          type="button"
+                          aria-label="Close"
+                          onClick={onHideSentNoticeToast}
+                          className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
                         >
-                          <UnreadMark unread={unread} testId={`sent-notice-${notice.noticeId}-unread`} />
-                          <span className="flex h-6 w-4 shrink-0 items-center justify-center">
-                            {isHeld(notice)
-                              ? <AlertTriangle size={14} aria-hidden className="shrink-0 text-warning" />
-                              : <SenderMark notice={notice} className="shrink-0" />}
-                          </span>
-                          <NoticeText
-                            title={notice.title}
-                            titleClass={unread ? "font-medium text-ink" : "text-muted"}
-                            body={openNote === undefined ? notice.body : ""}
-                            onOpenRow={openRowNotice}
-                            copy={copies ? { report: failureDetails(notice) } : undefined}
-                            revision={notice.createdAtMs}
-                            actionClass={ROW_ACTION_CLASS}
-                            testId={`sent-notice-${notice.noticeId}`}
-                          >
-                            {(text) => (
-                              <div className="min-w-0 flex-1">
-                                <div className="flex min-w-0 items-start gap-2">
-                                  <RowTitle title={text.title} testId={`sent-notice-${notice.noticeId}`} onOpen={openRowNotice} busy={busy} />
-                                  <span className={ROW_CONTROLS_CLASS}>
-                                    {text.copy.icon}
-                                    <RowCorner
-                                      timeMs={notice.createdAtMs}
-                                      busy={busy && openRowNotice !== undefined}
-                                      testId={`sent-notice-${notice.noticeId}`}
-                                      onDismiss={dismissNotice
-                                        ? (event) => {
-                                            focusPastRow(event.currentTarget);
-                                            dismissNotice();
-                                          }
-                                        : undefined}
-                                    />
-                                  </span>
-                                </div>
-                                {openNote === undefined ? text.body : <RowNote note={openNote} />}
-                                {folder ? <p className="m-0 mt-0.5 truncate text-[12px] text-subtle">{folder}</p> : null}
-                                {runNow || retry || openButton || text.copy.action ? (
-                                  <div className={ROW_ACTIONS_CLASS}>
-                                    {runNow ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-run-now`}
-                                        aria-busy={running || undefined}
-                                        disabled={runningKey !== null}
-                                        onClick={runNow}
-                                        className={ROW_ACTION_CLASS}
-                                      >
-                                        {running ? "Starting…" : "Run now"}
-                                      </button>
-                                    ) : null}
-                                    {retry ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-retry`}
-                                        onClick={retry}
-                                        className={ROW_ACTION_CLASS}
-                                      >
-                                        Try again
-                                      </button>
-                                    ) : null}
-                                    {openButton ? (
-                                      <button
-                                        type="button"
-                                        data-testid={`sent-notice-${notice.noticeId}-open`}
-                                        aria-busy={busy || undefined}
-                                        onClick={openNotice}
-                                        className={ROW_ACTION_CLASS}
-                                      >
-                                        {busy ? "Opening…" : isHeld(notice) ? "Open note" : AUTOMATION_NOTICE_KINDS.has(notice.kind) ? "Open automation" : "Open"}
-                                      </button>
-                                    ) : null}
-                                    {text.copy.action}
-                                  </div>
-                                ) : null}
-                                {text.copy.block}
-                                {note ? (
-                                  <p role="status" className="m-0 mt-1 text-[11px] leading-snug text-ink">
-                                    {note}
-                                  </p>
-                                ) : null}
-                              </div>
-                            )}
-                          </NoticeText>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {sentHidden > 0 ? (
-                    <button
-                      type="button"
-                      data-testid="sent-notices-more"
-                      onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
-                      className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                    >
-                      Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
-                    </button>
-                  ) : null}
-                </section>
+                          <X size={12} aria-hidden />
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                </WithDetails>
               ) : null}
-            </div>
+              {liveDeliveryToastVisible && liveDelivery ? (
+                <WithDetails
+                  key={liveDeliveryKey}
+                  copy={{ report: liveDeliveryDetails }}
+                  shown={[`${liveDelivery.title}. ${liveDelivery.body}`]}
+                  actionClass={TOAST_ACTION_CLASS}
+                  testId="owner-live-delivery-toast"
+                >
+                  {(details) => (
+                    <div
+                      data-testid="owner-live-delivery-toast"
+                      role="status"
+                      aria-live="polite"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                    >
+                      <liveDelivery.Icon
+                        size={14}
+                        aria-hidden
+                        className="mt-0.5 shrink-0 text-warning"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="block select-text cursor-text break-words leading-snug">
+                          {liveDelivery.title}. {liveDelivery.body}
+                        </span>
+                        <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                          {liveDeliveryAction ? (
+                            <button
+                              type="button"
+                              data-testid="owner-live-delivery-toast-action"
+                              onClick={liveDeliveryAction.onClick}
+                              className={TOAST_ACTION_CLASS}
+                            >
+                              {liveDeliveryAction.label}
+                            </button>
+                          ) : null}
+                          {details.action}
+                        </div>
+                        {details.block}
+                      </div>
+                      {details.icon}
+                      <button
+                        type="button"
+                        aria-label="Dismiss live editing notice"
+                        onClick={() => setDismissedLiveDeliveryKey(liveDeliveryKey)}
+                        className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                      >
+                        <X size={12} aria-hidden />
+                      </button>
+                    </div>
+                  )}
+                </WithDetails>
+              ) : null}
+              {refusalsToastVisible ? (
+                <WithDetails
+                  key={refusalsKey}
+                  copy={{ report: refusalsDetails }}
+                  shown={[`${OWNER_LIVE_REFUSALS_TITLE}. ${OWNER_LIVE_REFUSALS_BODY}`]}
+                  actionClass={TOAST_ACTION_CLASS}
+                  testId="owner-live-refusals-toast"
+                >
+                  {(details) => (
+                    <div
+                      data-testid="owner-live-refusals-toast"
+                      role="status"
+                      aria-live="polite"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                    >
+                      <AlertTriangle
+                        size={14}
+                        aria-hidden
+                        className="mt-0.5 shrink-0 text-warning"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="block select-text cursor-text break-words leading-snug">
+                          {OWNER_LIVE_REFUSALS_TITLE}. {OWNER_LIVE_REFUSALS_BODY}
+                        </span>
+                        <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                          {onOpenLiveDocuments ? (
+                            <button
+                              type="button"
+                              data-testid="owner-live-refusals-toast-action"
+                              onClick={onOpenLiveDocuments}
+                              className={TOAST_ACTION_CLASS}
+                            >
+                              Live documents
+                            </button>
+                          ) : null}
+                          {details.action}
+                        </div>
+                        {details.block}
+                      </div>
+                      {details.icon}
+                      {/* Closing ends the announcement; the row stays in Notices. */}
+                      <button
+                        type="button"
+                        aria-label="Dismiss live editing refusals notice"
+                        onClick={() => setDismissedRefusalsKey(refusalsKey)}
+                        className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                      >
+                        <X size={12} aria-hidden />
+                      </button>
+                    </div>
+                  )}
+                </WithDetails>
+              ) : null}
+              {declineToast ? (
+                <WithDetails
+                  key={sharingDeclinedKey(props.workspaceId, declineToast)}
+                  copy={{ report: sharingDeclinedDetails(props.workspaceId, declineToast) }}
+                  shown={[`${SHARING_DECLINED_TITLE}. ${sharingDeclinedBody(declineToast)}`]}
+                  actionClass={TOAST_ACTION_CLASS}
+                  testId="sharing-declined-toast"
+                >
+                  {(details) => (
+                    <div
+                      data-testid="sharing-declined-toast"
+                      role="status"
+                      aria-live="polite"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                    >
+                      <AlertTriangle
+                        size={14}
+                        aria-hidden
+                        className="mt-0.5 shrink-0 text-warning"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="block select-text cursor-text break-words leading-snug">
+                          {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
+                        </span>
+                        <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                          {onOpenSharingDeclined ? (
+                            <button
+                              type="button"
+                              data-testid="sharing-declined-toast-open"
+                              onClick={() => {
+                                closeDecline(declineToast);
+                                onOpenSharingDeclined(
+                                  declineToast.versionId,
+                                  declineToast.objectId,
+                                );
+                              }}
+                              className={TOAST_ACTION_CLASS}
+                            >
+                              Open document
+                            </button>
+                          ) : null}
+                          {details.action}
+                        </div>
+                        {details.block}
+                      </div>
+                      {details.icon}
+                      {/* Closing ends the announcement; the row stays in Notices. */}
+                      <button
+                        type="button"
+                        aria-label={`Close notice for ${declineToast.path}`}
+                        onClick={() => closeDecline(declineToast)}
+                        className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                      >
+                        <X size={12} aria-hidden />
+                      </button>
+                    </div>
+                  )}
+                </WithDetails>
+              ) : null}
+              {crashToastVisible && crashReport ? (
+                <WithDetails
+                  key={crashReport.revision}
+                  copy={{ report: crashReport.text }}
+                  shown={[crashReport.title]}
+                  actionClass={TOAST_ACTION_CLASS}
+                  testId="crash-report-toast"
+                >
+                  {(details) => (
+                    <div
+                      data-testid="crash-report-toast"
+                      role="alert"
+                      className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+                    >
+                      <AlertTriangle
+                        size={14}
+                        aria-hidden
+                        className="mt-0.5 shrink-0 text-danger"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="block select-text cursor-text break-words leading-snug">
+                          {crashReport.title}
+                        </span>
+                        <div data-toast-actions="" className={TOAST_ACTIONS_CLASS}>
+                          {props.onSendCrashReport ? (
+                            <button
+                              type="button"
+                              data-testid="crash-report-toast-send"
+                              onClick={props.onSendCrashReport}
+                              className={TOAST_ACTION_CLASS}
+                            >
+                              Send report
+                            </button>
+                          ) : null}
+                          {details.action}
+                        </div>
+                        {details.block}
+                      </div>
+                      {details.icon}
+                      {/* Closing ends the announcement; the row stays in Notices. */}
+                      <button
+                        type="button"
+                        aria-label="Close crash report notice"
+                        onClick={props.onReadCrashReport}
+                        className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+                      >
+                        <X size={12} aria-hidden />
+                      </button>
+                    </div>
+                  )}
+                </WithDetails>
+              ) : null}
+            </div>,
           )}
-        </div>
-      )) : null}
+
+      {open
+        ? inToastLayer(
+            host,
+            <div
+              ref={centerRef}
+              data-focus-surface="notices"
+              data-testid="notice-center"
+              role="dialog"
+              aria-label="Notices"
+              tabIndex={-1}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  moveBetweenRows(event);
+                  return;
+                }
+                if (event.key !== "Escape" || event.defaultPrevented) return;
+                event.preventDefault();
+                event.stopPropagation();
+                setOpen(false);
+              }}
+              onBlur={(event) => {
+                // Focus moved out by Tab, F6 or a dialog's trap closes Notices, as
+                // a press outside does. Focus leaving the window keeps it open.
+                const next = event.relatedTarget;
+                if (
+                  !(next instanceof Element) ||
+                  event.currentTarget.contains(next) ||
+                  toggleRef.current?.contains(next)
+                )
+                  return;
+                setOpen(false);
+              }}
+              className={`dohc-popover dohc-pop-in fixed ${PANEL_POSITION_CLASS[host]} z-60 flex max-h-[calc(100vh-100px)] flex-col rounded-lg border border-line bg-panel text-xs text-ink`}
+            >
+              <header className="flex h-9 shrink-0 items-center gap-2 border-b border-line px-3">
+                <Bell size={13} aria-hidden className="text-subtle" />
+                <span className="text-sm font-semibold text-ink">Notices</span>
+                {canReadAll ? (
+                  <button
+                    type="button"
+                    data-testid="notice-center-read-all"
+                    onClick={() => {
+                      centerRef.current?.focus();
+                      readLocal(unreadNotices, [setAsideKey, keptTypingKey]);
+                      if (unreadSent > 0) props.onReadAllSentNotices?.();
+                    }}
+                    className="ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                  >
+                    Mark all read
+                  </button>
+                ) : null}
+                {count > 0 ? (
+                  <span
+                    data-testid="notice-center-count"
+                    className={`${canReadAll ? "" : "ml-auto "}rounded-full border border-line bg-panel-2 px-1.5 text-[10px] font-medium leading-4 text-muted`}
+                  >
+                    {count}
+                  </span>
+                ) : null}
+              </header>
+              {localCount === 0 && sentNotices.length === 0 ? (
+                props.sentNoticesLoading ? null : (
+                  <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">
+                    <Check size={14} aria-hidden />
+                    All clear
+                  </div>
+                )
+              ) : (
+                <div className="min-h-0 max-h-[28rem] overflow-y-auto">
+                  {localCount > 0 ? (
+                    <section data-testid="notice-group-local">
+                      <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
+                        On this computer
+                      </SectionLabel>
+                      {recoveryRows.length > 0 ? (
+                        <section
+                          data-testid="notice-set-aside-edits"
+                          {...readOnReach("set-aside")}
+                          className="flex gap-2 border-b border-line px-3 py-2"
+                        >
+                          <UnreadMark
+                            unread={setAsideUnread}
+                            testId="notice-set-aside-edits-unread"
+                            className="h-4"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={`m-0 text-[12px] ${setAsideUnread ? "font-medium text-ink" : "text-muted"}`}
+                            >
+                              {recoveryRows.length === 1
+                                ? "1 set-aside edit is waiting"
+                                : `${recoveryRows.length} set-aside edits are waiting`}
+                            </p>
+                            <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                              Copy an edit to keep its text. Dismiss deletes it for good.
+                            </p>
+                            <RecoveryList rows={recoveryRows} />
+                          </div>
+                        </section>
+                      ) : null}
+                      {keptTyping.length > 0 ? (
+                        <section
+                          data-testid="notice-kept-typing"
+                          {...readOnReach("kept-typing")}
+                          className="flex gap-2 border-b border-line px-3 py-2"
+                        >
+                          <UnreadMark
+                            unread={keptTypingUnread}
+                            testId="notice-kept-typing-unread"
+                            className="h-4"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={`m-0 text-[12px] ${keptTypingUnread ? "font-medium text-ink" : "text-muted"}`}
+                            >
+                              Typing kept from a workspace no longer in your list
+                            </p>
+                            <p className="m-0 mt-0.5 text-[11px] leading-snug text-muted">
+                              Copy the typing to keep it. Dismiss deletes it for good.
+                            </p>
+                            <ul className="m-0 list-none p-0">
+                              {keptTyping.map((kept) => (
+                                <li
+                                  key={kept.recordId}
+                                  className="flex items-center justify-between gap-2 border-b border-line py-1.5 text-[11px] last:border-b-0"
+                                >
+                                  <span className="min-w-0 flex-1 truncate font-mono text-muted">
+                                    {kept.path}
+                                  </span>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <CopyButton
+                                      testId="kept-typing-copy"
+                                      label="Copy typing"
+                                      getText={() => kept.text}
+                                    />
+                                    <DismissDraftControls
+                                      onDismiss={() => props.onDismissKeptTyping?.(kept)}
+                                    />
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        </section>
+                      ) : null}
+                      <ul className="m-0 list-none p-0">
+                        {notices.map((notice) => {
+                          const key = `local:${notice.id}`;
+                          const note = rowNotes.get(key);
+                          return (
+                            <LocalNoticeRow
+                              key={notice.id}
+                              notice={notice}
+                              unread={unreadNotices.includes(notice)}
+                              reach={readOnReach(key)}
+                              onKeyDown={rowKeys(notice.onDismiss)}
+                              // A row that says why it cannot open goes nowhere.
+                              onOpen={note === undefined ? openLocal(notice) : undefined}
+                              note={note}
+                              opening={openingKey === key}
+                              onAction={runLocalAction}
+                              onDismiss={(event) => {
+                                focusPastRow(event.currentTarget);
+                                notice.onDismiss?.();
+                              }}
+                            />
+                          );
+                        })}
+                      </ul>
+                    </section>
+                  ) : null}
+                  {sentNotices.length > 0 ? (
+                    <section
+                      data-testid="notice-group-sent"
+                      className={localCount > 0 ? "border-t border-line" : undefined}
+                    >
+                      <SectionLabel as="h3" className="m-0 px-3 pb-1 pt-2">
+                        Sent to you
+                      </SectionLabel>
+                      <ul className="m-0 list-none p-0">
+                        {sentShownRows.map(({ notice, folder, openable, retryable }) => {
+                          const key = sentKey(sentAccount, notice);
+                          const unread = notice.readAtMs === null;
+                          const note = sentNotes.get(key);
+                          // Why Open could not go there, in place of the text.
+                          const openNote = rowNotes.get(key);
+                          const busy = openingKey === key;
+                          const openNotice =
+                            openable && props.onOpenSentNotice
+                              ? () => openSentNotice(notice)
+                              : undefined;
+                          // A row that says why it cannot open goes nowhere; its
+                          // Open stays, to try again once the person has acted.
+                          const openRowNotice = openNote === undefined ? openNotice : undefined;
+                          // A row that opens is its own Open, so the button shows
+                          // only while the row cannot.
+                          const openButton = openRowNotice ? undefined : openNotice;
+                          const runNow =
+                            notice.kind === "schedule-skipped" && props.onRunSentNoticeNow
+                              ? () => void runSentNoticeNow(notice)
+                              : undefined;
+                          const retry =
+                            (retriesRun(notice) || retryable) && props.onRetrySentNotice
+                              ? () => props.onRetrySentNotice?.(notice)
+                              : undefined;
+                          const copies = isFailure(notice);
+                          const running = runningKey === key;
+                          // A wake from the server waits for one of this person's computers to run it; dismissing it would cancel it.
+                          const dismissNotice =
+                            props.onDismissSentNotice && notice.kind !== "automation-wake"
+                              ? () => {
+                                  cancelOpen(key);
+                                  props.onDismissSentNotice?.(notice);
+                                }
+                              : undefined;
+                          return (
+                            <li
+                              key={key}
+                              data-testid={`sent-notice-${notice.noticeId}`}
+                              data-notice-row=""
+                              tabIndex={openRowNotice ? undefined : -1}
+                              onKeyDown={rowKeys(dismissNotice)}
+                              {...readOnReach(`sent:${key}`)}
+                              className={`${ROW_CLASS}${openRowNotice ? " dohc-row-open" : ""}`}
+                            >
+                              <UnreadMark
+                                unread={unread}
+                                testId={`sent-notice-${notice.noticeId}-unread`}
+                              />
+                              <span className="flex h-6 w-4 shrink-0 items-center justify-center">
+                                {isHeld(notice) ? (
+                                  <AlertTriangle
+                                    size={14}
+                                    aria-hidden
+                                    className="shrink-0 text-warning"
+                                  />
+                                ) : (
+                                  <SenderMark notice={notice} className="shrink-0" />
+                                )}
+                              </span>
+                              <NoticeText
+                                title={notice.title}
+                                titleClass={unread ? "font-medium text-ink" : "text-muted"}
+                                body={openNote === undefined ? notice.body : ""}
+                                onOpenRow={openRowNotice}
+                                copy={copies ? { report: failureDetails(notice) } : undefined}
+                                revision={notice.createdAtMs}
+                                actionClass={ROW_ACTION_CLASS}
+                                testId={`sent-notice-${notice.noticeId}`}
+                              >
+                                {(text) => (
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex min-w-0 items-start gap-2">
+                                      <RowTitle
+                                        title={text.title}
+                                        testId={`sent-notice-${notice.noticeId}`}
+                                        onOpen={openRowNotice}
+                                        busy={busy}
+                                      />
+                                      <span className={ROW_CONTROLS_CLASS}>
+                                        {text.copy.icon}
+                                        <RowCorner
+                                          timeMs={notice.createdAtMs}
+                                          busy={busy && openRowNotice !== undefined}
+                                          testId={`sent-notice-${notice.noticeId}`}
+                                          onDismiss={
+                                            dismissNotice
+                                              ? (event) => {
+                                                  focusPastRow(event.currentTarget);
+                                                  dismissNotice();
+                                                }
+                                              : undefined
+                                          }
+                                        />
+                                      </span>
+                                    </div>
+                                    {openNote === undefined ? (
+                                      text.body
+                                    ) : (
+                                      <RowNote note={openNote} />
+                                    )}
+                                    {folder ? (
+                                      <p className="m-0 mt-0.5 truncate text-[12px] text-subtle">
+                                        {folder}
+                                      </p>
+                                    ) : null}
+                                    {runNow || retry || openButton || text.copy.action ? (
+                                      <div className={ROW_ACTIONS_CLASS}>
+                                        {runNow ? (
+                                          <button
+                                            type="button"
+                                            data-testid={`sent-notice-${notice.noticeId}-run-now`}
+                                            aria-busy={running || undefined}
+                                            disabled={runningKey !== null}
+                                            onClick={runNow}
+                                            className={ROW_ACTION_CLASS}
+                                          >
+                                            {running ? "Starting…" : "Run now"}
+                                          </button>
+                                        ) : null}
+                                        {retry ? (
+                                          <button
+                                            type="button"
+                                            data-testid={`sent-notice-${notice.noticeId}-retry`}
+                                            onClick={retry}
+                                            className={ROW_ACTION_CLASS}
+                                          >
+                                            Try again
+                                          </button>
+                                        ) : null}
+                                        {openButton ? (
+                                          <button
+                                            type="button"
+                                            data-testid={`sent-notice-${notice.noticeId}-open`}
+                                            aria-busy={busy || undefined}
+                                            onClick={openNotice}
+                                            className={ROW_ACTION_CLASS}
+                                          >
+                                            {busy
+                                              ? "Opening…"
+                                              : isHeld(notice)
+                                                ? "Open note"
+                                                : AUTOMATION_NOTICE_KINDS.has(notice.kind)
+                                                  ? "Open automation"
+                                                  : "Open"}
+                                          </button>
+                                        ) : null}
+                                        {text.copy.action}
+                                      </div>
+                                    ) : null}
+                                    {text.copy.block}
+                                    {note ? (
+                                      <p
+                                        role="status"
+                                        className="m-0 mt-1 text-[11px] leading-snug text-ink"
+                                      >
+                                        {note}
+                                      </p>
+                                    ) : null}
+                                  </div>
+                                )}
+                              </NoticeText>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {sentHidden > 0 ? (
+                        <button
+                          type="button"
+                          data-testid="sent-notices-more"
+                          onClick={() => setSentShown((shown) => shown + SENT_NOTICE_PAGE)}
+                          className="dohc-focus-row w-full border-t border-line px-3 py-2 text-left text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                        >
+                          Show {Math.min(SENT_NOTICE_PAGE, sentHidden)} more
+                        </button>
+                      ) : null}
+                    </section>
+                  ) : null}
+                </div>
+              )}
+            </div>,
+          )
+        : null}
 
       <button
         ref={toggleRef}

@@ -31,7 +31,7 @@ export interface TableQuery {
 
 // quote_ident keeps the mixed-case "deviceCode" from folding to lower case.
 const PRESENT_TABLES =
-  'select t.name from unnest($1::text[]) as t(name) where to_regclass(quote_ident(t.name)) is not null';
+  "select t.name from unnest($1::text[]) as t(name) where to_regclass(quote_ident(t.name)) is not null";
 
 /** The table crash reports go to, when they are on. Created by migration 0003_crash_reports. */
 export const CRASH_REPORT_TABLE = "crash_reports";
@@ -41,13 +41,18 @@ export function createReadinessProbe(
   options: { timeoutMs?: number; emailConfigured?: boolean; crashReports?: boolean } = {},
 ): () => Promise<ReadinessReport> {
   const timeoutMs = options.timeoutMs ?? 3000;
-  const tables: string[] = [...REQUIRED_TABLES, ...(options.crashReports ? [CRASH_REPORT_TABLE] : [])];
+  const tables: string[] = [
+    ...REQUIRED_TABLES,
+    ...(options.crashReports ? [CRASH_REPORT_TABLE] : []),
+  ];
   let pending: ReturnType<TableQuery["query"]> | undefined;
   return async () => {
     let rows: Array<Record<string, unknown>>;
     try {
       // Keep one probe until the database settles, even after an HTTP timeout.
-      pending ??= client.query(PRESENT_TABLES, [tables]).finally(() => { pending = undefined; });
+      pending ??= client.query(PRESENT_TABLES, [tables]).finally(() => {
+        pending = undefined;
+      });
       rows = (await withTimeout(pending, timeoutMs)).rows;
     } catch {
       return {
@@ -70,7 +75,13 @@ export function createReadinessProbe(
       };
     }
     if (options.emailConfigured === false) {
-      return { ok: false, database: "ok", schema: "ok", missingTables: [], detail: "Configure SMTP for account email." };
+      return {
+        ok: false,
+        database: "ok",
+        schema: "ok",
+        missingTables: [],
+        detail: "Configure SMTP for account email.",
+      };
     }
     return { ok: true, database: "ok", schema: "ok", missingTables: [] };
   };

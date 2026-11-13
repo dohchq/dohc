@@ -46,32 +46,65 @@ See the [exchange rates][rates] before paying.
 `;
 
 // About 2,400 lines, standing in for the start of a file over the 2 MiB limit.
-const itinerary = Array.from({ length: 300 }, (_, day) => `## Day ${day + 1}
+const itinerary = Array.from(
+  { length: 300 },
+  (_, day) => `## Day ${day + 1}
 
 - 09:00 Breakfast near the flat
 - 11:00 Walk to the next viewpoint
 - 13:30 Lunch, then the tram back
 - 16:00 Free afternoon
 - 20:00 Dinner by the river
-`).join("\n");
+`,
+).join("\n");
 
 // A long page that stays editable: about 2,100 lines, well under the 2 MiB limit.
-const journal = Array.from({ length: 350 }, (_, entry) => `## Entry ${entry + 1}
+const journal = Array.from(
+  { length: 350 },
+  (_, entry) => `## Entry ${entry + 1}
 
 Walked from the flat down to the river, then up through Alfama for coffee. The trams were full again.
 
 - Spent: €${(entry % 9) + 4}
 - Steps: ${8000 + entry * 13}
-`).join("\n");
+`,
+).join("\n");
 
 export const samplePages: Record<string, SamplePage> = {
-  "trip/journal.md": { path: "trip/journal.md", title: "Journal", icon: "📓", markdown: journal, properties: [{ name: "Trip", value: "Lisbon, Nov 12–19" }] },
-  "trip/packing-list.md": {
-    path: "trip/packing-list.md", title: "Packing list", icon: "🧳", markdown: packing,
-    properties: [{ name: "Trip", value: "Lisbon, Nov 12–19" }, { name: "Owner", value: "Ice" }, { name: "Itinerary", value: "itinerary/days.md", opens: true }],
+  "trip/journal.md": {
+    path: "trip/journal.md",
+    title: "Journal",
+    icon: "📓",
+    markdown: journal,
+    properties: [{ name: "Trip", value: "Lisbon, Nov 12–19" }],
   },
-  "trip/budget.md": { path: "trip/budget.md", title: "Budget", icon: "💶", markdown: budget, lossy: true, history: "kept", properties: [] },
-  "itinerary/days.md": { path: "itinerary/days.md", title: "Days", markdown: itinerary, large: true, properties: [] },
+  "trip/packing-list.md": {
+    path: "trip/packing-list.md",
+    title: "Packing list",
+    icon: "🧳",
+    markdown: packing,
+    properties: [
+      { name: "Trip", value: "Lisbon, Nov 12–19" },
+      { name: "Owner", value: "Ice" },
+      { name: "Itinerary", value: "itinerary/days.md", opens: true },
+    ],
+  },
+  "trip/budget.md": {
+    path: "trip/budget.md",
+    title: "Budget",
+    icon: "💶",
+    markdown: budget,
+    lossy: true,
+    history: "kept",
+    properties: [],
+  },
+  "itinerary/days.md": {
+    path: "itinerary/days.md",
+    title: "Days",
+    markdown: itinerary,
+    large: true,
+    properties: [],
+  },
 };
 
 /** The file chat rows are named after the file; the page lives at its path. */

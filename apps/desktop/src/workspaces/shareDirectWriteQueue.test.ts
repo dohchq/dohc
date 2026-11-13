@@ -12,7 +12,9 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 function fixture() {
-  const push = vi.fn<(workspaceId: string) => Promise<PushShareDirectWritesResult>>(async () => REFUSED);
+  const push = vi.fn<(workspaceId: string) => Promise<PushShareDirectWritesResult>>(
+    async () => REFUSED,
+  );
   const report = vi.fn<(workspaceId: string, result: PushShareDirectWritesResult) => void>();
   return { push, report, queue: createShareDirectWriteQueue({ push, report }) };
 }
@@ -24,7 +26,10 @@ it("pushes once per view after a burst of saves settles, and reports it", async 
   f.queue.edited("a");
   await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
   expect(f.push.mock.calls).toEqual([["b"], ["a"]]);
-  expect(f.report.mock.calls).toEqual([["b", REFUSED], ["a", REFUSED]]);
+  expect(f.report.mock.calls).toEqual([
+    ["b", REFUSED],
+    ["a", REFUSED],
+  ]);
 });
 
 it("reports nothing when every write went", async () => {
@@ -37,7 +42,11 @@ it("reports nothing when every write went", async () => {
 });
 
 it("refreshes delivery status for acceptance and offline failure", async () => {
-  const settled = vi.fn(), push = vi.fn(async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [{ result: "written", paths: ["Tasks/automations.yaml"] }] }));
+  const settled = vi.fn(),
+    push = vi.fn(async (): Promise<PushShareDirectWritesResult> => ({
+      status: "pushed",
+      writes: [{ result: "written", paths: ["Tasks/automations.yaml"] }],
+    }));
   const queue = createShareDirectWriteQueue({ push, report: () => true, settled });
   await queue.pushNow("a");
   expect(settled).toHaveBeenCalledWith("a");
@@ -48,7 +57,11 @@ it("refreshes delivery status for acceptance and offline failure", async () => {
 
 it("does not refresh definitions after an empty mount poll", async () => {
   const settled = vi.fn();
-  const queue = createShareDirectWriteQueue({ push: async () => NOTHING, report: () => true, settled });
+  const queue = createShareDirectWriteQueue({
+    push: async () => NOTHING,
+    report: () => true,
+    settled,
+  });
   await queue.pushNow("a");
   expect(settled).not.toHaveBeenCalled();
 });
@@ -56,7 +69,12 @@ it("does not refresh definitions after an empty mount poll", async () => {
 it("runs one push per view at a time, and one more after it for a request during it", async () => {
   const f = fixture();
   let finish!: (result: PushShareDirectWritesResult) => void;
-  f.push.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  f.push.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
   const opened = f.queue.pushNow("a");
   f.queue.edited("a");
   await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
@@ -77,7 +95,12 @@ it("sends a save waiting for its delay with a push on open", async () => {
 it("reports a push joined by a draft retry even when its caller ignores the result", async () => {
   const f = fixture();
   let finish!: (result: PushShareDirectWritesResult) => void;
-  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.push.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
   f.queue.edited("a");
   await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
   const opened = f.queue.pushNow("a");
@@ -91,7 +114,12 @@ it("reports a push joined by a draft retry even when its caller ignores the resu
 it("reports a background push once when several delayed saves join it", async () => {
   const f = fixture();
   let finish!: (result: PushShareDirectWritesResult) => void;
-  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.push.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
   for (let save = 0; save < 3; save += 1) {
     f.queue.edited("a");
     await vi.advanceTimersByTimeAsync(DIRECT_WRITE_PUSH_DELAY_MS);
@@ -105,8 +133,14 @@ it("reports a background push once when several delayed saves join it", async ()
 it("reports each push once and gives concurrent callers only completion", async () => {
   const f = fixture();
   let finish!: (result: PushShareDirectWritesResult) => void;
-  f.push.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-  const first = f.queue.pushNow("a"), second = f.queue.pushNow("a");
+  f.push.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const first = f.queue.pushNow("a"),
+    second = f.queue.pushNow("a");
   f.push.mockResolvedValueOnce(NOTHING);
   finish(REFUSED);
   await expect(first).resolves.toBeUndefined();
@@ -118,7 +152,12 @@ it("asks again after an ended share's answer, and turns a thrown push into a fai
   const f = fixture();
   f.push.mockRejectedValueOnce(new Error("offline"));
   await expect(f.queue.pushNow("a")).resolves.toBeUndefined();
-  expect(f.report).toHaveBeenLastCalledWith("a", { status: "failed", writes: [], errorMessage: "offline", lasting: false });
+  expect(f.report).toHaveBeenLastCalledWith("a", {
+    status: "failed",
+    writes: [],
+    errorMessage: "offline",
+    lasting: false,
+  });
   f.push.mockResolvedValueOnce({ status: "unavailable" });
   await expect(f.queue.pushNow("a")).resolves.toBeUndefined();
   expect(f.report).toHaveBeenLastCalledWith("a", { status: "unavailable" });

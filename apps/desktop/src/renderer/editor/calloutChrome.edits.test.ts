@@ -11,13 +11,20 @@ const callout = (calloutType: string, title: string, ...blocks: PMNode[]) =>
 function headers(state: EditorState, plugin: Plugin) {
   return (plugin.getState(state) as DecorationSet)
     .find()
-    .map((header) => ({ pos: header.from, key: String(header.spec.key), owner: String(header.spec.ownerKey) }))
+    .map((header) => ({
+      pos: header.from,
+      key: String(header.spec.key),
+      owner: String(header.spec.ownerKey),
+    }))
     .sort((a, b) => a.pos - b.pos);
 }
 
 // Each header's position and type/fold, without the owner part of its key.
 function shown(state: EditorState, plugin: Plugin) {
-  return headers(state, plugin).map(({ pos, key, owner }) => ({ pos, chrome: key.slice(`callout-${owner}-`.length) }));
+  return headers(state, plugin).map(({ pos, key, owner }) => ({
+    pos,
+    chrome: key.slice(`callout-${owner}-`.length),
+  }));
 }
 
 function expected(document: PMNode) {
@@ -71,7 +78,9 @@ describe("makeCalloutChromePlugin — edits", () => {
     let state = EditorState.create({ doc: doc(lead, callout("note", "Title")), plugins: [plugin] });
     const [first] = headers(state, plugin);
 
-    state = state.apply(state.tr.setNodeMarkup(lead.nodeSize, undefined, { calloutType: "note", title: "Renamed" }));
+    state = state.apply(
+      state.tr.setNodeMarkup(lead.nodeSize, undefined, { calloutType: "note", title: "Renamed" }),
+    );
     expect(headers(state, plugin)).toEqual([first]);
 
     state = state.apply(state.tr.insert(0, schema.nodes.horizontalRule.create()));
@@ -94,7 +103,11 @@ describe("makeCalloutChromePlugin — edits", () => {
     state = state.apply(tr.insertText("y", tr.doc.content.size - 1));
     expect(headers(state, plugin).map(({ owner }) => owner)).toEqual(owners);
 
-    const remote = doc(paragraph("lead, edited"), callout("note", "Title"), paragraph("after, edited"));
+    const remote = doc(
+      paragraph("lead, edited"),
+      callout("note", "Title"),
+      paragraph("after, edited"),
+    );
     state = state.apply(state.tr.replaceWith(0, state.doc.content.size, remote.content));
     expect(headers(state, plugin).map(({ owner }) => owner)).toEqual(owners);
     expect(shown(state, plugin)).toEqual(expected(state.doc));
@@ -105,7 +118,10 @@ describe("makeCalloutChromePlugin — edits", () => {
     const a = callout("note", "Same", paragraph("a"));
     const b = callout("note", "Same", paragraph("b"));
     const c = callout("note", "Same", paragraph("c"));
-    let start = EditorState.create({ doc: doc(paragraph("lead"), b, a, paragraph("after")), plugins: [plugin] });
+    let start = EditorState.create({
+      doc: doc(paragraph("lead"), b, a, paragraph("after")),
+      plugins: [plugin],
+    });
     let [ownerB, ownerA] = headers(start, plugin).map(({ owner }) => owner);
     const [posB] = calloutPositions(start.doc);
 
@@ -120,7 +136,10 @@ describe("makeCalloutChromePlugin — edits", () => {
 
     // In one edit, A goes, B takes A's body, a copy of B follows, and the
     // paragraph before them changes. The callouts end as they began.
-    start = EditorState.create({ doc: doc(paragraph("lead"), a, b, paragraph("after")), plugins: [plugin] });
+    start = EditorState.create({
+      doc: doc(paragraph("lead"), a, b, paragraph("after")),
+      plugins: [plugin],
+    });
     [ownerA, ownerB] = headers(start, plugin).map(({ owner }) => owner);
     const [posA, posSecond] = calloutPositions(start.doc);
     tr = start.tr.insert(posSecond! + b.nodeSize, b);

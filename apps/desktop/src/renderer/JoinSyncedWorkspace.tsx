@@ -42,10 +42,12 @@ function displayPath(path: string): string {
   return isWindows() ? path.replaceAll("/", "\\") : path;
 }
 
-export function JoinSyncedWorkspace(props: {
-  onWorkspaceReady: (workspace: Workspace) => void;
-  onBack: () => void;
-} & ConnectionNoticeHost) {
+export function JoinSyncedWorkspace(
+  props: {
+    onWorkspaceReady: (workspace: Workspace) => void;
+    onBack: () => void;
+  } & ConnectionNoticeHost,
+) {
   const [gate, setGate] = useState<Gate>({ kind: "checking" });
   const [code, setCode] = useState("");
   const [folder, setFolder] = useState<string | null>(null);
@@ -214,7 +216,9 @@ export function JoinSyncedWorkspace(props: {
             <RetryRow testId="join-check-failed" onRetry={checkSession} />
           ) : (
             <>
-              <p className="sr-only">Connect your server first, then enter the code from your other machine.</p>
+              <p className="sr-only">
+                Connect your server first, then enter the code from your other machine.
+              </p>
               <CloudLogin
                 onConnected={checkSession}
                 embedded
@@ -311,7 +315,11 @@ export function JoinSyncedWorkspace(props: {
           ) : null}
 
           {error ? (
-            <p data-testid="join-error" role="alert" className="m-0 text-xs leading-relaxed text-danger">
+            <p
+              data-testid="join-error"
+              role="alert"
+              className="m-0 text-xs leading-relaxed text-danger"
+            >
               {error}
             </p>
           ) : null}

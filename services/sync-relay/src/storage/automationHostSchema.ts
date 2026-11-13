@@ -32,21 +32,28 @@ function sameSql(left: string, right: string): boolean {
 
 function assertAutomationHostSchema(db: SqliteDb): void {
   const objects = db
-    .prepare("SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (?, ?) AND sql IS NOT NULL ORDER BY name")
+    .prepare(
+      "SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (?, ?) AND sql IS NOT NULL ORDER BY name",
+    )
     .all(AUTOMATION_HOSTS, AUTOMATION_COMPUTERS);
   const expected = Object.keys(AUTOMATION_HOST_SCHEMA).sort();
   if (
     objects.length !== expected.length ||
-    objects.some((row, index) => row.name !== expected[index] ||
-      typeof row.sql !== "string" ||
-      !sameSql(row.sql, AUTOMATION_HOST_SCHEMA[row.name as keyof typeof AUTOMATION_HOST_SCHEMA]))
+    objects.some(
+      (row, index) =>
+        row.name !== expected[index] ||
+        typeof row.sql !== "string" ||
+        !sameSql(row.sql, AUTOMATION_HOST_SCHEMA[row.name as keyof typeof AUTOMATION_HOST_SCHEMA]),
+    )
   ) {
     throw new Error("automation host schema is missing or damaged");
   }
 }
 
 export function initializeAutomationHostSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER);
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+    .get(MARKER);
   if (marked) {
     assertAutomationHostSchema(db);
     return;
@@ -58,6 +65,8 @@ export function initializeAutomationHostSchema(db: SqliteDb): void {
   if (existing.length) throw new Error("unmarked automation host schema already exists");
   for (const sql of Object.values(AUTOMATION_HOST_SCHEMA)) db.exec(sql);
   assertAutomationHostSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(MARKER, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    MARKER,
+    Date.now(),
+  );
 }

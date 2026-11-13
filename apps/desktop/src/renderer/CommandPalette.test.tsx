@@ -32,25 +32,33 @@ function selectedLabel(): string | null {
 }
 
 describe("CommandPalette keyboard selection", () => {
-  it.each(["win32", "darwin"].flatMap((platform) =>
-    ["input", "result row", "panel"].flatMap((focus) =>
-      SHORTCUTS["command-palette"].accelerators.map((binding) => ({ platform, focus, binding })),
+  it.each(
+    ["win32", "darwin"].flatMap((platform) =>
+      ["input", "result row", "panel"].flatMap((focus) =>
+        SHORTCUTS["command-palette"].accelerators.map((binding) => ({ platform, focus, binding })),
+      ),
     ),
-  ))("handles $binding on $platform with focus on the $focus", ({ platform, focus, binding }) => {
+  )("handles $binding on $platform with focus on the $focus", ({ platform, focus, binding }) => {
     vi.stubGlobal("dohcDesktop", { platform });
     const { ran, onClose } = setup();
-    const target = focus === "input"
-      ? screen.getByRole("textbox", { name: "Command" })
-      : focus === "result row"
-        ? screen.getByRole("button", { name: "alpha" })
-        : screen.getByTestId("command-palette").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
+    const target =
+      focus === "input"
+        ? screen.getByRole("textbox", { name: "Command" })
+        : focus === "result row"
+          ? screen.getByRole("button", { name: "alpha" })
+          : screen
+              .getByTestId("command-palette")
+              .closest<HTMLElement>('[data-focus-surface="dialog"]')!;
     target.focus();
     expect(document.activeElement).toBe(target);
     const parts = binding.split("+");
     const event = new KeyboardEvent("keydown", {
-      key: parts.at(-1)!, shiftKey: parts.includes("Shift"),
-      ctrlKey: platform === "win32", metaKey: platform === "darwin",
-      bubbles: true, cancelable: true,
+      key: parts.at(-1)!,
+      shiftKey: parts.includes("Shift"),
+      ctrlKey: platform === "win32",
+      metaKey: platform === "darwin",
+      bubbles: true,
+      cancelable: true,
     });
     fireEvent(target, event);
     expect(event.defaultPrevented).toBe(true);
@@ -61,7 +69,12 @@ describe("CommandPalette keyboard selection", () => {
   it("leaves macOS Control+K to the text field", () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
     const { onClose } = setup();
-    const event = new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true });
+    const event = new KeyboardEvent("keydown", {
+      key: "k",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
     fireEvent(screen.getByRole("textbox", { name: "Command" }), event);
     expect(event.defaultPrevented).toBe(false);
     expect(onClose).not.toHaveBeenCalled();
@@ -100,7 +113,12 @@ describe("CommandPalette keyboard selection", () => {
     const control = document.createElement("button");
     control.addEventListener("click", pressed);
     document.body.append(control);
-    render(<CommandPalette commands={[{ id: "open", label: "open", run: () => control.focus() }]} onClose={vi.fn()} />);
+    render(
+      <CommandPalette
+        commands={[{ id: "open", label: "open", run: () => control.focus() }]}
+        onClose={vi.fn()}
+      />,
+    );
 
     await userEvent.keyboard("{Enter}");
     expect(document.activeElement).toBe(control);

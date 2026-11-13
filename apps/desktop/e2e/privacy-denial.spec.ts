@@ -41,10 +41,17 @@ for (const refusal of [
       const root = await realpath(temp.rootPath);
       const sandboxed = join(temp.baseDir, "sandboxed-electron.sh");
       const profile = `(version 1)(allow default)(deny ${refusal.operations} (subpath "${root}"))`;
-      await writeFile(sandboxed, `#!/bin/sh\nexec /usr/bin/sandbox-exec -p '${profile}' '${electronExecutable}' "$@"\n`);
+      await writeFile(
+        sandboxed,
+        `#!/bin/sh\nexec /usr/bin/sandbox-exec -p '${profile}' '${electronExecutable}' "$@"\n`,
+      );
       await chmod(sandboxed, 0o755);
       // Chromium cannot start its own sandbox inside another one.
-      desktop = await launchDesktopApp({ workspace: temp, executablePath: sandboxed, switches: ["--no-sandbox"] });
+      desktop = await launchDesktopApp({
+        workspace: temp,
+        executablePath: sandboxed,
+        switches: ["--no-sandbox"],
+      });
       const { app, page } = desktop;
 
       const stopped = page.getByTestId("workspace-open-failed");
@@ -58,22 +65,31 @@ for (const refusal of [
       await app.evaluate(({ shell }) => {
         const opened: string[] = [];
         Reflect.set(globalThis, "openedExternally", opened);
-        shell.openExternal = async (url: string) => { opened.push(url); };
+        shell.openExternal = async (url: string) => {
+          opened.push(url);
+        };
       });
       await stopped.getByRole("button", { name: "Open System Settings" }).click();
-      await expect.poll(() => app.evaluate(() => Reflect.get(globalThis, "openedExternally") as string[]))
-        .toEqual(["x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"]);
+      await expect
+        .poll(() => app.evaluate(() => Reflect.get(globalThis, "openedExternally") as string[]))
+        .toEqual([
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders",
+        ]);
       await expect(stopped.getByRole("button", { name: "Try again" })).toBeVisible();
 
       // When macOS will not open the pane, the person still hears about it.
       await app.evaluate(({ shell }) => {
-        shell.openExternal = async () => { throw new Error("Failed to open URL"); };
+        shell.openExternal = async () => {
+          throw new Error("Failed to open URL");
+        };
       });
       await stopped.getByRole("button", { name: "Open System Settings" }).click();
       const toast = page.getByTestId("workspace-shell-error");
       await expect(toast).toContainText("dohc could not open System Settings.");
       await expect(toast.getByTestId("workspace-shell-error-retry")).toBeVisible();
-      await page.screenshot({ path: test.info().outputPath(`privacy-settings-failed-${refusal.name}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`privacy-settings-failed-${refusal.name}.png`),
+      });
     } finally {
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);
       else await temp.cleanup();

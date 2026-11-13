@@ -55,11 +55,7 @@ function fieldCell(row: Locator, fieldIndex: number): Locator {
 // Inline edit of a plain-input cell (text, number, url, a typed person id):
 // click the cell's display button, type into the editor, commit with Enter,
 // then wait for the settled value to come back from the index.
-async function editInputCell(
-  row: Locator,
-  fieldIndex: number,
-  value: string,
-): Promise<void> {
+async function editInputCell(row: Locator, fieldIndex: number, value: string): Promise<void> {
   const cell = fieldCell(row, fieldIndex);
   await cell.getByRole("button").click();
   // Cell editors render in the table-owned overlay, not inside the row.
@@ -69,26 +65,22 @@ async function editInputCell(
   await expect(cell).toContainText(value, { timeout: 30_000 });
 }
 
-async function editSelectCell(
-  row: Locator,
-  fieldIndex: number,
-  option: string,
-): Promise<void> {
+async function editSelectCell(row: Locator, fieldIndex: number, option: string): Promise<void> {
   const cell = fieldCell(row, fieldIndex);
   await cell.getByRole("button").click();
   // The option picker opens in the table-owned overlay. A pick saves and closes it.
-  await row.page().locator("[data-cell-editor]").getByRole("option", { name: option, exact: true }).click();
+  await row
+    .page()
+    .locator("[data-cell-editor]")
+    .getByRole("option", { name: option, exact: true })
+    .click();
   await expect(cell).toContainText(option, { timeout: 30_000 });
 }
 
 // Picks a day of the current month in a date cell's picker, which opens on
 // today's month for an empty cell. The cell then shows the date as people
 // read it ("Nov 10").
-async function editDateCell(
-  row: Locator,
-  fieldIndex: number,
-  day: number,
-): Promise<void> {
+async function editDateCell(row: Locator, fieldIndex: number, day: number): Promise<void> {
   const cell = fieldCell(row, fieldIndex);
   await cell.getByRole("button").click();
   const date = new Date(NOW.getFullYear(), NOW.getMonth(), day);
@@ -124,17 +116,15 @@ async function addField(page: Page, field: FieldSpec): Promise<void> {
     const target = dialog.getByLabel("Related collection");
     // The relation-target list loads async; the option must exist before
     // selectOption can land on it.
-    await expect(
-      target.locator(`option[value="${field.relation}"]`),
-    ).toHaveCount(1, { timeout: 15_000 });
+    await expect(target.locator(`option[value="${field.relation}"]`)).toHaveCount(1, {
+      timeout: 15_000,
+    });
     await target.selectOption(field.relation);
   }
   await dialog.getByTestId("collection-add-field").click();
   // The add settles as one schema rewrite; the new field's list row is the
   // settled signal (and the form reset for the next add).
-  await expect(
-    dialog.getByText(field.name, { exact: true }),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByText(field.name, { exact: true })).toBeVisible({ timeout: 30_000 });
 }
 
 interface ViewSpec {
@@ -159,9 +149,7 @@ async function addView(page: Page, view: ViewSpec): Promise<void> {
   await dialog.getByTestId("collection-add-view").click();
   // The rename button's label is unique per view row; the bare view name can
   // collide with the kind label and the create form's controls.
-  await expect(
-    dialog.getByLabel(`Rename view ${view.name}`),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByLabel(`Rename view ${view.name}`)).toBeVisible({ timeout: 30_000 });
 }
 
 async function switchView(page: Page, name: string): Promise<void> {
@@ -181,11 +169,7 @@ function boardColumn(page: Page, label: string): Locator {
 
 // @dnd-kit's drag is pointer-based: press on the card, move across in real
 // steps so the sensor sees the motion, release over the target column.
-async function dragCardToColumn(
-  page: Page,
-  card: Locator,
-  column: Locator,
-): Promise<void> {
+async function dragCardToColumn(page: Page, card: Locator, column: Locator): Promise<void> {
   const cardBox = await card.boundingBox();
   const columnBox = await column.boundingBox();
   if (!cardBox || !columnBox) {
@@ -196,11 +180,9 @@ async function dragCardToColumn(
   await page.mouse.move(fromX, fromY);
   await page.mouse.down();
   await page.mouse.move(fromX + 8, fromY + 8, { steps: 4 });
-  await page.mouse.move(
-    columnBox.x + columnBox.width / 2,
-    columnBox.y + columnBox.height / 2,
-    { steps: 20 },
-  );
+  await page.mouse.move(columnBox.x + columnBox.width / 2, columnBox.y + columnBox.height / 2, {
+    steps: 20,
+  });
   await page.mouse.up();
 }
 
@@ -226,7 +208,9 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // needs.
     await newCollection.getByTestId("new-collection-create").click();
     await expect(page.getByTestId(CLIENTS_TAB)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("grid").getByRole("button", { name: "New record", exact: true })).toBeVisible({
+    await expect(
+      page.getByRole("grid").getByRole("button", { name: "New record", exact: true }),
+    ).toBeVisible({
       timeout: 30_000,
     });
 
@@ -246,7 +230,9 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     }
     await expect(recordRows(page)).toHaveCount(4, { timeout: 30_000 });
     for (const name of ["Acme", "Birch", "Cedar", "Dune"]) {
-      await expect(page.getByRole("grid").getByRole("button", { name: `Open ${name}`, exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(
+        page.getByRole("grid").getByRole("button", { name: `Open ${name}`, exact: true }),
+      ).toBeVisible({ timeout: 30_000 });
     }
 
     // --- The main "projects" collection.
@@ -256,7 +242,9 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await newCollection.getByLabel("Collection name").fill("projects");
     await newCollection.getByTestId("new-collection-create").click();
     await expect(page.getByTestId(PROJECTS_TAB)).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole("grid").getByRole("button", { name: "New record", exact: true })).toBeVisible({
+    await expect(
+      page.getByRole("grid").getByRole("button", { name: "New record", exact: true }),
+    ).toBeVisible({
       timeout: 30_000,
     });
 
@@ -285,9 +273,9 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("collection-fields-dialog")).toHaveCount(0);
     // The table re-reads the schema: the last-added column arrives.
-    await expect(
-      page.getByRole("columnheader").filter({ hasText: "Site" }),
-    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("columnheader").filter({ hasText: "Site" })).toBeVisible({
+      timeout: 30_000,
+    });
 
     // --- Inline cell edits in the table, one per field type.
     // Field order = schema order: Name 0, Effort 1, Done 2, Due 3,
@@ -368,30 +356,21 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await expect(
       boardColumn(page, "Doing").locator('[role="listitem"][aria-label="Launch"]'),
     ).toBeVisible();
-    await dragCardToColumn(
-      page,
-      boardCard(page, "Website"),
-      boardColumn(page, "Doing"),
-    );
+    await dragCardToColumn(page, boardCard(page, "Website"), boardColumn(page, "Doing"));
     await expect(
       boardColumn(page, "Doing").locator('[role="listitem"][aria-label="Website"]'),
     ).toBeVisible({ timeout: 30_000 });
     // A virtualized column mounts only the cards near its viewport; the
     // header count is what tells the user the rest exist. After the drag
     // the Doing column holds both records.
-    await expect(
-      boardColumn(page, "Doing").getByTestId("board-column-count"),
-    ).toHaveText("2");
+    await expect(boardColumn(page, "Doing").getByTestId("board-column-count")).toHaveText("2");
     // The md file IS the record: the grouped-field write settles into its
     // frontmatter on disk.
     await expect
       .poll(
         async () => {
           try {
-            const text = await readFile(
-              join(temp.rootPath, "projects", "Web.md"),
-              "utf8",
-            );
+            const text = await readFile(join(temp.rootPath, "projects", "Web.md"), "utf8");
             return /Status:\s*Doing/.test(text);
           } catch {
             return false;
@@ -406,19 +385,15 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed
     // to Started only Launch renders (day 20). The events moved with the key.
     await switchView(page, "Due dates");
-    await expect(
-      page.locator(".rbc-event").filter({ hasText: "Website" }),
-    ).toBeVisible({ timeout: 30_000 });
-    await expect(
-      page.locator(".rbc-event").filter({ hasText: "Launch" }),
-    ).toHaveCount(0);
+    await expect(page.locator(".rbc-event").filter({ hasText: "Website" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.locator(".rbc-event").filter({ hasText: "Launch" })).toHaveCount(0);
     await switchView(page, "Start dates");
-    await expect(
-      page.locator(".rbc-event").filter({ hasText: "Launch" }),
-    ).toBeVisible({ timeout: 30_000 });
-    await expect(
-      page.locator(".rbc-event").filter({ hasText: "Website" }),
-    ).toHaveCount(0);
+    await expect(page.locator(".rbc-event").filter({ hasText: "Launch" })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.locator(".rbc-event").filter({ hasText: "Website" })).toHaveCount(0);
 
     // --- The whole walkthrough ran without the schema file on screen: no
     // editor tab for either collection.yaml ever opened (a tab is the only

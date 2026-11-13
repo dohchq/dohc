@@ -17,13 +17,19 @@ test("@focus-removal a closed tab hands focus to the next tab after a key or a c
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
     const names = ["a.md", "b.md", "c.md"];
-    await writeWorkspaceFiles(temp, names.map((path) => ({ path, contents: `# ${path}\n` })));
+    await writeWorkspaceFiles(
+      temp,
+      names.map((path) => ({ path, contents: `# ${path}\n` })),
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     for (const name of names) {
       await explorerRow(page, name).click();
-      await expect(page.getByTestId(editorTabTestId(name))).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByTestId(editorTabTestId(name))).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
     }
     const strip = page.getByTestId("editor-tabs");
     const selected = strip.getByRole("tab", { selected: true });

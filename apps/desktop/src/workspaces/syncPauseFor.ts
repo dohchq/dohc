@@ -1,4 +1,7 @@
-import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import {
+  WorkspaceSyncPause,
+  workspaceSyncPauseStatus,
+} from "@dohc/workspace-contracts/workspace-sync";
 import type { RegistryEntry } from "./registryStore";
 import { shareViewIsPresent } from "./shareViewMarker";
 

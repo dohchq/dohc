@@ -1,31 +1,67 @@
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
-import { USAGE_ACTION_IDS, USAGE_DOORS, type UsageBuildPair, type UsageSnapshot } from "@dohc/workspace-contracts/usage";
-import { INVALID_USAGE_RECORD, type UsageRecordResult, type UsageRecordRow, type usageRecordOperations } from "../ipc/bridgeContract";
+import {
+  USAGE_ACTION_IDS,
+  USAGE_DOORS,
+  type UsageBuildPair,
+  type UsageSnapshot,
+} from "@dohc/workspace-contracts/usage";
+import {
+  INVALID_USAGE_RECORD,
+  type UsageRecordResult,
+  type UsageRecordRow,
+  type usageRecordOperations,
+} from "../ipc/bridgeContract";
 import type { OperationHandlers } from "../ipc/operationTable";
 import type { createUsageStore } from "./usageStore";
 
-type UsageStore = Pick<ReturnType<typeof createUsageStore>,
-  "read" | "newestAside" | "clear" | "setEnabled" | "startNewRecord" | "restoreSetAside">;
+type UsageStore = Pick<
+  ReturnType<typeof createUsageStore>,
+  "read" | "newestAside" | "clear" | "setEnabled" | "startNewRecord" | "restoreSetAside"
+>;
 
 // One row per counted action: each door's total over the kept days, and
 // whether this build counts that door at all.
-export function usageRecordView(snapshot: UsageSnapshot, coverage: readonly UsageBuildPair[], file: string): UsageRecordResult {
-  const counted = new Set(coverage.filter(pair => pair.status === "covered").map(pair => `${pair.capabilityId}:${pair.door}`));
-  const rows = new Map<string, UsageRecordRow>(USAGE_ACTION_IDS.map(capabilityId => [capabilityId, {
-    capabilityId,
-    label: CAPABILITIES[capabilityId].description.replace(/\.$/, ""),
-    doors: Object.fromEntries(USAGE_DOORS.map(door =>
-      [door, { count: 0, counted: counted.has(`${capabilityId}:${door}`) }])) as UsageRecordRow["doors"],
-    lastUsed: null,
-  }]));
+export function usageRecordView(
+  snapshot: UsageSnapshot,
+  coverage: readonly UsageBuildPair[],
+  file: string,
+): UsageRecordResult {
+  const counted = new Set(
+    coverage
+      .filter((pair) => pair.status === "covered")
+      .map((pair) => `${pair.capabilityId}:${pair.door}`),
+  );
+  const rows = new Map<string, UsageRecordRow>(
+    USAGE_ACTION_IDS.map((capabilityId) => [
+      capabilityId,
+      {
+        capabilityId,
+        label: CAPABILITIES[capabilityId].description.replace(/\.$/, ""),
+        doors: Object.fromEntries(
+          USAGE_DOORS.map((door) => [
+            door,
+            { count: 0, counted: counted.has(`${capabilityId}:${door}`) },
+          ]),
+        ) as UsageRecordRow["doors"],
+        lastUsed: null,
+      },
+    ]),
+  );
   for (const { capabilityId, door, day, count } of snapshot.counts) {
     const row = rows.get(capabilityId)!;
     row.doors[door].count += count;
     if (row.lastUsed === null || day > row.lastUsed) row.lastUsed = day;
   }
-  const days = snapshot.days.map(day => day.day).sort();
-  return { status: "readable", enabled: snapshot.enabled, file, since: days[0] ?? null,
-    incompleteDays: snapshot.days.filter(day => !day.complete).length, rows: [...rows.values()], setAside: null };
+  const days = snapshot.days.map((day) => day.day).sort();
+  return {
+    status: "readable",
+    enabled: snapshot.enabled,
+    file,
+    since: days[0] ?? null,
+    incompleteDays: snapshot.days.filter((day) => !day.complete).length,
+    rows: [...rows.values()],
+    setAside: null,
+  };
 }
 
 // Privacy's handlers. They have no completion observer, so reading or
@@ -54,7 +90,8 @@ export function usageRecordHandlers(deps: {
         result = { status: "unreadable", file, code, setAside: null };
       }
       // Restore swaps only a record main read or could not decode.
-      if (result.status === "readable" || result.code === INVALID_USAGE_RECORD) result.setAside = await current.newestAside();
+      if (result.status === "readable" || result.code === INVALID_USAGE_RECORD)
+        result.setAside = await current.newestAside();
       return result;
     },
     clearUsageRecord: () => store().clear(),

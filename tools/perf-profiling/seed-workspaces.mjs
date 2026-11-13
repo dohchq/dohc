@@ -64,9 +64,7 @@ function safeOutputPath(value) {
   const cwd = resolve(process.cwd());
   const cwdFromOutput = relative(output, cwd);
   const outputContainsCwd =
-    cwdFromOutput !== "" &&
-    !cwdFromOutput.startsWith("..") &&
-    !isAbsolute(cwdFromOutput);
+    cwdFromOutput !== "" && !cwdFromOutput.startsWith("..") && !isAbsolute(cwdFromOutput);
   if (output === root || output === cwd || outputContainsCwd) {
     throw new Error(`Refusing to replace unsafe output directory: ${output}`);
   }
@@ -115,7 +113,9 @@ function markdownFixture(path, index, markdownPaths, random) {
     "",
     `Links: ${links.join(" ")}`,
     "",
-    `Deterministic payload ${Math.floor(random() * 0xffff_ffff).toString(16).padStart(8, "0")}.`,
+    `Deterministic payload ${Math.floor(random() * 0xffff_ffff)
+      .toString(16)
+      .padStart(8, "0")}.`,
     "",
   ].join("\n");
 }
@@ -148,7 +148,11 @@ async function seedLargeFlat(root, counts, random) {
       : `fixture=${padded(index)}\npath=${path}\nvalue=${Math.floor(random() * 0xffff_ffff)}\n`,
   }));
   await writeFiles(root, files);
-  return { files: files.length, markdownFiles: markdownPaths.length, flatFolderFiles: counts.flatFolderFiles };
+  return {
+    files: files.length,
+    markdownFiles: markdownPaths.length,
+    flatFolderFiles: counts.flatFolderFiles,
+  };
 }
 
 function deepPath(index) {

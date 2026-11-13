@@ -3,10 +3,7 @@
 // Electron. The renderer never re-executes the pattern: highlighting comes
 // only from each entry's matchStart/matchEnd offsets.
 
-import type {
-  SearchResultsEvent,
-  SearchResultsEventEntry,
-} from "../../ipc/bridgeContract";
+import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/bridgeContract";
 
 export interface SearchGroup {
   path: string;

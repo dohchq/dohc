@@ -38,16 +38,26 @@ export const OLD_STORE_PATH = `.dohc/datasets/${STORE_FILE}`;
  * saying what dohc did not do, unless the engine's current open of the
  * workspace prepared `.dohc/local`. Never creates `.dohc/local`.
  */
-export async function localDatasetFolder(workspace: LocalStateWorkspace, folder: LocalDatasetFolder, child?: string): Promise<string> {
+export async function localDatasetFolder(
+  workspace: LocalStateWorkspace,
+  folder: LocalDatasetFolder,
+  child?: string,
+): Promise<string> {
   const { path, what } = FOLDERS[folder];
   const name = child === undefined ? path : `${path}/${child}`;
   try {
-    return await localStateFolder(workspace, name, { path: `.dohc/local/${name}`, lead: `dohc could not ${what}.` });
+    return await localStateFolder(workspace, name, {
+      path: `.dohc/local/${name}`,
+      lead: `dohc could not ${what}.`,
+    });
   } catch (error) {
     if (!(error instanceof LocalStateUnavailableError)) throw error;
-    throw new LocalStateUnavailableError(error.refusal, error.refusal === "not-opened"
-      ? `dohc did not ${what} because the workspace has not finished opening. Try again when it opens.`
-      : `dohc did not ${what} because it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again.`);
+    throw new LocalStateUnavailableError(
+      error.refusal,
+      error.refusal === "not-opened"
+        ? `dohc did not ${what} because the workspace has not finished opening. Try again when it opens.`
+        : `dohc did not ${what} because it can't keep this workspace's .dohc/local out of iCloud Drive. Restart dohc to try again.`,
+    );
   }
 }
 
@@ -56,6 +66,11 @@ export async function localDatasetFolder(workspace: LocalStateWorkspace, folder:
  * missing or not one only this user can change. Refuses as
  * readOwnedLocalStateFolder does.
  */
-export function readLocalDatasetExports<T>(rootPath: string, read: (dir: string | null) => Promise<T>): Promise<T> {
-  return readOwnedLocalStateFolder(rootPath, FOLDERS.exports.path, (dir) => read(dir === "unusable" ? null : dir));
+export function readLocalDatasetExports<T>(
+  rootPath: string,
+  read: (dir: string | null) => Promise<T>,
+): Promise<T> {
+  return readOwnedLocalStateFolder(rootPath, FOLDERS.exports.path, (dir) =>
+    read(dir === "unusable" ? null : dir),
+  );
 }

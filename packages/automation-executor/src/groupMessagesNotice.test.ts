@@ -15,10 +15,13 @@ describe("groupMessagesNotice", () => {
       body: "Some Group messages are dated more than an hour later than this computer's clock. Check that this computer's date and time are right.",
       target: {},
     });
-    expect(groupMessagesNotice({ workspaceId: "ws-trip", reason: "ahead", atMs: at + 60_000 }).noticeId)
-      .toBe(ahead.noticeId);
-    expect(groupMessagesNotice({ workspaceId: "ws-trip", reason: "ahead", atMs: at + 86_400_000 }).noticeId)
-      .toBe("group-messages-skipped:ws-trip:ahead:2026-09-27");
+    expect(
+      groupMessagesNotice({ workspaceId: "ws-trip", reason: "ahead", atMs: at + 60_000 }).noticeId,
+    ).toBe(ahead.noticeId);
+    expect(
+      groupMessagesNotice({ workspaceId: "ws-trip", reason: "ahead", atMs: at + 86_400_000 })
+        .noticeId,
+    ).toBe("group-messages-skipped:ws-trip:ahead:2026-09-27");
     const late = groupMessagesNotice({ workspaceId: "ws-trip", reason: "late", atMs: at });
     expect(late.noticeId).toBe("group-messages-skipped:ws-trip:late:2026-09-26");
     expect(late.body).toBe(

@@ -19,10 +19,21 @@ afterEach(() => {
 
 describe("rewriteCollectionSchema", () => {
   it("refuses a newer version without mutating or writing", async () => {
-    bridgeMock.readWorkspaceText.mockResolvedValue({ text: "version: 2\nname: Tasks\n", truncated: false, contentHash: "hash-1" });
-    const mutate = vi.fn(schema => schema);
-    expect(await rewriteCollectionSchema({ workspaceId: "ws-1", collectionPath: "projects/tasks", mutate })).toEqual({
-      status: "error", detail: "projects/tasks/collection.yaml uses a newer version. Update dohc to read this file.",
+    bridgeMock.readWorkspaceText.mockResolvedValue({
+      text: "version: 2\nname: Tasks\n",
+      truncated: false,
+      contentHash: "hash-1",
+    });
+    const mutate = vi.fn((schema) => schema);
+    expect(
+      await rewriteCollectionSchema({
+        workspaceId: "ws-1",
+        collectionPath: "projects/tasks",
+        mutate,
+      }),
+    ).toEqual({
+      status: "error",
+      detail: "projects/tasks/collection.yaml uses a newer version. Update dohc to read this file.",
     });
     expect(mutate).not.toHaveBeenCalled();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();

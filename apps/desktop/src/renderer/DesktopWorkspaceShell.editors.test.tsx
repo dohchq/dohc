@@ -5,12 +5,33 @@ import "./CollectionPage";
 import { act, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { RefreshSharedViewResult, SyncDmsResult, WriteWorkspaceTextPayload, WorkspaceUiState } from "../ipc/bridgeContract";
+import type {
+  RefreshSharedViewResult,
+  SyncDmsResult,
+  WriteWorkspaceTextPayload,
+  WorkspaceUiState,
+} from "../ipc/bridgeContract";
 import { type Workspace } from "./DesktopWorkspaceShell";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
 import { sharedViewRefusalWords } from "../testing/sharedViewRefusal.fixture";
-import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, shellBootstrapProps, makeShareBridge } from "./DesktopWorkspaceShell.testHarness";
+import {
+  DesktopWorkspaceShell,
+  WORKSPACE,
+  OTHER_WORKSPACE,
+  SYNC_STATUS,
+  STORED_STATE,
+  storedStateWithTabs,
+  storedTabs,
+  DM_GRAPH_NODE,
+  CANONICAL_DM,
+  dmSyncResult,
+  makeBridge,
+  renderShell,
+  enterMarkdownSource,
+  shellBootstrapProps,
+  makeShareBridge,
+} from "./DesktopWorkspaceShell.testHarness";
 
 function checkRefusalCopy(text: string, cause?: string) {
   const lines = text.split("\n");
@@ -20,8 +41,12 @@ function checkRefusalCopy(text: string, cause?: string) {
     expect(line, "Copied facts omit the wire code").not.toContain("[share-collision-record]");
     expect(line, "Copied facts omit the capture class").not.toContain("CapturePartialFailureError");
   }
-  for (const line of lines.slice(1)) expect(line, "Copied facts do not repeat the refusal").not.toContain(sharedViewRefusalWords);
-  expect(lines.filter(line => line.startsWith("Cause:")), "Copy keeps only the filesystem cause").toEqual(cause ? [`Cause: ${cause}`] : []);
+  for (const line of lines.slice(1))
+    expect(line, "Copied facts do not repeat the refusal").not.toContain(sharedViewRefusalWords);
+  expect(
+    lines.filter((line) => line.startsWith("Cause:")),
+    "Copy keeps only the filesystem cause",
+  ).toEqual(cause ? [`Cause: ${cause}`] : []);
 }
 
 // Opens a notice's Details unless it is open, then copies its report. A
@@ -29,8 +54,13 @@ function checkRefusalCopy(text: string, cause?: string) {
 // its toast.
 async function copyDetails(notice: HTMLElement) {
   const closed = within(notice).queryByRole("button", { name: "Details" });
-  if (closed) await act(async () => { fireEvent.click(closed); });
-  await act(async () => { fireEvent.click(within(notice).getByRole("button", { name: "Copy details" })); });
+  if (closed)
+    await act(async () => {
+      fireEvent.click(closed);
+    });
+  await act(async () => {
+    fireEvent.click(within(notice).getByRole("button", { name: "Copy details" }));
+  });
 }
 
 // One share's durable skip record, as the registry holds it.
@@ -53,15 +83,11 @@ const SKIPPED_RECORD = {
 
 describe("editor groups", () => {
   function fileTreeRow(path: string): HTMLElement {
-    return screen
-      .getAllByTestId("tree-row")
-      .find((row) => row.dataset.path === path)!;
+    return screen.getAllByTestId("tree-row").find((row) => row.dataset.path === path)!;
   }
 
   it("copies the active tab right with Ctrl+\\ and collapses the group after its last tab closes", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
     renderShell(bridge);
     expect(await screen.findByTestId("view-markdown")).toBeTruthy();
 
@@ -69,9 +95,7 @@ describe("editor groups", () => {
     await waitFor(() =>
       expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(2),
     );
-    expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.active).toBe(
-      "true",
-    );
+    expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.active).toBe("true");
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const right = screen.getByRole("region", { name: "Editor group 2" });
     expect(within(left).getByTestId("tab-a.md")).toBeTruthy();
@@ -81,20 +105,18 @@ describe("editor groups", () => {
 
     await userEvent.click(fileTreeRow("b.md"));
     expect(await within(right).findByTestId("tab-b.md")).toBeTruthy();
-    await waitFor(
-      () => {
-        const persisted = bridge.setWorkspaceUiState.mock.calls
-          .map(([payload]) => payload.state)
-          .find(
-            (state) =>
-              state.editorGroups.length === 2 &&
-              state.editorGroups[0]?.tabs.includes("a.md") &&
-              state.editorGroups[1]?.tabs.includes("a.md") &&
-              state.editorGroups[1]?.tabs.includes("b.md"),
-          );
-        expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
-      },
-    );
+    await waitFor(() => {
+      const persisted = bridge.setWorkspaceUiState.mock.calls
+        .map(([payload]) => payload.state)
+        .find(
+          (state) =>
+            state.editorGroups.length === 2 &&
+            state.editorGroups[0]?.tabs.includes("a.md") &&
+            state.editorGroups[1]?.tabs.includes("a.md") &&
+            state.editorGroups[1]?.tabs.includes("b.md"),
+        );
+      expect(persisted?.activeEditorGroup).toBe(persisted?.editorGroups[1]?.id);
+    });
     // Press Ctrl+W again the moment the first close shows, before React runs
     // that commit's passive effects. A loaded machine produced this order.
     const tabsLeftAfterFirstClose = new Promise<string[]>((resolve, reject) => {
@@ -102,7 +124,9 @@ describe("editor groups", () => {
         if (within(right).queryByTestId("tab-b.md") !== null) return;
         observer.disconnect();
         clearTimeout(timeout);
-        const tabs = within(right).queryAllByRole("tab").map((tab) => tab.dataset.testid ?? "");
+        const tabs = within(right)
+          .queryAllByRole("tab")
+          .map((tab) => tab.dataset.testid ?? "");
         fireEvent.keyDown(window, { key: "w", ctrlKey: true });
         resolve(tabs);
       });
@@ -150,7 +174,8 @@ describe("editor groups", () => {
         activeEditorGroup: "right",
       }),
     );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      visibility: { status: "ready" as const, rules: [] },
       files: ["race-a.md", "race-b.md", "race-c.md"].map((path) => ({
         path,
         kind: "file" as const,
@@ -172,9 +197,7 @@ describe("editor groups", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await waitFor(() =>
-      expect(screen.getAllByTestId("view-markdown")).toHaveLength(3),
-    );
+    await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(3));
     const left = screen.getByRole("region", { name: "Editor group 1" });
     const middle = screen.getByRole("region", { name: "Editor group 2" });
     const right = screen.getByRole("region", { name: "Editor group 3" });
@@ -192,26 +215,18 @@ describe("editor groups", () => {
     await waitFor(() => expect(right.dataset.active).toBe("true"));
     await user.click(fileTreeRow("race-a.md"));
     await waitFor(() =>
-      expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].relativePath).toBe(
-        "race-a.md",
-      ),
+      expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].relativePath).toBe("race-a.md"),
     );
     await user.click(fileTreeRow("race-b.md"));
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2),
-    );
-    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0].relativePath).toBe(
-      "race-b.md",
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
+    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0].relativePath).toBe("race-b.md");
 
     await act(async () => {
       bSave.resolve({ status: "written", contentHash: "b".repeat(64) });
       await bSave.promise;
     });
     await waitFor(() =>
-      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe(
-        "true",
-      ),
+      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe("true"),
     );
 
     await act(async () => {
@@ -219,16 +234,15 @@ describe("editor groups", () => {
       await aSave.promise;
     });
     await waitFor(() =>
-      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe(
-        "true",
-      ),
+      expect(within(right).getByTestId("tab-race-b.md").dataset.active).toBe("true"),
     );
     expect(within(right).queryByTestId("tab-race-a.md")).toBeNull();
   });
 
   it("closes an imported database in every group before its Undo reaches main", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["data.csv"], "data.csv")));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      visibility: { status: "ready" as const, rules: [] },
       files: [{ path: "data.csv", kind: "file" as const }],
       folders: [] as string[],
     }));
@@ -246,7 +260,12 @@ describe("editor groups", () => {
       return undone.promise;
     });
     Object.assign(bridge, {
-      importToDatabase: vi.fn(async () => ({ operationId: "dohc-operation:import-1", path: "data.sqlite", tableName: "data", rowCount: 501 })),
+      importToDatabase: vi.fn(async () => ({
+        operationId: "dohc-operation:import-1",
+        path: "data.sqlite",
+        tableName: "data",
+        rowCount: 501,
+      })),
       undoDatabaseImport,
       // The database views stay loading; this test is about their tabs.
       readWorkspaceDatabase: vi.fn(() => new Promise(() => {})),
@@ -263,10 +282,17 @@ describe("editor groups", () => {
     expect(within(left).getByTestId("tab-data.sqlite")).toBeTruthy();
 
     await user.click(screen.getByTestId("notice-center-toggle"));
-    await user.click(within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }));
+    await user.click(
+      within(screen.getByRole("dialog", { name: "Notices" })).getByRole("button", { name: "Undo" }),
+    );
 
     // Both tabs are gone before Undo reaches main, so no view holds the file.
-    await waitFor(() => expect(undoDatabaseImport).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId, operationId: "dohc-operation:import-1" }));
+    await waitFor(() =>
+      expect(undoDatabaseImport).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: WORKSPACE.workspaceId,
+        operationId: "dohc-operation:import-1",
+      }),
+    );
     expect(shownAtUndo).toEqual([0]);
     expect(screen.getByTestId("tab-data.csv")).toBeTruthy();
     await act(async () => undone.resolve({ trashed: true }));
@@ -293,7 +319,11 @@ describe("ui-state merge-on-load", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     const view = render(shell(WORKSPACE));
     // A's read must be in flight, or the switch only cancels it before it starts.
-    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() =>
+      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: WORKSPACE.workspaceId,
+      }),
+    );
 
     view.rerender(shell(OTHER_WORKSPACE));
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
@@ -303,7 +333,10 @@ describe("ui-state merge-on-load", () => {
       await first.promise;
     });
 
-    expect(screen.getByTestId("tab-b.md"), "omit the response guard's cleanup invalidation. The first workspace's late answer replaces b.md with a.md here.").toBeTruthy();
+    expect(
+      screen.getByTestId("tab-b.md"),
+      "omit the response guard's cleanup invalidation. The first workspace's late answer replaces b.md with a.md here.",
+    ).toBeTruthy();
     expect(screen.queryByTestId("tab-a.md")).toBeNull();
   });
 
@@ -326,7 +359,9 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
     await waitFor(() => {
-      const states = bridge.setWorkspaceUiState.mock.calls.map(([payload]) => storedTabs(payload.state));
+      const states = bridge.setWorkspaceUiState.mock.calls.map(([payload]) =>
+        storedTabs(payload.state),
+      );
       expect(states.some((tabs) => tabs.includes("a.md") && tabs.includes("b.md"))).toBe(true);
     });
   });
@@ -363,7 +398,8 @@ describe("ui-state merge-on-load", () => {
     };
     const retried = deferred<RefreshSharedViewResult>();
     const retriedAgain = deferred<RefreshSharedViewResult>();
-    const refresh = vi.fn<() => Promise<RefreshSharedViewResult>>()
+    const refresh = vi
+      .fn<() => Promise<RefreshSharedViewResult>>()
       .mockResolvedValueOnce(refused)
       .mockReturnValueOnce(retried.promise)
       .mockReturnValueOnce(retriedAgain.promise);
@@ -388,7 +424,9 @@ describe("ui-state merge-on-load", () => {
     // The record still keeps the person's own files apart, so its row has no ×.
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     const notices = await screen.findByTestId("notice-center");
-    const row = within(notices).getByText(words, { exact: false }).closest<HTMLElement>("[data-notice-row]")!;
+    const row = within(notices)
+      .getByText(words, { exact: false })
+      .closest<HTMLElement>("[data-notice-row]")!;
     expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
     await navigator.clipboard.writeText("");
     await copyDetails(row);
@@ -398,7 +436,11 @@ describe("ui-state merge-on-load", () => {
     const refreshButton = () => screen.getByTestId("shared-view-refresh") as HTMLButtonElement;
     const refusalRow = async () => {
       fireEvent.click(screen.getByTestId("notice-center-toggle"));
-      return within(await screen.findByTestId("notice-center")).queryByText(words, { exact: false })?.closest<HTMLElement>("[data-notice-row]") ?? null;
+      return (
+        within(await screen.findByTestId("notice-center"))
+          .queryByText(words, { exact: false })
+          ?.closest<HTMLElement>("[data-notice-row]") ?? null
+      );
     };
     fireEvent.click(within(row).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(refreshButton().disabled).toBe(true));
@@ -424,9 +466,7 @@ describe("ui-state merge-on-load", () => {
   });
 
   it("repaints changed files and removes generic chat before an ended share becomes read-only", async () => {
-    const bridge = makeShareBridge(
-      Promise.resolve(storedStateWithTabs(["b.md"], "b.md")),
-    );
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["b.md"], "b.md")));
     bridge.listFileChats.mockResolvedValue({
       fileObjectId: "share-object-1",
       threads: [
@@ -480,9 +520,7 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalled());
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled,
-      ).toBe(false),
+      expect((screen.getByTestId("shared-view-refresh") as HTMLButtonElement).disabled).toBe(false),
     );
     const listCallsBeforeEnd = bridge.listWorkspaceFiles.mock.calls.length;
     const readCallsBeforeEnd = bridge.readWorkspaceText.mock.calls.length;
@@ -551,9 +589,7 @@ describe("ui-state merge-on-load", () => {
     const first = deferred<RefreshSharedViewResult>();
     const second = deferred<RefreshSharedViewResult>();
     let refreshCall = 0;
-    bridge.refreshSharedView = vi.fn(() =>
-      refreshCall++ === 0 ? first.promise : second.promise,
-    );
+    bridge.refreshSharedView = vi.fn(() => (refreshCall++ === 0 ? first.promise : second.promise));
     const firstWorkspace: Workspace = {
       ...WORKSPACE,
       workspaceId: "ws-first",
@@ -572,10 +608,7 @@ describe("ui-state merge-on-load", () => {
         access: "edit",
       },
     };
-    const rendered = renderShell(bridge, firstWorkspace, [
-      firstWorkspace,
-      secondWorkspace,
-    ]);
+    const rendered = renderShell(bridge, firstWorkspace, [firstWorkspace, secondWorkspace]);
     await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1));
 
     rendered.rerender(
@@ -594,9 +627,7 @@ describe("ui-state merge-on-load", () => {
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/new-pull.md"],
-        unjournalablePaths: [
-          { path: "docs/new-local.md", reason: "non-utf8" },
-        ],
+        unjournalablePaths: [{ path: "docs/new-local.md", reason: "non-utf8" }],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -610,9 +641,7 @@ describe("ui-state merge-on-load", () => {
         status: "unchanged",
         changedPaths: 0,
         excludedPaths: ["docs/stale-pull.md"],
-        unjournalablePaths: [
-          { path: "docs/stale-local.md", reason: "oversized-text" },
-        ],
+        unjournalablePaths: [{ path: "docs/stale-local.md", reason: "oversized-text" }],
         refusedOps: 0,
         refusedDetail: null,
       });
@@ -627,9 +656,7 @@ describe("ui-state merge-on-load", () => {
   // refresh: the cursor has committed past those ops, so a quiet refresh must
   // not clear it and a restart must not lose it.
   it("says so when a share's record holds ops its pulls skipped", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs([])),
-    );
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     // A refresh that finds nothing new. The warning must survive it.
     bridge.refreshSharedView = vi.fn(async () => ({
       ok: true as const,
@@ -678,9 +705,7 @@ describe("ui-state merge-on-load", () => {
     });
 
     const lines = await screen.findAllByTestId("shared-view-refused");
-    const boundary = lines.find(
-      (line) => line.getAttribute("data-kind") === "boundary",
-    );
+    const boundary = lines.find((line) => line.getAttribute("data-kind") === "boundary");
     expect(
       boundary?.textContent,
       "reading the last refresh instead of the record clears the warning while the content is still missing",
@@ -689,20 +714,14 @@ describe("ui-state merge-on-load", () => {
     expect(boundary?.getAttribute("title")).toContain("version-other");
     // The overflow keeps no class, so it names no cause and sends the reader
     // nowhere.
-    const overflow = lines.find(
-      (line) => line.getAttribute("data-kind") === "unknown",
-    );
-    expect(overflow?.textContent).toContain(
-      "dohc skipped 1 more update from this share",
-    );
+    const overflow = lines.find((line) => line.getAttribute("data-kind") === "unknown");
+    expect(overflow?.textContent).toContain("dohc skipped 1 more update from this share");
     expect(overflow?.textContent).not.toContain("granter@dohc.test");
 
     // The only honest recovery this surface has: the user says they have seen
     // it. That is recorded durably — and it hides the warning rather than
     // deleting the evidence, because the content it names is gone for good.
-    await userEvent.click(
-      screen.getAllByTestId("shared-view-refused-dismiss")[0]!,
-    );
+    await userEvent.click(screen.getAllByTestId("shared-view-refused-dismiss")[0]!);
     expect(dismiss).toHaveBeenCalledWith({
       workspaceId: WORKSPACE.workspaceId,
       // The generation on screen: a refusal recorded since this render is not
@@ -719,14 +738,13 @@ describe("ui-state merge-on-load", () => {
   // requires the file, the write fails, the failure is swallowed — the draft
   // would be gone with no error and no way back.
   it("never closes a restored tab with an unsaved draft, and closes it once saved", async () => {
-    const listing = (...paths: string[]) => ({ visibility: { status: "ready" as const, rules: [] },
+    const listing = (...paths: string[]) => ({
+      visibility: { status: "ready" as const, rules: [] },
       files: paths.map((path) => ({ path, kind: "file" as const })),
       folders: [] as string[],
     });
     const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
     renderShell(bridge);
 
     // Type into the restored tab's document without letting it settle.
@@ -760,7 +778,8 @@ describe("ui-state merge-on-load", () => {
   // successful listing re-enables it — and correctness beats eagerness for
   // work that cannot be undone.
   it("waits for a listing that succeeds after a failure before closing", async () => {
-    const older = deferred<{ visibility: { status: "ready"; rules: [] };
+    const older = deferred<{
+      visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -768,7 +787,8 @@ describe("ui-state merge-on-load", () => {
     const newer = new Promise<never>((_resolve, reject) => {
       failNewer = reject;
     });
-    const third = deferred<{ visibility: { status: "ready"; rules: [] };
+    const third = deferred<{
+      visibility: { status: "ready"; rules: [] };
       files: Array<{ path: string; kind: "file" }>;
       folders: string[];
     }>();
@@ -798,7 +818,11 @@ describe("ui-state merge-on-load", () => {
 
     // The older listing commits, but a newer request is still in flight.
     await act(async () => {
-      older.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
+      older.resolve({
+        visibility: { status: "ready" as const, rules: [] },
+        files: [{ path: "b.md", kind: "file" }],
+        folders: [],
+      });
       await older.promise;
     });
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
@@ -819,7 +843,11 @@ describe("ui-state merge-on-load", () => {
     });
     await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(3));
     await act(async () => {
-      third.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [{ path: "b.md", kind: "file" }], folders: [] });
+      third.resolve({
+        visibility: { status: "ready" as const, rules: [] },
+        files: [{ path: "b.md", kind: "file" }],
+        folders: [],
+      });
       await third.promise;
     });
     await waitFor(() => {
@@ -853,7 +881,13 @@ describe("ui-state merge-on-load", () => {
 
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("graph-file-row")
+          .some((row) => row.dataset.path?.startsWith("chat-thread:")),
+      ).toBe(true),
+    );
     const rows = await screen.findAllByTestId("graph-file-row");
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
     await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
@@ -874,7 +908,11 @@ describe("ui-state merge-on-load", () => {
       await sync.promise;
     });
 
-    expect(await screen.findByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeTruthy();
+    expect(
+      await screen.findByTestId(
+        `tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`,
+      ),
+    ).toBeTruthy();
   });
 
   // The session signal reaches the SHELL: cloudStatus derives the presence
@@ -893,12 +931,7 @@ describe("ui-state merge-on-load", () => {
       }),
     );
     bridge.onCloudSessionChanged = vi.fn(
-      (
-        callback: (event: {
-          sessionKey: string | null;
-          phase: "changing" | "ready";
-        }) => void,
-      ) => {
+      (callback: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void) => {
         sessionListeners.push(callback);
         return () => {};
       },
@@ -947,8 +980,12 @@ describe("ui-state merge-on-load", () => {
     await waitFor(() => expect(presence.presencePublish).toHaveBeenCalled());
     // The list stays mounted beside the live tab and holds no transport of
     // its own: the channel topic has exactly one publisher, the page.
-    expect(screen.getByTestId("side-panel").querySelector('[data-testid="chats-view"]')).toBeTruthy();
-    const channelPublishes = (presence.presencePublish.mock.calls as unknown as [{ topic: string; incarnationId: string }][])
+    expect(
+      screen.getByTestId("side-panel").querySelector('[data-testid="chats-view"]'),
+    ).toBeTruthy();
+    const channelPublishes = (
+      presence.presencePublish.mock.calls as unknown as [{ topic: string; incarnationId: string }][]
+    )
       .map(([payload]) => payload)
       .filter((payload) => payload.topic === "channel-team");
     expect(channelPublishes.length).toBeGreaterThan(0);
@@ -1007,7 +1044,8 @@ describe("ui-state merge-on-load", () => {
       listPersonalChatFeed: vi.fn(async () => ({
         items: [
           {
-            message: { presentation: { group: "fixture", hue: null, self: false },
+            message: {
+              presentation: { group: "fixture", hue: null, self: false },
               id: "message-feed",
               threadId: "thread-team",
               authorKind: "human" as const,
@@ -1038,7 +1076,8 @@ describe("ui-state merge-on-load", () => {
       })),
       listChatMessages: vi.fn(async () => ({
         messages: [
-          { presentation: { group: "fixture", hue: null, self: false },
+          {
+            presentation: { group: "fixture", hue: null, self: false },
             id: "message-feed",
             threadId: "thread-team",
             authorKind: "human" as const,
@@ -1053,7 +1092,8 @@ describe("ui-state merge-on-load", () => {
       listChatThreadAttachments: vi.fn(async () => ({ attachments: [] })),
       chatRunRecordsForThread: vi.fn(async () => ({ runs: {} })),
       chatDispatchStateForThread: vi.fn(async () => ({
-        liveRunId: null, liveTriggerMessageId: null,
+        liveRunId: null,
+        liveTriggerMessageId: null,
         pendingCount: 0,
         paused: false,
       })),
@@ -1084,13 +1124,17 @@ describe("ui-state merge-on-load", () => {
     // Start a canonical DM navigation from the graph and leave it in flight.
     await user.click(screen.getByTestId("activity-graph"));
     await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() => expect(screen.getAllByTestId("graph-file-row").some(row => row.dataset.path?.startsWith("chat-thread:"))).toBe(true));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("graph-file-row")
+          .some((row) => row.dataset.path?.startsWith("chat-thread:")),
+      ).toBe(true),
+    );
     const rows = await screen.findAllByTestId("graph-file-row");
     const dmCallsBefore = bridge.syncDms.mock.calls.length;
     await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
-    await waitFor(() =>
-      expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1),
-    );
+    await waitFor(() => expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1));
     // Collapse the sidebar so only the Chats page answers the queries below.
     await user.click(screen.getByTestId("activity-graph"));
 
@@ -1101,9 +1145,7 @@ describe("ui-state merge-on-load", () => {
     const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
     await act(async () => {
       bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
-      postButton.dispatchEvent(
-        new MouseEvent("click", { bubbles: true, cancelable: true }),
-      );
+      postButton.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       await Promise.resolve();
     });
 
@@ -1111,8 +1153,9 @@ describe("ui-state merge-on-load", () => {
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
     // The feed click opens its channel once; the delayed DM opens no tab.
     expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
-    expect(screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`)).toBeNull();
-
+    expect(
+      screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`),
+    ).toBeNull();
   });
 
   // The same race through the back button: every BackHeader and the keyboard

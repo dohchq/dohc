@@ -20,7 +20,11 @@ describe("splitPath", () => {
       middle: "Users\\sam\\home\\dohc\\",
       name: "Personal",
     });
-    expect(splitPath("/home/sam/dohc/Personal")).toEqual({ first: "/home/", middle: "sam/dohc/", name: "Personal" });
+    expect(splitPath("/home/sam/dohc/Personal")).toEqual({
+      first: "/home/",
+      middle: "sam/dohc/",
+      name: "Personal",
+    });
     expect(splitPath("/home/Personal")).toEqual({ first: "/home/", middle: "", name: "Personal" });
     expect(splitPath("\\\\server\\share\\Trips\\Lisbon")).toEqual({
       first: "\\\\server\\",
@@ -37,10 +41,28 @@ describe("splitPath", () => {
 describe("pathPieces", () => {
   it("cuts after every separator and joins back into the path", () => {
     const posix = "/home/user/.nvm/versions/node/v24.16.0/bin/claude";
-    expect(pathPieces(posix)).toEqual(["/", "home/", "user/", ".nvm/", "versions/", "node/", "v24.16.0/", "bin/", "claude"]);
+    expect(pathPieces(posix)).toEqual([
+      "/",
+      "home/",
+      "user/",
+      ".nvm/",
+      "versions/",
+      "node/",
+      "v24.16.0/",
+      "bin/",
+      "claude",
+    ]);
     expect(pathPieces(posix).join("")).toBe(posix);
     const windows = "C:\\Users\\sam\\AppData\\Roaming\\npm\\codex.cmd";
-    expect(pathPieces(windows)).toEqual(["C:\\", "Users\\", "sam\\", "AppData\\", "Roaming\\", "npm\\", "codex.cmd"]);
+    expect(pathPieces(windows)).toEqual([
+      "C:\\",
+      "Users\\",
+      "sam\\",
+      "AppData\\",
+      "Roaming\\",
+      "npm\\",
+      "codex.cmd",
+    ]);
     expect(pathPieces(windows).join("")).toBe(windows);
   });
 

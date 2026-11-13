@@ -56,7 +56,13 @@ export function useDatasetAutomations(props: {
 } {
   const { workspaceId, datasetId, tableId, dataset, onError } = props;
   const described = dataset?.tables.find((candidate) => candidate.tableId === tableId);
-  const table = useMemo((): AutomationTable | undefined => dataset !== null && described !== undefined ? automationTableOf(dataset, described.name) : undefined, [dataset, tableId]);
+  const table = useMemo(
+    (): AutomationTable | undefined =>
+      dataset !== null && described !== undefined
+        ? automationTableOf(dataset, described.name)
+        : undefined,
+    [dataset, tableId],
+  );
   const tableName = table?.name;
   // What main answered, or "failed" when dohc could not ask it; null while it asks.
   const [found, setFound] = useState<FindDatasetCollectionResult | "failed" | null>(null);
@@ -69,14 +75,17 @@ export function useDatasetAutomations(props: {
       if (request.isCurrent(token)) setFound(result);
     } catch (error) {
       if (!request.isCurrent(token)) return;
-      setFound((current) => (current !== null && current !== "failed" && current.status === "found" ? current : "failed"));
+      setFound((current) =>
+        current !== null && current !== "failed" && current.status === "found" ? current : "failed",
+      );
       onError(FIND_FAILED, error, () => void find());
     }
   }, [workspaceId, datasetId, onError]);
   useEffect(() => {
     void find();
   }, [find]);
-  const collectionPath = found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
+  const collectionPath =
+    found !== null && found !== "failed" && found.status === "found" ? found.collectionPath : null;
   const automations = useCollectionAutomations(workspaceId, collectionPath, onError);
   const [open, setOpen] = useState(false);
   const [start, setStart] = useState<{ automation: Automation; seq: number } | null>(null);
@@ -96,9 +105,13 @@ export function useDatasetAutomations(props: {
   }, [open]);
   // Approved or archived rules name a dataset's folder again. The list
   // reads itself again when main's automations change.
-  useEffect(() => bridge().onCollectionAutomationsChanged((event) => {
-    if (event.workspaceId === workspaceId) void find();
-  }), [workspaceId, find]);
+  useEffect(
+    () =>
+      bridge().onCollectionAutomationsChanged((event) => {
+        if (event.workspaceId === workspaceId) void find();
+      }),
+    [workspaceId, find],
+  );
   // What runs once the panel has closed at the page's asking.
   const afterClose = useRef<(() => void) | null>(null);
   const close = useCallback(() => {
@@ -149,15 +162,30 @@ export function useDatasetAutomations(props: {
       {found === null ? undefined : found === "failed" ? (
         <>
           <p className="m-0">{FIND_FAILED}</p>
-          <SecondaryButton size="compact" className="mt-2" onClick={() => {
-            setFound(null);
-            void find();
-          }}>Try again</SecondaryButton>
+          <SecondaryButton
+            size="compact"
+            className="mt-2"
+            onClick={() => {
+              setFound(null);
+              void find();
+            }}
+          >
+            Try again
+          </SecondaryButton>
         </>
       ) : found.status === "unavailable" ? (
         "This Collection's automations run on its owner's computer."
-      ) : found.status === "cannot-run" ? found.reason : undefined}
+      ) : found.status === "cannot-run" ? (
+        found.reason
+      ) : undefined}
     </AutomationsNote>
   );
-  return { toggle, panel, fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null), start: startWith, collectionPath, fileMade: automationsFileMade(automations.file) };
+  return {
+    toggle,
+    panel,
+    fieldMarks: useDatasetFieldMarks(datasetId, tableName ?? null),
+    start: startWith,
+    collectionPath,
+    fileMade: automationsFileMade(automations.file),
+  };
 }

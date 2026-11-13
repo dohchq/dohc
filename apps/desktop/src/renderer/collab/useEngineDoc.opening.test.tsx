@@ -43,9 +43,7 @@ function Harness(props: {
       <span data-testid="opening">{String(engine.opening)}</span>
       <span data-testid="live-host-unavailable">{String(engine.liveHostUnavailable)}</span>
       <span data-testid="available">{String(engine.available)}</span>
-      <span data-testid="engine-may-hold-document">
-        {String(engine.engineMayHoldDocument)}
-      </span>
+      <span data-testid="engine-may-hold-document">{String(engine.engineMayHoldDocument)}</span>
     </div>
   );
 }
@@ -63,21 +61,19 @@ function deferredBridge() {
           available: boolean;
           initialUpdate?: Uint8Array;
           lineageGeneration?: number;
-        }>(
-          (resolve, reject) => {
-            settle = (result) =>
-              resolve(
-                result.available
-                  ? {
-                      available: true,
-                      initialUpdate: Y.encodeStateAsUpdate(doc),
-                      lineageGeneration: 1,
-                    }
-                  : { available: false },
-              );
-            fail = reject;
-          },
-        ),
+        }>((resolve, reject) => {
+          settle = (result) =>
+            resolve(
+              result.available
+                ? {
+                    available: true,
+                    initialUpdate: Y.encodeStateAsUpdate(doc),
+                    lineageGeneration: 1,
+                  }
+                : { available: false },
+            );
+          fail = reject;
+        }),
     ),
     applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
     onEngineYDocRemoteUpdate: () => () => undefined,
@@ -120,14 +116,13 @@ it("stays opening while the open is held, then binds", async () => {
   expect(screen.getByTestId("opening").textContent).toBe("true");
 
   bridge.bind();
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   expect(screen.getByTestId("opening").textContent).toBe("false");
 });
 
 it("does not bind a late open from the previous workspace", async () => {
-  const first = deferredBridge(), second = deferredBridge();
+  const first = deferredBridge(),
+    second = deferredBridge();
   vi.stubGlobal("dohcDesktop", {
     ...second.api,
     openEngineYDocSession: ({ workspaceId }: { workspaceId: string }) =>
@@ -161,37 +156,40 @@ it("separates 'not engine-backed' from 'opening' — both are available:false", 
   // The engine answers: this workspace has no capture. Same `available`, and
   // now the caller may fall back to the writable plain editor.
   bridge.refuse();
-  await waitFor(() =>
-    expect(screen.getByTestId("opening").textContent).toBe("false"),
-  );
+  await waitFor(() => expect(screen.getByTestId("opening").textContent).toBe("false"));
   expect(screen.getByTestId("available").textContent).toBe("false");
 });
 
-it.each(["engineMayHoldDocument", "liveHostUnavailable"] as const)("keeps %s out of the writable fallback", async flag => {
-  vi.stubGlobal("dohcDesktop", {
-    openEngineYDocSession: vi.fn(async () => ({
-      available: false,
-      [flag]: true,
-    })),
-    applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
-    onEngineYDocRemoteUpdate: () => () => undefined,
-    onEngineYDocOwnerHandoff: () => () => undefined,
-    prepareEngineYDocOwnerHandoff: async () => undefined,
-    onEngineYDocLineageReplacement: () => () => undefined,
-    onEngineYDocSaveState: () => () => undefined,
-    closeEngineYDocSession: vi.fn(async () => undefined),
-  });
+it.each(["engineMayHoldDocument", "liveHostUnavailable"] as const)(
+  "keeps %s out of the writable fallback",
+  async (flag) => {
+    vi.stubGlobal("dohcDesktop", {
+      openEngineYDocSession: vi.fn(async () => ({
+        available: false,
+        [flag]: true,
+      })),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      onEngineYDocRemoteUpdate: () => () => undefined,
+      onEngineYDocOwnerHandoff: () => () => undefined,
+      prepareEngineYDocOwnerHandoff: async () => undefined,
+      onEngineYDocLineageReplacement: () => () => undefined,
+      onEngineYDocSaveState: () => () => undefined,
+      closeEngineYDocSession: vi.fn(async () => undefined),
+    });
 
-  render(<Harness path="notes/a.md" />);
+    render(<Harness path="notes/a.md" />);
 
-  await waitFor(() =>
-    expect(
-      screen.getByTestId(flag === "liveHostUnavailable" ? "live-host-unavailable" : "engine-may-hold-document").textContent,
-    ).toBe("true"),
-  );
-  expect(screen.getByTestId("opening").textContent).toBe("false");
-  expect(screen.getByTestId("available").textContent).toBe("false");
-});
+    await waitFor(() =>
+      expect(
+        screen.getByTestId(
+          flag === "liveHostUnavailable" ? "live-host-unavailable" : "engine-may-hold-document",
+        ).textContent,
+      ).toBe("true"),
+    );
+    expect(screen.getByTestId("opening").textContent).toBe("false");
+    expect(screen.getByTestId("available").textContent).toBe("false");
+  },
+);
 
 it("clears opening when the open throws, instead of wedging the surface read-only", async () => {
   const bridge = deferredBridge();
@@ -201,9 +199,7 @@ it("clears opening when the open throws, instead of wedging the surface read-onl
   await waitFor(() => expect(bridge.api.openEngineYDocSession).toHaveBeenCalled());
 
   bridge.throwOpen();
-  await waitFor(() =>
-    expect(screen.getByTestId("opening").textContent).toBe("false"),
-  );
+  await waitFor(() => expect(screen.getByTestId("opening").textContent).toBe("false"));
   expect(screen.getByTestId("available").textContent).toBe("false");
 });
 
@@ -225,9 +221,7 @@ it("re-enters opening on the first render of a version switch, not one frame lat
 
   const view = render(<Harness path="notes/a.md" reopenKey={1} />);
   bridge.bind();
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   // The shell switches the active version under an open document. It keys the
   // inspector by tab (`DesktopWorkspaceShell.tsx`), so this is a prop change,
@@ -244,13 +238,9 @@ it("re-enters opening on the first render of a version switch, not one frame lat
 
   // And it stays that way until the new open answers.
   expect(screen.getByTestId("opening").textContent).toBe("true");
-  await waitFor(() =>
-    expect(bridge.api.openEngineYDocSession).toHaveBeenCalledTimes(2),
-  );
+  await waitFor(() => expect(bridge.api.openEngineYDocSession).toHaveBeenCalledTimes(2));
   bridge.bind();
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 });
 
 it("re-enters opening on the first render after the gate reopens", async () => {
@@ -259,9 +249,7 @@ it("re-enters opening on the first render after the gate reopens", async () => {
 
   const view = render(<Harness path="notes/a.md" />);
   bridge.bind();
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   // The caller closes the gate and opens it again on the same document — a
   // truncated read that reloads whole flips `enabled` this way. The request
@@ -281,16 +269,12 @@ it("re-enters opening when the document switches", async () => {
 
   const view = render(<Harness path="notes/a.md" />);
   bridge.bind();
-  await waitFor(() =>
-    expect(screen.getByTestId("available").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
 
   // The next document's open starts over: a bound predecessor must not lend
   // this one a writable surface before its own session answers.
   view.rerender(<Harness path="notes/b.md" />);
-  await waitFor(() =>
-    expect(screen.getByTestId("opening").textContent).toBe("true"),
-  );
+  await waitFor(() => expect(screen.getByTestId("opening").textContent).toBe("true"));
   expect(screen.getByTestId("available").textContent).toBe("false");
 });
 
@@ -298,17 +282,40 @@ it("reopens a newly created shared record on delivery notification without a man
   const f = deferredBridge();
   const listeners = new Set<(event: { workspaceId?: string; paths?: string[] }) => void>();
   const doc = new Y.Doc();
-  const api = { ...f.api, onWorkspaceActivity: (listener: (event: { workspaceId?: string; paths?: string[] }) => void) => {
-    listeners.add(listener); return () => listeners.delete(listener);
-  }, openEngineYDocSession: vi.fn()
-    .mockResolvedValueOnce({ available: false, sharedWaiting: { state: "pending", message: "Record saved on this device. Waiting to send." } })
-    .mockResolvedValue({ available: true, initialUpdate: Y.encodeStateAsUpdate(doc), lineageGeneration: 1 }) };
+  const api = {
+    ...f.api,
+    onWorkspaceActivity: (
+      listener: (event: { workspaceId?: string; paths?: string[] }) => void,
+    ) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    openEngineYDocSession: vi
+      .fn()
+      .mockResolvedValueOnce({
+        available: false,
+        sharedWaiting: {
+          state: "pending",
+          message: "Record saved on this device. Waiting to send.",
+        },
+      })
+      .mockResolvedValue({
+        available: true,
+        initialUpdate: Y.encodeStateAsUpdate(doc),
+        lineageGeneration: 1,
+      }),
+  };
   vi.stubGlobal("dohcDesktop", api);
   render(<Harness path="tasks/Untitled.md" />);
   await waitFor(() => expect(screen.getByTestId("live-host-unavailable").textContent).toBe("true"));
-  act(() => { for (const listener of listeners) listener({ workspaceId: "other" }); });
+  act(() => {
+    for (const listener of listeners) listener({ workspaceId: "other" });
+  });
   expect(api.openEngineYDocSession).toHaveBeenCalledTimes(1);
-  act(() => { for (const listener of listeners) listener({ workspaceId: "ws-1", paths: ["tasks/Untitled.md"] }); });
+  act(() => {
+    for (const listener of listeners)
+      listener({ workspaceId: "ws-1", paths: ["tasks/Untitled.md"] });
+  });
   await waitFor(() => expect(screen.getByTestId("available").textContent).toBe("true"));
   expect(api.openEngineYDocSession).toHaveBeenCalledTimes(2);
   doc.destroy();
@@ -317,10 +324,17 @@ it("reopens a newly created shared record on delivery notification without a man
 it("holds readiness only while the waiting editor is visible and ignores late answers after unmount", async () => {
   const f = deferredBridge();
   const pending: Array<(ready: boolean) => void> = [];
-  const waitForEngineYDocAdmission = vi.fn<(_input: {workspaceId: string; path: string; sessionId: string}) => Promise<boolean>>(
-    () => new Promise<boolean>(resolve => pending.push(resolve)));
-  const api = {...f.api, waitForEngineYDocAdmission,
-    openEngineYDocSession: vi.fn().mockResolvedValue({available: false, sharedWaiting: {state: "failed", message: "Waiting for editing."}})};
+  const waitForEngineYDocAdmission = vi.fn<
+    (_input: { workspaceId: string; path: string; sessionId: string }) => Promise<boolean>
+  >(() => new Promise<boolean>((resolve) => pending.push(resolve)));
+  const api = {
+    ...f.api,
+    waitForEngineYDocAdmission,
+    openEngineYDocSession: vi.fn().mockResolvedValue({
+      available: false,
+      sharedWaiting: { state: "failed", message: "Waiting for editing." },
+    }),
+  };
   const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
   vi.stubGlobal("dohcDesktop", api);
   const view = render(<Harness path="tasks/One.md" />);
@@ -329,7 +343,7 @@ it("holds readiness only while the waiting editor is visible and ignores late an
     visibility.mockReturnValue("hidden");
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     const firstId = waitForEngineYDocAdmission.mock.calls[0]![0].sessionId;
-    expect(api.closeEngineYDocSession).toHaveBeenCalledWith({sessionId: firstId});
+    expect(api.closeEngineYDocSession).toHaveBeenCalledWith({ sessionId: firstId });
     await act(async () => pending[0]!(true));
     expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
     expect(waitForEngineYDocAdmission).toHaveBeenCalledOnce();
@@ -339,5 +353,8 @@ it("holds readiness only while the waiting editor is visible and ignores late an
     view.unmount();
     await act(async () => pending[1]!(true));
     expect(api.openEngineYDocSession).toHaveBeenCalledOnce();
-  } finally { visibility.mockRestore(); view.unmount(); }
+  } finally {
+    visibility.mockRestore();
+    view.unmount();
+  }
 });

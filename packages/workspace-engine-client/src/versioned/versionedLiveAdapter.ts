@@ -1,6 +1,18 @@
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "../workspace/workspaceWireContract";
-import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksInResult, LinksResolveInput, LinksResolveResult } from "@dohc/workspace-contracts/links";
-import type { HistoryOperationsStore, HistoryOperation, HistoryUndoResult, HistoryLinkRewriteResult } from "@dohc/workspace-contracts/engine";
+import {
+  LinksEdgesInput,
+  LinksEdgesResult,
+  LinksInInput,
+  LinksInResult,
+  LinksResolveInput,
+  LinksResolveResult,
+} from "@dohc/workspace-contracts/links";
+import type {
+  HistoryOperationsStore,
+  HistoryOperation,
+  HistoryUndoResult,
+  HistoryLinkRewriteResult,
+} from "@dohc/workspace-contracts/engine";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
@@ -99,8 +111,20 @@ import {
 } from "./versionedWireContract";
 import { CONFLICT_ROW_HARD_CAP_BYTES } from "./engineTextLimits";
 
-import { decodeFileResolveResult, MAX_FILE_RESOLVE_TARGETS, MAX_FILE_RESOLVE_BYTES, type FileResolveTarget, type FileResolveResult } from "../daemon/fileResolution";
-import { decodeMadeWorkReference, decodeWorkReferenceResolution, type MadeWorkReference, type WorkReferenceResolution, type WorkTargetInput } from "../daemon/workReferences";
+import {
+  decodeFileResolveResult,
+  MAX_FILE_RESOLVE_TARGETS,
+  MAX_FILE_RESOLVE_BYTES,
+  type FileResolveTarget,
+  type FileResolveResult,
+} from "../daemon/fileResolution";
+import {
+  decodeMadeWorkReference,
+  decodeWorkReferenceResolution,
+  type MadeWorkReference,
+  type WorkReferenceResolution,
+  type WorkTargetInput,
+} from "../daemon/workReferences";
 
 export class VersionedAdapterCapabilityError extends Error {
   constructor(message: string) {
@@ -117,9 +141,7 @@ export interface AdapterWriteMetadata {
 
 export interface VersionedLiveAdapterOptions {
   workspaceId: string;
-  createId?: (
-    kind: "conflict" | "moment" | "object" | "version",
-  ) => string;
+  createId?: (kind: "conflict" | "moment" | "object" | "version") => string;
 }
 
 const CONFLICT_HYDRATION_CONCURRENCY = 8;
@@ -175,17 +197,14 @@ async function mapWithConcurrency<T, R>(
   const results = new Array<R>(values.length);
   let nextIndex = 0;
   await Promise.all(
-    Array.from(
-      { length: Math.min(concurrency, values.length) },
-      async () => {
-        for (;;) {
-          const index = nextIndex;
-          nextIndex += 1;
-          if (index >= values.length) return;
-          results[index] = await operation(values[index]!);
-        }
-      },
-    ),
+    Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+      for (;;) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= values.length) return;
+        results[index] = await operation(values[index]!);
+      }
+    }),
   );
   return results;
 }
@@ -194,23 +213,40 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   readonly workspace: WorkspaceHandle;
   readonly workspaceId: string;
   private readonly requester: WorkspaceDaemonRequester;
-  private readonly createId: NonNullable<
-    VersionedLiveAdapterOptions["createId"]
-  >;
+  private readonly createId: NonNullable<VersionedLiveAdapterOptions["createId"]>;
 
   /** Read only the recorded writes, never unrelated workspace drafts. */
-  async sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]> {
+  async sharedFileUpdateStates(
+    writes: readonly SharedFileUpdate[],
+  ): Promise<SharedFileUpdateState[]> {
     const states: SharedFileUpdateState[] = [];
     for (let offset = 0; offset < writes.length; offset += 64) {
-      const raw = await this.requester.request("ydoc.ownerDelivery.listDrafts", {
-        after: null, limit: 64, writes: writes.slice(offset, offset + 64) as unknown as JsonValue,
-      }, { workspace: this.workspace });
-      if (raw === null || typeof raw !== "object" || Array.isArray(raw) || !Array.isArray(raw.states) ||
-          raw.states.length !== Math.min(64, writes.length - offset) ||
-          raw.states.some(state => state !== "pending" && state !== "settled" && state !== "not-accepted" && state !== "absent")) {
+      const raw = await this.requester.request(
+        "ydoc.ownerDelivery.listDrafts",
+        {
+          after: null,
+          limit: 64,
+          writes: writes.slice(offset, offset + 64) as unknown as JsonValue,
+        },
+        { workspace: this.workspace },
+      );
+      if (
+        raw === null ||
+        typeof raw !== "object" ||
+        Array.isArray(raw) ||
+        !Array.isArray(raw.states) ||
+        raw.states.length !== Math.min(64, writes.length - offset) ||
+        raw.states.some(
+          (state) =>
+            state !== "pending" &&
+            state !== "settled" &&
+            state !== "not-accepted" &&
+            state !== "absent",
+        )
+      ) {
         throw new DaemonProtocolError("Invalid owner write status.");
       }
-      states.push(...raw.states as SharedFileUpdateState[]);
+      states.push(...(raw.states as SharedFileUpdateState[]));
     }
     return states;
   }
@@ -228,8 +264,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     this.requester = new WorkspaceDaemonRequester(client);
     this.workspace = workspace;
     this.workspaceId = options.workspaceId;
-    this.createId =
-      options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
+    this.createId = options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
   }
 
   static async openWorkspace(
@@ -240,11 +275,10 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     const requester = new WorkspaceDaemonRequester(client);
     const raw = await requester.request(WORKSPACE_METHOD.open, input);
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
-    const adapter = new VersionedLiveAdapter(
-      client,
-      opened.workspace,
-      { ...options, workspaceId: input.workspaceId },
-    );
+    const adapter = new VersionedLiveAdapter(client, opened.workspace, {
+      ...options,
+      workspaceId: input.workspaceId,
+    });
     return adapter;
   }
 
@@ -276,11 +310,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       method === WORKSPACE_METHOD.collectionsGet ||
       method === WORKSPACE_METHOD.collectionsGetRecord
     ) {
-      return this.collectionRequest(
-        method,
-        params as unknown as JsonValue,
-        options,
-      ) as Promise<WorkspaceMethodResultMap[M]>;
+      return this.collectionRequest(method, params as unknown as JsonValue, options) as Promise<
+        WorkspaceMethodResultMap[M]
+      >;
     }
     const raw = await this.requester.request(method, params as JsonValue, {
       workspace: this.workspace,
@@ -299,16 +331,12 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     params: JsonValue,
     options?: { idempotencyKey?: string; deadlineMs?: number },
   ): Promise<WorkspaceMethodResultMap[M]> {
-    let delivery: Awaited<
-      ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
-    >;
+    let delivery: Awaited<ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>>;
     try {
-      delivery = await this.requester.requestWithBlob(
-        method,
-        params,
-        collectionResultExpectsBlob,
-        { workspace: this.workspace, ...options },
-      );
+      delivery = await this.requester.requestWithBlob(method, params, collectionResultExpectsBlob, {
+        workspace: this.workspace,
+        ...options,
+      });
     } catch (error) {
       if (error instanceof DaemonClientCapabilityError) {
         throw new VersionedAdapterCapabilityError(error.message);
@@ -341,40 +369,30 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         ignoreBOM: true,
       }).decode(delivery.blob.bytes);
     } catch {
-      throw new DaemonProtocolError(
-        "The blob-backed collection result is not valid UTF-8.",
-      );
+      throw new DaemonProtocolError("The blob-backed collection result is not valid UTF-8.");
     }
     let result: JsonValue;
     try {
       result = JSON.parse(text) as JsonValue;
     } catch {
-      throw new DaemonProtocolError(
-        "The blob-backed collection result is not valid JSON.",
-      );
+      throw new DaemonProtocolError("The blob-backed collection result is not valid JSON.");
     }
     return decodeWorkspaceResult(method, result);
   }
 
-  async ensureMainVersion(input: {
-    workspaceId: string;
-  }): Promise<VersionRecord> {
+  async ensureMainVersion(input: { workspaceId: string }): Promise<VersionRecord> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.versionsEnsureMain, {
       workspaceId: input.workspaceId,
     });
   }
 
-  async getMainVersion(input: {
-    workspaceId: string;
-  }): Promise<VersionRecord | null> {
+  async getMainVersion(input: { workspaceId: string }): Promise<VersionRecord | null> {
     const versions = await this.listVersions(input);
     return versions.find((version) => version.kind === "main") ?? null;
   }
 
-  async getActiveVersion(input: {
-    workspaceId: string;
-  }): Promise<VersionRecord | null> {
+  async getActiveVersion(input: { workspaceId: string }): Promise<VersionRecord | null> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.versionsActive, {
       workspaceId: input.workspaceId,
@@ -400,9 +418,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
-  async listVersions(input: {
-    workspaceId: string;
-  }): Promise<VersionRecord[]> {
+  async listVersions(input: { workspaceId: string }): Promise<VersionRecord[]> {
     this.assertWorkspace(input.workspaceId);
     const records: VersionRecord[] = [];
     let afterVersionId: string | undefined;
@@ -421,9 +437,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
             ? {
                 forkPoint: {
                   versionId: row.forkVersionId,
-                  ...(row.forkMomentId !== null
-                    ? { momentId: row.forkMomentId }
-                    : {}),
+                  ...(row.forkMomentId !== null ? { momentId: row.forkMomentId } : {}),
                 },
               }
             : {}),
@@ -457,11 +471,11 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       ...(input.publish !== undefined ? { publish: input.publish } : {}),
       ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
       ...(input.createOnly !== undefined ? { createOnly: input.createOnly } : {}),
-      ...(input.restoreBeforeMomentId !== undefined ? { restoreBeforeMomentId: input.restoreBeforeMomentId } : {}),
-      origin: input.metadata.origin,
-      ...(input.metadata.summary !== undefined
-        ? { summary: input.metadata.summary }
+      ...(input.restoreBeforeMomentId !== undefined
+        ? { restoreBeforeMomentId: input.restoreBeforeMomentId }
         : {}),
+      origin: input.metadata.origin,
+      ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
       ...(input.metadata.correlationId !== undefined
         ? { correlationId: input.metadata.correlationId }
         : {}),
@@ -470,14 +484,22 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     };
     if (Buffer.byteLength(input.text, "utf8") > MAX_DESKTOP_CAPTURE_TEXT_BYTES) {
       const bytes = Buffer.from(input.text, "utf8");
-      const result = await this.request(VERSIONED_METHOD.textWriteBlob, {
-        ...params,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-        bytesBase64: bytes.toString("base64"),
-      }, { idempotencyKey: requestId });
+      const result = await this.request(
+        VERSIONED_METHOD.textWriteBlob,
+        {
+          ...params,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytesBase64: bytes.toString("base64"),
+        },
+        { idempotencyKey: requestId },
+      );
       return { ...result, snapshot: { ...result.snapshot, text: input.text } };
     }
-    return this.request(VERSIONED_METHOD.textWrite, { ...params, text: input.text }, { idempotencyKey: requestId });
+    return this.request(
+      VERSIONED_METHOD.textWrite,
+      { ...params, text: input.text },
+      { idempotencyKey: requestId },
+    );
   }
 
   async writeBinaryFile(input: {
@@ -509,9 +531,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
             ? {}
             : { bytesBase64: Buffer.from(input.bytes).toString("base64") }),
           origin: input.metadata.origin,
-          ...(input.metadata.summary !== undefined
-            ? { summary: input.metadata.summary }
-            : {}),
+          ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
           ...(input.metadata.correlationId !== undefined
             ? { correlationId: input.metadata.correlationId }
             : {}),
@@ -531,9 +551,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
         bytes: Array.from(input.bytes),
         origin: input.metadata.origin,
-        ...(input.metadata.summary !== undefined
-          ? { summary: input.metadata.summary }
-          : {}),
+        ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
@@ -581,21 +599,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
-  async readBinaryBlob(input: {
-    workspaceId: string;
-    sha256: string;
-  }): Promise<Uint8Array | null> {
+  async readBinaryBlob(input: { workspaceId: string; sha256: string }): Promise<Uint8Array | null> {
     this.assertWorkspace(input.workspaceId);
-    let delivery: Awaited<
-      ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
-    >;
+    let delivery: Awaited<ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>>;
     try {
       delivery = await this.requester.requestWithBlob(
         VERSIONED_METHOD.binaryReadBlob,
         input,
-        (raw) =>
-          decodeVersionedResult(VERSIONED_METHOD.binaryReadBlob, raw)
-            .bytesBase64 === null,
+        (raw) => decodeVersionedResult(VERSIONED_METHOD.binaryReadBlob, raw).bytesBase64 === null,
         { workspace: this.workspace },
       );
     } catch (error) {
@@ -611,10 +622,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       }
       throw error;
     }
-    const result = decodeVersionedResult(
-      VERSIONED_METHOD.binaryReadBlob,
-      delivery.result,
-    );
+    const result = decodeVersionedResult(VERSIONED_METHOD.binaryReadBlob, delivery.result);
     if (result.bytesBase64 !== null) {
       return this.decodeBase64(result.bytesBase64);
     }
@@ -629,10 +637,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         "The completed blob digest does not match the requested binary digest.",
       );
     }
-    if (
-      result.byteLength !== undefined &&
-      delivery.blob.bytes.byteLength !== result.byteLength
-    ) {
+    if (result.byteLength !== undefined && delivery.blob.bytes.byteLength !== result.byteLength) {
       throw new DaemonProtocolError(
         "The completed blob length does not match the binary metadata.",
       );
@@ -646,21 +651,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * default decoder strips a leading U+FEFF, and a stripped body no longer
    * matches the `sha256`/`byteLength` the daemon recorded for it.
    */
-  async readTextBlob(input: {
-    workspaceId: string;
-    sha256: string;
-  }): Promise<string | null> {
+  async readTextBlob(input: { workspaceId: string; sha256: string }): Promise<string | null> {
     this.assertWorkspace(input.workspaceId);
-    let delivery: Awaited<
-      ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>
-    >;
+    let delivery: Awaited<ReturnType<WorkspaceDaemonRequester["requestWithBlob"]>>;
     try {
       delivery = await this.requester.requestWithBlob(
         VERSIONED_METHOD.textReadBlob,
         input,
-        (raw) =>
-          decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw)
-            .bytesBase64 === null,
+        (raw) => decodeVersionedResult(VERSIONED_METHOD.textReadBlob, raw).bytesBase64 === null,
         { workspace: this.workspace },
       );
     } catch (error) {
@@ -676,10 +674,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       }
       throw error;
     }
-    const result = decodeVersionedResult(
-      VERSIONED_METHOD.textReadBlob,
-      delivery.result,
-    );
+    const result = decodeVersionedResult(VERSIONED_METHOD.textReadBlob, delivery.result);
     if (result.bytesBase64 !== null) {
       return this.decodeUtf8(this.decodeBase64(result.bytesBase64));
     }
@@ -695,9 +690,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       );
     }
     if (delivery.blob.bytes.byteLength !== result.byteLength) {
-      throw new DaemonProtocolError(
-        "The completed blob length does not match the text metadata.",
-      );
+      throw new DaemonProtocolError("The completed blob length does not match the text metadata.");
     }
     return this.decodeUtf8(new Uint8Array(delivery.blob.bytes));
   }
@@ -725,9 +718,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         sha256: result.blobSha256,
       });
       if (text === null) {
-        throw new DaemonProtocolError(
-          "The daemon could not hydrate the referenced text blob.",
-        );
+        throw new DaemonProtocolError("The daemon could not hydrate the referenced text blob.");
       }
       const { inbandLimitBytes: _inbandLimitBytes, ...metadata } = result;
       return { ...metadata, text };
@@ -788,9 +779,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         sourceVersionId: input.sourceVersionId,
         path: input.path,
         origin: input.metadata.origin,
-        ...(input.metadata.summary !== undefined
-          ? { summary: input.metadata.summary }
-          : {}),
+        ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
@@ -819,14 +808,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     this.assertWorkspace(input.workspaceId);
     const params: ConflictListParams = {
       ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.afterConflictId !== undefined
-        ? { afterConflictId: input.afterConflictId }
-        : {}),
+      ...(input.afterConflictId !== undefined ? { afterConflictId: input.afterConflictId } : {}),
     };
-    const page = await this.workspaceRequest(
-      WORKSPACE_METHOD.conflictsList,
-      params,
-    );
+    const page = await this.workspaceRequest(WORKSPACE_METHOD.conflictsList, params);
     if (input.bodies === "withheld") {
       return {
         conflicts: page.conflicts,
@@ -842,10 +826,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     let retained = 0;
     for (const conflict of page.conflicts) {
       const cost = hydratedConflictByteCost(conflict);
-      if (
-        affordable.length > 0 &&
-        retained + cost > HYDRATED_CONFLICT_PAGE_BYTE_BUDGET
-      ) {
+      if (affordable.length > 0 && retained + cost > HYDRATED_CONFLICT_PAGE_BYTE_BUDGET) {
         break;
       }
       affordable.push(conflict);
@@ -862,18 +843,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       async (conflict) => {
         // Sides in sequence, so the concurrency bound counts blob reads —
         // three parallel sides per row would triple it.
-        const base = await this.hydrateConflictSide(
-          input.workspaceId,
-          conflict.base,
-        );
-        const current = await this.hydrateConflictSide(
-          input.workspaceId,
-          conflict.current,
-        );
-        const incoming = await this.hydrateConflictSide(
-          input.workspaceId,
-          conflict.incoming,
-        );
+        const base = await this.hydrateConflictSide(input.workspaceId, conflict.base);
+        const current = await this.hydrateConflictSide(input.workspaceId, conflict.current);
+        const incoming = await this.hydrateConflictSide(input.workspaceId, conflict.incoming);
         return base === conflict.base &&
           current === conflict.current &&
           incoming === conflict.incoming
@@ -911,9 +883,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return { ...state, snapshot: { ...metadata, text } };
   }
 
-  async openTextConflict(
-    input: ConflictOpenParams,
-  ): Promise<ConflictOpenResult> {
+  async openTextConflict(input: ConflictOpenParams): Promise<ConflictOpenResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.conflictsOpen, input);
   }
 
@@ -927,16 +897,28 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   async linkEdges(input: LinksEdgesInput): Promise<LinksEdgesResult> {
-    return LinksEdgesResult.parse(await this.requester.request("links.edges", LinksEdgesInput.parse(input), { workspace: this.workspace }));
+    return LinksEdgesResult.parse(
+      await this.requester.request("links.edges", LinksEdgesInput.parse(input), {
+        workspace: this.workspace,
+      }),
+    );
   }
   async incomingLinks(input: LinksInInput): Promise<LinksInResult> {
-    return LinksInResult.parse(await this.requester.request("links.in", LinksInInput.parse(input), { workspace: this.workspace }));
+    return LinksInResult.parse(
+      await this.requester.request("links.in", LinksInInput.parse(input), {
+        workspace: this.workspace,
+      }),
+    );
   }
   async resolveLinks(input: LinksResolveInput): Promise<LinksResolveResult> {
     const params = LinksResolveInput.parse(input);
-    if (Buffer.byteLength(JSON.stringify(params)) > 48 * 1024) throw new Error("links.resolve exceeds 48 KiB.");
-    const result = LinksResolveResult.parse(await this.requester.request("links.resolve", params, { workspace: this.workspace }));
-    if (result.results.length !== params.literals.length) throw new DaemonProtocolError("links.resolve returned a different literal count.");
+    if (Buffer.byteLength(JSON.stringify(params)) > 48 * 1024)
+      throw new Error("links.resolve exceeds 48 KiB.");
+    const result = LinksResolveResult.parse(
+      await this.requester.request("links.resolve", params, { workspace: this.workspace }),
+    );
+    if (result.results.length !== params.literals.length)
+      throw new DaemonProtocolError("links.resolve returned a different literal count.");
     return result;
   }
 
@@ -949,32 +931,63 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }): Promise<FileResolveResult> {
     this.assertWorkspace(input.workspaceId);
     input.signal?.throwIfAborted();
-    const params = { ...(input.versionId !== undefined ? { versionId: input.versionId } : {}), targets: [...input.targets] };
-    if (params.targets.length > MAX_FILE_RESOLVE_TARGETS || Buffer.byteLength(JSON.stringify(params)) > MAX_FILE_RESOLVE_BYTES) {
+    const params = {
+      ...(input.versionId !== undefined ? { versionId: input.versionId } : {}),
+      targets: [...input.targets],
+    };
+    if (
+      params.targets.length > MAX_FILE_RESOLVE_TARGETS ||
+      Buffer.byteLength(JSON.stringify(params)) > MAX_FILE_RESOLVE_BYTES
+    ) {
       throw new Error("files.resolve exceeds its target or byte cap.");
     }
-    const result = decodeFileResolveResult(await this.requester.request("files.resolve", params, { workspace: this.workspace }));
+    const result = decodeFileResolveResult(
+      await this.requester.request("files.resolve", params, { workspace: this.workspace }),
+    );
     input.signal?.throwIfAborted();
-    if (result.results.length !== input.targets.length || (input.versionId !== undefined && result.versionId !== input.versionId)) {
+    if (
+      result.results.length !== input.targets.length ||
+      (input.versionId !== undefined && result.versionId !== input.versionId)
+    ) {
       throw new DaemonProtocolError("files.resolve returned a different version or target count.");
     }
     return result;
   }
 
   /** Return this device's reference for a target, making one when it has none. */
-  async makeWorkReference(input: { workspaceId: string; target: WorkTargetInput; signal?: AbortSignal }): Promise<MadeWorkReference> {
+  async makeWorkReference(input: {
+    workspaceId: string;
+    target: WorkTargetInput;
+    signal?: AbortSignal;
+  }): Promise<MadeWorkReference> {
     this.assertWorkspace(input.workspaceId);
     input.signal?.throwIfAborted();
-    const result = decodeMadeWorkReference(await this.requester.request("workReferences.make", { target: input.target }, { workspace: this.workspace }));
+    const result = decodeMadeWorkReference(
+      await this.requester.request(
+        "workReferences.make",
+        { target: input.target },
+        { workspace: this.workspace },
+      ),
+    );
     input.signal?.throwIfAborted();
     return result;
   }
 
   /** Resolve a reference to the work it names here. A rename or move does not change the answer. */
-  async resolveWorkReference(input: { workspaceId: string; reference: string; signal?: AbortSignal }): Promise<WorkReferenceResolution> {
+  async resolveWorkReference(input: {
+    workspaceId: string;
+    reference: string;
+    signal?: AbortSignal;
+  }): Promise<WorkReferenceResolution> {
     this.assertWorkspace(input.workspaceId);
     input.signal?.throwIfAborted();
-    const result = decodeWorkReferenceResolution(await this.requester.request("workReferences.resolve", { reference: input.reference }, { workspace: this.workspace }));
+    const result = decodeWorkReferenceResolution(
+      await this.requester.request(
+        "workReferences.resolve",
+        { reference: input.reference },
+        { workspace: this.workspace },
+      ),
+    );
     input.signal?.throwIfAborted();
     if (result.status === "found" && result.reference !== input.reference) {
       throw new DaemonProtocolError("workReferences.resolve returned a different reference.");
@@ -1004,7 +1017,8 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       });
       const inside = page.files.filter((file) => file.path.startsWith(prefix));
       files.push(...inside);
-      afterPath = inside.length === page.files.length ? page.nextAfterPath ?? undefined : undefined;
+      afterPath =
+        inside.length === page.files.length ? (page.nextAfterPath ?? undefined) : undefined;
     } while (afterPath !== undefined);
     return files;
   }
@@ -1040,62 +1054,124 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     const { workspaceId, versionId, signal } = input;
     const paths = [...input.paths];
     const bounds = { ...input.bounds };
-    if (!Number.isSafeInteger(bounds.maxInputFiles) || bounds.maxInputFiles < 1 || bounds.maxInputFiles > 512 ||
-        !Number.isSafeInteger(bounds.maxInputBytes) || bounds.maxInputBytes < 1 || bounds.maxInputBytes > 128 * 1024 * 1024 ||
-        paths.length === 0 || paths.length > bounds.maxInputFiles || new Set(paths).size !== paths.length) {
+    if (
+      !Number.isSafeInteger(bounds.maxInputFiles) ||
+      bounds.maxInputFiles < 1 ||
+      bounds.maxInputFiles > 512 ||
+      !Number.isSafeInteger(bounds.maxInputBytes) ||
+      bounds.maxInputBytes < 1 ||
+      bounds.maxInputBytes > 128 * 1024 * 1024 ||
+      paths.length === 0 ||
+      paths.length > bounds.maxInputFiles ||
+      new Set(paths).size !== paths.length
+    ) {
       throw new Error("Invalid source capture bounds or paths.");
     }
-    const capture = await this.request(VERSIONED_METHOD.textCaptureSources, { versionId, paths, bounds });
+    const capture = await this.request(VERSIONED_METHOD.textCaptureSources, {
+      versionId,
+      paths,
+      bounds,
+    });
     signal.throwIfAborted();
     this.assertWorkspace(workspaceId);
     const expectedPaths = new Set(paths);
     let totalBytes = 0;
     for (const file of capture.files) {
-      if (!expectedPaths.delete(file.path) || !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 ||
-          !/^[a-f0-9]{64}$/.test(file.sha256) || !file.objectId || !file.latestMomentId) {
+      if (
+        !expectedPaths.delete(file.path) ||
+        !Number.isSafeInteger(file.byteLength) ||
+        file.byteLength < 0 ||
+        !/^[a-f0-9]{64}$/.test(file.sha256) ||
+        !file.objectId ||
+        !file.latestMomentId
+      ) {
         throw new DaemonProtocolError("Invalid captured source identity.");
       }
       totalBytes += file.byteLength;
     }
-    if (capture.workspaceId !== workspaceId || capture.versionId !== versionId || expectedPaths.size !== 0 ||
-        totalBytes !== capture.totalBytes || totalBytes > bounds.maxInputBytes || !/^[a-f0-9]{64}$/.test(capture.sourceDigest)) {
-      throw new DaemonProtocolError("Captured sources do not match the selected workspace, paths, or bounds.");
+    if (
+      capture.workspaceId !== workspaceId ||
+      capture.versionId !== versionId ||
+      expectedPaths.size !== 0 ||
+      totalBytes !== capture.totalBytes ||
+      totalBytes > bounds.maxInputBytes ||
+      !/^[a-f0-9]{64}$/.test(capture.sourceDigest)
+    ) {
+      throw new DaemonProtocolError(
+        "Captured sources do not match the selected workspace, paths, or bounds.",
+      );
     }
-    const digest = createHash("sha256").update(JSON.stringify([
-      "dohc-source-capture-v1", workspaceId, versionId,
-      capture.files.map(({ path, objectId, contentKind, sha256, byteLength, latestMomentId }) =>
-        ({ path, objectId, contentKind, sha256, byteLength, latestMomentId })),
-    ])).digest("hex");
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify([
+          "dohc-source-capture-v1",
+          workspaceId,
+          versionId,
+          capture.files.map(
+            ({ path, objectId, contentKind, sha256, byteLength, latestMomentId }) => ({
+              path,
+              objectId,
+              contentKind,
+              sha256,
+              byteLength,
+              latestMomentId,
+            }),
+          ),
+        ]),
+      )
+      .digest("hex");
     if (digest !== capture.sourceDigest) {
       throw new DaemonProtocolError("Captured source digest does not match its metadata.");
     }
     return capture;
   }
 
-  async hydrateCapturedSources(capture: SourceCapture, signal: AbortSignal): Promise<{
-    path: string; bytes: Uint8Array; sha256: string;
-  }[]> {
+  async hydrateCapturedSources(
+    capture: SourceCapture,
+    signal: AbortSignal,
+  ): Promise<
+    {
+      path: string;
+      bytes: Uint8Array;
+      sha256: string;
+    }[]
+  > {
     // Snapshot caller-owned metadata before the first asynchronous read.
     const workspaceId = capture.workspaceId;
     const files = capture.files.map((file) => ({ ...file }));
     this.assertWorkspace(workspaceId);
     signal.throwIfAborted();
-    if (files.length === 0 || files.length > 512 || files.some((file) =>
-      !Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || !/^[a-f0-9]{64}$/.test(file.sha256)) ||
-      files.reduce((total, file) => total + file.byteLength, 0) > 128 * 1024 * 1024) {
+    if (
+      files.length === 0 ||
+      files.length > 512 ||
+      files.some(
+        (file) =>
+          !Number.isSafeInteger(file.byteLength) ||
+          file.byteLength < 0 ||
+          !/^[a-f0-9]{64}$/.test(file.sha256),
+      ) ||
+      files.reduce((total, file) => total + file.byteLength, 0) > 128 * 1024 * 1024
+    ) {
       throw new DaemonProtocolError("Invalid captured source hydration bounds.");
     }
     const inputs: { path: string; bytes: Uint8Array; sha256: string }[] = [];
     for (const file of files) {
       signal.throwIfAborted();
-      const blob = file.contentKind === "text"
-        ? await this.readTextBlob({ workspaceId, sha256: file.sha256 })
-        : await this.readBinaryBlob({ workspaceId, sha256: file.sha256 });
+      const blob =
+        file.contentKind === "text"
+          ? await this.readTextBlob({ workspaceId, sha256: file.sha256 })
+          : await this.readBinaryBlob({ workspaceId, sha256: file.sha256 });
       signal.throwIfAborted();
       this.assertWorkspace(workspaceId);
       const bytes = typeof blob === "string" ? new TextEncoder().encode(blob) : blob;
-      if (bytes === null || bytes.byteLength !== file.byteLength || createHash("sha256").update(bytes).digest("hex") !== file.sha256) {
-        throw new DaemonProtocolError("Captured source blob is missing or does not match its recorded bytes.");
+      if (
+        bytes === null ||
+        bytes.byteLength !== file.byteLength ||
+        createHash("sha256").update(bytes).digest("hex") !== file.sha256
+      ) {
+        throw new DaemonProtocolError(
+          "Captured source blob is missing or does not match its recorded bytes.",
+        );
       }
       inputs.push({ path: file.path, sha256: file.sha256, bytes });
     }
@@ -1103,7 +1179,13 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   /** `change`: the move or delete that takes the path away, so a page this computer owns at or under it refuses too. A duplicate leaves it out. */
-  async checkMove(input: { workspaceId: string; versionId: string; path: string; author?: WriteAuthor; change?: "movePage" | "moveFolder" | "delete" }): Promise<void> {
+  async checkMove(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+    author?: WriteAuthor;
+    change?: "movePage" | "moveFolder" | "delete";
+  }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.textCheckMove, {
       versionId: input.versionId,
@@ -1131,9 +1213,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         fromPath: input.fromPath,
         toPath: input.toPath,
         origin: input.metadata.origin,
-        ...(input.metadata.summary !== undefined
-          ? { summary: input.metadata.summary }
-          : {}),
+        ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
@@ -1169,13 +1249,13 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         workspaceId: input.workspaceId,
         versionId: input.versionId,
         path: input.path,
-        ...(input.expectedObjectId !== undefined ? { expectedObjectId: input.expectedObjectId } : {}),
+        ...(input.expectedObjectId !== undefined
+          ? { expectedObjectId: input.expectedObjectId }
+          : {}),
         ...(input.expectedSha256 !== undefined ? { expectedSha256: input.expectedSha256 } : {}),
         ...(input.onlyIfAbsentOnDisk ? { onlyIfAbsentOnDisk: true } : {}),
         origin: input.metadata.origin,
-        ...(input.metadata.summary !== undefined
-          ? { summary: input.metadata.summary }
-          : {}),
+        ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
         ...(input.metadata.correlationId !== undefined
           ? { correlationId: input.metadata.correlationId }
           : {}),
@@ -1220,30 +1300,51 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
-  async readHistoryPage(input: VersionedMethodParamsMap["history.page"]): Promise<VersionedMethodResultMap["history.page"]> {
+  async readHistoryPage(
+    input: VersionedMethodParamsMap["history.page"],
+  ): Promise<VersionedMethodResultMap["history.page"]> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.historyPage, input);
   }
 
-  async readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation> {
-    this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyOperations, {operationId: input.operationId});
-  }
-
-  async undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor}): Promise<HistoryUndoResult> {
-    this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyUndo, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId});
-  }
-
-  async rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: WriteAuthor; cancelSignal?: AbortSignal}): Promise<HistoryLinkRewriteResult> {
-    this.assertWorkspace(input.workspaceId);
-    return this.request(VERSIONED_METHOD.historyRewriteLinks, {operationId: input.operationId, ...(input.author ? {author: input.author} : {})}, {idempotencyKey: input.requestId, cancelSignal: input.cancelSignal});
-  }
-
-  async getMoment(input: {
+  async readHistoryOperation(input: {
     workspaceId: string;
-    momentId: string;
-  }): Promise<MomentRecord | null> {
+    operationId: string;
+  }): Promise<HistoryOperation> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(VERSIONED_METHOD.historyOperations, { operationId: input.operationId });
+  }
+
+  async undoHistoryOperation(input: {
+    workspaceId: string;
+    operationId: string;
+    requestId: string;
+    author?: WriteAuthor;
+  }): Promise<HistoryUndoResult> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(
+      VERSIONED_METHOD.historyUndo,
+      { operationId: input.operationId, ...(input.author ? { author: input.author } : {}) },
+      { idempotencyKey: input.requestId },
+    );
+  }
+
+  async rewriteHistoryLinks(input: {
+    workspaceId: string;
+    operationId: string;
+    requestId: string;
+    author?: WriteAuthor;
+    cancelSignal?: AbortSignal;
+  }): Promise<HistoryLinkRewriteResult> {
+    this.assertWorkspace(input.workspaceId);
+    return this.request(
+      VERSIONED_METHOD.historyRewriteLinks,
+      { operationId: input.operationId, ...(input.author ? { author: input.author } : {}) },
+      { idempotencyKey: input.requestId, cancelSignal: input.cancelSignal },
+    );
+  }
+
+  async getMoment(input: { workspaceId: string; momentId: string }): Promise<MomentRecord | null> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.momentsGet, {
       momentId: input.momentId,
@@ -1262,10 +1363,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     });
   }
 
-  async ensureSearchIndex(input: {
-    workspaceId: string;
-    versionId: string;
-  }): Promise<void> {
+  async ensureSearchIndex(input: { workspaceId: string; versionId: string }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.searchEnsureIndex, input);
   }
@@ -1291,25 +1389,18 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async listPendingCollectionAdoptions(
     input: CollectionPendingAdoptionsParams = {},
   ): Promise<CollectionPendingAdoptionsPage> {
-    return this.workspaceRequest(
-      WORKSPACE_METHOD.collectionsListPendingAdoptions,
-      input,
-    );
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsListPendingAdoptions, input);
   }
 
   async getCollection(input: CollectionGetParams): Promise<CollectionGetResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsGet, input);
   }
 
-  async queryCollectionRecords(
-    input: CollectionQueryParams,
-  ): Promise<CollectionQueryResult> {
+  async queryCollectionRecords(input: CollectionQueryParams): Promise<CollectionQueryResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsQuery, input);
   }
 
-  async getCollectionRecord(
-    input: CollectionGetRecordParams,
-  ): Promise<CollectionGetRecordResult> {
+  async getCollectionRecord(input: CollectionGetRecordParams): Promise<CollectionGetRecordResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsGetRecord, input);
   }
 
@@ -1317,9 +1408,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * Registers one (automationId, collection path) pair with the change
    * kinds and fields it wants; a new filter replaces the pair's old one.
    */
-  async subscribeAutomation(
-    input: AutomationSubscribeParams,
-  ): Promise<AutomationSubscribeResult> {
+  async subscribeAutomation(input: AutomationSubscribeParams): Promise<AutomationSubscribeResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSubscribe, input);
   }
 
@@ -1327,10 +1416,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   async unsubscribeAutomation(
     input: AutomationUnsubscribeParams,
   ): Promise<AutomationUnsubscribeResult> {
-    return this.workspaceRequest(
-      WORKSPACE_METHOD.automationsUnsubscribe,
-      input,
-    );
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsUnsubscribe, input);
   }
 
   /**
@@ -1356,9 +1442,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * Takes the oldest pending claim in the executor's namespace (pending ->
    * running) with its field facts, or null.
    */
-  async claimNextAutomation(
-    input: AutomationClaimNextParams,
-  ): Promise<AutomationClaimNextResult> {
+  async claimNextAutomation(input: AutomationClaimNextParams): Promise<AutomationClaimNextResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsClaimNext, input);
   }
 
@@ -1368,9 +1452,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   /** Settles a running claim as done, or failed with its error text. */
-  async settleAutomationClaim(
-    input: AutomationSettleParams,
-  ): Promise<AutomationClaimSummary> {
+  async settleAutomationClaim(input: AutomationSettleParams): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSettle, input);
   }
 
@@ -1382,9 +1464,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * repeated retry announces nothing, so after this resolves the caller
    * wakes its executor's drain and re-reads `automations.failures` itself.
    */
-  async retryAutomationClaim(
-    input: AutomationRetryParams,
-  ): Promise<AutomationClaimSummary> {
+  async retryAutomationClaim(input: AutomationRetryParams): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsRetry, input);
   }
 
@@ -1395,9 +1475,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * announces nothing, so the executor drains again when what held the
    * claim clears.
    */
-  async releaseAutomationClaim(
-    input: AutomationReleaseParams,
-  ): Promise<AutomationClaimSummary> {
+  async releaseAutomationClaim(input: AutomationReleaseParams): Promise<AutomationClaimSummary> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsRelease, input);
   }
 
@@ -1442,9 +1520,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   /** One claim in run history, by its id or by its automation and trigger key. */
-  async getAutomationClaim(
-    input: AutomationGetClaimParams,
-  ): Promise<AutomationGetClaimResult> {
+  async getAutomationClaim(input: AutomationGetClaimParams): Promise<AutomationGetClaimResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsGetClaim, input);
   }
 
@@ -1474,10 +1550,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * later proves no one else's change arrived in between.
    */
   async remoteChangesApplied(): Promise<number> {
-    const result = await this.workspaceRequest(
-      WORKSPACE_METHOD.syncRemoteChanges,
-      {},
-    );
+    const result = await this.workspaceRequest(WORKSPACE_METHOD.syncRemoteChanges, {});
     return result.applied;
   }
 
@@ -1486,10 +1559,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
    * last page. The engine answers from the pull's durable token.
    */
   async collectionsWaiting(): Promise<boolean> {
-    const result = await this.workspaceRequest(
-      WORKSPACE_METHOD.syncCollectionsWaiting,
-      {},
-    );
+    const result = await this.workspaceRequest(WORKSPACE_METHOD.syncCollectionsWaiting, {});
     return result.waiting;
   }
 
@@ -1513,9 +1583,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       text: input.text,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
-      ...(input.metadata.summary !== undefined
-        ? { summary: input.metadata.summary }
-        : {}),
+      ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
       ...(input.metadata.correlationId !== undefined
         ? { correlationId: input.metadata.correlationId }
         : {}),
@@ -1539,19 +1607,14 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       path: input.path,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
-      ...(input.metadata.summary !== undefined
-        ? { summary: input.metadata.summary }
-        : {}),
+      ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
       ...(input.metadata.correlationId !== undefined
         ? { correlationId: input.metadata.correlationId }
         : {}),
     });
   }
 
-  async listSecretFiles(input: {
-    workspaceId: string;
-    versionId: string;
-  }): Promise<
+  async listSecretFiles(input: { workspaceId: string; versionId: string }): Promise<
     Array<{
       workspaceId: string;
       versionId: string;
@@ -1649,9 +1712,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       path: input.path,
       origin: input.metadata.origin,
       momentId: this.createId("moment"),
-      ...(input.metadata.summary !== undefined
-        ? { summary: input.metadata.summary }
-        : {}),
+      ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
       ...(input.metadata.correlationId !== undefined
         ? { correlationId: input.metadata.correlationId }
         : {}),
@@ -1673,9 +1734,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       momentId: input.momentId,
     });
     if (before === null) {
-      throw new VersionedAdapterCapabilityError(
-        `Secret moment ${input.momentId} was not found.`,
-      );
+      throw new VersionedAdapterCapabilityError(`Secret moment ${input.momentId} was not found.`);
     }
     return this.request(VERSIONED_METHOD.secretsRestore, {
       workspaceId: input.workspaceId,
@@ -1683,9 +1742,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
       beforeMomentId: input.momentId,
       momentId: this.createId("moment"),
       origin: input.metadata.origin,
-      ...(input.metadata.summary !== undefined
-        ? { summary: input.metadata.summary }
-        : {}),
+      ...(input.metadata.summary !== undefined ? { summary: input.metadata.summary } : {}),
       ...(input.metadata.correlationId !== undefined
         ? { correlationId: input.metadata.correlationId }
         : {}),
@@ -1784,7 +1841,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
 
   // Capture records nothing until the hold is released, its lease runs out
   // unrenewed, or the workspace closes.
-  async holdCapture(input: { operationId?: string } = {}): Promise<{ holdId: string; leaseMs: number }> {
+  async holdCapture(
+    input: { operationId?: string } = {},
+  ): Promise<{ holdId: string; leaseMs: number }> {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureHold, input);
   }
 
@@ -1797,17 +1856,30 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   // One rename that refuses to replace, of a visible regular file, under a hold.
-  async duplicateFileUnderHold(input: { holdId: string; fromPath: string; toPath: string; author?: WriteAuthor }): Promise<{path: string; materialized: boolean}> {
+  async duplicateFileUnderHold(input: {
+    holdId: string;
+    fromPath: string;
+    toPath: string;
+    author?: WriteAuthor;
+  }): Promise<{ path: string; materialized: boolean }> {
     return this.workspaceRequest(WORKSPACE_METHOD.captureDuplicateFile, input);
   }
 
-  async moveFileUnderHold(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult> {
+  async moveFileUnderHold(input: {
+    holdId: string;
+    fromPath: string;
+    toPath: string;
+  }): Promise<CaptureMoveFileResult> {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
   }
 
   // Writes the bytes over the file whole through the engine's temp file, and
   // saves nothing. Capture sees the change as any edit on disk.
-  async replaceFile(input: { path: string; temporary: string; data: string | Uint8Array }): Promise<void> {
+  async replaceFile(input: {
+    path: string;
+    temporary: string;
+    data: string | Uint8Array;
+  }): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.filesReplace, {
       path: input.path,
       temporary: input.temporary,
@@ -1850,13 +1922,9 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   private decodeBase64(value: string): Uint8Array {
     if (
       value.length % 4 !== 0 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-        value,
-      )
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
     ) {
-      throw new VersionedAdapterCapabilityError(
-        "The daemon returned invalid base64.",
-      );
+      throw new VersionedAdapterCapabilityError("The daemon returned invalid base64.");
     }
     return new Uint8Array(Buffer.from(value, "base64"));
   }

@@ -15,7 +15,20 @@
 // is placeholder bytes, and nothing installs or relaunches.
 
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -117,7 +130,11 @@ export function feedManifest(installer) {
 // Reads complete lines only: the app may still be writing the last one.
 export function readDrillLog(path) {
   if (!existsSync(path)) return [];
-  return readFileSync(path, "utf8").split("\n").slice(0, -1).filter(Boolean).map((line) => JSON.parse(line));
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .slice(0, -1)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 // Consent, from the app's own log: the person was asked, answered Download,
@@ -128,7 +145,11 @@ export function downloadedOnlyAfterAnswer(entries) {
   if (answered < 0) return false;
   const installer = (logged) => logged.kind === "request" && logged.path?.includes(INSTALLER);
   const before = entries.slice(0, answered);
-  return before.some((logged) => logged.kind === "question") && !before.some(installer) && entries.slice(answered).some(installer);
+  return (
+    before.some((logged) => logged.kind === "question") &&
+    !before.some(installer) &&
+    entries.slice(answered).some(installer)
+  );
 }
 
 // The scratch app links these to the real app. They are removed as links
@@ -147,29 +168,41 @@ export const DRILL_APPS_ROOT = join(repoRoot, ".dohc-dev");
  */
 export function buildDrillApp({ scenario, app, feedUrl, source = desktopRoot }) {
   if (resolve(app, "../..") !== resolve(source, "../..")) {
-    throw new Error(`The scratch app ${app} must share its grandparent with ${source}, or pnpm's relative links in node_modules resolve elsewhere.`);
+    throw new Error(
+      `The scratch app ${app} must share its grandparent with ${source}, or pnpm's relative links in node_modules resolve elsewhere.`,
+    );
   }
   const main = join(app, "dist", "main");
   const entry = join(source, "dist", "main", "main.js");
   const appModule = join(source, "dist", "main", "app.js");
   if (!existsSync(entry) || !existsSync(appModule)) {
-    throw new Error("The drill needs a desktop build with the entry module. Run `pnpm qa:prepare` first.");
+    throw new Error(
+      "The drill needs a desktop build with the entry module. Run `pnpm qa:prepare` first.",
+    );
   }
   const entrySource = readFileSync(entry, "utf8");
-  if (!/import\(\s*["']\.\/app\.js["']\s*\)/.test(entrySource) || /(?:from|import)\s*["']\.\/app\.js["']/.test(entrySource)) {
-    throw new Error("dist/main/main.js must load app.js only through a dynamic import, or the fault would reach the entry.");
+  if (
+    !/import\(\s*["']\.\/app\.js["']\s*\)/.test(entrySource) ||
+    /(?:from|import)\s*["']\.\/app\.js["']/.test(entrySource)
+  ) {
+    throw new Error(
+      "dist/main/main.js must load app.js only through a dynamic import, or the fault would reach the entry.",
+    );
   }
   cpSync(join(source, "dist"), join(app, "dist"), { recursive: true });
   copyFileSync(join(source, "package.json"), join(app, "package.json"));
   for (const name of LINKED) {
-    if (existsSync(join(source, name))) symlinkSync(join(source, name), join(app, name), "junction");
+    if (existsSync(join(source, name)))
+      symlinkSync(join(source, name), join(app, name), "junction");
   }
   writeFileSync(join(main, "drill-dialogs.mjs"), DIALOG_RECORDER);
   writeFileSync(join(main, "main.js"), `import "./drill-dialogs.mjs";\n${entrySource}`);
   writeFileSync(join(main, "app.js"), injectFault(scenario, readFileSync(appModule, "utf8")));
   // Unpackaged, electron-updater reads its cache name from this file.
-  writeFileSync(join(main, "dev-app-update.yml"),
-    `provider: generic\nurl: ${feedUrl}\nupdaterCacheDirName: dohc-release-drill-updater\n`);
+  writeFileSync(
+    join(main, "dev-app-update.yml"),
+    `provider: generic\nurl: ${feedUrl}\nupdaterCacheDirName: dohc-release-drill-updater\n`,
+  );
   return { app, entry: join(main, "main.js") };
 }
 
@@ -201,7 +234,9 @@ function startFeed(directory, logPath) {
   const requests = [];
   let published = false;
   const server = createServer((request, response) => {
-    const name = decodeURIComponent(new URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(1));
+    const name = decodeURIComponent(
+      new URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(1),
+    );
     const entry = { at: Date.now(), name, published };
     requests.push(entry);
     appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
@@ -212,15 +247,23 @@ function startFeed(directory, logPath) {
     }
     response.writeHead(200, { "content-type": "application/octet-stream" }).end(readFileSync(path));
   });
-  const close = () => new Promise((done) => {
-    server.closeAllConnections();
-    server.close(() => done());
-  });
+  const close = () =>
+    new Promise((done) => {
+      server.closeAllConnections();
+      server.close(() => done());
+    });
   return new Promise((resolveFeed, rejectFeed) => {
     server.once("error", rejectFeed);
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address();
-      resolveFeed({ url: `http://127.0.0.1:${port}/`, requests, publish: () => { published = true; }, close });
+      resolveFeed({
+        url: `http://127.0.0.1:${port}/`,
+        requests,
+        publish: () => {
+          published = true;
+        },
+        close,
+      });
     });
   });
 }
@@ -261,7 +304,8 @@ async function waitFor(check, deadlineMs, describe, signal) {
     if (signal.aborted) throw new Error(`Stopped waiting for ${describe}.`);
     const found = check();
     if (found) return found;
-    if (Date.now() > deadline) throw new Error(`Timed out after ${deadlineMs} ms waiting for ${describe}.`);
+    if (Date.now() > deadline)
+      throw new Error(`Timed out after ${deadlineMs} ms waiting for ${describe}.`);
     await sleep(250, signal);
   }
 }
@@ -274,7 +318,9 @@ async function waitFor(check, deadlineMs, describe, signal) {
  */
 export async function launchApp({ start, until, readLog, boundMs, describe, onEnded }) {
   let child = null;
-  const exited = start((spawned) => { child = spawned; });
+  const exited = start((spawned) => {
+    child = spawned;
+  });
   const polling = new AbortController();
   try {
     if (!until) {
@@ -283,7 +329,9 @@ export async function launchApp({ start, until, readLog, boundMs, describe, onEn
     }
     return await Promise.race([
       waitFor(() => until(readLog()), boundMs, describe, polling.signal),
-      exited.then((outcome) => { throw new Error(`The app ended before ${describe}: ${JSON.stringify(outcome)}`); }),
+      exited.then((outcome) => {
+        throw new Error(`The app ended before ${describe}: ${JSON.stringify(outcome)}`);
+      }),
     ]);
   } finally {
     polling.abort();
@@ -315,14 +363,28 @@ export async function runDrill({
   onFeed,
 }) {
   assert(SCENARIOS.includes(scenario), `Choose --scenario ${SCENARIOS.join(" or ")}.`);
-  assert(existsSync(engine), `The drill needs the staged engine at ${engine}. Run \`pnpm qa:prepare\` first.`);
+  assert(
+    existsSync(engine),
+    `The drill needs the staged engine at ${engine}. Run \`pnpm qa:prepare\` first.`,
+  );
   const electron = createRequire(join(desktopRoot, "package.json"))("electron");
 
   const evidence = mkdtempSync(join(tempRoot, "dohc-release-drill-evidence-"));
   const logPath = join(evidence, "dialogs.jsonl");
-  const result = { scenario, feedVersion: FEED_VERSION, evidence, launches: [], checks: [], passed: false };
+  const result = {
+    scenario,
+    feedVersion: FEED_VERSION,
+    evidence,
+    launches: [],
+    checks: [],
+    passed: false,
+  };
   const check = (name, condition, detail) => {
-    result.checks.push({ name, passed: Boolean(condition), ...(detail === undefined ? {} : { detail }) });
+    result.checks.push({
+      name,
+      passed: Boolean(condition),
+      ...(detail === undefined ? {} : { detail }),
+    });
     assert(condition, `${name} failed${detail === undefined ? "" : `: ${JSON.stringify(detail)}`}`);
   };
   let scratch = null;
@@ -332,13 +394,17 @@ export async function runDrill({
   const launch = (number, { entry, profile, until }) => {
     const started = Date.now();
     return launchApp({
-      start: (onSpawn) => run(electron, [`--user-data-dir=${profile}`, "--dohc-isolated-test", entry], {
-        env: launchEnv(scratch, logPath, feed.url),
-        log: join(evidence, `launch-${number}.log`),
-        onSpawn,
-        quietStdout: true,
-        timeoutMs: LAUNCH_BOUND_MS,
-      }).then((done) => ({ code: done.code }), (error) => ({ error: error.message })),
+      start: (onSpawn) =>
+        run(electron, [`--user-data-dir=${profile}`, "--dohc-isolated-test", entry], {
+          env: launchEnv(scratch, logPath, feed.url),
+          log: join(evidence, `launch-${number}.log`),
+          onSpawn,
+          quietStdout: true,
+          timeoutMs: LAUNCH_BOUND_MS,
+        }).then(
+          (done) => ({ code: done.code }),
+          (error) => ({ error: error.message }),
+        ),
       until,
       readLog: () => readDrillLog(logPath),
       boundMs: LAUNCH_BOUND_MS,
@@ -350,7 +416,8 @@ export async function runDrill({
   try {
     scratch = mkdtempSync(join(tempRoot, "dohc-release-drill-"));
     const feedDir = join(scratch, "feed");
-    for (const directory of [feedDir, join(scratch, "home"), join(scratch, "localappdata")]) mkdirSync(directory, { recursive: true });
+    for (const directory of [feedDir, join(scratch, "home"), join(scratch, "localappdata")])
+      mkdirSync(directory, { recursive: true });
     const installer = randomBytes(64 * 1024);
     writeFileSync(join(feedDir, INSTALLER), installer);
     writeFileSync(join(feedDir, "latest.yml"), feedManifest(installer));
@@ -366,35 +433,68 @@ export async function runDrill({
     // Download is pressed only after the drill has read the question, so a
     // download that does not wait for it starts first and fails the check.
     const offered = (entries) => {
-      if (entries.some((logged) => logged.kind === "question")) writeFileSync(join(scratch, ANSWER), "Download\n");
+      if (entries.some((logged) => logged.kind === "question"))
+        writeFileSync(join(scratch, ANSWER), "Download\n");
       return entries.find((logged) => logged.kind === "dialog");
     };
     const asked = (entries, message, detail) => {
       const question = entries.find((logged) => logged.kind === "question");
-      return question?.message === message && question.detail === detail && downloadedOnlyAfterAnswer(entries);
+      return (
+        question?.message === message &&
+        question.detail === detail &&
+        downloadedOnlyAfterAnswer(entries)
+      );
     };
 
     if (scenario === "main-fails-to-load") {
       feed.publish();
       const dialog = await launch(1, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
-      check("reports that dohc failed to start", entries.some((logged) => logged.kind === "error-box" && logged.title === "dohc failed to start"));
-      check("asks before it downloads the newer build", asked(entries, `Update ${FEED_VERSION} is available.`,
-        "It may fix what stopped dohc from starting. Download it?"), entries);
-      check("offers the restart into the newer build", dialog.message === `Update ${FEED_VERSION} is downloaded.` &&
-        JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
+      check(
+        "reports that dohc failed to start",
+        entries.some(
+          (logged) => logged.kind === "error-box" && logged.title === "dohc failed to start",
+        ),
+      );
+      check(
+        "asks before it downloads the newer build",
+        asked(
+          entries,
+          `Update ${FEED_VERSION} is available.`,
+          "It may fix what stopped dohc from starting. Download it?",
+        ),
+        entries,
+      );
+      check(
+        "offers the restart into the newer build",
+        dialog.message === `Update ${FEED_VERSION} is downloaded.` &&
+          JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]),
+        dialog,
+      );
       // DOHC_TEST_HOME is main's state directory in a test run, so the report
       // lands where the next dohc's store reads it.
       const report = readCrashReport(join(scratch, "home", "crash-report.json"));
-      check("keeps the failure in the crash report", report?.problems?.some((problem) => problem.source === "main" &&
-        problem.text.includes("What happened: The main module failed to load")), report);
+      check(
+        "keeps the failure in the crash report",
+        report?.problems?.some(
+          (problem) =>
+            problem.source === "main" &&
+            problem.text.includes("What happened: The main module failed to load"),
+        ),
+        report,
+      );
     } else {
       for (const number of [1, 2]) {
         await launch(number, { entry, profile });
         const entries = readDrillLog(logPath);
-        check(`launch ${number} loads main and exits after its first window loads`,
-          entries.filter((logged) => logged.kind === "fault-exit").length === number);
-        check(`launch ${number} offers nothing`, !entries.some((logged) => logged.kind === "dialog" || logged.kind === "error-box"));
+        check(
+          `launch ${number} loads main and exits after its first window loads`,
+          entries.filter((logged) => logged.kind === "fault-exit").length === number,
+        );
+        check(
+          `launch ${number} offers nothing`,
+          !entries.some((logged) => logged.kind === "dialog" || logged.kind === "error-box"),
+        );
         const marker = JSON.parse(readFileSync(markerPath, "utf8"));
         check(`launch ${number} leaves ${number} unfinished`, marker.unfinished === number, marker);
       }
@@ -402,15 +502,34 @@ export async function runDrill({
       feed.publish();
       const dialog = await launch(3, { entry, profile, until: offered });
       const entries = readDrillLog(logPath);
-      check("launch 3 checks before main loads", entries.filter((logged) => logged.kind === "main-loaded").length === 2);
-      check("launch 3 asks before it downloads the newer build", asked(entries, "dohc closed before it finished starting.",
-        `Update ${FEED_VERSION} is available and may fix this. Download it?`), entries);
-      check("launch 3 offers the restart into the newer build", dialog.message === "dohc closed before it finished starting." &&
-        dialog.detail?.startsWith(`Update ${FEED_VERSION} is downloaded.`) &&
-        JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]), dialog);
+      check(
+        "launch 3 checks before main loads",
+        entries.filter((logged) => logged.kind === "main-loaded").length === 2,
+      );
+      check(
+        "launch 3 asks before it downloads the newer build",
+        asked(
+          entries,
+          "dohc closed before it finished starting.",
+          `Update ${FEED_VERSION} is available and may fix this. Download it?`,
+        ),
+        entries,
+      );
+      check(
+        "launch 3 offers the restart into the newer build",
+        dialog.message === "dohc closed before it finished starting." &&
+          dialog.detail?.startsWith(`Update ${FEED_VERSION} is downloaded.`) &&
+          JSON.stringify(dialog.buttons) === JSON.stringify(["Restart now", "Quit"]),
+        dialog,
+      );
     }
-    check("the feed served the manifest and the installer", ["latest.yml", INSTALLER].every((name) =>
-      feed.requests.some((request) => request.published && request.name === name)), feed.requests);
+    check(
+      "the feed served the manifest and the installer",
+      ["latest.yml", INSTALLER].every((name) =>
+        feed.requests.some((request) => request.published && request.name === name),
+      ),
+      feed.requests,
+    );
     result.passed = true;
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
@@ -435,10 +554,13 @@ export async function runDrill({
     if (failures.length > 0) {
       // Keep result.json, marked failed, so the cleanup failure has its evidence.
       result.passed = false;
-      result.cleanupErrors = failures.map((error) => (error instanceof Error ? error.message : String(error)));
+      result.cleanupErrors = failures.map((error) =>
+        error instanceof Error ? error.message : String(error),
+      );
       mkdirSync(evidence, { recursive: true });
       writeFileSync(join(evidence, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
-      for (const message of result.cleanupErrors) console.error(`release drill cleanup: ${message}`);
+      for (const message of result.cleanupErrors)
+        console.error(`release drill cleanup: ${message}`);
       // A drill that already failed keeps its own error.
       if (!("error" in result)) throw failures[0];
     }
@@ -450,14 +572,23 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1] ?? "")).href) {
   const scenarioIndex = process.argv.indexOf("--scenario");
   const scenario = scenarioIndex >= 0 ? process.argv[scenarioIndex + 1] : undefined;
   const keep = process.argv.includes("--keep");
-  const drill = process.platform === "win32"
-    ? runDrill({ scenario, keep })
-    : Promise.reject(new Error("The release drill runs on Windows only."));
-  drill.then((result) => {
-    console.log(`[release-drill] ${scenario}: passed. ${result.checks.map((check) => check.name).join("; ")}.`);
-    if (keep) console.log(`[release-drill] Evidence: ${result.evidence}. Scratch app: ${result.app}. Scratch data: ${result.scratch}.`);
-  }, (error) => {
-    console.error(`[release-drill] ${scenario ?? "(no scenario)"}: failed. ${error.message}`);
-    process.exitCode = 1;
-  });
+  const drill =
+    process.platform === "win32"
+      ? runDrill({ scenario, keep })
+      : Promise.reject(new Error("The release drill runs on Windows only."));
+  drill.then(
+    (result) => {
+      console.log(
+        `[release-drill] ${scenario}: passed. ${result.checks.map((check) => check.name).join("; ")}.`,
+      );
+      if (keep)
+        console.log(
+          `[release-drill] Evidence: ${result.evidence}. Scratch app: ${result.app}. Scratch data: ${result.scratch}.`,
+        );
+    },
+    (error) => {
+      console.error(`[release-drill] ${scenario ?? "(no scenario)"}: failed. ${error.message}`);
+      process.exitCode = 1;
+    },
+  );
 }

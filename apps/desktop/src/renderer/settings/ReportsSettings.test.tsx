@@ -21,23 +21,41 @@ afterEach(() => {
 });
 
 describe("report settings", () => {
-
   it("marks a switch that is off as changed, and resets it", () => {
     const onChange = vi.fn();
-    render(<ReportsSettings privacy={{ usageReports: false, errorReports: true }} onChange={onChange} />);
-    expect(screen.getByRole("switch", { name: "Send usage reports" }).getAttribute("aria-checked")).toBe("false");
+    render(
+      <ReportsSettings privacy={{ usageReports: false, errorReports: true }} onChange={onChange} />,
+    );
+    expect(
+      screen.getByRole("switch", { name: "Send usage reports" }).getAttribute("aria-checked"),
+    ).toBe("false");
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
     expect(onChange).toHaveBeenCalledWith({ usageReports: true, errorReports: true });
   });
 
-
   it("says which reports this launch cannot send", async () => {
-    for (const [usage, errors] of [[false, false], [true, false], [false, true], [true, true]] as const) {
-      bridge.readDiagnostics.mockResolvedValueOnce({ text: "dohc diagnostics", available: { usage, errors } });
+    for (const [usage, errors] of [
+      [false, false],
+      [true, false],
+      [false, true],
+      [true, true],
+    ] as const) {
+      bridge.readDiagnostics.mockResolvedValueOnce({
+        text: "dohc diagnostics",
+        available: { usage, errors },
+      });
       const onChange = vi.fn();
-      const view = render(<ReportsSettings privacy={{ usageReports: true, errorReports: true }} onChange={onChange} />);
+      const view = render(
+        <ReportsSettings
+          privacy={{ usageReports: true, errorReports: true }}
+          onChange={onChange}
+        />,
+      );
       await waitFor(() => {
-        for (const [kind, available] of [["usage", usage], ["error", errors]] as const) {
+        for (const [kind, available] of [
+          ["usage", usage],
+          ["error", errors],
+        ] as const) {
           const row = screen.getByTestId(`settings-row-${kind}-reports`);
           const control = screen.getByRole("switch", { name: `Send ${kind} reports` });
           const line = screen.queryByText(`This launch sends no ${kind} reports.`);
@@ -62,6 +80,4 @@ describe("report settings", () => {
       view.unmount();
     }
   });
-
-
 });

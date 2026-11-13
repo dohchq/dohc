@@ -1,14 +1,8 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import {
-  RelayUnauthorizedError,
-  ShareUnavailableError,
-} from "@dohc/workspace-contracts/relay";
-import {
-  withExclusiveWorkspaceOperation,
-  type WorkspaceOperationLease,
-} from "./workspaceAssets";
+import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import { withExclusiveWorkspaceOperation, type WorkspaceOperationLease } from "./workspaceAssets";
 import {
   createShareViewFiles,
   ShareViewMountRollbackError,
@@ -19,10 +13,7 @@ import type { ShareViewFilesOwnerCapability } from "./shareViewFilesOwner";
 import type { ShareMountRecord } from "./registryStore";
 import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
-import {
-  createShareMountCommands,
-  type ShareMountCommandDependencies,
-} from "./shareMountCommands";
+import { createShareMountCommands, type ShareMountCommandDependencies } from "./shareMountCommands";
 
 const WORKSPACE = { workspaceId: "workspace-one", rootPath: "C:/workspace-one" };
 const SHARE_ID = "11111111-1111-4111-8111-111111111111";
@@ -64,9 +55,19 @@ it("never stores a received pin when credentials change during share metadata lo
   h.dependencies.currentCredentialGeneration = () => generation;
   h.dependencies.fetchInfo = async () => {
     generation += 1;
-    return { granterEmail: null, selector: SELECTOR, receivedIdentity: { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 1 } };
+    return {
+      granterEmail: null,
+      selector: SELECTOR,
+      receivedIdentity: {
+        receivedSource: "share-source:v1:" + "a".repeat(64),
+        grantId: "grant",
+        generation: 1,
+      },
+    };
   };
-  await expect(h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent })).rejects.toThrow("The server session changed.");
+  await expect(
+    h.commands.mount({ workspace: WORKSPACE, shareCode: SHARE_CODE, assertCurrent }),
+  ).rejects.toThrow("The server session changed.");
   expect(h.mounts).toEqual([]);
   expect(h.events).not.toContain("lease:start");
 });
@@ -77,10 +78,7 @@ async function withLiveMountOwner<T>(
   target: PreparedShareViewFilesMount,
   run: (owner: ShareViewFilesOwnerCapability) => Promise<T>,
 ): Promise<T> {
-  let settled:
-    | { ok: true; value: T }
-    | { ok: false; error: unknown }
-    | undefined;
+  let settled: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
   const files = createShareViewFiles({
     resolveTarget: () => null,
     openStore: () => {
@@ -107,9 +105,8 @@ async function withLiveMountOwner<T>(
   });
 
   try {
-    await withExclusiveWorkspaceOperation(
-      target.schedulingRootPath,
-      (_changed, lease) => files.mount(lease, target),
+    await withExclusiveWorkspaceOperation(target.schedulingRootPath, (_changed, lease) =>
+      files.mount(lease, target),
     );
     throw new Error("Live owner test did not stop after admission.");
   } catch (error) {
@@ -142,9 +139,7 @@ function preparedTarget(
   };
 }
 
-const CROSS_TARGET_CASES: ReadonlyArray<
-  readonly [string, Partial<PreparedShareViewFilesMount>]
-> = [
+const CROSS_TARGET_CASES: ReadonlyArray<readonly [string, Partial<PreparedShareViewFilesMount>]> = [
   ["workspaceId", { workspaceId: "workspace-two" }],
   ["storeWorkspaceId", { storeWorkspaceId: "mount-store-two" }],
   ["shareId", { shareId: "22222222-2222-4222-8222-222222222222" }],
@@ -156,9 +151,7 @@ const CROSS_TARGET_CASES: ReadonlyArray<
 function harness() {
   const events: string[] = [];
   let mounts: ShareMountRecord[] = [];
-  let filesLifecycle:
-    | ReturnType<typeof createShareMountCommands>["filesLifecycle"]
-    | undefined;
+  let filesLifecycle: ReturnType<typeof createShareMountCommands>["filesLifecycle"] | undefined;
   let mountFailure: unknown;
   let removeOutcome: { folderLeft: boolean; error?: unknown } = {
     folderLeft: false,
@@ -166,16 +159,23 @@ function harness() {
 
   const files: ShareViewFiles = {
     lookup: vi.fn(async () => ({ files: [], folders: [] })),
-    linksEdges: vi.fn(async () => ({versionId:"main",files:[],entries:[],unchecked:[],complete:true,indexBuilding:false,mountsCovered:true,nextCursor:null})),
+    linksEdges: vi.fn(async () => ({
+      versionId: "main",
+      files: [],
+      entries: [],
+      unchecked: [],
+      complete: true,
+      indexBuilding: false,
+      mountsCovered: true,
+      nextCursor: null,
+    })),
     linksIn: vi.fn(async () => null),
     linksResolve: vi.fn(async () => ({ versionId: "main", results: [], mountsCovered: true })),
     narrow: vi.fn(async () => undefined),
     end: vi.fn(async () => undefined),
     mount: vi.fn(async (_lease, target: PreparedShareViewFilesMount) => {
       events.push("files:mount");
-      await withLiveMountOwner(target, (owner) =>
-        filesLifecycle!.createMount(owner, target),
-      );
+      await withLiveMountOwner(target, (owner) => filesLifecycle!.createMount(owner, target));
       if (mountFailure !== undefined) throw mountFailure;
       return {
         status: "updated",
@@ -191,9 +191,7 @@ function harness() {
     }),
     unmount: vi.fn(async (_lease, target) => {
       events.push("files:unmount");
-      const mount = mounts.find(
-        (candidate) => candidate.shareId === target.shareId,
-      )!;
+      const mount = mounts.find((candidate) => candidate.shareId === target.shareId)!;
       const active = preparedTarget({
         shareId: mount.shareId,
         mountLabel: mount.label,
@@ -204,9 +202,7 @@ function harness() {
         grantedSelector: mount.grantedSelector,
         ended: mount.ended === true,
       });
-      return withLiveMountOwner(active, (owner) =>
-        filesLifecycle!.removeMount(owner, active),
-      );
+      return withLiveMountOwner(active, (owner) => filesLifecycle!.removeMount(owner, active));
     }),
     change: vi.fn(),
     read: vi.fn(),
@@ -503,12 +499,8 @@ describe("share mount commands", () => {
       (error) => error instanceof ShareViewMountRollbackError,
     );
     expect(rollbackError).toBeInstanceOf(ShareViewMountRollbackError);
-    expect(
-      (rollbackError as ShareViewMountRollbackError).rollbackError,
-    ).toBe(cleanupFailure);
-    expect(
-      (rollbackError as ShareViewMountRollbackError).mountError,
-    ).toBe(responseFailure);
+    expect((rollbackError as ShareViewMountRollbackError).rollbackError).toBe(cleanupFailure);
+    expect((rollbackError as ShareViewMountRollbackError).mountError).toBe(responseFailure);
     expect(loggedErrors).toContain(notifyFailure);
     expect(loggedErrors).toContain(nativeFailure);
     expect(h.mounts).toEqual([]);
@@ -538,9 +530,7 @@ describe("share mount commands", () => {
       (error) => error instanceof ShareViewMountRollbackError,
     );
     expect(rollbackError).toBeInstanceOf(ShareViewMountRollbackError);
-    expect(
-      (rollbackError as ShareViewMountRollbackError).rollbackError,
-    ).toBe(cleanupFailure);
+    expect((rollbackError as ShareViewMountRollbackError).rollbackError).toBe(cleanupFailure);
     expect(h.mounts).toEqual([]);
   });
 
@@ -654,9 +644,7 @@ describe("share mount commands", () => {
     const target = preparedTarget();
 
     await expect(
-      withLiveMountOwner(target, (owner) =>
-        commands.filesLifecycle.createMount(owner, target),
-      ),
+      withLiveMountOwner(target, (owner) => commands.filesLifecycle.createMount(owner, target)),
     ).rejects.toBeInstanceOf(ShareViewMountRollbackError);
     expect(h.events).toEqual(["projection:create", "projection:remove"]);
   });
@@ -690,12 +678,7 @@ describe("share mount commands", () => {
 
     expect(result).toEqual({ folderLeft: false });
     expect(h.mounts).toEqual([]);
-    expect(h.events).toEqual([
-      "relay:close",
-      "log",
-      "projection:remove",
-      "registry:0",
-    ]);
+    expect(h.events).toEqual(["relay:close", "log", "projection:remove", "registry:0"]);
   });
 
   it("returns the projection error when removal leaves the mount folder", async () => {
@@ -719,12 +702,7 @@ describe("share mount commands", () => {
     );
 
     expect(result).toEqual({ folderLeft: true, error: removalError });
-    expect(h.events).toEqual([
-      "relay:close",
-      "projection:remove",
-      "log",
-      "registry:0",
-    ]);
+    expect(h.events).toEqual(["relay:close", "projection:remove", "log", "registry:0"]);
   });
 
   it.each(CROSS_TARGET_CASES)(
@@ -870,11 +848,7 @@ describe("share mount commands", () => {
         assertCurrent: caller.assertCurrent,
       }),
     ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
-    expect(h.events).toEqual([
-      "lease:start",
-      "files:reconcile",
-      "notify:workspace-one",
-    ]);
+    expect(h.events).toEqual(["lease:start", "files:reconcile", "notify:workspace-one"]);
   });
 
   it("aborts the refresh on expired credentials but still notifies", async () => {
@@ -889,13 +863,12 @@ describe("share mount commands", () => {
         grantedSelector: SELECTOR,
       },
     ];
-    vi.mocked(h.files.reconcile).mockRejectedValueOnce(
-      new RelayUnauthorizedError(),
-    );
+    vi.mocked(h.files.reconcile).mockRejectedValueOnce(new RelayUnauthorizedError());
 
-    await expect(
-      h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
-    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
+    await expect(h.commands.refresh({ workspace: WORKSPACE, assertCurrent })).resolves.toEqual({
+      results: [ALEX_FAILED],
+      abortMessage: SESSION_EXPIRED,
+    });
     expect(h.events.at(-1)).toBe("notify:workspace-one");
   });
 
@@ -913,9 +886,7 @@ describe("share mount commands", () => {
         grantedSelector: SELECTOR,
       },
     ];
-    vi.mocked(h.files.reconcile).mockRejectedValueOnce(
-      new RelayUnauthorizedError(),
-    );
+    vi.mocked(h.files.reconcile).mockRejectedValueOnce(new RelayUnauthorizedError());
     h.dependencies.notifyRenderer = () => {
       throw notifyFailure;
     };
@@ -923,9 +894,10 @@ describe("share mount commands", () => {
       loggedErrors.push(error);
     };
 
-    await expect(
-      h.commands.refresh({ workspace: WORKSPACE, assertCurrent }),
-    ).resolves.toEqual({ results: [ALEX_FAILED], abortMessage: SESSION_EXPIRED });
+    await expect(h.commands.refresh({ workspace: WORKSPACE, assertCurrent })).resolves.toEqual({
+      results: [ALEX_FAILED],
+      abortMessage: SESSION_EXPIRED,
+    });
     expect(loggedErrors).toEqual([notifyFailure]);
   });
 
@@ -1146,26 +1118,59 @@ describe("share mount commands", () => {
 
 it("reconciles a revoked mount even when missing-pin detail lookup returns 404", async () => {
   const h = harness();
-  h.dependencies.loadCredentials = async () => ({ relayUrl: "https://relay.example", token: "token", userId: "recipient" });
-  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientUserId: "recipient", grantedSelector: SELECTOR }];
-  h.dependencies.fetchInfo = vi.fn(async () => { throw new ShareUnavailableError(); });
-  const markEnded = vi.fn(async () => h.dependencies.updateMounts(WORKSPACE.workspaceId, rows => rows.map(row => ({ ...row, ended: true }))));
+  h.dependencies.loadCredentials = async () => ({
+    relayUrl: "https://relay.example",
+    token: "token",
+    userId: "recipient",
+  });
+  h.mounts = [
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      granterEmail: null,
+      relayUrl: "https://relay.example",
+      recipientUserId: "recipient",
+      grantedSelector: SELECTOR,
+    },
+  ];
+  h.dependencies.fetchInfo = vi.fn(async () => {
+    throw new ShareUnavailableError();
+  });
+  const markEnded = vi.fn(async () =>
+    h.dependencies.updateMounts(WORKSPACE.workspaceId, (rows) =>
+      rows.map((row) => ({ ...row, ended: true })),
+    ),
+  );
   // The engine has opened the mount's store, so its refresh can say a pull is in flight.
   const mountRoot = await createTestScratch("share-mount-commands-");
   await mkdir(join(mountRoot, ".dohc", "local"), { recursive: true });
   const opened = { localStateReady: true };
-  readLocalStateFrom({ currentBinding: () => opened, localStateOpenAt: async () => ({ current: () => true }) });
+  readLocalStateFrom({
+    currentBinding: () => opened,
+    localStateOpenAt: async () => ({ current: () => true }),
+  });
   const files = createShareViewFiles({
     resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
-    openStore: () => ({ ensureMainVersion: async () => ({ id: "main" }), listTextFileMetadata: async () => [] } as unknown as import("./shareViewFiles").ShareViewFilesStore),
+    openStore: () =>
+      ({
+        ensureMainVersion: async () => ({ id: "main" }),
+        listTextFileMetadata: async () => [],
+      }) as unknown as import("./shareViewFiles").ShareViewFilesStore,
     resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
-    pull: async () => { throw new ShareUnavailableError(); },
-    recordRefusals: async () => undefined, updateUnsavedPaths: async () => undefined,
-    markEnded, retireTarget: async () => undefined, assertProjectionRoot: async () => undefined,
-    createMount: async () => undefined, removeMount: async () => ({ folderLeft: false }),
+    pull: async () => {
+      throw new ShareUnavailableError();
+    },
+    recordRefusals: async () => undefined,
+    updateUnsavedPaths: async () => undefined,
+    markEnded,
+    retireTarget: async () => undefined,
+    assertProjectionRoot: async () => undefined,
+    createMount: async () => undefined,
+    removeMount: async () => ({ folderLeft: false }),
   });
   h.dependencies.files = () => files;
-  h.dependencies.withWorkspaceOperation = (_root, run) => withExclusiveWorkspaceOperation(WORKSPACE.rootPath, (_changed, lease) => run(lease));
+  h.dependencies.withWorkspaceOperation = (_root, run) =>
+    withExclusiveWorkspaceOperation(WORKSPACE.rootPath, (_changed, lease) => run(lease));
   const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
   expect(markEnded).toHaveBeenCalledOnce();
   expect((h.mounts[0] as ShareMountRecord).ended).toBe(true);
@@ -1174,10 +1179,31 @@ it("reconciles a revoked mount even when missing-pin detail lookup returns 404",
 
 it("recovers a missing received pin once without fetching detail on every refresh", async () => {
   const h = harness();
-  h.dependencies.loadCredentials = vi.fn(async () => ({ relayUrl: "https://relay.example", token: "token", userId: "recipient" }));
-  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientUserId: "recipient", grantedSelector: SELECTOR }];
-  const pin = { receivedSource: "share-source:v1:" + "a".repeat(64), grantId: "grant", generation: 1 };
-  h.dependencies.fetchInfo = vi.fn(async () => ({ granterEmail: null, selector: SELECTOR, receivedIdentity: pin }));
+  h.dependencies.loadCredentials = vi.fn(async () => ({
+    relayUrl: "https://relay.example",
+    token: "token",
+    userId: "recipient",
+  }));
+  h.mounts = [
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      granterEmail: null,
+      relayUrl: "https://relay.example",
+      recipientUserId: "recipient",
+      grantedSelector: SELECTOR,
+    },
+  ];
+  const pin = {
+    receivedSource: "share-source:v1:" + "a".repeat(64),
+    grantId: "grant",
+    generation: 1,
+  };
+  h.dependencies.fetchInfo = vi.fn(async () => ({
+    granterEmail: null,
+    selector: SELECTOR,
+    receivedIdentity: pin,
+  }));
   await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
   expect((h.mounts[0] as ShareMountRecord).receivedIdentity).toEqual(pin);
   await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
@@ -1190,26 +1216,52 @@ it("recovers a missing received pin once without fetching detail on every refres
 // records on disk.
 async function mountOnDisk(
   h: ReturnType<typeof harness>,
-  overrides: (record: string, mountRoot: string) => Partial<Parameters<typeof createShareViewFiles>[0]>,
+  overrides: (
+    record: string,
+    mountRoot: string,
+  ) => Partial<Parameters<typeof createShareViewFiles>[0]>,
 ) {
-  h.mounts = [{ shareId: SHARE_ID, label: "alex", granterEmail: null, relayUrl: "https://relay.example", recipientEmail: null, grantedSelector: SELECTOR }];
+  h.mounts = [
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      granterEmail: null,
+      relayUrl: "https://relay.example",
+      recipientEmail: null,
+      grantedSelector: SELECTOR,
+    },
+  ];
   const mountRoot = await createTestScratch("share-mount-commands-");
   await mkdir(join(mountRoot, ".dohc", "local"), { recursive: true });
   const record = join(mountRoot, ".dohc", "local", "share-refresh", "share-collision-record.json");
   const opened = { localStateReady: true };
-  readLocalStateFrom({ currentBinding: () => opened, localStateOpenAt: async () => ({ current: () => true }) });
+  readLocalStateFrom({
+    currentBinding: () => opened,
+    localStateOpenAt: async () => ({ current: () => true }),
+  });
   const files = createShareViewFiles({
     resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
-    openStore: () => ({ ensureMainVersion: async () => ({ id: "main" }), listTextFileMetadata: async () => [] } as unknown as import("./shareViewFiles").ShareViewFilesStore),
+    openStore: () =>
+      ({
+        ensureMainVersion: async () => ({ id: "main" }),
+        listTextFileMetadata: async () => [],
+      }) as unknown as import("./shareViewFiles").ShareViewFilesStore,
     resolveRelay: async () => ({ baseUrl: "https://relay.example", token: "token" }),
-    pull: async () => { throw new Error("This test has no pull."); },
-    recordRefusals: async () => undefined, updateUnsavedPaths: async () => undefined,
-    markEnded: async () => undefined, retireTarget: async () => undefined, assertProjectionRoot: async () => undefined,
-    createMount: async () => undefined, removeMount: async () => ({ folderLeft: false }),
+    pull: async () => {
+      throw new Error("This test has no pull.");
+    },
+    recordRefusals: async () => undefined,
+    updateUnsavedPaths: async () => undefined,
+    markEnded: async () => undefined,
+    retireTarget: async () => undefined,
+    assertProjectionRoot: async () => undefined,
+    createMount: async () => undefined,
+    removeMount: async () => ({ folderLeft: false }),
     ...overrides(record, mountRoot),
   });
   h.dependencies.files = () => files;
-  h.dependencies.withWorkspaceOperation = (_root, run) => withExclusiveWorkspaceOperation(WORKSPACE.rootPath, (_changed, lease) => run(lease));
+  h.dependencies.withWorkspaceOperation = (_root, run) =>
+    withExclusiveWorkspaceOperation(WORKSPACE.rootPath, (_changed, lease) => run(lease));
   return { record };
 }
 
@@ -1230,7 +1282,13 @@ it("reports a mount refresh that can't read its collision record as that refusal
   const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
   expect(result.results).toEqual([
-    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, errorKind: "collision-record" },
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      status: "failed",
+      changedPaths: 0,
+      errorKind: "collision-record",
+    },
   ]);
   expect(await readFile(record, "utf8")).toBe("not json");
 });
@@ -1244,7 +1302,13 @@ it("reports a mount refresh that set aside its collision record", async () => {
   const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
   expect(result.results).toEqual([
-    { shareId: SHARE_ID, label: "alex", status: "unchanged", changedPaths: 0, collisionRecordQuarantined: true },
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      status: "unchanged",
+      changedPaths: 0,
+      collisionRecordQuarantined: true,
+    },
   ]);
   expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
 });
@@ -1258,7 +1322,13 @@ it("reports a mount refresh that set aside its collision record and then failed"
   const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
   expect(result.results).toEqual([
-    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true },
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      status: "failed",
+      changedPaths: 0,
+      collisionRecordQuarantined: true,
+    },
   ]);
   expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
 });
@@ -1266,8 +1336,12 @@ it("reports a mount refresh that set aside its collision record and then failed"
 it("reports a mount refresh that set aside its collision record and then failed to mark the share ended", async () => {
   const h = harness();
   const { record } = await mountOnDisk(h, () => ({
-    pull: async () => { throw new ShareUnavailableError(); },
-    markEnded: async () => { throw new Error("could not save the ended share"); },
+    pull: async () => {
+      throw new ShareUnavailableError();
+    },
+    markEnded: async () => {
+      throw new Error("could not save the ended share");
+    },
   }));
   await mkdir(dirname(record), { recursive: true, mode: 0o700 });
   await writeFile(record, "not json");
@@ -1275,7 +1349,13 @@ it("reports a mount refresh that set aside its collision record and then failed 
   const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
   expect(result.results).toEqual([
-    { shareId: SHARE_ID, label: "alex", status: "failed", changedPaths: 0, collisionRecordQuarantined: true },
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      status: "failed",
+      changedPaths: 0,
+      collisionRecordQuarantined: true,
+    },
   ]);
   expect((await readdir(dirname(record))).some((name) => name.includes(".invalid-"))).toBe(true);
 });
@@ -1283,7 +1363,9 @@ it("reports a mount refresh that set aside its collision record and then failed 
 it("keeps a mount's set-aside row when its refresh then finds the session expired", async () => {
   const h = harness();
   const { record } = await mountOnDisk(h, () => ({
-    pull: async () => { throw new RelayUnauthorizedError(); },
+    pull: async () => {
+      throw new RelayUnauthorizedError();
+    },
   }));
   await mkdir(dirname(record), { recursive: true, mode: 0o700 });
   await writeFile(record, "not json");
@@ -1318,14 +1400,24 @@ it("keeps an earlier mount's set-aside row when a later one finds the session ex
 
   expect(result).toEqual({
     results: [
-      { shareId: SHARE_ID, label: "alex", status: "updated", changedPaths: 1, collisionRecordQuarantined: true },
-      { shareId: "22222222-1111-4111-8111-111111111111", label: "blair", status: "failed", changedPaths: 0 },
+      {
+        shareId: SHARE_ID,
+        label: "alex",
+        status: "updated",
+        changedPaths: 1,
+        collisionRecordQuarantined: true,
+      },
+      {
+        shareId: "22222222-1111-4111-8111-111111111111",
+        label: "blair",
+        status: "failed",
+        changedPaths: 0,
+      },
     ],
     abortMessage: SESSION_EXPIRED,
   });
   expect(h.files.reconcile).toHaveBeenCalledTimes(2);
 });
-
 
 it("carries kept mount paths after rebuilding their saved list", async () => {
   const h = harness();
@@ -1336,11 +1428,22 @@ it("carries kept mount paths after rebuilding their saved list", async () => {
     file = join(mountRoot, path);
     return {
       resolveRelay: async () => null,
-      openStore: () => ({
-        ensureMainVersion: async () => ({ id: "main" }),
-        listTextFileMetadata: async () => [{ path, objectId: "a", contentKind: "text", byteLength: 1, sha256: hash,
-          updatedAtMs: 0, latestMomentId: "a", hasYdocMarker: false }],
-      } as unknown as import("./shareViewFiles").ShareViewFilesStore),
+      openStore: () =>
+        ({
+          ensureMainVersion: async () => ({ id: "main" }),
+          listTextFileMetadata: async () => [
+            {
+              path,
+              objectId: "a",
+              contentKind: "text",
+              byteLength: 1,
+              sha256: hash,
+              updatedAtMs: 0,
+              latestMomentId: "a",
+              hasYdocMarker: false,
+            },
+          ],
+        }) as unknown as import("./shareViewFiles").ShareViewFilesStore,
     };
   });
   await mkdir(dirname(record), { recursive: true, mode: 0o700 });
@@ -1350,8 +1453,16 @@ it("carries kept mount paths after rebuilding their saved list", async () => {
 
   const result = await h.commands.refresh({ workspace: WORKSPACE, assertCurrent });
 
-  expect(result.results).toEqual([{ shareId: SHARE_ID, label: "alex", status: "unchanged", changedPaths: 0,
-    collisionRecordQuarantined: true, unjournalablePaths: [{ path, reason: "local-collision" }] }]);
+  expect(result.results).toEqual([
+    {
+      shareId: SHARE_ID,
+      label: "alex",
+      status: "unchanged",
+      changedPaths: 0,
+      collisionRecordQuarantined: true,
+      unjournalablePaths: [{ path, reason: "local-collision" }],
+    },
+  ]);
   expect(await readFile(file, "utf8")).toBe("my own file");
   expect(JSON.parse(await readFile(record, "utf8"))).toEqual({ shareId: SHARE_ID, paths: [path] });
 });

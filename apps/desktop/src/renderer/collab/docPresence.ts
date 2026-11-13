@@ -208,8 +208,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
           const remote = awareness.getStates().get(state.yc);
           if (
             remote &&
-            (remote.user?.name !== user.name ||
-              remote.user?.sessionToken !== user.sessionToken)
+            (remote.user?.name !== user.name || remote.user?.sessionToken !== user.sessionToken)
           ) {
             remote.user = user;
             awareness.emit("change", [

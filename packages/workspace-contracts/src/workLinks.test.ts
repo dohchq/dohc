@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildWorkLinkUrl, parseWorkLinkUrl, workLinkPathReference, workLinkServerOrigin } from "./workLinks";
+import {
+  buildWorkLinkUrl,
+  parseWorkLinkUrl,
+  workLinkPathReference,
+  workLinkServerOrigin,
+} from "./workLinks";
 
 const reference = "aB_9-".repeat(8) + "aB_";
 
@@ -32,16 +37,24 @@ describe("work links", () => {
     `https://dohc.example/s/${reference}`,
     `https://dohc.example/l/${"%41".repeat(43)}`,
     "not a url",
-  ])("refuses %j", url => {
+  ])("refuses %j", (url) => {
     expect(parseWorkLinkUrl(url)).toBeNull();
   });
 
-  it.each(["https://dohc.example/", "https://dohc.example/base", "https://user@dohc.example", "file:///tmp", ""])("refuses to build from a server that is not an origin: %j", server => {
+  it.each([
+    "https://dohc.example/",
+    "https://dohc.example/base",
+    "https://user@dohc.example",
+    "file:///tmp",
+    "",
+  ])("refuses to build from a server that is not an origin: %j", (server) => {
     expect(() => buildWorkLinkUrl({ server, reference })).toThrow("invalid work link server");
   });
 
   it("refuses to build from an invalid reference", () => {
-    expect(() => buildWorkLinkUrl({ server: "https://dohc.example", reference: "short" })).toThrow("invalid work reference");
+    expect(() => buildWorkLinkUrl({ server: "https://dohc.example", reference: "short" })).toThrow(
+      "invalid work reference",
+    );
   });
 
   it("reduces a server URL to its origin", () => {

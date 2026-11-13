@@ -1,6 +1,8 @@
 import { engineStoreRefusalCopy, type SyncStatusResult } from "../../ipc/bridgeContract";
 
-export function fileObservationFailureCopy(reason: NonNullable<SyncStatusResult["fileObservationFailure"]>): string {
+export function fileObservationFailureCopy(
+  reason: NonNullable<SyncStatusResult["fileObservationFailure"]>,
+): string {
   return reason === "read-failed"
     ? "dohc could not read file changes for this workspace."
     : "dohc could not watch file changes for this workspace.";

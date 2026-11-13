@@ -38,13 +38,14 @@ export function groupMessagesNotice(input: {
     noticeId,
     kind: "automation-failed",
     title: "Group messages started no automations",
-    body: reason === "ahead"
-      ? server
-        ? "Some Group messages are dated more than an hour later than your server's clock. Check that your server's date and time are right."
-        : "Some Group messages are dated more than an hour later than this computer's clock. Check that this computer's date and time are right."
-      : server
-        ? "Some Group messages reached your server too late to start automations there. Their automations may have already run on one of your computers. Check before you post one again."
-        : "Some Group messages reached this computer too late to start automations here. Their automations may have already run on another of your computers. Check before you post one again.",
+    body:
+      reason === "ahead"
+        ? server
+          ? "Some Group messages are dated more than an hour later than your server's clock. Check that your server's date and time are right."
+          : "Some Group messages are dated more than an hour later than this computer's clock. Check that this computer's date and time are right."
+        : server
+          ? "Some Group messages reached your server too late to start automations there. Their automations may have already run on one of your computers. Check before you post one again."
+          : "Some Group messages reached this computer too late to start automations here. Their automations may have already run on another of your computers. Check before you post one again.",
     target: {},
   };
 }

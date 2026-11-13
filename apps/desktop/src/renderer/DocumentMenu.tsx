@@ -3,7 +3,11 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { Menu } from "./ui/Menu";
 import { bridge } from "./bridge";
 import { CustomizeContext } from "./settings/customize";
-import { ShellErrorReporter, ShellNoticeClear, type ReportShellFailure } from "./shell/useShellError";
+import {
+  ShellErrorReporter,
+  ShellNoticeClear,
+  type ReportShellFailure,
+} from "./shell/useShellError";
 
 // The document's "…" menu in its tab row (ViewActions): copy the raw markdown, export
 // it as a .md file, or export a self-contained HTML/PDF render. The Menu part
@@ -95,7 +99,9 @@ function reportNoteCopyFailure(notices: CopyNotices, failure: unknown, note: Cop
     retry: () => copyNoteAsMarkdown(note, notices),
     identity: copyNoticeIdentity(note),
     target: { to: "file", path: note.path },
-    ...(notOpen && note.open ? { action: { label: "Open note", run: note.open, reads: true } } : {}),
+    ...(notOpen && note.open
+      ? { action: { label: "Open note", run: note.open, reads: true } }
+      : {}),
   });
 }
 
@@ -168,9 +174,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
   const [open, setOpen] = useState(false);
   // The transient half: an item's label swaps for 1.2s to say what happened.
-  const [feedback, setFeedback] = useState<
-    Partial<Record<DocumentMenuItemId, string>>
-  >({});
+  const [feedback, setFeedback] = useState<Partial<Record<DocumentMenuItemId, string>>>({});
   // The lasting half. A refusal owes the user a next step
   // (the dohc-interface skill), and a label that swaps for 1.2s has no room for one
   // and no time to be read. It is stated in the menu's status line, which
@@ -218,11 +222,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
   // refusal is not: closing takes its instruction off the screen, which is
   // how the tooltip failed keyboard users in the first place. So the timer
   // retires the label and the menu stays, until the user closes it.
-  function showFeedback(
-    id: DocumentMenuItemId,
-    label: string,
-    nextStep?: string,
-  ) {
+  function showFeedback(id: DocumentMenuItemId, label: string, nextStep?: string) {
     setFeedback({ [id]: label });
     setInstruction(nextStep ?? "");
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
@@ -288,11 +288,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
     }
     const markdown = serialized.markdown;
     if (markdown === null) {
-      showFeedback(
-        "copy-markdown",
-        REFUSAL_LABEL,
-        "You can copy this document when it opens.",
-      );
+      showFeedback("copy-markdown", REFUSAL_LABEL, "You can copy this document when it opens.");
       return;
     }
     let failure: unknown = null;
@@ -325,8 +321,11 @@ export function DocumentMenu(props: DocumentMenuProps) {
     };
   }
 
-
-  async function exportDocument(kind: "markdown" | "html" | "pdf", action: number, attempt: number) {
+  async function exportDocument(
+    kind: "markdown" | "html" | "pdf",
+    action: number,
+    attempt: number,
+  ) {
     const serialized = await serializeOrFail(
       `export-${kind}`,
       "Couldn't export",
@@ -341,11 +340,7 @@ export function DocumentMenu(props: DocumentMenuProps) {
       // Before closing: the feedback replaces the item's label, so a refusal
       // shown into a closed menu is a refusal the user never sees — the
       // export would just appear to do nothing.
-      showFeedback(
-        `export-${kind}`,
-        REFUSAL_LABEL,
-        "You can export this document when it opens.",
-      );
+      showFeedback(`export-${kind}`, REFUSAL_LABEL, "You can export this document when it opens.");
       return;
     }
     setOpen(false);
@@ -361,13 +356,8 @@ export function DocumentMenu(props: DocumentMenuProps) {
         // pulls in the Tiptap MarkdownManager/schema stack and KaTeX, which
         // the lazy MarkdownEditor split otherwise keeps out of the
         // initial/open path. A user who never exports never pays for it.
-        const { buildStandaloneDocumentHtml } = await import(
-          "./editor/documentExport"
-        );
-        content = buildStandaloneDocumentHtml(
-          documentMarkdown,
-          props.suggestedName,
-        );
+        const { buildStandaloneDocumentHtml } = await import("./editor/documentExport");
+        content = buildStandaloneDocumentHtml(documentMarkdown, props.suggestedName);
       }
       await bridge().exportDocumentFile({
         workspaceId: props.workspaceId,
@@ -405,7 +395,9 @@ export function DocumentMenu(props: DocumentMenuProps) {
       return;
     }
     void exportDocument(
-      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown", action, attempt,
+      id === "export-pdf" ? "pdf" : id === "export-html" ? "html" : "markdown",
+      action,
+      attempt,
     );
   }
 

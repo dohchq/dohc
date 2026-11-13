@@ -4,17 +4,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { IDENTITY_HUES } from "@dohc/workspace-contracts/agent-hues";
-import {
-  CSS_TOKEN_NAMES,
-  fonts,
-  identityHues,
-  palette,
-  type ThemeTokens,
-} from "./tokens";
+import { CSS_TOKEN_NAMES, fonts, identityHues, palette, type ThemeTokens } from "./tokens";
 import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
 import { MENU_FRAME } from "./ui/Menu";
 
-import { agentTextClass, presentationColor, presentationClasses } from "./workbench/actorPresentation";
+import {
+  agentTextClass,
+  presentationColor,
+  presentationClasses,
+} from "./workbench/actorPresentation";
 
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
@@ -40,8 +38,14 @@ describe("the surface ladder", () => {
 
   it("keeps every step visible", () => {
     for (const mode of ["light", "dark"] as const) {
-      expect(contrast(palette[mode].bg, palette[mode].panel), `bg/panel (${mode})`).toBeGreaterThanOrEqual(1.04);
-      expect(contrast(palette[mode].panel, palette[mode].panel2), `panel/panel-2 (${mode})`).toBeGreaterThanOrEqual(1.04);
+      expect(
+        contrast(palette[mode].bg, palette[mode].panel),
+        `bg/panel (${mode})`,
+      ).toBeGreaterThanOrEqual(1.04);
+      expect(
+        contrast(palette[mode].panel, palette[mode].panel2),
+        `panel/panel-2 (${mode})`,
+      ).toBeGreaterThanOrEqual(1.04);
     }
   });
 });
@@ -59,17 +63,35 @@ describe("state fills", () => {
 
   // A skeleton bar is not a selection, so it keeps 11% when the selected fill moves.
   it("and an 11% skeleton fill in both themes", () => {
-    for (const mode of ["light", "dark"] as const) expect(inkAlpha(palette[mode].skeleton, "skeleton")).toBe(0.11);
+    for (const mode of ["light", "dark"] as const)
+      expect(inkAlpha(palette[mode].skeleton, "skeleton")).toBe(0.11);
   });
 
   it("tell a hovered row from a selected one on every surface", () => {
     for (const mode of ["light", "dark"] as const) {
       for (const surface of SURFACES) {
-        const hover = mix(palette[mode].ink, palette[mode][surface], inkAlpha(palette[mode].hover, "hover"));
-        const selected = mix(palette[mode].ink, palette[mode][surface], inkAlpha(palette[mode].selected, "selected"));
-        expect(contrast(hover, palette[mode][surface]), `hover on ${surface} (${mode})`).toBeGreaterThanOrEqual(1.1);
-        expect(contrast(selected, palette[mode][surface]), `selected on ${surface} (${mode})`).toBeGreaterThanOrEqual(1.2);
-        expect(contrast(selected, hover), `selected vs hover on ${surface} (${mode})`).toBeGreaterThanOrEqual(1.06);
+        const hover = mix(
+          palette[mode].ink,
+          palette[mode][surface],
+          inkAlpha(palette[mode].hover, "hover"),
+        );
+        const selected = mix(
+          palette[mode].ink,
+          palette[mode][surface],
+          inkAlpha(palette[mode].selected, "selected"),
+        );
+        expect(
+          contrast(hover, palette[mode][surface]),
+          `hover on ${surface} (${mode})`,
+        ).toBeGreaterThanOrEqual(1.1);
+        expect(
+          contrast(selected, palette[mode][surface]),
+          `selected on ${surface} (${mode})`,
+        ).toBeGreaterThanOrEqual(1.2);
+        expect(
+          contrast(selected, hover),
+          `selected vs hover on ${surface} (${mode})`,
+        ).toBeGreaterThanOrEqual(1.06);
       }
     }
   });
@@ -82,7 +104,9 @@ describe("keyboard focus marks", () => {
   for (const mode of ["light", "dark"] as const) {
     it(`${mode} halo and row line clear 3:1 on every surface and fill`, () => {
       const tokens = palette[mode];
-      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(tokens.focus);
+      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(
+        tokens.focus,
+      );
       expect(alpha, "focus").not.toBeNull();
       for (const surface of SURFACES) {
         const unders = [
@@ -92,9 +116,15 @@ describe("keyboard focus marks", () => {
         ] as const;
         for (const [fill, under] of unders) {
           const halo = contrast(mix(tokens.accent, under, Number(alpha![1]) / 100), under);
-          expect(halo, `halo on ${fill}${surface} (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+          expect(
+            halo,
+            `halo on ${fill}${surface} (${mode}) = ${halo.toFixed(2)}:1`,
+          ).toBeGreaterThanOrEqual(3);
           const line = contrast(tokens.accent, under);
-          expect(line, `row line on ${fill}${surface} (${mode}) = ${line.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+          expect(
+            line,
+            `row line on ${fill}${surface} (${mode}) = ${line.toFixed(2)}:1`,
+          ).toBeGreaterThanOrEqual(3);
         }
       }
     });
@@ -163,9 +193,15 @@ describe("WCAG AA contrast, both modes", () => {
     // inside code blocks too (styles.css forces it over the syntax colors).
     it(`${mode} text on the match tints is AA`, () => {
       for (const surface of SURFACES) {
-        for (const [label, amount] of [["find match", 0.22], ["atom", 0.1]] as const) {
+        for (const [label, amount] of [
+          ["find match", 0.22],
+          ["atom", 0.1],
+        ] as const) {
           const tint = mix(palette[mode].match, palette[mode][surface], amount);
-          expect(contrast(palette[mode].ink, tint), `ink on ${label}/${surface} (${mode})`).toBeGreaterThanOrEqual(4.5);
+          expect(
+            contrast(palette[mode].ink, tint),
+            `ink on ${label}/${surface} (${mode})`,
+          ).toBeGreaterThanOrEqual(4.5);
         }
       }
     });
@@ -176,11 +212,17 @@ describe("WCAG AA contrast, both modes", () => {
         for (const surface of SURFACES) {
           const fill = mix(palette[mode].ink, palette[mode][surface], amount);
           for (const fg of ["ink", "muted"] as const) {
-            expect(contrast(palette[mode][fg], fill), `${fg} on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(4.5);
+            expect(
+              contrast(palette[mode][fg], fill),
+              `${fg} on ${state}/${surface} (${mode})`,
+            ).toBeGreaterThanOrEqual(4.5);
           }
           // The opaque match chip keeps the 3:1 graphical floor on the full
           // fill, the only fill rows use (see the attenuation scan below).
-          expect(contrast(palette[mode].match, fill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
+          expect(
+            contrast(palette[mode].match, fill),
+            `match on ${state}/${surface} (${mode})`,
+          ).toBeGreaterThanOrEqual(3);
         }
       }
     });
@@ -190,8 +232,14 @@ describe("WCAG AA contrast, both modes", () => {
     it(`${mode} subtle text on the selected fill shows in muted at AA`, () => {
       const amount = inkAlpha(palette[mode].selected, "selected");
       for (const surface of SURFACES) {
-        const ratio = contrast(palette[mode].muted, mix(palette[mode].ink, palette[mode][surface], amount));
-        expect(ratio, `muted on selected/${surface} (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+        const ratio = contrast(
+          palette[mode].muted,
+          mix(palette[mode].ink, palette[mode][surface], amount),
+        );
+        expect(
+          ratio,
+          `muted on selected/${surface} (${mode}) = ${ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(4.5);
       }
     });
 
@@ -204,8 +252,14 @@ describe("WCAG AA contrast, both modes", () => {
         ["hover", inkAlpha(palette[mode].hover, "hover")],
         ["selected", inkAlpha(palette[mode].selected, "selected")],
       ] as const) {
-        const ratio = contrast(palette[mode].danger, mix(palette[mode].ink, palette[mode].panel, amount));
-        expect(ratio, `danger on ${fill}/panel (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+        const ratio = contrast(
+          palette[mode].danger,
+          mix(palette[mode].ink, palette[mode].panel, amount),
+        );
+        expect(
+          ratio,
+          `danger on ${fill}/panel (${mode}) = ${ratio.toFixed(2)}:1`,
+        ).toBeGreaterThanOrEqual(4.5);
       }
     });
 
@@ -222,7 +276,10 @@ describe("WCAG AA contrast, both modes", () => {
             [`${surface} tint`, mix(fg, bg, 0.15)],
           ] as const) {
             const ratio = contrast(fg, on);
-            expect(ratio, `${hue} on ${label} (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+            expect(
+              ratio,
+              `${hue} on ${label} (${mode}) = ${ratio.toFixed(2)}:1`,
+            ).toBeGreaterThanOrEqual(4.5);
           }
         }
       }
@@ -239,12 +296,19 @@ describe("the danger confirm", () => {
     it(`${mode} label, fill and halo clear their thresholds`, () => {
       const t = palette[mode];
       const label = contrast(t.onDanger, t.dangerFill);
-      expect(label, `on-danger on danger-fill (${mode}) = ${label.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      expect(
+        label,
+        `on-danger on danger-fill (${mode}) = ${label.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(4.5);
       const hover = contrast(mix(t.onDanger, t.panel, HOVER), mix(t.dangerFill, t.panel, HOVER));
       expect(hover, `hovered label (${mode}) = ${hover.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
       const fill = contrast(t.dangerFill, t.panel);
-      expect(fill, `danger-fill on panel (${mode}) = ${fill.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
-      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(t.focus);
+      expect(fill, `danger-fill on panel (${mode}) = ${fill.toFixed(2)}:1`).toBeGreaterThanOrEqual(
+        3,
+      );
+      const alpha = /^color-mix\(in srgb, var\(--dohc-accent\) (\d+)%, transparent\)$/.exec(
+        t.focus,
+      );
       expect(alpha, "focus").not.toBeNull();
       const halo = contrast(mix(t.accent, t.panel, Number(alpha![1]) / 100), t.panel);
       expect(halo, `halo on panel (${mode}) = ${halo.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
@@ -253,7 +317,10 @@ describe("the danger confirm", () => {
     it(`${mode} glyph clears 3:1 on its tile`, () => {
       const t = palette[mode];
       const glyph = contrast(t.danger, t.dangerTint);
-      expect(glyph, `danger on danger-tint (${mode}) = ${glyph.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+      expect(
+        glyph,
+        `danger on danger-tint (${mode}) = ${glyph.toFixed(2)}:1`,
+      ).toBeGreaterThanOrEqual(3);
     });
   }
 });
@@ -315,10 +382,13 @@ describe("styles.css mirrors tokens.ts", () => {
 describe("renderer rows use the full state fills", () => {
   it("has no bg-selected/ or bg-hover/ opacity modifier", () => {
     const root = fileURLToPath(new URL(".", import.meta.url));
-    const sources = readdirSync(root, { recursive: true, encoding: "utf8" })
-      .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name));
+    const sources = readdirSync(root, { recursive: true, encoding: "utf8" }).filter(
+      (name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name),
+    );
     expect(sources.length).toBeGreaterThan(100);
-    const offenders = sources.filter((name) => /\bbg-(selected|hover)\//.test(readFileSync(join(root, name), "utf8")));
+    const offenders = sources.filter((name) =>
+      /\bbg-(selected|hover)\//.test(readFileSync(join(root, name), "utf8")),
+    );
     expect(offenders).toEqual([]);
   });
 
@@ -328,10 +398,14 @@ describe("renderer rows use the full state fills", () => {
     const root = fileURLToPath(new URL(".", import.meta.url));
     const painters = readdirSync(root, { recursive: true, encoding: "utf8" })
       .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name))
-      .filter((name) => /var\(--(color|dohc)-(selected|selection)\)/.test(readFileSync(join(root, name), "utf8")));
+      .filter((name) =>
+        /var\(--(color|dohc)-(selected|selection)\)/.test(readFileSync(join(root, name), "utf8")),
+      );
     expect(painters.map((name) => name.replace(/\\/g, "/"))).toContain("ui/Ref.tsx");
     for (const name of painters) {
-      expect(readFileSync(join(root, name), "utf8"), name).toContain("[--dohc-subtle:var(--dohc-muted)]");
+      expect(readFileSync(join(root, name), "utf8"), name).toContain(
+        "[--dohc-subtle:var(--dohc-muted)]",
+      );
     }
   });
 });
@@ -345,7 +419,9 @@ describe("copies of the palette mirror tokens.ts", () => {
     Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]),
   );
   const declarations = (css: string) =>
-    [...css.matchAll(/(--dohc-[a-z0-9-]+): ([^;]+);/g)].map(([, name, value]) => [name!, value!] as const);
+    [...css.matchAll(/(--dohc-[a-z0-9-]+): ([^;]+);/g)].map(
+      ([, name, value]) => [name!, value!] as const,
+    );
 
   it("the site demo keeps no copy that could drift", () => {
     const css = readFileSync(new URL("../../../site/src/demo.css", import.meta.url), "utf8");
@@ -354,7 +430,9 @@ describe("copies of the palette mirror tokens.ts", () => {
 
   it("the document export", () => {
     const source = readFileSync(new URL("./editor/documentExport.ts", import.meta.url), "utf8");
-    const found = [...source.matchAll(/^\s+--([a-z0-9-]+): (#[0-9a-f]{6});$/gm)].map(([, name, value]) => [`--dohc-${name}`, value!] as const);
+    const found = [...source.matchAll(/^\s+--([a-z0-9-]+): (#[0-9a-f]{6});$/gm)].map(
+      ([, name, value]) => [`--dohc-${name}`, value!] as const,
+    );
     expect(found.length).toBeGreaterThan(0);
     for (const [name, value] of found) {
       expect(value, name).toBe(palette.light[keyOf[name]!]);
@@ -369,8 +447,11 @@ describe("the type stacks name the bundled families", () => {
   const require = createRequire(import.meta.url);
   const declaredFamilies = (specifier: string) =>
     new Set(
-      [...readFileSync(require.resolve(specifier), "utf8").matchAll(/font-family:\s*['"]?([^'";]+)['"]?;/g)]
-        .map((match) => match[1]),
+      [
+        ...readFileSync(require.resolve(specifier), "utf8").matchAll(
+          /font-family:\s*['"]?([^'";]+)['"]?;/g,
+        ),
+      ].map((match) => match[1]),
     );
   const firstFamily = (stack: string) => stack.split(",")[0].trim().replace(/^"|"$/g, "");
 
@@ -390,11 +471,16 @@ it("keeps document caret labels at AA for every hue and neutral in both themes",
   expect(label.match(/\bcolor:\s*([^;]+);/)![1]!.trim()).toBe("var(--dohc-bg)");
   for (const hue of [null, ...IDENTITY_HUES]) {
     for (const mode of ["light", "dark"] as const) {
-      expect(contrast(palette[mode].bg, presentationColor({ group: "label", hue, self: false }, "human", mode).stroke), `${hue ?? "neutral"} label (${mode})`).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(
+          palette[mode].bg,
+          presentationColor({ group: "label", hue, self: false }, "human", mode).stroke,
+        ),
+        `${hue ?? "neutral"} label (${mode})`,
+      ).toBeGreaterThanOrEqual(4.5);
     }
   }
 });
-
 
 it("keeps agent name, glyph and opaque border contrast on every surface in both themes", () => {
   for (const mode of ["light", "dark"] as const) {
@@ -402,7 +488,10 @@ it("keeps agent name, glyph and opaque border contrast on every surface in both 
       const token = { group: "contrast", hue, self: false };
       const color = presentationColor(token, "agent", mode).stroke;
       for (const surface of SURFACES) {
-        expect(contrast(color, palette[mode][surface]), String(hue) + "/" + surface).toBeGreaterThanOrEqual(4.5);
+        expect(
+          contrast(color, palette[mode][surface]),
+          String(hue) + "/" + surface,
+        ).toBeGreaterThanOrEqual(4.5);
       }
       // The name and sparkle beside the avatar take the hue measured above.
       expect(agentTextClass(token)).toBe(hue ? "text-hue-" + hue : "text-agent");

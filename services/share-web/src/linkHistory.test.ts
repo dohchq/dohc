@@ -1,8 +1,5 @@
 import { afterEach, expect, it } from "vitest";
-import {
-  Client,
-  StreamableHTTPClientTransport,
-} from "@modelcontextprotocol/client";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { signInAgent } from "./mcpSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 import {
@@ -32,15 +29,8 @@ it.each(["view", "comment"] as const)(
     const storage = await testStorage();
     const relay = testHandler(storage, { relayExchangeKey: RELAY_EXCHANGE_KEY });
     expect(
-      (
-        await relay(
-          request(
-            owner,
-            "/sync/workspaces",
-            jsonBody({ workspaceId: workspace }),
-          ),
-        )
-      ).status,
+      (await relay(request(owner, "/sync/workspaces", jsonBody({ workspaceId: workspace }))))
+        .status,
     ).toBe(200);
     const old = await putBlob(relay, owner, workspace, "old body");
     const current = await putBlob(relay, owner, workspace, "current body");
@@ -73,11 +63,7 @@ it.each(["view", "comment"] as const)(
     );
     const link = await json(
       await relay(
-        request(
-          owner,
-          `/sync/${workspace}/shares/${share.shareId}/links`,
-          jsonBody({ access }),
-        ),
+        request(owner, `/sync/${workspace}/shares/${share.shareId}/links`, jsonBody({ access })),
       ),
     );
     const secret = linkSecret(link.url);
@@ -112,15 +98,9 @@ it.each(["view", "comment"] as const)(
     expect((await json(await browser("/api/view/current"))).files).toEqual([
       expect.objectContaining({ blobSha256: current }),
     ]);
-    expect(await (await browser(`/api/view/blob/${current}`)).text()).toBe(
-      "current body",
-    );
-    const changes = await json(
-      await browser("/api/view/log?since=0&current=true"),
-    );
-    expect(JSON.stringify(changes)).not.toMatch(
-      /forkSnapshots|payloadBefore|old body/,
-    );
+    expect(await (await browser(`/api/view/blob/${current}`)).text()).toBe("current body");
+    const changes = await json(await browser("/api/view/log?since=0&current=true"));
+    expect(JSON.stringify(changes)).not.toMatch(/forkSnapshots|payloadBefore|old body/);
     expect(JSON.stringify(changes)).not.toContain(old);
 
     const agent = await signInAgent(send, origin, secret);
@@ -138,9 +118,9 @@ it.each(["view", "comment"] as const)(
           },
         }),
       );
-      expect(
-        (await client.listTools()).tools.map((tool) => tool.name),
-      ).not.toContain("dohc_list_changes");
+      expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain(
+        "dohc_list_changes",
+      );
       await expect(
         client.callTool({ name: "dohc_list_changes", arguments: { since: 0 } }),
       ).rejects.toThrow("not found");

@@ -41,15 +41,32 @@ const BOARD_YAML = [
   "",
 ].join("\n");
 
-interface RunLine { runId: string; door: string; phase: "ask" | "answer"; threadId: string; sameRun?: boolean; promptHasAnswer?: boolean; promptHasCard?: boolean; promptHasQuestion?: boolean }
+interface RunLine {
+  runId: string;
+  door: string;
+  phase: "ask" | "answer";
+  threadId: string;
+  sameRun?: boolean;
+  promptHasAnswer?: boolean;
+  promptHasCard?: boolean;
+  promptHasQuestion?: boolean;
+}
 
-async function seed(temp: TempWorkspace, door: "mcp" | "cli", when: "mid-run" | "after-run"): Promise<void> {
+async function seed(
+  temp: TempWorkspace,
+  door: "mcp" | "cli",
+  when: "mid-run" | "after-run",
+): Promise<void> {
   const settings: DesktopUserSettings = {
     ...DEFAULT_USER_SETTINGS,
     profile: { preferredName: "Ice" },
     agents: {
       default: {
-        name: "Nova", hue: "olive", changesFiles: true, enabled: true, timeoutMinutes: 2,
+        name: "Nova",
+        hue: "olive",
+        changesFiles: true,
+        enabled: true,
+        timeoutMinutes: 2,
         launch: { command: `node "${agent.replaceAll('"', '\\"')}" ${door} ${when}` },
       },
     },
@@ -57,12 +74,18 @@ async function seed(temp: TempWorkspace, door: "mcp" | "cli", when: "mid-run" | 
   await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
   await mkdir(join(temp.rootPath, "board"), { recursive: true });
   await writeFile(join(temp.rootPath, "board", "collection.yaml"), BOARD_YAML);
-  await writeFile(join(temp.rootPath, "board", "launch.md"), "---\nid: rec_launche2e234567abcdefgh234\nName: Launch\nStatus: In progress\n---\n");
+  await writeFile(
+    join(temp.rootPath, "board", "launch.md"),
+    "---\nid: rec_launche2e234567abcdefgh234\nName: Launch\nStatus: In progress\n---\n",
+  );
 }
 
 async function runLines(file: string): Promise<RunLine[]> {
   const text = await readFile(file, "utf8").catch(() => "");
-  return text.split("\n").filter(Boolean).map(line => JSON.parse(line) as RunLine);
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as RunLine);
 }
 
 async function card(temp: TempWorkspace): Promise<string> {
@@ -71,20 +94,35 @@ async function card(temp: TempWorkspace): Promise<string> {
 
 // What dispatch holds for a thread: its live run and the requests waiting
 // for one.
-async function dispatchState(page: Page, threadId: string): Promise<{ liveRunId: string | null; pendingCount: number }> {
+async function dispatchState(
+  page: Page,
+  threadId: string,
+): Promise<{ liveRunId: string | null; pendingCount: number }> {
   return await page.evaluate(async (thread) => {
-    const api = (window as unknown as { dohcDesktop: {
-      getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-      chatDispatchStateForThread(payload: { workspaceId: string; threadId: string }): Promise<{ liveRunId: string | null; pendingCount: number }>;
-    } }).dohcDesktop;
+    const api = (
+      window as unknown as {
+        dohcDesktop: {
+          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
+          chatDispatchStateForThread(payload: {
+            workspaceId: string;
+            threadId: string;
+          }): Promise<{ liveRunId: string | null; pendingCount: number }>;
+        };
+      }
+    ).dohcDesktop;
     const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-    const { liveRunId, pendingCount } = await api.chatDispatchStateForThread({ workspaceId, threadId: thread });
+    const { liveRunId, pendingCount } = await api.chatDispatchStateForThread({
+      workspaceId,
+      threadId: thread,
+    });
     return { liveRunId, pendingCount };
   }, threadId);
 }
 
 function postCard(view: Locator, title: string): Locator {
-  return view.getByTestId("chats-post-card").filter({ has: view.page().getByTestId("chats-post-title").filter({ hasText: title }) });
+  return view
+    .getByTestId("chats-post-card")
+    .filter({ has: view.page().getByTestId("chats-post-title").filter({ hasText: title }) });
 }
 
 for (const door of ["mcp", "cli"] as const) {
@@ -102,14 +140,21 @@ for (const door of ["mcp", "cli"] as const) {
         await trustOpenWorkspace(desktop);
         const page = desktop.page;
         // The board is a Collection before the agent writes to its card.
-        await expect(page.locator('[data-testid="tree-row"][data-path="board"]')).toHaveAttribute("data-collection", "true", { timeout: 60_000 });
+        await expect(page.locator('[data-testid="tree-row"][data-path="board"]')).toHaveAttribute(
+          "data-collection",
+          "true",
+          { timeout: 60_000 },
+        );
         await openMyAgent(page);
         await page.getByTestId("chats-lane-composer").fill("Work the launch card on the board.");
         await page.getByTestId("chats-lane-composer").press("Enter");
 
         // The agent blocks its card, makes #needs-ice, and asks there with
         // the card attached.
-        const group = page.getByTestId(desktopPins.sidePanel).getByTestId("chats-channel").filter({ hasText: "needs-ice" });
+        const group = page
+          .getByTestId(desktopPins.sidePanel)
+          .getByTestId("chats-channel")
+          .filter({ hasText: "needs-ice" });
         await expect(group).toBeVisible({ timeout: 60_000 });
         await expect.poll(() => card(temp), { timeout: 30_000 }).toContain("Status: Blocked");
         await group.click();
@@ -127,7 +172,11 @@ for (const door of ["mcp", "cli"] as const) {
           // The asking run has ended before Ice answers.
           await expect.poll(async () => (await runLines(runs)).length).toBe(1);
           const [asked] = await runLines(runs);
-          await expect.poll(async () => (await dispatchState(page, asked!.threadId)).liveRunId, { timeout: 30_000 }).toBeNull();
+          await expect
+            .poll(async () => (await dispatchState(page, asked!.threadId)).liveRunId, {
+              timeout: 30_000,
+            })
+            .toBeNull();
         }
 
         // Ice replies in the thread like anyone would: no mention, no Answer.
@@ -135,24 +184,41 @@ for (const door of ["mcp", "cli"] as const) {
         await view.getByTestId("chats-composer").press("Enter");
 
         // The agent sets the card from the answer and resolves the question.
-        await expect(view.getByText("Going with Friday. The card is back In progress.")).toBeVisible({ timeout: 60_000 });
+        await expect(
+          view.getByText("Going with Friday. The card is back In progress."),
+        ).toBeVisible({ timeout: 60_000 });
         await expect(opening.getByTestId("chats-message-decision-resolved")).toBeVisible();
-        await expect.poll(() => card(temp), { timeout: 30_000 }).toMatch(/Status: In progress[\s\S]*Decision: Friday|Decision: Friday[\s\S]*Status: In progress/u);
+        await expect
+          .poll(() => card(temp), { timeout: 30_000 })
+          .toMatch(
+            /Status: In progress[\s\S]*Decision: Friday|Decision: Friday[\s\S]*Status: In progress/u,
+          );
 
         // Once no run is live and nothing waits in the thread, the runs are
         // settled: the reply started a run only when no run was there to
         // take it.
         const askedIn = (await runLines(runs))[0]!.threadId;
-        await expect.poll(async () => [await dispatchState(page, askedIn), await dispatchState(page, threadId)], { timeout: 30_000 })
-          .toEqual([{ liveRunId: null, pendingCount: 0 }, { liveRunId: null, pendingCount: 0 }]);
+        await expect
+          .poll(
+            async () => [await dispatchState(page, askedIn), await dispatchState(page, threadId)],
+            { timeout: 30_000 },
+          )
+          .toEqual([
+            { liveRunId: null, pendingCount: 0 },
+            { liveRunId: null, pendingCount: 0 },
+          ]);
         const lines = await runLines(runs);
-        expect(lines.map(line => line.phase)).toEqual(["ask", "answer"]);
-        expect(lines.every(line => line.door === door)).toBe(true);
+        expect(lines.map((line) => line.phase)).toEqual(["ask", "answer"]);
+        expect(lines.every((line) => line.door === door)).toBe(true);
         if (when === "mid-run") {
           expect(lines[1]).toMatchObject({ runId: lines[0]!.runId, sameRun: true });
         } else {
           expect(lines[1]!.runId).not.toBe(lines[0]!.runId);
-          expect(lines[1]).toMatchObject({ promptHasAnswer: true, promptHasCard: true, promptHasQuestion: true });
+          expect(lines[1]).toMatchObject({
+            promptHasAnswer: true,
+            promptHasCard: true,
+            promptHasQuestion: true,
+          });
         }
       } finally {
         await cleanupDesktopWorkspace(desktop, temp);

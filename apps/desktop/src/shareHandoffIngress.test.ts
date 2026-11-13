@@ -35,10 +35,22 @@ const INVALID_URLS = [
   ["trailing slash", `dohc://open/${CODE_A}/?relay=${encodeURIComponent(RELAY_A)}`],
   ["percent-encoded code", `dohc://open/${"A".repeat(42)}%41?relay=${encodeURIComponent(RELAY_A)}`],
   ["unencoded relay", `dohc://open/${CODE_A}?relay=${RELAY_A}`],
-  ["relay credentials", `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://user:pass@relay-a.example")}`],
-  ["relay query", `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://relay-a.example?token=secret")}`],
-  ["relay fragment", `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://relay-a.example#secret")}`],
-  ["noncanonical relay host", `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://Relay-A.Example/")}`],
+  [
+    "relay credentials",
+    `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://user:pass@relay-a.example")}`,
+  ],
+  [
+    "relay query",
+    `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://relay-a.example?token=secret")}`,
+  ],
+  [
+    "relay fragment",
+    `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://relay-a.example#secret")}`,
+  ],
+  [
+    "noncanonical relay host",
+    `dohc://open/${CODE_A}?relay=${encodeURIComponent("https://Relay-A.Example/")}`,
+  ],
   ["invalid relay encoding", `dohc://open/${CODE_A}?relay=%ZZ`],
   ["leading whitespace", ` ${VALID_URL}`],
   ["trailing whitespace", `${VALID_URL} `],
@@ -51,8 +63,14 @@ const INVALID_URLS = [
   ["host-suffix lookalike", `dohc://open.example/${CODE_A}?relay=${encodeURIComponent(RELAY_A)}`],
   ["short code", `dohc://open/${"A".repeat(42)}?relay=${encodeURIComponent(RELAY_A)}`],
   ["long code", `dohc://open/${"A".repeat(44)}?relay=${encodeURIComponent(RELAY_A)}`],
-  ["forbidden code character", `dohc://open/${"A".repeat(42)}.?relay=${encodeURIComponent(RELAY_A)}`],
-  ["Unicode case-folding code character", `dohc://open/${"A".repeat(42)}K?relay=${encodeURIComponent(RELAY_A)}`],
+  [
+    "forbidden code character",
+    `dohc://open/${"A".repeat(42)}.?relay=${encodeURIComponent(RELAY_A)}`,
+  ],
+  [
+    "Unicode case-folding code character",
+    `dohc://open/${"A".repeat(42)}K?relay=${encodeURIComponent(RELAY_A)}`,
+  ],
 ] as const;
 
 afterEach(() => {
@@ -90,26 +108,10 @@ describe("share handoff argument classifier", () => {
   it.each([
     ["plain launch", ["dohc.exe"], "plain"],
     ["exact accepted handoff", ["dohc.exe", VALID_URL], "accepted"],
-    [
-      "accepted upper-case scheme",
-      ["dohc.exe", CASE_VARIANT_URLS[0][1]],
-      "accepted",
-    ],
-    [
-      "accepted upper-case host",
-      ["dohc.exe", CASE_VARIANT_URLS[1][1]],
-      "accepted",
-    ],
-    [
-      "accepted mixed-case scheme and host",
-      ["dohc.exe", CASE_VARIANT_URLS[2][1]],
-      "accepted",
-    ],
-    [
-      "rejected lower-case lookalike",
-      ["dohc.exe", `${VALID_URL}?source=browser`],
-      "rejected",
-    ],
+    ["accepted upper-case scheme", ["dohc.exe", CASE_VARIANT_URLS[0][1]], "accepted"],
+    ["accepted upper-case host", ["dohc.exe", CASE_VARIANT_URLS[1][1]], "accepted"],
+    ["accepted mixed-case scheme and host", ["dohc.exe", CASE_VARIANT_URLS[2][1]], "accepted"],
+    ["rejected lower-case lookalike", ["dohc.exe", `${VALID_URL}?source=browser`], "rejected"],
     [
       "workspace path plus rejected lookalike",
       ["dohc.exe", "C:\\workspaces\\trip", `${VALID_URL}#handoff`],
@@ -235,10 +237,7 @@ describe("share handoff delivery", () => {
     };
     expect(receiveShareHandoffArguments([VALID_URL], slot)).toBe(true);
 
-    const accepted = receiveShareHandoffArguments(
-      [`${VALID_URL}?lookalike=1`],
-      slot,
-    );
+    const accepted = receiveShareHandoffArguments([`${VALID_URL}?lookalike=1`], slot);
     if (accepted) focusShareHandoffWindow(window);
 
     expect(accepted).toBe(false);
@@ -256,46 +255,68 @@ describe("share handoff delivery", () => {
     ];
     const slot = createShareHandoffIntentSlot();
 
-    receiveShareHandoffArguments(
-      [VALID_URL, `${VALID_URL}?must-not-be-recorded=1`],
-      slot,
-    );
+    receiveShareHandoffArguments([VALID_URL, `${VALID_URL}?must-not-be-recorded=1`], slot);
 
     for (const recorder of recorders) expect(recorder).not.toHaveBeenCalled();
   });
 });
 
 describe("share handoff runtime registration", () => {
-  it.each([true, false])("leaves the OS handler untouched for isolated QA (defaultApp=%s)", (defaultApp) => {
-    const setAsDefaultProtocolClient = vi.fn(() => true);
-    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
-      platform: "win32",
-      defaultApp,
-      execPath: "dohc.exe",
-      argv: ["dohc.exe", "--dohc-isolated-test", `--user-data-dir=${resolve("isolated-profile")}`],
-    })).toBe(false);
-    expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
-  });
+  it.each([true, false])(
+    "leaves the OS handler untouched for isolated QA (defaultApp=%s)",
+    (defaultApp) => {
+      const setAsDefaultProtocolClient = vi.fn(() => true);
+      expect(
+        registerShareHandoffProtocol(
+          { setAsDefaultProtocolClient },
+          {
+            platform: "win32",
+            defaultApp,
+            execPath: "dohc.exe",
+            argv: [
+              "dohc.exe",
+              "--dohc-isolated-test",
+              `--user-data-dir=${resolve("isolated-profile")}`,
+            ],
+          },
+        ),
+      ).toBe(false);
+      expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each([[], ["--user-data-dir=relative"], ["--user-data-dir="],
+  it.each([
+    [],
+    ["--user-data-dir=relative"],
+    ["--user-data-dir="],
     [`--user-data-dir=${resolve("one")}`, `--user-data-dir=${resolve("two")}`],
   ])("rejects an isolated launch without one absolute profile: %j", (...profileArgs) => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
-    expect(() => registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
-      platform: "win32",
-      execPath: "dohc.exe",
-      argv: ["dohc.exe", "--dohc-isolated-test", ...profileArgs],
-    })).toThrow("one absolute --user-data-dir");
+    expect(() =>
+      registerShareHandoffProtocol(
+        { setAsDefaultProtocolClient },
+        {
+          platform: "win32",
+          execPath: "dohc.exe",
+          argv: ["dohc.exe", "--dohc-isolated-test", ...profileArgs],
+        },
+      ),
+    ).toThrow("one absolute --user-data-dir");
     expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
   });
 
   it("keeps protocol registration for a normal launch with a custom profile", () => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
-    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
-      platform: "win32",
-      execPath: "dohc.exe",
-      argv: ["dohc.exe", `--user-data-dir=${resolve("custom-profile")}`],
-    })).toBe(true);
+    expect(
+      registerShareHandoffProtocol(
+        { setAsDefaultProtocolClient },
+        {
+          platform: "win32",
+          execPath: "dohc.exe",
+          argv: ["dohc.exe", `--user-data-dir=${resolve("custom-profile")}`],
+        },
+      ),
+    ).toBe(true);
     expect(setAsDefaultProtocolClient).toHaveBeenCalledWith("dohc");
   });
 
@@ -317,33 +338,39 @@ describe("share handoff runtime registration", () => {
       }),
     ).toBe(true);
     expect(calls).toEqual([
-      [
-        "dohc",
-        "C:\\runtime\\electron.exe",
-        [resolve("relative/app-entry.js")],
-      ],
+      ["dohc", "C:\\runtime\\electron.exe", [resolve("relative/app-entry.js")]],
     ]);
   });
 
   it("leaves the macOS handler alone in development, where it would claim the scheme for Electron", () => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
-    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
-      platform: "darwin",
-      defaultApp: true,
-      execPath: "/repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
-      argv: ["Electron", "dist/main/main.js"],
-    })).toBe(false);
+    expect(
+      registerShareHandoffProtocol(
+        { setAsDefaultProtocolClient },
+        {
+          platform: "darwin",
+          defaultApp: true,
+          execPath: "/repo/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+          argv: ["Electron", "dist/main/main.js"],
+        },
+      ),
+    ).toBe(false);
     expect(setAsDefaultProtocolClient).not.toHaveBeenCalled();
   });
 
   it("registers the packaged macOS app with the scheme alone", () => {
     const setAsDefaultProtocolClient = vi.fn(() => true);
-    expect(registerShareHandoffProtocol({ setAsDefaultProtocolClient }, {
-      platform: "darwin",
-      defaultApp: false,
-      execPath: "/Applications/dohc.app/Contents/MacOS/dohc",
-      argv: ["/Applications/dohc.app/Contents/MacOS/dohc"],
-    })).toBe(true);
+    expect(
+      registerShareHandoffProtocol(
+        { setAsDefaultProtocolClient },
+        {
+          platform: "darwin",
+          defaultApp: false,
+          execPath: "/Applications/dohc.app/Contents/MacOS/dohc",
+          argv: ["/Applications/dohc.app/Contents/MacOS/dohc"],
+        },
+      ),
+    ).toBe(true);
     expect(setAsDefaultProtocolClient).toHaveBeenCalledWith("dohc");
   });
 

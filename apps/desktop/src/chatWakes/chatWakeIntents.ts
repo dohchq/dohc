@@ -56,7 +56,10 @@ const same = (a: ChatWakeIntent, b: ChatWakeIntent) =>
  * sync can leave the new contents in place although the write rejected, so a
  * caller trusts a row it reads back only after saving it again.
  */
-export function createChatWakeIntents(file: string, operations?: DurableFileOperations): ChatWakeIntents {
+export function createChatWakeIntents(
+  file: string,
+  operations?: DurableFileOperations,
+): ChatWakeIntents {
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
     const result = queue.then(work);
@@ -65,14 +68,18 @@ export function createChatWakeIntents(file: string, operations?: DurableFileOper
   };
   const read = async (): Promise<ChatWakeIntent[]> => {
     let text: string;
-    try { text = await readFile(file, "utf8"); }
-    catch (error) {
+    try {
+      text = await readFile(file, "utf8");
+    } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
       throw error;
     }
     let value: unknown;
-    try { value = JSON.parse(text); }
-    catch { throw new ChatWakeIntentsUnreadableError(); }
+    try {
+      value = JSON.parse(text);
+    } catch {
+      throw new ChatWakeIntentsUnreadableError();
+    }
     const rows = ChatWakeIntentFile.safeParse(value);
     if (!rows.success) throw new ChatWakeIntentsUnreadableError();
     return rows.data;
@@ -83,14 +90,17 @@ export function createChatWakeIntents(file: string, operations?: DurableFileOper
   };
   return {
     list: () => serial(read),
-    save: (intent) => serial(async () => {
-      const rows = await read();
-      const at = rows.findIndex((row) => same(row, intent));
-      await write(at === -1 ? [...rows, intent] : rows.with(at, intent));
-    }),
-    remove: (intent) => serial(async () => {
-      const rows = await read();
-      if (rows.some((row) => same(row, intent))) await write(rows.filter((row) => !same(row, intent)));
-    }),
+    save: (intent) =>
+      serial(async () => {
+        const rows = await read();
+        const at = rows.findIndex((row) => same(row, intent));
+        await write(at === -1 ? [...rows, intent] : rows.with(at, intent));
+      }),
+    remove: (intent) =>
+      serial(async () => {
+        const rows = await read();
+        if (rows.some((row) => same(row, intent)))
+          await write(rows.filter((row) => !same(row, intent)));
+      }),
   };
 }

@@ -8,7 +8,9 @@ async function existingSource(root: string, path: string, source: string): Promi
   try {
     const existing = await readWorkspaceText(root, path);
     if (existing.truncated || existing.text !== source) {
-      throw new SourceCreationConflict(`${path} contains different source. Keep it and choose another folder.`);
+      throw new SourceCreationConflict(
+        `${path} contains different source. Keep it and choose another folder.`,
+      );
     }
     return true;
   } catch (error) {
@@ -31,7 +33,9 @@ export async function createDatasetSources(
   },
   progress?: SourceCreationProgress,
 ): Promise<void> {
-  const entries = Object.entries(files).sort(([a], [b]) => Number(a.endsWith("dataset.json")) - Number(b.endsWith("dataset.json")));
+  const entries = Object.entries(files).sort(
+    ([a], [b]) => Number(a.endsWith("dataset.json")) - Number(b.endsWith("dataset.json")),
+  );
   // Validate every destination before the first write.
   for (const [path, source] of entries) {
     await resolveWorkspaceMaterializePath(root, path);

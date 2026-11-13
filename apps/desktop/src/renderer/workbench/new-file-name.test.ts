@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
-import { nextPagePath, pageFileStem, withMarkdownDefault, withRenameDefault } from "./new-file-name";
+import {
+  nextPagePath,
+  pageFileStem,
+  withMarkdownDefault,
+  withRenameDefault,
+} from "./new-file-name";
 
 describe("pageFileStem", () => {
   it("keeps a title a file can hold as typed", () => {
@@ -40,7 +45,9 @@ describe("nextPagePath", () => {
 
   it("numbers the name past every taken one, ignoring case", () => {
     expect(nextPagePath("", "Untitled", new Set(["untitled.md"]), "win32")).toBe("Untitled 2.md");
-    expect(nextPagePath("Trip", "Plan", new Set(["trip/plan.md", "trip/plan 2.md"]), "win32")).toBe("Trip/Plan 3.md");
+    expect(nextPagePath("Trip", "Plan", new Set(["trip/plan.md", "trip/plan 2.md"]), "win32")).toBe(
+      "Trip/Plan 3.md",
+    );
   });
 
   it("cuts the name short so a path in a deep folder stays inside the engine's limit", () => {
@@ -72,9 +79,7 @@ describe("withMarkdownDefault", () => {
   });
 
   it("appends .md to the leaf of a nested path", () => {
-    expect(withMarkdownDefault("plans/2026/roadmap")).toBe(
-      "plans/2026/roadmap.md",
-    );
+    expect(withMarkdownDefault("plans/2026/roadmap")).toBe("plans/2026/roadmap.md");
   });
 
   it("respects an explicit extension exactly", () => {

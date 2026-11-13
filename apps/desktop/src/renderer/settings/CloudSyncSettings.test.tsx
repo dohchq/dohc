@@ -5,13 +5,13 @@ import { toQR } from "toqr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult, CloudStopSyncResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
-import { SYNC_NOT_CONNECTED, SYNC_SIGN_IN_EXPIRED, SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
-import { palette } from "../tokens";
 import {
-  CloudSyncSettings,
-  SYNC_ON_NEEDS_SERVER,
-  type CloudSettings,
-} from "./CloudSyncSettings";
+  SYNC_NOT_CONNECTED,
+  SYNC_SIGN_IN_EXPIRED,
+  SYNC_UNCONFIRMED_ACCOUNT,
+} from "../cloudSyncWords";
+import { palette } from "../tokens";
+import { CloudSyncSettings, SYNC_ON_NEEDS_SERVER, type CloudSettings } from "./CloudSyncSettings";
 
 type SessionEvent = { sessionKey: string | null; phase: "changing" | "ready" };
 const sessionListeners = new Set<(event: SessionEvent) => void>();
@@ -42,13 +42,21 @@ const SIGNED_IN: CloudStatusResult = {
   workspaceSyncConnected: false,
   workspaceSecretState: "none",
 };
-const SYNCED: CloudStatusResult = { ...SIGNED_IN, workspaceSynced: true, workspaceSyncConnected: true };
+const SYNCED: CloudStatusResult = {
+  ...SIGNED_IN,
+  workspaceSynced: true,
+  workspaceSyncConnected: true,
+};
 const PAUSED_AT = Date.UTC(2026, 9, 14, 13, 5);
 const PAUSE_BY_YOU: NonNullable<CloudStatusResult["syncPause"]> = {
   atMs: PAUSED_AT,
   author: { kind: "person", personId: "local-you", self: true },
 };
-const SIGNED_OUT_OWNED: CloudStatusResult = { connected: false, workspaceSyncOwned: true, workspaceSynced: false };
+const SIGNED_OUT_OWNED: CloudStatusResult = {
+  connected: false,
+  workspaceSyncOwned: true,
+  workspaceSynced: false,
+};
 const stopped = (workspaceId: string, syncPause = PAUSE_BY_YOU): CloudStopSyncResult => ({
   workspaceId,
   workspaceSynced: false,
@@ -64,7 +72,10 @@ const stopped = (workspaceId: string, syncPause = PAUSE_BY_YOU): CloudStopSyncRe
   },
 });
 
-function cloud(status: CloudStatusResult | null, overrides: Partial<CloudSettings> = {}): CloudSettings {
+function cloud(
+  status: CloudStatusResult | null,
+  overrides: Partial<CloudSettings> = {},
+): CloudSettings {
   return {
     status,
     unreadable: false,
@@ -119,7 +130,12 @@ describe("CloudSyncSettings", () => {
   // stays off and says why, below Connect server. Signed out, nothing syncs,
   // so Pause sync stands in for the switch, without Try again.
   it("lets a signed-out owner pause, then says turning sync on needs the server", async () => {
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
+    render(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })}
+      />,
+    );
     expect(screen.getByTestId("settings-cloud-connect")).toBeTruthy();
     expect(screen.queryByTestId("settings-row-account")).toBeNull();
     expect(screen.queryByTestId("cloud-relink-workspace")).toBeNull();
@@ -145,7 +161,12 @@ describe("CloudSyncSettings", () => {
   });
 
   it("shows a QR code of the server's origin, and nothing else, for connecting a phone", () => {
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })} />);
+    render(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SYNCED, serverUrl: "https://dohc.hollis.studio/" })}
+      />,
+    );
 
     const row = screen.getByTestId("settings-row-connect-phone");
     expect(row.textContent).toBe("Connect a phonedohc.hollis.studio");
@@ -174,7 +195,10 @@ describe("CloudSyncSettings", () => {
     const remove = screen.getByRole("menuitem", { name: "Delete account…" });
     expect(remove.className).toContain("text-danger");
     fireEvent.click(remove);
-    expect(settings.onDeleteAccount).toHaveBeenCalledWith({ email: "sam@hollis.studio", server: "https://dohc.hollis.studio" });
+    expect(settings.onDeleteAccount).toHaveBeenCalledWith({
+      email: "sam@hollis.studio",
+      server: "https://dohc.hollis.studio",
+    });
     expect(screen.queryByRole("menu")).toBeNull();
 
     // Not while Disconnect is ending the same session.
@@ -228,7 +252,9 @@ describe("CloudSyncSettings", () => {
     expect(control.getAttribute("aria-checked")).toBe("false");
     expect(control.getAttribute("aria-busy")).toBe("true");
     expect(control.disabled).toBe(true);
-    const spinner = within(screen.getByTestId("settings-row-sync-workspace")).getByTestId("switch-busy");
+    const spinner = within(screen.getByTestId("settings-row-sync-workspace")).getByTestId(
+      "switch-busy",
+    );
     expect(spinner.getAttribute("class")).toContain("animate-spin");
     expect(spinner.getAttribute("aria-hidden")).toBe("true");
     fireEvent.click(control);
@@ -254,9 +280,11 @@ describe("CloudSyncSettings", () => {
 
   it("sends a failed stop to the shell with a retry, and shows sync still on", async () => {
     bridgeMock.cloudStopSync
-      .mockRejectedValueOnce(new Error(
-        "Error invoking remote method 'desktop:cloud-stop-sync': Error: A live document could not settle.",
-      ))
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'desktop:cloud-stop-sync': Error: A live document could not settle.",
+        ),
+      )
       .mockResolvedValueOnce(stopped("ws-1"));
     const settings = cloud(SYNCED);
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
@@ -301,9 +329,11 @@ describe("CloudSyncSettings", () => {
 
   it("sends a failed enable to the shell with a retry", async () => {
     bridgeMock.cloudEnableSync
-      .mockRejectedValueOnce(new Error(
-        "Error invoking remote method 'desktop:cloud-enable-sync': Error: This workspace is already claimed by another account.",
-      ))
+      .mockRejectedValueOnce(
+        new Error(
+          "Error invoking remote method 'desktop:cloud-enable-sync': Error: This workspace is already claimed by another account.",
+        ),
+      )
       .mockResolvedValueOnce(undefined);
     const settings = cloud(SIGNED_IN);
     render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
@@ -328,7 +358,12 @@ describe("CloudSyncSettings", () => {
     bridgeMock.cloudEnableSync
       .mockRejectedValueOnce(new Error("Passphrase required to protect synced secrets."))
       .mockResolvedValueOnce(undefined);
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_IN, workspaceSecretState: "protected-key-present" })} />);
+    render(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SIGNED_IN, workspaceSecretState: "protected-key-present" })}
+      />,
+    );
 
     fireEvent.click(syncSwitch());
     const input = await screen.findByTestId("cloud-sync-passphrase");
@@ -346,33 +381,55 @@ describe("CloudSyncSettings", () => {
     fireEvent.click(submit);
 
     await waitFor(() =>
-      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({ workspaceId: "ws-1", passphrase: "12345678" }),
+      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
+        workspaceId: "ws-1",
+        passphrase: "12345678",
+      }),
     );
     await waitFor(() => expect(syncSwitch().getAttribute("aria-checked")).toBe("true"));
     expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
   });
 
   it("unlocks protected files, then offers to protect them", async () => {
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-missing" })} />);
+    render(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-missing" })}
+      />,
+    );
 
     fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
     const submit = screen.getByTestId("cloud-sync-passphrase-submit") as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "shared passphrase" } });
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), {
+      target: { value: "shared passphrase" },
+    });
     fireEvent.click(submit);
 
     await waitFor(() =>
-      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({ workspaceId: "ws-1", passphrase: "shared passphrase" }),
+      expect(bridgeMock.cloudEnableSync).toHaveBeenLastCalledWith({
+        workspaceId: "ws-1",
+        passphrase: "shared passphrase",
+      }),
     );
     expect(await screen.findByTestId("cloud-protect-secrets")).toBeTruthy();
   });
 
   it("keeps the passphrase field open when the passphrase cannot unlock", async () => {
-    bridgeMock.cloudEnableSync.mockRejectedValue(new Error("Passphrase could not unlock synced secrets."));
-    render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-missing" })} />);
+    bridgeMock.cloudEnableSync.mockRejectedValue(
+      new Error("Passphrase could not unlock synced secrets."),
+    );
+    render(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SYNCED, workspaceSecretState: "protected-key-missing" })}
+      />,
+    );
 
     fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
-    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "wrong passphrase" } });
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), {
+      target: { value: "wrong passphrase" },
+    });
     fireEvent.click(screen.getByTestId("cloud-sync-passphrase-submit"));
 
     expect((await screen.findByTestId("cloud-sync-error")).textContent).toBe(
@@ -384,11 +441,20 @@ describe("CloudSyncSettings", () => {
 
   it("closes the passphrase form on sign-out", () => {
     const protectedSynced = { ...SYNCED, workspaceSecretState: "protected-key-present" as const };
-    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(protectedSynced)} />);
+    const { rerender } = render(
+      <CloudSyncSettings workspaceId="ws-1" cloud={cloud(protectedSynced)} />,
+    );
     fireEvent.click(screen.getByTestId("cloud-protect-secrets"));
-    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "shared passphrase" } });
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), {
+      target: { value: "shared passphrase" },
+    });
 
-    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
+    rerender(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })}
+      />,
+    );
     expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
     expect(screen.queryByTestId("settings-row-protected-files")).toBeNull();
 
@@ -402,15 +468,26 @@ describe("CloudSyncSettings", () => {
     const enable = deferred<void>();
     bridgeMock.cloudEnableSync.mockReturnValueOnce(enable.promise);
     const lockedSynced = { ...SYNCED, workspaceSecretState: "protected-key-missing" as const };
-    const { rerender } = render(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(lockedSynced)} />);
+    const { rerender } = render(
+      <CloudSyncSettings workspaceId="ws-1" cloud={cloud(lockedSynced)} />,
+    );
     fireEvent.click(screen.getByTestId("cloud-unlock-secrets"));
-    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), { target: { value: "shared passphrase" } });
+    fireEvent.change(screen.getByTestId("cloud-sync-passphrase"), {
+      target: { value: "shared passphrase" },
+    });
     fireEvent.click(screen.getByTestId("cloud-sync-passphrase-submit"));
     await waitFor(() => expect(bridgeMock.cloudEnableSync).toHaveBeenCalledOnce());
 
-    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })} />);
+    rerender(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud({ ...SIGNED_OUT_OWNED, workspaceSynced: true })}
+      />,
+    );
     enable.reject(new Error("Passphrase could not unlock synced secrets."));
-    await waitFor(() => expect((screen.getByTestId("cloud-pause-sync") as HTMLButtonElement).disabled).toBe(false));
+    await waitFor(() =>
+      expect((screen.getByTestId("cloud-pause-sync") as HTMLButtonElement).disabled).toBe(false),
+    );
     expect(screen.queryByTestId("cloud-sync-passphrase")).toBeNull();
     expect(screen.queryByTestId("cloud-sync-passphrase-submit")).toBeNull();
   });
@@ -418,7 +495,10 @@ describe("CloudSyncSettings", () => {
   it("shows Sign in again and Pause sync, not the switch, once the sign-in expired", () => {
     const onSignInAgain = vi.fn();
     const { rerender } = render(
-      <CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: true, onSignInAgain })} />,
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud(SYNCED, { signInExpired: true, onSignInAgain })}
+      />,
     );
 
     const row = within(screen.getByTestId("settings-row-sync-workspace"));
@@ -427,7 +507,10 @@ describe("CloudSyncSettings", () => {
     expect(line.textContent).toBe(SYNC_SIGN_IN_EXPIRED);
     expect(line.className).toContain("text-danger");
     expect(row.queryByText(SYNC_UNCONFIRMED_ACCOUNT)).toBeNull();
-    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual(["Sign in again", "Pause sync"]);
+    expect(row.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Sign in again",
+      "Pause sync",
+    ]);
     expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
     fireEvent.click(row.getByRole("button", { name: "Sign in again" }));
     expect(onSignInAgain).toHaveBeenCalledOnce();
@@ -435,7 +518,12 @@ describe("CloudSyncSettings", () => {
     expect(bridgeMock.cloudStopSync).not.toHaveBeenCalled();
 
     // A new sign-in rebuilt the engine: the switch reads on again.
-    rerender(<CloudSyncSettings workspaceId="ws-1" cloud={cloud(SYNCED, { signInExpired: false, onSignInAgain })} />);
+    rerender(
+      <CloudSyncSettings
+        workspaceId="ws-1"
+        cloud={cloud(SYNCED, { signInExpired: false, onSignInAgain })}
+      />,
+    );
     expect(screen.queryByTestId("cloud-workspace-sign-in-expired")).toBeNull();
     expect(syncSwitch().getAttribute("aria-checked")).toBe("true");
   });
@@ -494,7 +582,9 @@ describe("CloudSyncSettings", () => {
   // drops its status, and the page swaps the account row for loading lines.
 
   it("retries a failed disconnect while no one has signed in since", async () => {
-    bridgeMock.cloudLogout.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(undefined);
+    bridgeMock.cloudLogout
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(undefined);
     const settings = cloud(SIGNED_IN);
     const { unmount } = render(<CloudSyncSettings workspaceId="ws-1" cloud={settings} />);
 

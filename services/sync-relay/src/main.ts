@@ -1,8 +1,23 @@
-import {parsePublicEditRelease} from "@dohc/security-contract";
-import {accountDisplayName} from "./accountDisplayName";
-import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
-import { createAccountSessionResolver, createPostgresAccountSessions, createSessionActorResolver, UnauthorizedError, type AccountSessions, type ResolveAccountSession, type ResolveActor } from "@dohc/workspace-auth/session";
-import { createPostgresCredentialFence, type CredentialFence } from "@dohc/workspace-auth/credentialFence";
+import { parsePublicEditRelease } from "@dohc/security-contract";
+import { accountDisplayName } from "./accountDisplayName";
+import {
+  APP_PUBLICATION_MAX_FILES,
+  APP_PUBLICATION_MAX_METADATA_BYTES,
+  APP_PUBLICATION_MAX_BUNDLE_BYTES,
+} from "@dohc/security-contract/app-publication";
+import {
+  createAccountSessionResolver,
+  createPostgresAccountSessions,
+  createSessionActorResolver,
+  UnauthorizedError,
+  type AccountSessions,
+  type ResolveAccountSession,
+  type ResolveActor,
+} from "@dohc/workspace-auth/session";
+import {
+  createPostgresCredentialFence,
+  type CredentialFence,
+} from "@dohc/workspace-auth/credentialFence";
 import { readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
@@ -19,10 +34,15 @@ import {
 import { Pool, type QueryConfig } from "pg";
 import { compileDatasetOperations } from "./datasetCompiler";
 import { createVerifiedEmailLookups } from "./verifiedEmailLookups";
-import {ACCOUNT_DELETION_PATH, ACCOUNT_DELETION_KEY_HEADER, accountDeletionKey, accountDeletionFenceKey} from "@dohc/workspace-auth/accountDeletion";
-import {createAccountDeletionRoute, fencePendingAccountDeletions} from "./accountDeletionRoute";
-import type {StorageContext} from "./storage/context";
-import {startLiveJournalCheck} from "./storage/liveJournalCheck";
+import {
+  ACCOUNT_DELETION_PATH,
+  ACCOUNT_DELETION_KEY_HEADER,
+  accountDeletionKey,
+  accountDeletionFenceKey,
+} from "@dohc/workspace-auth/accountDeletion";
+import { createAccountDeletionRoute, fencePendingAccountDeletions } from "./accountDeletionRoute";
+import type { StorageContext } from "./storage/context";
+import { startLiveJournalCheck } from "./storage/liveJournalCheck";
 import { createSignUpInviteRoute } from "./signUpInviteRoute";
 import { errorBody, errorResponse, notFound } from "./errors";
 import { RELAY_API_VERSIONS, relayApiVersionRefusal } from "./apiVersion";
@@ -37,13 +57,16 @@ import { AUTOMATION_SERVER_MAX_BODY_BYTES, isAutomationServerPath } from "./auto
 import { ACCOUNT_WORKSPACE_MAX_BODY_BYTES, isAccountWorkspacePath } from "./accountWorkspaceRoutes";
 import { isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
 import { AUTOMATION_PRESS_MAX_BODY_BYTES } from "@dohc/workspace-contracts/relay";
-import { parseNamedLiveBrowserHttpLimits, type NamedLiveBrowserHttpLimits } from "./namedLiveBrowserHttp";
+import {
+  parseNamedLiveBrowserHttpLimits,
+  type NamedLiveBrowserHttpLimits,
+} from "./namedLiveBrowserHttp";
 import { DEFAULT_WORKSPACE_QUOTA_BYTES, openSyncRelayStorage } from "./storage";
 import { createDeviceControl } from "./deviceControl";
-import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConfig";
-import {liveValidation} from "./liveValidation.js";
-import {readRelayDeviceDeliveryConfig} from "./deviceLiveHostConfig";
-import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-control";
+import { readOwnerAdmissionConfig, startOwnerAdmission } from "./ownerAdmissionConfig";
+import { liveValidation } from "./liveValidation.js";
+import { readRelayDeviceDeliveryConfig } from "./deviceLiveHostConfig";
+import { parseDeviceControlLimits } from "@dohc/live-session-contract/device-control";
 import { startPublicationOperator } from "./appPublicationOperator";
 import { operatorSecretPath, operatorSocketPath } from "./appPublicationOperatorProtocol";
 import { openRelayDeployment } from "./relayDeployment";
@@ -52,43 +75,72 @@ import { checkReaderConfig } from "./readerConfig";
 import { startServiceLiveHost, deleteConfiguredServiceWorkspaceRoots } from "./serviceLiveHost";
 import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
-import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
+import {
+  readAppBackendParticipantLimit,
+  readAppCollectionPolicy,
+  readAppPublicationConfig,
+} from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
-import { createOwnerLiveRoutes, createNamedLiveRoutes, createPersonalLiveRoutes } from "./namedLiveRoutes";
+import {
+  createOwnerLiveRoutes,
+  createNamedLiveRoutes,
+  createPersonalLiveRoutes,
+} from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
-import {createLinkLiveResolver} from "./linkLiveBrowserAuth";
-import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
-import {isLinkEndpointPath, isLinkLivePath} from "./linkEndpointPath";
-import {relayEntryPattern, SYNC_RELAY_REQUEST_LOG} from "./requestLog";
-import {createLinkLiveHttp} from "./linkLiveHttp";
-import {createLiveMembershipRegistry} from "./liveMembership";
-import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
-import {createNamedDesktopLive} from "./namedDesktopLive";
-import {parseNamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
-import type {NamedFrameNativeHost} from "./namedLiveFrameHost";
-import {createAutomationRecordHost} from "./automationRecordHost";
+import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
+import { normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
+import { isLinkEndpointPath, isLinkLivePath } from "./linkEndpointPath";
+import { relayEntryPattern, SYNC_RELAY_REQUEST_LOG } from "./requestLog";
+import { createLinkLiveHttp } from "./linkLiveHttp";
+import { createLiveMembershipRegistry } from "./liveMembership";
+import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
+import { createNamedDesktopLive } from "./namedDesktopLive";
+import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
+import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { createAutomationRecordHost } from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import {selfHostLiveProfile} from "./selfHostLiveProfile";
-import {startSelfHostedLiveHost, deleteSelfHostedWorkspaceRoots, selfHostedLiveHostId} from "./selfHostedLiveHost";
-import {createServiceHostEnrollmentRoutes, isServiceHostEnrollmentPath} from "./serviceHostEnrollmentRoutes";
-import {createPersonalLiveDocumentRoute, PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES, PERSONAL_LIVE_DOCUMENT_PATH} from "./personalLiveDocumentRoutes";
-import {createServiceHostReplication} from "./serviceHostReplication";
-import {authorizeServiceHostReplication} from "./serviceHostCredential";
-import {TokenBucketLimiter} from "@dohc/service-http";
-import {NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_MAX_SENDERS, NOTICE_POST_REFILL_PER_SECOND} from "./noticeRoutes";
-import {automationServerLabel, startAutomationServer} from "./automationServer";
-import {isPublicHttpsOrigin, removeAutomationReplicas} from "./automationReplicas";
-import {tombstoneSettledOperations} from "./operationPublication";
-import {sweepChatWakesInBatches} from "./chatWakes";
-import {startServerCopies, type ServerCopies} from "./serverCopies";
-import {AUTOMATION_REPLICA_BEARER_PREFIX, authorizeAutomationReplication} from "./automationReplicaCredential";
+import { selfHostLiveProfile } from "./selfHostLiveProfile";
+import {
+  startSelfHostedLiveHost,
+  deleteSelfHostedWorkspaceRoots,
+  selfHostedLiveHostId,
+} from "./selfHostedLiveHost";
+import {
+  createServiceHostEnrollmentRoutes,
+  isServiceHostEnrollmentPath,
+} from "./serviceHostEnrollmentRoutes";
+import {
+  createPersonalLiveDocumentRoute,
+  PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES,
+  PERSONAL_LIVE_DOCUMENT_PATH,
+} from "./personalLiveDocumentRoutes";
+import { createServiceHostReplication } from "./serviceHostReplication";
+import { authorizeServiceHostReplication } from "./serviceHostCredential";
+import { TokenBucketLimiter } from "@dohc/service-http";
+import {
+  NOTICE_POST_BUCKET_CAPACITY,
+  NOTICE_POST_MAX_SENDERS,
+  NOTICE_POST_REFILL_PER_SECOND,
+} from "./noticeRoutes";
+import { automationServerLabel, startAutomationServer } from "./automationServer";
+import { isPublicHttpsOrigin, removeAutomationReplicas } from "./automationReplicas";
+import { tombstoneSettledOperations } from "./operationPublication";
+import { sweepChatWakesInBatches } from "./chatWakes";
+import { startServerCopies, type ServerCopies } from "./serverCopies";
+import {
+  AUTOMATION_REPLICA_BEARER_PREFIX,
+  authorizeAutomationReplication,
+} from "./automationReplicaCredential";
 
 const SHUTDOWN_GRACE_PERIOD_MS = parseGracePeriodMs(
-  process.env.NODE_ENV === "test" ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS : undefined,
+  process.env.NODE_ENV === "test"
+    ? process.env.SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS
+    : undefined,
   10_000,
 );
-const requestedPort = process.env.SYNC_RELAY_PORT === undefined ? 1788 : Number(process.env.SYNC_RELAY_PORT);
+const requestedPort =
+  process.env.SYNC_RELAY_PORT === undefined ? 1788 : Number(process.env.SYNC_RELAY_PORT);
 const workspaceQuotaBytes =
   process.env.SYNC_RELAY_WORKSPACE_QUOTA_BYTES === undefined
     ? DEFAULT_WORKSPACE_QUOTA_BYTES
@@ -103,23 +155,39 @@ const relayExchangeKey = process.env.DOHC_RELAY_EXCHANGE_KEY;
 const relayExchangeKeyHash =
   relayExchangeKey === undefined ? undefined : hashRelayExchangeKey(relayExchangeKey);
 const selfHostedLive = process.env.DOHC_SELF_HOST_LIVE === "1";
-if (process.env.DOHC_SELF_HOST_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_SELF_HOST_LIVE)) fatal("FATAL: DOHC_SELF_HOST_LIVE must be 0 or 1.");
+if (
+  process.env.DOHC_SELF_HOST_LIVE !== undefined &&
+  !["0", "1"].includes(process.env.DOHC_SELF_HOST_LIVE)
+)
+  fatal("FATAL: DOHC_SELF_HOST_LIVE must be 0 or 1.");
 const liveProfile = selfHostedLive ? selfHostLiveProfile() : undefined;
 // This server runs its owners' automations: on by default under the supported
 // self-host profile, off for development relays and tests unless they ask.
 const automationsSetting = process.env.DOHC_RELAY_AUTOMATIONS;
-if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting)) fatal("FATAL: DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
-const automationsOn = automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
+if (automationsSetting !== undefined && !["0", "1"].includes(automationsSetting))
+  fatal("FATAL: DOHC_RELAY_AUTOMATIONS must be 0 or 1.");
+const automationsOn =
+  automationsSetting === undefined ? selfHostedLive : automationsSetting === "1";
 // This server keeps copies of workspaces to run their automations and to answer their owners' phones.
 // A self-hosted server always keeps them; a development relay only while it runs automations.
 const copiesOn = automationsOn || selfHostedLive;
-if (selfHostedLive && (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG || process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG || process.env.DOHC_DEVICE_CONTROL_LIMITS)) {
-  fatal("FATAL: The self-host live service cannot replace a manually configured service or device host.");
+if (
+  selfHostedLive &&
+  (process.env.DOHC_RELAY_SERVICE_HOST_CONFIG ||
+    process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG ||
+    process.env.DOHC_DEVICE_CONTROL_LIMITS)
+) {
+  fatal(
+    "FATAL: The self-host live service cannot replace a manually configured service or device host.",
+  );
 }
 // A live host without the Markdown reader starts, but its Edit shares never go live.
 if (selfHostedLive || process.env.DOHC_RELAY_SERVICE_HOST_CONFIG) {
   const reader = checkReaderConfig(process.env.DOHC_ENGINE_READER_CONFIG);
-  if ("problem" in reader) fatal(`FATAL: Edit shares need the Markdown reader, but ${reader.problem}. DOHC_ENGINE_READER_CONFIG holds the startup.json that stage-engine-reader.mjs --self-host writes. The self-host image reads /opt/dohc-reader/engine-reader/startup.json, which is missing if the image was built without the reader.`);
+  if ("problem" in reader)
+    fatal(
+      `FATAL: Edit shares need the Markdown reader, but ${reader.problem}. DOHC_ENGINE_READER_CONFIG holds the startup.json that stage-engine-reader.mjs --self-host writes. The self-host image reads /opt/dohc-reader/engine-reader/startup.json, which is missing if the image was built without the reader.`,
+    );
   // The engines this relay starts get the value checked here.
   process.env.DOHC_ENGINE_READER_CONFIG = reader.config;
 }
@@ -172,7 +240,8 @@ function validateShareWebOrigin(value: string | undefined): string | undefined {
 }
 
 const shareWebOrigin = validateShareWebOrigin(process.env.DOHC_RELAY_SHARE_WEB_ORIGIN);
-if (shareWebOrigin && !process.env.DOHC_RELAY_SHARE_WEB_URL) fatal("DOHC_RELAY_SHARE_WEB_ORIGIN requires DOHC_RELAY_SHARE_WEB_URL for account deletion.");
+if (shareWebOrigin && !process.env.DOHC_RELAY_SHARE_WEB_URL)
+  fatal("DOHC_RELAY_SHARE_WEB_ORIGIN requires DOHC_RELAY_SHARE_WEB_URL for account deletion.");
 
 // Reject an unparseable SYNC_RELAY_PORT up front: Number("abc") is NaN and
 // server.listen(NaN) fails with an obscure downstream error. Port 0 is
@@ -225,64 +294,128 @@ if (process.env.SYNC_RELAY_TEST_AUTH === "1" && !isDevOrTest) {
 }
 
 if (!testAuthSeam && secret.length < 32) {
-  fatal(
-    "BETTER_AUTH_SECRET must be set (>=32 chars) and must match workspace-api's secret.",
-  );
+  fatal("BETTER_AUTH_SECRET must be set (>=32 chars) and must match workspace-api's secret.");
 }
 
-const publicEditRelease = parsePublicEditRelease(process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined ? (selfHostedLive ? {version: 1} : undefined) : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE));
+const publicEditRelease = parsePublicEditRelease(
+  process.env.DOHC_PUBLIC_EDIT_RELEASE === undefined
+    ? selfHostedLive
+      ? { version: 1 }
+      : undefined
+    : JSON.parse(process.env.DOHC_PUBLIC_EDIT_RELEASE),
+);
 const appPublicationLimits = (() => {
-  try { return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS); }
-  catch { fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1."); }
+  try {
+    return readAppPublicationConfig(process.env.DOHC_RELAY_APP_PUBLICATIONS);
+  } catch {
+    fatal("FATAL: DOHC_RELAY_APP_PUBLICATIONS must be 0 or 1.");
+  }
 })();
 const appBackendMaxParticipantsPerGrant = (() => {
-  try { return readAppBackendParticipantLimit(process.env.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT); }
-  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app backend participant limit"}`); }
+  try {
+    return readAppBackendParticipantLimit(
+      process.env.DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT,
+    );
+  } catch (error) {
+    fatal(
+      `FATAL: ${error instanceof Error ? error.message : "invalid app backend participant limit"}`,
+    );
+  }
 })();
 const appCollectionPolicy = (() => {
-  try { return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT); }
-  catch (error) { fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`); }
+  try {
+    return readAppCollectionPolicy(process.env.DOHC_RELAY_APP_COLLECTION_MAX_CREATES_PER_GRANT);
+  } catch (error) {
+    fatal(`FATAL: ${error instanceof Error ? error.message : "invalid app collection policy"}`);
+  }
 })();
 if (appCollectionPolicy && !appPublicationLimits) {
   fatal("FATAL: App collections require DOHC_RELAY_APP_PUBLICATIONS=1.");
 }
 const namedBrowserSessionLimits = loadNamedBrowserSessionLimits();
 const namedLiveConfig = (() => {
-  const value = process.env.DOHC_RELAY_NAMED_LIVE_CONFIG ?? (liveProfile && JSON.stringify(liveProfile.namedLive));
+  const value =
+    process.env.DOHC_RELAY_NAMED_LIVE_CONFIG ??
+    (liveProfile && JSON.stringify(liveProfile.namedLive));
   if (value === undefined) return undefined;
-  if (!namedBrowserSessionLimits || !shareWebOrigin || !relayExchangeKey || !linkKey || !process.env.DOHC_RELAY_NAMED_LIVE_HOSTS) {
-    fatal("FATAL: Named live routes require browser sessions, viewer origin, relay exchange and link keys, and explicit relay Host values.");
+  if (
+    !namedBrowserSessionLimits ||
+    !shareWebOrigin ||
+    !relayExchangeKey ||
+    !linkKey ||
+    !process.env.DOHC_RELAY_NAMED_LIVE_HOSTS
+  ) {
+    fatal(
+      "FATAL: Named live routes require browser sessions, viewer origin, relay exchange and link keys, and explicit relay Host values.",
+    );
   }
-  try { return parseNamedLiveConfig(JSON.parse(value), process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS !== undefined || liveProfile ? {
-    maxPendingAdmissionRequests: namedBrowserSessionLimits.maxPendingRequests,
-    maxPendingReadinessRequests: selfHostLiveProfile().desktopReadiness.maxPendingRequests,
-  } : undefined); }
-  catch { fatal("FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy."); }
+  try {
+    return parseNamedLiveConfig(
+      JSON.parse(value),
+      process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS !== undefined || liveProfile
+        ? {
+            maxPendingAdmissionRequests: namedBrowserSessionLimits.maxPendingRequests,
+            maxPendingReadinessRequests: selfHostLiveProfile().desktopReadiness.maxPendingRequests,
+          }
+        : undefined,
+    );
+  } catch {
+    fatal(
+      "FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy.",
+    );
+  }
 })();
-const frameChanges = namedLiveConfig ? createNamedFrameChanges(namedLiveConfig.maxListeners) : undefined;
-const linkLiveEnabled = process.env.DOHC_RELAY_LINK_LIVE === "1" || (selfHostedLive && process.env.DOHC_RELAY_LINK_LIVE === undefined);
-if (process.env.DOHC_RELAY_LINK_LIVE !== undefined && !["0", "1"].includes(process.env.DOHC_RELAY_LINK_LIVE)) fatal("FATAL: DOHC_RELAY_LINK_LIVE must be 0 or 1.");
-if (linkLiveEnabled && !namedLiveConfig) fatal("FATAL: Link live routes require configured live admission limits.");
+const frameChanges = namedLiveConfig
+  ? createNamedFrameChanges(namedLiveConfig.maxListeners)
+  : undefined;
+const linkLiveEnabled =
+  process.env.DOHC_RELAY_LINK_LIVE === "1" ||
+  (selfHostedLive && process.env.DOHC_RELAY_LINK_LIVE === undefined);
+if (
+  process.env.DOHC_RELAY_LINK_LIVE !== undefined &&
+  !["0", "1"].includes(process.env.DOHC_RELAY_LINK_LIVE)
+)
+  fatal("FATAL: DOHC_RELAY_LINK_LIVE must be 0 or 1.");
+if (linkLiveEnabled && !namedLiveConfig)
+  fatal("FATAL: Link live routes require configured live admission limits.");
 const desktopEditorLimits = (() => {
-  const value = process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS ?? (liveProfile && JSON.stringify(liveProfile.editor));
+  const value =
+    process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS ??
+    (liveProfile && JSON.stringify(liveProfile.editor));
   if (value === undefined) return undefined;
-  if (!namedLiveConfig || !namedBrowserSessionLimits) fatal("FATAL: Desktop live editing requires configured named live routes.");
+  if (!namedLiveConfig || !namedBrowserSessionLimits)
+    fatal("FATAL: Desktop live editing requires configured named live routes.");
   try {
     const limits = parseNamedLiveBrowserLimits(JSON.parse(value));
-    if (limits.provider.frames.receive.maxFrameBytes > namedLiveConfig.frames.receive.maxFrameBytes) throw Error();
+    if (limits.provider.frames.receive.maxFrameBytes > namedLiveConfig.frames.receive.maxFrameBytes)
+      throw Error();
     return limits;
-  } catch {fatal("FATAL: DOHC_RELAY_NAMED_EDITOR_LIMITS must provide bounded editor limits within relay frame capacity.");}
+  } catch {
+    fatal(
+      "FATAL: DOHC_RELAY_NAMED_EDITOR_LIMITS must provide bounded editor limits within relay frame capacity.",
+    );
+  }
 })();
 const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay.sqlite");
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
-if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
-if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
+if (!isDevOrTest && !deploymentConfig)
+  fatal(
+    "FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.",
+  );
+if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined)
+  fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
 const projectionExecutable = process.env.DOHC_RELAY_ENGINE_EXECUTABLE;
 const projectionOptIn = process.env.DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION;
-if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION must be 0 or 1.");
-if (projectionOptIn !== undefined && !isDevOrTest) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
-if (projectionOptIn === "1") console.warn("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.");
-if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
+if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn))
+  fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION must be 0 or 1.");
+if (projectionOptIn !== undefined && !isDevOrTest)
+  fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
+if (projectionOptIn === "1")
+  console.warn(
+    "WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.",
+  );
+if (!isDevOrTest && !projectionExecutable)
+  fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
 
 // Production auth intentionally reuses workspace-api's Better Auth database
 // and BETTER_AUTH_SECRET. A bearer token minted by workspace-api's desktop
@@ -297,13 +430,16 @@ const TEST_EMAIL_SUFFIX = "@dohc.test";
 let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | null;
 let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
-let lookupUserDisplayName: (
-  userId: string,
-) => Promise<string | null> | string | null;
+let lookupUserDisplayName: (userId: string) => Promise<string | null> | string | null;
 // The test seam has no browser sign-ins, so it serves no push subscriptions
 // and no personal agent sign-in.
-const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; sessions?: AccountSessions; credentialFence?: CredentialFence} = testAuthSeam
-  ? {actor: createTestActorResolver()}
+const accountResolvers: {
+  actor: ResolveActor;
+  session?: ResolveAccountSession;
+  sessions?: AccountSessions;
+  credentialFence?: CredentialFence;
+} = testAuthSeam
+  ? { actor: createTestActorResolver() }
   : await (async () => {
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
@@ -320,60 +456,129 @@ const accountResolvers: {actor: ResolveActor; session?: ResolveAccountSession; s
       });
       const auth = createWorkspaceAuth({
         pool,
-        baseURL: process.env.SYNC_RELAY_AUTH_BASE_URL ?? `http://localhost:${requestedPort || 1788}`,
+        baseURL:
+          process.env.SYNC_RELAY_AUTH_BASE_URL ?? `http://localhost:${requestedPort || 1788}`,
         secret,
       });
       const credentialFence = createPostgresCredentialFence(pool);
-      return {actor: createSessionActorResolver(auth), session: createAccountSessionResolver(auth), sessions: createPostgresAccountSessions(pool), credentialFence};
-  })();
+      return {
+        actor: createSessionActorResolver(auth),
+        session: createAccountSessionResolver(auth),
+        sessions: createPostgresAccountSessions(pool),
+        credentialFence,
+      };
+    })();
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
 const credentialFence = accountResolvers.credentialFence;
 const pushConfig = (() => {
-  try {return readPushConfig(process.env);}
-  catch (error) {fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid push sender configuration."}`);}
+  try {
+    return readPushConfig(process.env);
+  } catch (error) {
+    fatal(
+      `FATAL: ${error instanceof Error ? error.message : "Invalid push sender configuration."}`,
+    );
+  }
 })();
 const pushVapidPublicKey = pushConfig?.publicKey;
 
-const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
-  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
-    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
-const storageOptions = { workspaceQuotaBytes, pushConfigured: Boolean(pool && pushConfig),
-  ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
-const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
+const documentProjection = projectionExecutable
+  ? await startEngineProjection({
+      engineExecutable: projectionExecutable,
+      allowUnisolatedProjection: projectionOptIn === "1",
+    }).catch((error: unknown) =>
+      fatal(
+        `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`,
+      ),
+    )
+  : undefined;
+const storageOptions = {
+  workspaceQuotaBytes,
+  pushConfigured: Boolean(pool && pushConfig),
+  ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}),
+};
+const deployment = deploymentConfig
+  ? openRelayDeployment(deploymentConfig, storageOptions)
+  : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
 // Worker files are disposable materializations. The relay database retains authority and recovery history.
-const datasetDirectory = deployment?.datasetDirectory ?? await mkdtemp(join(tmpdir(), "dohc-relay-datasets-"));
-const datasetHost = await storage.createDatasetHost({directory: datasetDirectory, limits: appPublicationLimits ?? {
-  maxFiles: APP_PUBLICATION_MAX_FILES, maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES, maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
-}, publicEditRelease, maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant, compileOperations: compileDatasetOperations, startupExclusive: Boolean(deployment), onShutdownError(error) { console.error("[sync-relay] dataset shutdown failed", error); }});
+const datasetDirectory =
+  deployment?.datasetDirectory ?? (await mkdtemp(join(tmpdir(), "dohc-relay-datasets-")));
+const datasetHost = await storage.createDatasetHost({
+  directory: datasetDirectory,
+  limits: appPublicationLimits ?? {
+    maxFiles: APP_PUBLICATION_MAX_FILES,
+    maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES,
+    maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+  },
+  publicEditRelease,
+  maxParticipantsPerGrant: appBackendMaxParticipantsPerGrant,
+  compileOperations: compileDatasetOperations,
+  startupExclusive: Boolean(deployment),
+  onShutdownError(error) {
+    console.error("[sync-relay] dataset shutdown failed", error);
+  },
+});
 
 const resolveActor = resolveAccountActor;
-if (copiesOn && (!deployment || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
-  fatal("FATAL: Copies of workspaces on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
+if (
+  copiesOn &&
+  (!deployment ||
+    !linkKey ||
+    !process.env.DOHC_RELAY_SERVICE_HOST_ROOT ||
+    !process.env.DOHC_RELAY_ENGINE_EXECUTABLE ||
+    !process.env.DOHC_RELAY_PUBLIC_ORIGIN)
+) {
+  fatal(
+    "FATAL: Copies of workspaces on this server require a deployment, the link key, a persistent host root, the native engine executable, and the public HTTPS relay origin.",
+  );
 }
 // The copies sync with this origin, and it issues the actor key of each phone write.
 if (copiesOn && !isPublicHttpsOrigin(process.env.DOHC_RELAY_PUBLIC_ORIGIN!)) {
-  fatal("FATAL: DOHC_RELAY_PUBLIC_ORIGIN must be exactly an HTTPS origin, such as https://relay.example.com, with no path or trailing slash.");
+  fatal(
+    "FATAL: DOHC_RELAY_PUBLIC_ORIGIN must be exactly an HTTPS origin, such as https://relay.example.com, with no path or trailing slash.",
+  );
 }
-const automationServer = automationsOn ? {label: automationServerLabel(process.env.DOHC_SERVER_NAME)} : undefined;
-const automationReplicaKey = copiesOn ? {key: Buffer.from(linkKey!), namespace: deployment!.history.namespace} : undefined;
+const automationServer = automationsOn
+  ? { label: automationServerLabel(process.env.DOHC_SERVER_NAME) }
+  : undefined;
+const automationReplicaKey = copiesOn
+  ? { key: Buffer.from(linkKey!), namespace: deployment!.history.namespace }
+  : undefined;
 // One wait hub for every route that writes the log, so a write any of them takes wakes every wait on it.
 const discussionActivity = new DiscussionActivityHub();
 const automationReplication = automationReplicaKey
-  ? createServiceHostReplication({storage, prefix: AUTOMATION_REPLICA_BEARER_PREFIX, activity: discussionActivity,
-    authorize: input => authorizeAutomationReplication(storage, {...automationReplicaKey, ...input})}) : undefined;
+  ? createServiceHostReplication({
+      storage,
+      prefix: AUTOMATION_REPLICA_BEARER_PREFIX,
+      activity: discussionActivity,
+      authorize: (input) =>
+        authorizeAutomationReplication(storage, { ...automationReplicaKey, ...input }),
+    })
+  : undefined;
 // One limit per person for notices to others, shared by the route and this server's automations.
-const noticePostRateLimiter = new TokenBucketLimiter(NOTICE_POST_BUCKET_CAPACITY, NOTICE_POST_REFILL_PER_SECOND, NOTICE_POST_MAX_SENDERS);
+const noticePostRateLimiter = new TokenBucketLimiter(
+  NOTICE_POST_BUCKET_CAPACITY,
+  NOTICE_POST_REFILL_PER_SECOND,
+  NOTICE_POST_MAX_SENDERS,
+);
 let automations: Awaited<ReturnType<typeof startAutomationServer>> | undefined;
 let copies: ServerCopies | undefined;
-const serviceReplication = selfHostedLive && deployment && linkKey
-  ? (() => {
-      const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
-      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", hostedFeed: true, activity: discussionActivity,
-        authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input}),
-        lookupUserDisplayName: userId => lookupUserDisplayName(userId)});
-    })() : undefined;
+const serviceReplication =
+  selfHostedLive && deployment && linkKey
+    ? (() => {
+        const credential = { key: Buffer.from(linkKey), namespace: deployment.history.namespace };
+        return createServiceHostReplication({
+          storage,
+          prefix: "dohc-service-v1.",
+          hostedFeed: true,
+          activity: discussionActivity,
+          authorize: (input) =>
+            authorizeServiceHostReplication(storage, { ...credential, ...input }),
+          lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
+        });
+      })()
+    : undefined;
 
 function createTestActorResolver(): ResolveActor {
   return (request, workspaceId) => {
@@ -424,18 +629,21 @@ const relayApplication = createSyncRelayHandler({
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
-  ...(resolveAccountSession ? {resolveAccountSession} : {}),
-  ...(accountResolvers.sessions ? {accountSessions: accountResolvers.sessions} : {}),
-  ...(credentialFence ? {credentialFence} : {}),
-  ...(pushVapidPublicKey ? {pushVapidPublicKey} : {}),
-  ...(pushConfig ? {pushHosts: pushConfig.hosts} : {}),
+  ...(resolveAccountSession ? { resolveAccountSession } : {}),
+  ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
+  ...(credentialFence ? { credentialFence } : {}),
+  ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),
+  ...(pushConfig ? { pushHosts: pushConfig.hosts } : {}),
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
-  lookupUserEmails: async userIds => {
+  lookupUserEmails: async (userIds) => {
     if (userIds.length === 0) return new Map();
-    if (testAuthSeam) return new Map(userIds.map(id => [id, `${id}${TEST_EMAIL_SUFFIX}`]));
-    const result = await pool!.query<{ id: string; email: string }>('SELECT id, email FROM "user" WHERE id = ANY($1::text[])', [userIds]);
-    return new Map(result.rows.map(row => [row.id, row.email]));
+    if (testAuthSeam) return new Map(userIds.map((id) => [id, `${id}${TEST_EMAIL_SUFFIX}`]));
+    const result = await pool!.query<{ id: string; email: string }>(
+      'SELECT id, email FROM "user" WHERE id = ANY($1::text[])',
+      [userIds],
+    );
+    return new Map(result.rows.map((row) => [row.id, row.email]));
   },
   lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
@@ -456,7 +664,7 @@ const relayApplication = createSyncRelayHandler({
   noticePostRateLimiter,
   serverCopies: () => copies,
   relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
-  ...(automationServer ? {automationServer} : {}),
+  ...(automationServer ? { automationServer } : {}),
 });
 let ownerLive: ReturnType<typeof createOwnerLiveRoutes> | undefined;
 let namedLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
@@ -467,51 +675,127 @@ let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
 let personalLiveDocument: ReturnType<typeof createPersonalLiveDocumentRoute> | undefined;
 let personalLive: ReturnType<typeof createPersonalLiveRoutes> | undefined;
-const relayHandler = guardRelayResponses(storage, request => {
+const relayHandler = guardRelayResponses(storage, (request) => {
   const path = new URL(request.url).pathname;
-  if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (isServiceHostEnrollmentPath(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (path === PERSONAL_LIVE_DOCUMENT_PATH) return personalLiveDocument?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (path === "/sync/live/personal-tickets") return personalLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if ((path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")) return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1."))
+    return (
+      serviceReplication?.(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (
+    request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)
+  )
+    return (
+      automationReplication?.(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (isServiceHostEnrollmentPath(path))
+    return (
+      serviceEnrollment?.(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (path === PERSONAL_LIVE_DOCUMENT_PATH)
+    return (
+      personalLiveDocument?.(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (path === "/sync/live/personal-tickets")
+    return (
+      personalLive?.handle(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (path === "/sync/live/named-tickets")
+    return (
+      namedLive?.handle(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")
+    return (
+      desktopAdmission?.handle(request) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
+  if (isLinkLivePath(path))
+    return (
+      (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ??
+      Promise.resolve(Response.json({ ok: false, error: "not found" }, { status: 404 }))
+    );
   return relayApplication(request);
 });
-const deletions = createAccountDeletionRoute({storage: storage as StorageContext, key: accountDeletionKey(secret), fenceKey: accountDeletionFenceKey(secret),
+const deletions = createAccountDeletionRoute({
+  storage: storage as StorageContext,
+  key: accountDeletionKey(secret),
+  fenceKey: accountDeletionFenceKey(secret),
   invalidate(userId, manifest) {
-    const ids = manifest.workspaces.map(row => row.workspaceId);
-    relayApplication.deleteAccount(userId,ids,manifest.shareIds);
-    namedLive?.deleteAccount(userId,ids); linkLive?.deleteAccount(userId,ids); personalLive?.deleteAccount(userId,ids); desktopLive?.deleteAccount(userId,ids); ownerLive?.deleteAccount(userId,ids);
+    const ids = manifest.workspaces.map((row) => row.workspaceId);
+    relayApplication.deleteAccount(userId, ids, manifest.shareIds);
+    namedLive?.deleteAccount(userId, ids);
+    linkLive?.deleteAccount(userId, ids);
+    personalLive?.deleteAccount(userId, ids);
+    desktopLive?.deleteAccount(userId, ids);
+    ownerLive?.deleteAccount(userId, ids);
     automations?.deleteAccount(userId);
   },
   async deleteRuntime(userId, manifest) {
-    const ids = manifest.workspaces.map(row => row.workspaceId);
+    const ids = manifest.workspaces.map((row) => row.workspaceId);
     if (shareWebOrigin) {
       const origin = process.env.DOHC_RELAY_SHARE_WEB_URL;
       if (!origin || !relayExchangeKey) throw new Error("Share-web deletion is unavailable.");
-      const batches = Math.max(1, Math.ceil(Math.max(ids.length,manifest.grantIds.length,manifest.publicationIds.length)/8));
-      for (let i=0;i<batches;i++) {
-        const response = await fetch(new URL(ACCOUNT_DELETION_PATH,origin), {method: "POST", redirect: "error", signal: AbortSignal.timeout(10_000),
-          headers: {"content-type":"application/json", [ACCOUNT_DELETION_KEY_HEADER]: accountDeletionKey(relayExchangeKey)},
-          body: JSON.stringify({userId,workspaceIds:ids.slice(i*8,i*8+8),grantIds:manifest.grantIds.slice(i*8,i*8+8),publicationIds:manifest.publicationIds.slice(i*8,i*8+8)})});
+      const batches = Math.max(
+        1,
+        Math.ceil(
+          Math.max(ids.length, manifest.grantIds.length, manifest.publicationIds.length) / 8,
+        ),
+      );
+      for (let i = 0; i < batches; i++) {
+        const response = await fetch(new URL(ACCOUNT_DELETION_PATH, origin), {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(10_000),
+          headers: {
+            "content-type": "application/json",
+            [ACCOUNT_DELETION_KEY_HEADER]: accountDeletionKey(relayExchangeKey),
+          },
+          body: JSON.stringify({
+            userId,
+            workspaceIds: ids.slice(i * 8, i * 8 + 8),
+            grantIds: manifest.grantIds.slice(i * 8, i * 8 + 8),
+            publicationIds: manifest.publicationIds.slice(i * 8, i * 8 + 8),
+          }),
+        });
         const result: unknown = await response.json();
-        if (!response.ok || !result || typeof result !== "object" || !("finished" in result) || result.finished !== true) throw new Error("Share-web deletion is unfinished.");
+        if (
+          !response.ok ||
+          !result ||
+          typeof result !== "object" ||
+          !("finished" in result) ||
+          result.finished !== true
+        )
+          throw new Error("Share-web deletion is unfinished.");
       }
     }
     await (automations ?? copies)?.deleteWorkspaces(ids);
     if (selfHost) await selfHost.deleteWorkspaces(manifest.workspaces);
-    else if (deployment && process.env.DOHC_RELAY_SERVICE_HOST_ROOT) await deleteSelfHostedWorkspaceRoots(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, deployment.history.namespace, manifest.workspaces);
+    else if (deployment && process.env.DOHC_RELAY_SERVICE_HOST_ROOT)
+      await deleteSelfHostedWorkspaceRoots(
+        process.env.DOHC_RELAY_SERVICE_HOST_ROOT,
+        deployment.history.namespace,
+        manifest.workspaces,
+      );
     await configuredServiceHost?.deleteWorkspaces(ids);
     if (serviceHostConfig) await deleteConfiguredServiceWorkspaceRoots(serviceHostConfig, ids);
     await datasetHost.deleteWorkspaces(manifest.datasets);
   },
 });
 const pendingDeletions = pool ? await fencePendingAccountDeletions(pool, deletions) : [];
-const signUpInvites = secret.length >= 32 ? createSignUpInviteRoute({storage, key: signUpInviteKey(secret)}) : undefined;
+const signUpInvites =
+  secret.length >= 32
+    ? createSignUpInviteRoute({ storage, key: signUpInviteKey(secret) })
+    : undefined;
 const fetchHandler = async (request: Request): Promise<Response> => {
-  const entry = relayEntryPattern(request.headers.get("authorization"), new URL(request.url).pathname);
+  const entry = relayEntryPattern(
+    request.headers.get("authorization"),
+    new URL(request.url).pathname,
+  );
   if (entry) SYNC_RELAY_REQUEST_LOG.mark(request, entry);
   // These four answer before relayHandler, whatever the bearer, so each marks its own route.
   if (secret.length >= 32 && new URL(request.url).pathname === ACCOUNT_DELETION_PATH) {
@@ -524,21 +808,36 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   }
   if (new URL(request.url).pathname === "/ready") {
     SYNC_RELAY_REQUEST_LOG.mark(request, "/ready");
-    const ready = !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
-    return Response.json({ok: ready, service: "sync-relay", selfHostedLive: selfHostedLive && ready, apiVersions: RELAY_API_VERSIONS,
-      automations: !automationsOn ? "off" : automations && !automations.unavailable ? "on" : "unavailable"},
-      {status: ready ? 200 : 503, headers: {"cache-control": "no-store"}});
+    const ready =
+      !storage.unavailable.aborted && (!selfHostedLive || (!!selfHost && !selfHost.unavailable));
+    return Response.json(
+      {
+        ok: ready,
+        service: "sync-relay",
+        selfHostedLive: selfHostedLive && ready,
+        apiVersions: RELAY_API_VERSIONS,
+        automations: !automationsOn
+          ? "off"
+          : automations && !automations.unavailable
+            ? "on"
+            : "unavailable",
+      },
+      { status: ready ? 200 : 503, headers: { "cache-control": "no-store" } },
+    );
   }
   if (new URL(request.url).pathname === "/health") {
     SYNC_RELAY_REQUEST_LOG.mark(request, "/health");
     // The presence hub footprint is exposed only under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
     // production health stays a bare liveness probe.
-    return Response.json({
-      ok: !storage.unavailable.aborted,
-      service: "sync-relay",
-      ...(testAuthSeam ? { presence: presence.stats() } : {}),
-    }, { status: storage.unavailable.aborted ? 503 : 200 });
+    return Response.json(
+      {
+        ok: !storage.unavailable.aborted,
+        service: "sync-relay",
+        ...(testAuthSeam ? { presence: presence.stats() } : {}),
+      },
+      { status: storage.unavailable.aborted ? 503 : 200 },
+    );
   }
   const refusal = relayApiVersionRefusal(request.headers);
   const result = refusal ? errorResponse(refusal) : await relayHandler(request);
@@ -552,20 +851,31 @@ const MAX_BODY_BYTES = MAX_BLOB_BYTES + 1024 * 1024;
 const MAX_LINK_EXCHANGE_BODY_BYTES = 4096;
 
 function loadNamedBrowserSessionLimits(): NamedLiveBrowserHttpLimits | undefined {
-  const value = process.env.DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS ?? (liveProfile && JSON.stringify(liveProfile.browserSessions));
+  const value =
+    process.env.DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS ??
+    (liveProfile && JSON.stringify(liveProfile.browserSessions));
   if (value === undefined) return undefined;
   if (!shareWebOrigin || !shareWebOrigin.startsWith("https://")) {
-    fatal("FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin when named browser sessions are enabled.");
+    fatal(
+      "FATAL: DOHC_RELAY_SHARE_WEB_ORIGIN must be an HTTPS origin when named browser sessions are enabled.",
+    );
   }
   if (!relayExchangeKey) {
     fatal("FATAL: DOHC_RELAY_EXCHANGE_KEY must be set when named browser sessions are enabled.");
   }
-  try { return parseNamedLiveBrowserHttpLimits(JSON.parse(value)); }
-  catch { fatal("FATAL: DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must be valid JSON with all required positive limits within their supported bounds, a safe expiry timestamp, and capacity for the named session envelopes."); }
+  try {
+    return parseNamedLiveBrowserHttpLimits(JSON.parse(value));
+  } catch {
+    fatal(
+      "FATAL: DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS must be valid JSON with all required positive limits within their supported bounds, a safe expiry timestamp, and capacity for the named session envelopes.",
+    );
+  }
 }
 
 function isNamedBrowserSessionPath(pathname: string): boolean {
-  return pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve";
+  return (
+    pathname === "/sync/live/named-sessions" || pathname === "/sync/live/named-sessions/resolve"
+  );
 }
 
 function isLinkExchangePath(pathname: string): boolean {
@@ -589,8 +899,7 @@ function isLinkRefreshPath(pathname: string): boolean {
 function presentsValidRelayExchangeKey(headers: Headers): boolean {
   const presented = headers.get("x-dohc-relay-exchange-key");
   return (
-    relayExchangeKeyHash !== undefined &&
-    verifyRelayExchangeKey(presented, relayExchangeKeyHash)
+    relayExchangeKeyHash !== undefined && verifyRelayExchangeKey(presented, relayExchangeKeyHash)
   );
 }
 
@@ -619,23 +928,47 @@ const server = serveFetchHandler({
   handler: fetchHandler,
   streamBody: streamsRequestBody,
   requestLog: SYNC_RELAY_REQUEST_LOG,
-  maxBodyBytes: (url) => automationHostMaxBodyBytes(url.pathname) ?? (
-    isServiceHostEnrollmentPath(url.pathname) ? 16 * 1024 :
-    url.pathname === PERSONAL_LIVE_DOCUMENT_PATH ? PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES :
-    isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
-    isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
-    isAccountWorkspacePath(url.pathname) ? ACCOUNT_WORKSPACE_MAX_BODY_BYTES :
-    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
-    (url.pathname === "/sync/live/named-tickets" || url.pathname === "/sync/live/personal-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
-    (isNamedBrowserSessionPath(url.pathname) || url.pathname === "/sync/named-chat/messages") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
-    isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
-      ? MAX_LINK_EXCHANGE_BODY_BYTES
-      : MAX_BODY_BYTES),
+  maxBodyBytes: (url) =>
+    automationHostMaxBodyBytes(url.pathname) ??
+    (isServiceHostEnrollmentPath(url.pathname)
+      ? 16 * 1024
+      : url.pathname === PERSONAL_LIVE_DOCUMENT_PATH
+        ? PERSONAL_LIVE_DOCUMENT_MAX_BODY_BYTES
+        : isAutomationPressPath(url.pathname)
+          ? AUTOMATION_PRESS_MAX_BODY_BYTES
+          : isAutomationServerPath(url.pathname)
+            ? AUTOMATION_SERVER_MAX_BODY_BYTES
+            : isAccountWorkspacePath(url.pathname)
+              ? ACCOUNT_WORKSPACE_MAX_BODY_BYTES
+              : (url.pathname === "/sync/live/desktop-open" ||
+                    url.pathname === "/sync/live/desktop-ready") &&
+                  namedBrowserSessionLimits
+                ? namedBrowserSessionLimits.maxRequestBytes
+                : (url.pathname === "/sync/live/named-tickets" ||
+                      url.pathname === "/sync/live/personal-tickets" ||
+                      isLinkLivePath(url.pathname)) &&
+                    namedLiveConfig
+                  ? namedLiveConfig.transport.maxRequestBytes
+                  : (isNamedBrowserSessionPath(url.pathname) ||
+                        url.pathname === "/sync/named-chat/messages") &&
+                      namedBrowserSessionLimits
+                    ? namedBrowserSessionLimits.maxRequestBytes
+                    : isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+                      ? MAX_LINK_EXCHANGE_BODY_BYTES
+                      : MAX_BODY_BYTES),
   oversized: (url) =>
-    isLinkEndpointPath(url.pathname) ? opaqueLinkRefusal() :
-    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") || url.pathname === "/sync/live/named-tickets" || url.pathname === "/sync/live/personal-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
-      ? errorBody("not_found")
-      : errorBody("payload_too_large"),
+    isLinkEndpointPath(url.pathname)
+      ? opaqueLinkRefusal()
+      : url.pathname === "/sync/live/desktop-open" ||
+          url.pathname === "/sync/live/desktop-ready" ||
+          url.pathname === "/sync/live/named-tickets" ||
+          url.pathname === "/sync/live/personal-tickets" ||
+          isLinkLivePath(url.pathname) ||
+          isNamedBrowserSessionPath(url.pathname) ||
+          isLinkExchangePath(url.pathname) ||
+          isLinkRefreshPath(url.pathname)
+        ? errorBody("not_found")
+        : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
   // back to the caller.
   failure: () => jsonResponse({ ok: false, error: "internal error" }, 500),
@@ -654,179 +987,465 @@ const server = serveFetchHandler({
 const host = testAuthSeam ? "127.0.0.1" : (process.env.SYNC_RELAY_BIND ?? "0.0.0.0");
 let deviceControl: ReturnType<typeof createDeviceControl> | undefined;
 const deviceDeliveryConfig = process.env.DOHC_RELAY_DEVICE_DELIVERY_CONFIG;
-const trustedOwnerAccount = async (accountId: string) => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
+const trustedOwnerAccount = async (accountId: string) => ({
+  accountId,
+  name: (await accountDisplayName(lookupUserDisplayName, accountId)) ?? "Unnamed",
+});
 const ownerAdmissionPath = process.env.DOHC_RELAY_OWNER_ADMISSION_CONFIG;
-if (ownerAdmissionPath && !deviceDeliveryConfig) fatal("FATAL: Private owner admission requires configured device delivery.");
+if (ownerAdmissionPath && !deviceDeliveryConfig)
+  fatal("FATAL: Private owner admission requires configured device delivery.");
 let ownerAdmission: ReturnType<typeof readOwnerAdmissionConfig> | undefined;
-if (deviceDeliveryConfig && (!deployment || process.env.DOHC_DEVICE_CONTROL_LIMITS === undefined)) fatal("FATAL: Device delivery requires an initialized deployment and device control limits.");
+if (deviceDeliveryConfig && (!deployment || process.env.DOHC_DEVICE_CONTROL_LIMITS === undefined))
+  fatal("FATAL: Device delivery requires an initialized deployment and device control limits.");
 if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
     const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
-    const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
+    const delivery = deviceDeliveryConfig
+      ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig, limits)
+      : undefined;
     if (ownerAdmissionPath && delivery) {
-      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds,trustedOwnerAccount);
+      ownerAdmission = readOwnerAdmissionConfig(
+        ownerAdmissionPath,
+        delivery.workspaceIds,
+        trustedOwnerAccount,
+      );
     }
     deviceControl = createDeviceControl({
-      storage, relayExchangeKey: relayExchangeKey ?? "",
+      storage,
+      relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
       limits,
-      ...(delivery && deployment ? { delivery: { config: delivery, history: deployment.history,ownerAdmission: ownerAdmission?.admission, frameChanges } } : {}),
+      ...(delivery && deployment
+        ? {
+            delivery: {
+              config: delivery,
+              history: deployment.history,
+              ownerAdmission: ownerAdmission?.admission,
+              frameChanges,
+            },
+          }
+        : {}),
     });
   } catch (error) {
-    fatal(`FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`);
+    fatal(
+      `FATAL: Invalid device control configuration. ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 if (deviceControl) {
   server.on("upgrade", (request, socket, head) => {
-    if (namedLiveConfig && (request.url?.startsWith("/sync/live/named?") || request.url?.startsWith("/sync/live/link?") || request.url?.startsWith("/sync/live/personal?") || request.url?.startsWith("/sync/live/desktop?") || /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))) return;
+    if (
+      namedLiveConfig &&
+      (request.url?.startsWith("/sync/live/named?") ||
+        request.url?.startsWith("/sync/live/link?") ||
+        request.url?.startsWith("/sync/live/personal?") ||
+        request.url?.startsWith("/sync/live/desktop?") ||
+        /^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))
+    )
+      return;
     deviceControl!.handleUpgrade(request, socket, head);
   });
   process.once("SIGINT", deviceControl.close);
   process.once("SIGTERM", deviceControl.close);
   server.once("close", deviceControl.close);
 }
-const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startOwnerAdmission({config: ownerAdmission,storage,history: deployment.history,control: deviceControl,
-  onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
-const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
-server.once("close",stopOwnerAdmission);
-server.once("close",()=>void relayApplication.dispose());
-process.once("SIGINT",stopOwnerAdmission);
-process.once("SIGTERM",stopOwnerAdmission);
+const ownerAdmissionRun =
+  ownerAdmission && deviceControl && deployment
+    ? startOwnerAdmission({
+        config: ownerAdmission,
+        storage,
+        history: deployment.history,
+        control: deviceControl,
+        onError: (error) => console.error("[sync-relay] private owner delivery:", error),
+      })
+    : undefined;
+const stopOwnerAdmission = () => {
+  void ownerAdmissionRun
+    ?.close()
+    .catch((error) => console.error("[sync-relay] private owner delivery shutdown:", error));
+};
+server.once("close", stopOwnerAdmission);
+server.once("close", () => void relayApplication.dispose());
+process.once("SIGINT", stopOwnerAdmission);
+process.once("SIGTERM", stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
-if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
-const configuredServiceHost = serviceHostConfig && deployment
-  ? await startServiceLiveHost({ trustedAccount: trustedOwnerAccount, configPath: serviceHostConfig, storage, history: deployment.history, frameChanges })
-  : undefined;
-if (selfHostedLive && (!deployment || !frameChanges || !linkKey || !process.env.DOHC_RELAY_SERVICE_HOST_ROOT || !process.env.DOHC_RELAY_ENGINE_EXECUTABLE || !process.env.DOHC_RELAY_PUBLIC_ORIGIN)) {
-  fatal("FATAL: Self-host live editing requires a deployment, a persistent host root, the native engine executable, and the public HTTPS relay origin.");
+if (serviceHostConfig && !deployment)
+  fatal("FATAL: A service host requires an initialized relay deployment.");
+const configuredServiceHost =
+  serviceHostConfig && deployment
+    ? await startServiceLiveHost({
+        trustedAccount: trustedOwnerAccount,
+        configPath: serviceHostConfig,
+        storage,
+        history: deployment.history,
+        frameChanges,
+      })
+    : undefined;
+if (
+  selfHostedLive &&
+  (!deployment ||
+    !frameChanges ||
+    !linkKey ||
+    !process.env.DOHC_RELAY_SERVICE_HOST_ROOT ||
+    !process.env.DOHC_RELAY_ENGINE_EXECUTABLE ||
+    !process.env.DOHC_RELAY_PUBLIC_ORIGIN)
+) {
+  fatal(
+    "FATAL: Self-host live editing requires a deployment, a persistent host root, the native engine executable, and the public HTTPS relay origin.",
+  );
 }
-const selfHost = selfHostedLive ? await startSelfHostedLiveHost({trustedAccount: trustedOwnerAccount,storage, history: deployment!.history, frameChanges: frameChanges!,
-  root: process.env.DOHC_RELAY_SERVICE_HOST_ROOT!, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
-  relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, key: Buffer.from(linkKey!),
-  onError: error => console.error("[sync-relay] self-host live service:", error)}) : undefined;
+const selfHost = selfHostedLive
+  ? await startSelfHostedLiveHost({
+      trustedAccount: trustedOwnerAccount,
+      storage,
+      history: deployment!.history,
+      frameChanges: frameChanges!,
+      root: process.env.DOHC_RELAY_SERVICE_HOST_ROOT!,
+      engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
+      relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!,
+      key: Buffer.from(linkKey!),
+      onError: (error) => console.error("[sync-relay] self-host live service:", error),
+    })
+  : undefined;
 const serviceHost = () => selfHost?.current() ?? configuredServiceHost;
 // Browsers are told live editing is unavailable while the self-hosted session host cannot continue the document.
-const sessionHostBlocked = selfHost ? (document: {workspaceId: string; objectId: string}) =>
-  storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document) : undefined;
-if (selfHost && deployment) serviceEnrollment = createServiceHostEnrollmentRoutes({storage, history: deployment.history, host: selfHost, resolveActor: resolveAccountActor});
+const sessionHostBlocked = selfHost
+  ? (document: { workspaceId: string; objectId: string }) =>
+      storage.getLiveHostControl()?.configuredMode === "service" && selfHost.stopped(document)
+  : undefined;
+if (selfHost && deployment)
+  serviceEnrollment = createServiceHostEnrollmentRoutes({
+    storage,
+    history: deployment.history,
+    host: selfHost,
+    resolveActor: resolveAccountActor,
+  });
 // Every relay answers a personal open. Only one running the self-hosted live host hosts it.
-personalLiveDocument = createPersonalLiveDocumentRoute({storage, linkAuthority: relayApplication.linkAuthority, personalAgents: relayApplication.personalAgents,
-  limiter: relayApplication.personalLimiter, nowMs: () => Date.now(),
-  ...(selfHost && deployment ? {live: {host: selfHost, history: deployment.history, hostId: selfHostedLiveHostId(deployment.history.namespace)}} : {})});
+personalLiveDocument = createPersonalLiveDocumentRoute({
+  storage,
+  linkAuthority: relayApplication.linkAuthority,
+  personalAgents: relayApplication.personalAgents,
+  limiter: relayApplication.personalLimiter,
+  nowMs: () => Date.now(),
+  ...(selfHost && deployment
+    ? {
+        live: {
+          host: selfHost,
+          history: deployment.history,
+          hostId: selfHostedLiveHostId(deployment.history.namespace),
+        },
+      }
+    : {}),
+});
 ownerRestoreHost = () => {
   const mode = storage.getLiveHostControl()?.configuredMode;
   return mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
 };
 // Only a session service keeps hosted replicas, so only it holds documents for released retained work.
-heldDocumentHost = () => storage.getLiveHostControl()?.configuredMode === "service" ? serviceHost() : undefined;
+heldDocumentHost = () =>
+  storage.getLiveHostControl()?.configuredMode === "service" ? serviceHost() : undefined;
 if (publicEditRelease) {
   const mode = storage.getLiveHostControl()?.configuredMode;
-  if (!linkLiveEnabled || !namedLiveConfig || (mode === "service" ? (!configuredServiceHost && !selfHost) : mode === "device" ? (!deviceControl || !deviceDeliveryConfig || !ownerAdmission) : true)) {
-    fatal("FATAL: Public Edit release requires link live routes and the configured service host or device delivery with owner admission.");
+  if (
+    !linkLiveEnabled ||
+    !namedLiveConfig ||
+    (mode === "service"
+      ? !configuredServiceHost && !selfHost
+      : mode === "device"
+        ? !deviceControl || !deviceDeliveryConfig || !ownerAdmission
+        : true)
+  ) {
+    fatal(
+      "FATAL: Public Edit release requires link live routes and the configured service host or device delivery with owner admission.",
+    );
   }
 }
 if (namedLiveConfig) {
-  if (!configuredServiceHost && !selfHost && !deviceControl) fatal("FATAL: Named live routes require an authenticated service or device host.");
-  const captureNative = async (binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost> => {
+  if (!configuredServiceHost && !selfHost && !deviceControl)
+    fatal("FATAL: Named live routes require an authenticated service or device host.");
+  const captureNative = async (
+    binding: LiveObjectBinding,
+    signal: AbortSignal,
+  ): Promise<NamedFrameNativeHost> => {
     const mode = storage.getLiveHostControl()?.configuredMode;
     const host = mode === "service" ? serviceHost() : mode === "device" ? deviceControl : undefined;
     if (!host) throw new Error("Named live host is unavailable.");
     return host.captureNative(binding, signal);
   };
-  const tickets = createLiveTickets({ storage, audience: shareWebOrigin!, key: linkKey!, hostReports: createLiveHostReports({ storage, captureNative }) });
+  const tickets = createLiveTickets({
+    storage,
+    audience: shareWebOrigin!,
+    key: linkKey!,
+    hostReports: createLiveHostReports({ storage, captureNative }),
+  });
   const admission = createLiveConnectionAdmission();
-  const membership = createLiveMembershipRegistry({maxSessions: namedLiveConfig.transport.maxConnections, maxMembers: namedLiveConfig.transport.maxConnections,
-    maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage));
-  namedLive = createNamedLiveRoutes({ kind: "named", storage, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
-    publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-    sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission, sessionHostBlocked });
+  const membership = createLiveMembershipRegistry(
+    {
+      maxSessions: namedLiveConfig.transport.maxConnections,
+      maxMembers: namedLiveConfig.transport.maxConnections,
+      maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes,
+    },
+    storage.readLiveAuthority.bind(storage),
+  );
+  namedLive = createNamedLiveRoutes({
+    kind: "named",
+    storage,
+    lookupUserDisplayName,
+    hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    publicOrigin: shareWebOrigin!,
+    exchangeKey: relayExchangeKey!,
+    limits: namedLiveConfig.transport,
+    frames: namedLiveConfig.frames,
+    bounds: namedLiveConfig.host,
+    validate: namedLiveConfig.validate,
+    sessions: { resolve: relayApplication.resolveNamedBrowserSession },
+    tickets,
+    captureNative,
+    membership,
+    admission,
+    sessionHostBlocked,
+  });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
-    linkLive = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-      sessions: createLinkLiveResolver({storage, linkKey: linkKey!, publicEditRelease, linkAuthority: relayApplication.linkAuthority}), tickets, captureNative, membership, admission, sessionHostBlocked});
-    linkLiveHttp = createLinkLiveHttp({storage, hosts, publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, linkKey: linkKey!, publicEditRelease, sessionHostBlocked,
-      linkAuthority: relayApplication.linkAuthority});
-    server.once("close", linkLive.close); process.once("SIGINT", linkLive.close); process.once("SIGTERM", linkLive.close);
+    linkLive = createNamedLiveRoutes({
+      kind: "link",
+      storage,
+      hosts,
+      publicOrigin: shareWebOrigin!,
+      exchangeKey: relayExchangeKey!,
+      limits: namedLiveConfig.transport,
+      frames: namedLiveConfig.frames,
+      bounds: namedLiveConfig.host,
+      validate: namedLiveConfig.validate,
+      sessions: createLinkLiveResolver({
+        storage,
+        linkKey: linkKey!,
+        publicEditRelease,
+        linkAuthority: relayApplication.linkAuthority,
+      }),
+      tickets,
+      captureNative,
+      membership,
+      admission,
+      sessionHostBlocked,
+    });
+    linkLiveHttp = createLinkLiveHttp({
+      storage,
+      hosts,
+      publicOrigin: shareWebOrigin!,
+      exchangeKey: relayExchangeKey!,
+      limits: namedLiveConfig.transport,
+      linkKey: linkKey!,
+      publicEditRelease,
+      sessionHostBlocked,
+      linkAuthority: relayApplication.linkAuthority,
+    });
+    server.once("close", linkLive.close);
+    process.once("SIGINT", linkLive.close);
+    process.once("SIGTERM", linkLive.close);
   }
   // A personal agent edits only through the self-hosted live host, and only while it is the configured host.
   if (selfHost && deployment) {
     const hostId = selfHostedLiveHostId(deployment.history.namespace);
-    personalLive = createPersonalLiveRoutes({storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")), publicOrigin: shareWebOrigin!,
-      exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport, frames: namedLiveConfig.frames, bounds: namedLiveConfig.host,
-      validate: namedLiveConfig.validate, tickets, captureNative, admission, sessionHostBlocked, linkAuthority: relayApplication.linkAuthority,
-      personalAgents: relayApplication.personalAgents, limiter: relayApplication.personalLimiter,
-      supported: () => { const control = storage.getLiveHostControl(); return control?.configuredMode === "service" && control.configuredHostId === hostId; }});
-    server.once("close", personalLive.close); process.once("SIGINT", personalLive.close); process.once("SIGTERM", personalLive.close);
+    personalLive = createPersonalLiveRoutes({
+      storage,
+      hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+      publicOrigin: shareWebOrigin!,
+      exchangeKey: relayExchangeKey!,
+      limits: namedLiveConfig.transport,
+      frames: namedLiveConfig.frames,
+      bounds: namedLiveConfig.host,
+      validate: namedLiveConfig.validate,
+      tickets,
+      captureNative,
+      admission,
+      sessionHostBlocked,
+      linkAuthority: relayApplication.linkAuthority,
+      personalAgents: relayApplication.personalAgents,
+      limiter: relayApplication.personalLimiter,
+      supported: () => {
+        const control = storage.getLiveHostControl();
+        return control?.configuredMode === "service" && control.configuredHostId === hostId;
+      },
+    });
+    server.once("close", personalLive.close);
+    process.once("SIGINT", personalLive.close);
+    process.once("SIGTERM", personalLive.close);
   }
   if (desktopEditorLimits) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
-    desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
-      limits: namedBrowserSessionLimits!, editorLimits: desktopEditorLimits, tickets, changes: frameChanges!,
-      readinessLimits: selfHostLiveProfile().desktopReadiness});
-    desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, lookupUserDisplayName, hosts,
-      publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-      frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-      sessions: desktopAdmission, tickets, captureNative, membership, admission});
-    server.once("close", desktopLive.close); process.once("SIGINT", desktopLive.close); process.once("SIGTERM", desktopLive.close);
+    desktopAdmission = createNamedDesktopLive({
+      storage,
+      resolveActor,
+      publicOrigin: shareWebOrigin!,
+      hosts,
+      limits: namedBrowserSessionLimits!,
+      editorLimits: desktopEditorLimits,
+      tickets,
+      changes: frameChanges!,
+      readinessLimits: selfHostLiveProfile().desktopReadiness,
+    });
+    desktopLive = createNamedLiveRoutes({
+      kind: "named",
+      desktopBearer: true,
+      storage,
+      lookupUserDisplayName,
+      hosts,
+      publicOrigin: shareWebOrigin!,
+      exchangeKey: relayExchangeKey!,
+      limits: namedLiveConfig.transport,
+      frames: namedLiveConfig.frames,
+      bounds: namedLiveConfig.host,
+      validate: namedLiveConfig.validate,
+      sessions: desktopAdmission,
+      tickets,
+      captureNative,
+      membership,
+      admission,
+    });
+    server.once("close", desktopLive.close);
+    process.once("SIGINT", desktopLive.close);
+    process.once("SIGTERM", desktopLive.close);
   }
-  ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
-    publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
-    frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
+  ownerLive = createOwnerLiveRoutes({
+    storage,
+    resolveActor,
+    lookupUserDisplayName,
+    hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+    publicOrigin: shareWebOrigin!,
+    exchangeKey: relayExchangeKey!,
+    limits: namedLiveConfig.transport,
+    frames: namedLiveConfig.frames,
+    bounds: namedLiveConfig.host,
+    validate: namedLiveConfig.validate,
+    captureNative,
+    admission,
+  });
   server.once("close", ownerLive.close);
-  process.once("SIGINT", ownerLive.close); process.once("SIGTERM", ownerLive.close);
+  process.once("SIGINT", ownerLive.close);
+  process.once("SIGTERM", ownerLive.close);
   server.on("upgrade", (request, socket, head) => {
-    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? "")) void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
-    else if (request.url?.startsWith("/sync/live/named?")) void namedLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
-    else if (request.url?.startsWith("/sync/live/link?")) {if (linkLive) void linkLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
-    else if (request.url?.startsWith("/sync/live/personal?")) {if (personalLive) void personalLive.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
-    else if (request.url?.startsWith("/sync/live/desktop?")) {if (desktopLive) void desktopLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy()); else socket.destroy();}
-    else if (!deviceControl) socket.destroy();
+    if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))
+      void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+    else if (request.url?.startsWith("/sync/live/named?"))
+      void namedLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+    else if (request.url?.startsWith("/sync/live/link?")) {
+      if (linkLive)
+        void linkLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+      else socket.destroy();
+    } else if (request.url?.startsWith("/sync/live/personal?")) {
+      if (personalLive)
+        void personalLive.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+      else socket.destroy();
+    } else if (request.url?.startsWith("/sync/live/desktop?")) {
+      if (desktopLive)
+        void desktopLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
+      else socket.destroy();
+    } else if (!deviceControl) socket.destroy();
   });
   server.once("close", namedLive.close);
-  process.once("SIGINT", namedLive.close); process.once("SIGTERM", namedLive.close);
+  process.once("SIGINT", namedLive.close);
+  process.once("SIGTERM", namedLive.close);
 }
-const publicationOperator = await startPublicationOperator(storage, operatorSocketPath(), operatorSecretPath());
+const publicationOperator = await startPublicationOperator(
+  storage,
+  operatorSocketPath(),
+  operatorSecretPath(),
+);
 
 // A server that keeps no copies removes them at start. One that runs no automations ends that reason for every copy.
-const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations") : undefined;
+const automationRoot = process.env.DOHC_RELAY_SERVICE_HOST_ROOT
+  ? join(process.env.DOHC_RELAY_SERVICE_HOST_ROOT, "automations")
+  : undefined;
 // Their phone writes settle first, in an engine started for that alone when the server has one.
 if (!copiesOn && automationRoot) {
-  await removeAutomationReplicas(storage, automationRoot, deployment && process.env.DOHC_RELAY_ENGINE_EXECUTABLE
-    ? {namespace: deployment.history.namespace, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE} : undefined);
+  await removeAutomationReplicas(
+    storage,
+    automationRoot,
+    deployment && process.env.DOHC_RELAY_ENGINE_EXECUTABLE
+      ? {
+          namespace: deployment.history.namespace,
+          engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE,
+        }
+      : undefined,
+  );
 }
 if (!automationsOn && copiesOn) storage.endCopyReasonEverywhere("automation");
 // No phone read is open at start, but one a crash cut short can leave the reason a pass gave back after "Show on phone" went off.
 if (copiesOn) storage.endAccountReasonsOfHiddenOrDisownedCopies();
-const copyReplicas = automationReplicaKey && automationRoot ? {root: automationRoot, engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
-  relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!, ...automationReplicaKey} : undefined;
-automations = automationServer && copyReplicas ? await startAutomationServer({
-  storage, server: automationServer, datasetHost,
-  replicas: copyReplicas,
-  readOwnerShares: relayApplication.readOwnerShares,
-  lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
-  noticeLimiter: noticePostRateLimiter,
-  ...(deployment && namedLiveConfig ? {recordDelivery: createAutomationRecordHost({
-    storage, namespace: deployment.history.namespace, serviceHost, ...(deviceControl ? {deviceHost: deviceControl} : {}),
-    lookupUserDisplayName, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
-  })} : {}),
-  ...(selfHost ? {live: {ledger: (workspaceId: string) => selfHost.automationLedger(workspaceId),
-    workspaces: () => selfHost.automationWorkspaces(), onEvent: selfHost.onAutomationEvent}} : {}),
-  onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
-}) : undefined;
-copies = automations?.copies ?? (copyReplicas ? await startServerCopies({...copyReplicas, storage,
-  onError: (error, workspaceId) => console.error(workspaceId === undefined ? "[sync-relay] copies of workspaces:"
-    : `[sync-relay] copy of workspace "${workspaceId}":`, error)}) : undefined);
+const copyReplicas =
+  automationReplicaKey && automationRoot
+    ? {
+        root: automationRoot,
+        engineExecutable: process.env.DOHC_RELAY_ENGINE_EXECUTABLE!,
+        relayOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN!,
+        ...automationReplicaKey,
+      }
+    : undefined;
+automations =
+  automationServer && copyReplicas
+    ? await startAutomationServer({
+        storage,
+        server: automationServer,
+        datasetHost,
+        replicas: copyReplicas,
+        readOwnerShares: relayApplication.readOwnerShares,
+        lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
+        noticeLimiter: noticePostRateLimiter,
+        ...(deployment && namedLiveConfig
+          ? {
+              recordDelivery: createAutomationRecordHost({
+                storage,
+                namespace: deployment.history.namespace,
+                serviceHost,
+                ...(deviceControl ? { deviceHost: deviceControl } : {}),
+                lookupUserDisplayName,
+                bounds: namedLiveConfig.host,
+                validate: namedLiveConfig.validate,
+              }),
+            }
+          : {}),
+        ...(selfHost
+          ? {
+              live: {
+                ledger: (workspaceId: string) => selfHost.automationLedger(workspaceId),
+                workspaces: () => selfHost.automationWorkspaces(),
+                onEvent: selfHost.onAutomationEvent,
+              },
+            }
+          : {}),
+        onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),
+      })
+    : undefined;
+copies =
+  automations?.copies ??
+  (copyReplicas
+    ? await startServerCopies({
+        ...copyReplicas,
+        storage,
+        onError: (error, workspaceId) =>
+          console.error(
+            workspaceId === undefined
+              ? "[sync-relay] copies of workspaces:"
+              : `[sync-relay] copy of workspace "${workspaceId}":`,
+            error,
+          ),
+      })
+    : undefined);
 
 let journalCheck: ReturnType<typeof startLiveJournalCheck> | undefined;
 // pg reads query_timeout from each query's config, but its QueryConfig type doesn't declare it.
-const pushQuery = (text: string, values: unknown[]): QueryConfig & {query_timeout: number} =>
-  ({text, values, query_timeout: 5000});
-const pushSender = createPushSender({storage: storage as StorageContext, config: pool ? pushConfig : undefined,
+const pushQuery = (text: string, values: unknown[]): QueryConfig & { query_timeout: number } => ({
+  text,
+  values,
+  query_timeout: 5000,
+});
+const pushSender = createPushSender({
+  storage: storage as StorageContext,
+  config: pool ? pushConfig : undefined,
   async lookupAccountName(userId, signal) {
     signal.throwIfAborted();
-    const result = await pool!.query<{name: string | null}>(
+    const result = await pool!.query<{ name: string | null }>(
       pushQuery('SELECT name FROM "user" WHERE id = $1 LIMIT 1', [userId]),
     );
     signal.throwIfAborted();
@@ -834,22 +1453,36 @@ const pushSender = createPushSender({storage: storage as StorageContext, config:
   },
   async sessionIsValid(session, signal) {
     signal.throwIfAborted();
-    const result = await pool!.query(pushQuery(`SELECT 1 FROM "session" s JOIN "user" u ON u.id = s."userId"
-      WHERE s.id = $1 AND s."userId" = $2 AND s."expiresAt" > now()`, [session.sessionId, session.userId]));
+    const result = await pool!.query(
+      pushQuery(
+        `SELECT 1 FROM "session" s JOIN "user" u ON u.id = s."userId"
+      WHERE s.id = $1 AND s."userId" = $2 AND s."expiresAt" > now()`,
+        [session.sessionId, session.userId],
+      ),
+    );
     signal.throwIfAborted();
     return result.rowCount === 1;
-  }, onError: () => console.error("[sync-relay] Push delivery could not finish.")});
-const stopPushSender = () => {void pushSender.close().catch(() => console.error("[sync-relay] Push sender could not close."));};
-process.once("SIGINT", stopPushSender); process.once("SIGTERM", stopPushSender);
+  },
+  onError: () => console.error("[sync-relay] Push delivery could not finish."),
+});
+const stopPushSender = () => {
+  void pushSender.close().catch(() => console.error("[sync-relay] Push sender could not close."));
+};
+process.once("SIGINT", stopPushSender);
+process.once("SIGTERM", stopPushSender);
 server.once("close", stopPushSender);
 const stopJournalCheck = () => journalCheck?.close();
-process.once("SIGINT", stopJournalCheck); process.once("SIGTERM", stopJournalCheck);
+process.once("SIGINT", stopJournalCheck);
+process.once("SIGTERM", stopJournalCheck);
 server.once("close", stopJournalCheck);
 server.listen(requestedPort, host, () => {
   journalCheck = startLiveJournalCheck((storage as StorageContext).db);
   pushSender.start();
   void (async () => {
-    for (const job of pendingDeletions.splice(0)) await deletions.purge(job.user_id,job.email).catch(() => console.error("[sync-relay] Account deletion remains pending."));
+    for (const job of pendingDeletions.splice(0))
+      await deletions
+        .purge(job.user_id, job.email)
+        .catch(() => console.error("[sync-relay] Account deletion remains pending."));
   })();
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : requestedPort;
@@ -871,7 +1504,8 @@ installShutdown(server, {
     await configuredServiceHost?.close();
     await liveValidation.close();
     await datasetHost?.close();
-    if (!deployment) await rm(datasetDirectory, {recursive: true, force: true, maxRetries: 8, retryDelay: 25});
+    if (!deployment)
+      await rm(datasetDirectory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
     // The fence listener holds a pool client, so it closes before the pool ends.
     await relayApplication.dispose();
     storage.close();

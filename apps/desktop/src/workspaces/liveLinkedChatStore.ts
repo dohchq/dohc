@@ -19,7 +19,10 @@ const PATH_HINT_ENRICHMENT_CONCURRENCY = 8;
 
 export interface DesktopLinkedChatStore extends LinkedChatStore {
   ensureOpen(): Promise<void>;
-  listChannelsPage(input: { workspaceId: string; limit: number }): Promise<{ channels: ChatChannelSummary[]; nextCursor: string | null }>;
+  listChannelsPage(input: {
+    workspaceId: string;
+    limit: number;
+  }): Promise<{ channels: ChatChannelSummary[]; nextCursor: string | null }>;
 }
 
 export interface DesktopLinkedChatStoreOptions {
@@ -35,9 +38,7 @@ function toStoreChannel(channel: LiveChatChannel): ChatChannel {
   return { ...rest, id: channelId } as ChatChannel;
 }
 
-function toStoreChannelSummary(
-  channel: LiveChatChannelSummary,
-): ChatChannelSummary {
+function toStoreChannelSummary(channel: LiveChatChannelSummary): ChatChannelSummary {
   const { channelId, ...rest } = channel;
   return { ...rest, id: channelId } as ChatChannelSummary;
 }
@@ -50,17 +51,14 @@ async function mapWithConcurrency<T, U>(
   const results = new Array<U>(values.length);
   let nextIndex = 0;
   await Promise.all(
-    Array.from(
-      { length: Math.min(concurrency, values.length) },
-      async () => {
-        for (;;) {
-          const index = nextIndex;
-          nextIndex += 1;
-          if (index >= values.length) return;
-          results[index] = await operation(values[index]!);
-        }
-      },
-    ),
+    Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+      for (;;) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= values.length) return;
+        results[index] = await operation(values[index]!);
+      }
+    }),
   );
   return results;
 }
@@ -74,8 +72,7 @@ export function createLiveLinkedChatStore(
   } = {},
 ): DesktopLinkedChatStore {
   const runWithAuthority =
-    options.runWithAuthority ??
-    (async <Result>(work: () => Promise<Result>) => await work());
+    options.runWithAuthority ?? (async <Result>(work: () => Promise<Result>) => await work());
   const accountReadOwner = options.accountReadOwner;
   const accountReadsTried = new Set<string>();
   const recordAccountReads = async (adapter: ChatsLiveAdapter) => {
@@ -84,7 +81,11 @@ export function createLiveLinkedChatStore(
     if (!accountUserId || accountReadsTried.has(accountUserId)) return;
     accountReadsTried.add(accountUserId);
     try {
-      await adapter.seedAccountReads({ workspaceId: workspace.workspaceId, accountUserId, seedLocal: true });
+      await adapter.seedAccountReads({
+        workspaceId: workspace.workspaceId,
+        accountUserId,
+        seedLocal: true,
+      });
     } catch (error) {
       console.error("[desktop] account read seed:", error);
     }
@@ -95,21 +96,19 @@ export function createLiveLinkedChatStore(
   ): Promise<T> =>
     await runWithAuthority(
       async () =>
-    await sessions.run(
-      workspace,
-      async ({ client, workspace: handle }) => {
-        const adapter = new ChatsLiveAdapter(client, handle, {
-          workspaceId: workspace.workspaceId,
-        });
-        await recordAccountReads(adapter);
-        return await operation(adapter);
-      },
-      options,
+        await sessions.run(
+          workspace,
+          async ({ client, workspace: handle }) => {
+            const adapter = new ChatsLiveAdapter(client, handle, {
+              workspaceId: workspace.workspaceId,
+            });
+            await recordAccountReads(adapter);
+            return await operation(adapter);
+          },
+          options,
         ),
     );
-  const invokeRead = async <T>(
-    operation: (adapter: ChatsLiveAdapter) => Promise<T>,
-  ): Promise<T> =>
+  const invokeRead = async <T>(operation: (adapter: ChatsLiveAdapter) => Promise<T>): Promise<T> =>
     await invoke(operation, {
       retryTransportErrors: true,
     });
@@ -118,59 +117,40 @@ export function createLiveLinkedChatStore(
     ensureOpen: async () => {
       await runWithAuthority(
         async () =>
-          await sessions.run(
-        workspace,
-        async () => undefined,
-        { retryTransportErrors: true }),
+          await sessions.run(workspace, async () => undefined, { retryTransportErrors: true }),
       );
     },
     createThread: async (input) =>
       await invoke(async (adapter) => await adapter.createThread(input)),
     createChannel: async (input) =>
-      toStoreChannel(
-        await invoke(async (adapter) => await adapter.createChannel(input)),
-      ),
+      toStoreChannel(await invoke(async (adapter) => await adapter.createChannel(input))),
     ensureGeneralChannel: async (input) =>
-      toStoreChannel(
-        await invoke(
-          async (adapter) => await adapter.ensureGeneralChannel(input),
-        ),
-      ),
+      toStoreChannel(await invoke(async (adapter) => await adapter.ensureGeneralChannel(input))),
     ensureAgentChannel: async (input) =>
-      toStoreChannel(
-        await invoke(async (adapter) => await adapter.ensureAgentChannel(input)),
-      ),
+      toStoreChannel(await invoke(async (adapter) => await adapter.ensureAgentChannel(input))),
     listChannels: async (input) =>
-      (
-        await invokeRead(async (adapter) => await adapter.listChannels(input))
-      ).map(toStoreChannelSummary),
-    listChannelsPage: async input => invokeRead(async adapter => {
-      if (input.workspaceId !== workspace.workspaceId) throw new Error("Chat workspace mismatch.");
-      const page = await adapter.request("chats.channels.list", { pageLimit: input.limit });
-      return { channels: page.channels.map(toStoreChannelSummary), nextCursor: page.nextCursor };
-    }),
+      (await invokeRead(async (adapter) => await adapter.listChannels(input))).map(
+        toStoreChannelSummary,
+      ),
+    listChannelsPage: async (input) =>
+      invokeRead(async (adapter) => {
+        if (input.workspaceId !== workspace.workspaceId)
+          throw new Error("Chat workspace mismatch.");
+        const page = await adapter.request("chats.channels.list", { pageLimit: input.limit });
+        return { channels: page.channels.map(toStoreChannelSummary), nextCursor: page.nextCursor };
+      }),
     findChannelBySlug: async (input) => {
-      const channel = await invokeRead(
-        async (adapter) => await adapter.findChannelBySlug(input),
-      );
+      const channel = await invokeRead(async (adapter) => await adapter.findChannelBySlug(input));
       return channel ? toStoreChannel(channel) : null;
     },
     getChannelWireId: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.getChannelWireId(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.getChannelWireId(input)),
     findThreadChannelId: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.findThreadChannelId(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.findThreadChannelId(input)),
     startChannelThread: async (input) =>
-      await invoke(
-        async (adapter) => await adapter.startChannelThread(input),
-      ),
+      await invoke(async (adapter) => await adapter.startChannelThread(input)),
     listChannelThreads: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.listChannelThreads(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.listChannelThreads(input)),
     markThreadRead: async (input) =>
       await invoke(async (adapter) => await adapter.markThreadRead(input)),
     listThreads: async (input) =>
@@ -178,9 +158,7 @@ export function createLiveLinkedChatStore(
         const threads = await adapter.listThreads(input);
         const linkedObjectIds = [
           ...new Set(
-            threads.flatMap((thread) =>
-              thread.linkedFile ? [thread.linkedFile.objectId] : [],
-            ),
+            threads.flatMap((thread) => (thread.linkedFile ? [thread.linkedFile.objectId] : [])),
           ),
         ];
         if (linkedObjectIds.length === 0) return threads;
@@ -195,17 +173,12 @@ export function createLiveLinkedChatStore(
               }),
           )
         ).flat();
-        const richerById = new Map(
-          richerThreads.map((thread) => [thread.id, thread]),
-        );
+        const richerById = new Map(richerThreads.map((thread) => [thread.id, thread]));
         return threads.map((thread) => richerById.get(thread.id) ?? thread);
       }),
     listThreadsForFile: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.listThreadsForFile(input),
-      ),
-    sendMessage: async (input) =>
-      await invoke(async (adapter) => await adapter.sendMessage(input)),
+      await invokeRead(async (adapter) => await adapter.listThreadsForFile(input)),
+    sendMessage: async (input) => await invoke(async (adapter) => await adapter.sendMessage(input)),
     listMessages: async (input) =>
       await invokeRead(async (adapter) => await adapter.listMessages(input)),
     listMessagesPage: async (input) =>
@@ -219,48 +192,31 @@ export function createLiveLinkedChatStore(
     getMessage: async (input) =>
       await invokeRead(async (adapter) => await adapter.getMessage(input)),
     getThreadRevision: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.getThreadRevision(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.getThreadRevision(input)),
     resolveChatDecision: async (input) =>
-      await invoke(
-        async (adapter) => await adapter.resolveChatDecision(input),
-      ),
+      await invoke(async (adapter) => await adapter.resolveChatDecision(input)),
     listThreadDecisions: async (workspaceId, threadId) =>
-      await invokeRead(
-        async (adapter) =>
-          await adapter.listThreadDecisions(workspaceId, threadId),
-      ),
+      await invokeRead(async (adapter) => await adapter.listThreadDecisions(workspaceId, threadId)),
     listThreadAttachments: async (workspaceId, threadId) =>
       await invokeRead(
-        async (adapter) =>
-          await adapter.listThreadAttachments(workspaceId, threadId),
+        async (adapter) => await adapter.listThreadAttachments(workspaceId, threadId),
       ),
-    linksPage: async input => await invokeRead(adapter => adapter.linksPage(input)),
-    fileMentionsPage: input => invokeRead(adapter => adapter.fileMentionsPage(input)),
+    linksPage: async (input) => await invokeRead((adapter) => adapter.linksPage(input)),
+    fileMentionsPage: (input) => invokeRead((adapter) => adapter.fileMentionsPage(input)),
     markThreadReadByAgent: async (input) =>
-      await invoke(
-        async (adapter) => await adapter.markThreadReadByAgent(input),
-      ),
+      await invoke(async (adapter) => await adapter.markThreadReadByAgent(input)),
     listAgentUnreadThreads: async (workspaceId, reader) =>
       await invokeRead(
-        async (adapter) =>
-          await adapter.listAgentUnreadThreads(workspaceId, reader),
+        async (adapter) => await adapter.listAgentUnreadThreads(workspaceId, reader),
       ),
     listAgentUnreadRequests: async (workspaceId, reader) =>
       await invokeRead(
-        async (adapter) =>
-          await adapter.listAgentUnreadRequests(workspaceId, reader),
+        async (adapter) => await adapter.listAgentUnreadRequests(workspaceId, reader),
       ),
     listAgentRequestsPage: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.listAgentRequestsPage(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.listAgentRequestsPage(input)),
     listMentionsForHandle: async (workspaceId, handle) =>
-      await invokeRead(
-        async (adapter) =>
-          await adapter.listMentionsForHandle(workspaceId, handle),
-      ),
+      await invokeRead(async (adapter) => await adapter.listMentionsForHandle(workspaceId, handle)),
     setReaction: async (input) =>
       await invoke(
         async (adapter) =>
@@ -275,23 +231,15 @@ export function createLiveLinkedChatStore(
       ),
     listReactions: async (input) =>
       await invokeRead(async (adapter) => await adapter.listReactions(input)),
-    setFollow: async (input) =>
-      await invoke(async (adapter) => await adapter.setFollow(input)),
+    setFollow: async (input) => await invoke(async (adapter) => await adapter.setFollow(input)),
     listFollows: async (input) =>
       await invokeRead(async (adapter) => await adapter.listFollows(input)),
     ensureDefaultChannelFollows: async (input) =>
-      await invoke(
-        async (adapter) =>
-          await adapter.ensureDefaultChannelFollows(input),
-      ),
+      await invoke(async (adapter) => await adapter.ensureDefaultChannelFollows(input)),
     listPersonalFeed: async (input) =>
-      (await invokeRead(
-        async (adapter) => await adapter.listPersonalFeed(input),
-      )) as ChatFeedPage,
+      (await invokeRead(async (adapter) => await adapter.listPersonalFeed(input))) as ChatFeedPage,
     markPersonalFeedSeen: async (input) =>
-      await invoke(
-        async (adapter) => await adapter.markPersonalFeedSeen(input),
-      ),
+      await invoke(async (adapter) => await adapter.markPersonalFeedSeen(input)),
     saveBookmark: async (input) =>
       await invoke(async (adapter) => await adapter.saveBookmark(input)),
     listBookmarks: async (input) =>
@@ -301,27 +249,19 @@ export function createLiveLinkedChatStore(
     archiveBookmark: async (input) =>
       await invoke(async (adapter) => await adapter.archiveBookmark(input)),
     listPendingBookmarks: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.listPendingBookmarks(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.listPendingBookmarks(input)),
     markBookmarkPending: async (input) =>
-      await invoke(
-        async (adapter) => await adapter.markBookmarkPending(input),
-      ),
+      await invoke(async (adapter) => await adapter.markBookmarkPending(input)),
     markBookmarkReady: async (input) =>
       await invoke(async (adapter) => await adapter.markBookmarkReady(input)),
     markBookmarkFailed: async (input) =>
-      await invoke(
-        async (adapter) => await adapter.markBookmarkFailed(input),
-      ),
+      await invoke(async (adapter) => await adapter.markBookmarkFailed(input)),
     retryFailedBookmark: async (input) =>
       await invoke(async (adapter) => await adapter.retryFailedBookmark(input)),
     markBookmarkStale: async (input) =>
       await invoke(async (adapter) => await adapter.markBookmarkStale(input)),
     getThreadProjection: async (input) =>
-      await invokeRead(
-        async (adapter) => await adapter.getThreadProjection(input),
-      ),
+      await invokeRead(async (adapter) => await adapter.getThreadProjection(input)),
     close: async () => {
       await sessions.closeWorkspace(workspace);
     },

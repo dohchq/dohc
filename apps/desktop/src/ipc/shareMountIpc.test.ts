@@ -21,10 +21,7 @@ const workspaceSummary = {
 const shareId = "11111111-1111-4111-8111-111111111111";
 
 function harness() {
-  const handlers = new Map<
-    string,
-    (event: TestEvent, payload: unknown) => Promise<unknown>
-  >();
+  const handlers = new Map<string, (event: TestEvent, payload: unknown) => Promise<unknown>>();
   const trace: string[] = [];
   let writable = true;
   let activeWorkspaceId = workspace.workspaceId;
@@ -68,10 +65,7 @@ function harness() {
       event: TestEvent,
       workspaceId: string,
       inactiveMessage: string,
-      work: (operation: {
-        workspace: typeof workspace;
-        assertCurrent(): void;
-      }) => Promise<Result>,
+      work: (operation: { workspace: typeof workspace; assertCurrent(): void }) => Promise<Result>,
     ) => {
       expect(inactiveMessage).toBe("Share update stopped because this window changed workspaces.");
       trace.push(`operation:${workspaceId}`);
@@ -92,13 +86,17 @@ function harness() {
       return result;
     },
   };
-  registerOperations(dependencies, shareMountOperations, createShareMountIpcHandlers({
-    assertWritableWorkspace: () => {
-      trace.push("write gate");
-      if (!writable) throw new Error("This workspace is read-only.");
-    },
-    commands,
-  }));
+  registerOperations(
+    dependencies,
+    shareMountOperations,
+    createShareMountIpcHandlers({
+      assertWritableWorkspace: () => {
+        trace.push("write gate");
+        if (!writable) throw new Error("This workspace is read-only.");
+      },
+      commands,
+    }),
+  );
   return {
     handlers,
     trace,
@@ -226,7 +224,9 @@ describe("share mount IPC registration", () => {
     [shareMountOperations.unmountShare.channel, { workspaceId: "workspace-2", shareId }],
   ])("rejects a foreign workspace payload for %s before its command", async (channel, payload) => {
     const test = harness();
-    await expect(test.invoke(channel, payload)).rejects.toThrow("Share update stopped because this window changed workspaces.");
+    await expect(test.invoke(channel, payload)).rejects.toThrow(
+      "Share update stopped because this window changed workspaces.",
+    );
     expect(test.trace).toEqual(["trust", "operation:workspace-2"]);
     for (const command of Object.values(test.commands)) expect(command).not.toHaveBeenCalled();
   });
@@ -297,21 +297,16 @@ describe("share mount IPC registration", () => {
     const test = harness();
     test.setWritable(false);
 
-    await expect(test.invoke(channel, payload)).rejects.toThrow(
-      "This workspace is read-only.",
-    );
-    expect(test.trace).toEqual([
-      "trust",
-      `operation:${workspace.workspaceId}`,
-      "write gate",
-    ]);
+    await expect(test.invoke(channel, payload)).rejects.toThrow("This workspace is read-only.");
+    expect(test.trace).toEqual(["trust", `operation:${workspace.workspaceId}`, "write gate"]);
     expect(test.commands.mount).not.toHaveBeenCalled();
     expect(test.commands.refresh).not.toHaveBeenCalled();
     expect(test.commands.unmount).not.toHaveBeenCalled();
   });
 
-  it.each(Object.values(shareMountOperations).map(row => row.channel))(
-    "rejects an untrusted sender before parsing %s", async channel => {
+  it.each(Object.values(shareMountOperations).map((row) => row.channel))(
+    "rejects an untrusted sender before parsing %s",
+    async (channel) => {
       const test = harness();
       await expect(
         test.invoke(channel, null, {

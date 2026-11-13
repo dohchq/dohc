@@ -11,7 +11,9 @@ export function reportedProduct(reported: ChatReportedAgentRecord | undefined): 
 }
 
 // One line for a tooltip: `Claude Code 2.1 · Claude Opus 5.5 (as reported)`.
-export function reportedAgentLine(reported: ChatReportedAgentRecord | undefined): string | undefined {
+export function reportedAgentLine(
+  reported: ChatReportedAgentRecord | undefined,
+): string | undefined {
   const parts = [reportedProduct(reported), reported?.model].filter((part) => part !== undefined);
   return parts.length > 0 ? `${parts.join(" · ")} ${AS_REPORTED}` : undefined;
 }

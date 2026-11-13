@@ -10,9 +10,10 @@ const bridgeMock = {
   onCloudSessionChanged: vi.fn<(listener: () => void) => () => void>(),
 };
 // What main says while the engine is still taking in a new workspace's files.
-const stillUpdating = () => new Error(
-  "Error invoking remote method 'desktop:cloud-status': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
-);
+const stillUpdating = () =>
+  new Error(
+    "Error invoking remote method 'desktop:cloud-status': DaemonRefusalError [OVERLOADED]: Workspace is still updating. Try again.",
+  );
 const onStatusUnavailable = vi.fn<(retry: () => void) => void>();
 
 vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
@@ -86,7 +87,8 @@ it("reports sync for this workspace after a refresh", async () => {
 });
 
 it("reports a failed read and retries the current workspace", async () => {
-  bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine unavailable"))
+  bridgeMock.cloudStatus
+    .mockRejectedValueOnce(new Error("engine unavailable"))
     .mockResolvedValue({ connected: true, workspaceSynced: true });
   const { result } = renderHook(() => useCloudPresence("ws-1", onStatusUnavailable, true));
   await waitFor(() => expect(onStatusUnavailable).toHaveBeenCalledTimes(1));
@@ -165,7 +167,8 @@ it("keeps a still-updating answer workspace A asked for out of workspace B", asy
 
 // About tells a status still being read from one that could not be read.
 it("says the status could not be read until a read answers, for this workspace only", async () => {
-  bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("engine unavailable"))
+  bridgeMock.cloudStatus
+    .mockRejectedValueOnce(new Error("engine unavailable"))
     .mockResolvedValue({ connected: true, workspaceSynced: true });
   const { result, rerender } = renderHook(
     ({ workspaceId }) => useCloudPresence(workspaceId, onStatusUnavailable, true),
@@ -189,7 +192,8 @@ it("does not report a confirmed unsynced workspace as unavailable", async () => 
 
 it("ignores stale failures and retires retry actions on workspace switch", async () => {
   const pending = deferred<CloudStatusResult>();
-  bridgeMock.cloudStatus.mockRejectedValueOnce(new Error("old failure"))
+  bridgeMock.cloudStatus
+    .mockRejectedValueOnce(new Error("old failure"))
     .mockReturnValueOnce(pending.promise)
     .mockResolvedValue({ connected: true, workspaceSynced: true });
   const { rerender } = renderHook(
@@ -224,6 +228,8 @@ it("does not read cloud status before workspace admission", async () => {
   expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
   result.current.refreshCloudStatus();
   expect(bridgeMock.cloudStatus).not.toHaveBeenCalled();
-  await act(async () => { rerender({ ready: true }); });
+  await act(async () => {
+    rerender({ ready: true });
+  });
   expect(bridgeMock.cloudStatus).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace" });
 });

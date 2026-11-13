@@ -4,12 +4,28 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 
-const accepted = { kind: "accepted", acceptanceId: "accepted-1", objectId: "object-1", momentId: "moment-1",
-  publicPrincipalId: "public-person-1", versionId: "main", collectionPath: "trip/responses", path: "trip/responses/vote.md", acceptedAtMs: 1 };
+const accepted = {
+  kind: "accepted",
+  acceptanceId: "accepted-1",
+  objectId: "object-1",
+  momentId: "moment-1",
+  publicPrincipalId: "public-person-1",
+  versionId: "main",
+  collectionPath: "trip/responses",
+  path: "trip/responses/vote.md",
+  acceptedAtMs: 1,
+};
 const page = { action: "list", acceptances: [accepted], nextAcceptanceId: null };
 const api = { ownerAppResponses: vi.fn() };
-beforeEach(() => { vi.stubGlobal("dohcDesktop", api); api.ownerAppResponses.mockResolvedValue(page); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.resetAllMocks(); });
+beforeEach(() => {
+  vi.stubGlobal("dohcDesktop", api);
+  api.ownerAppResponses.mockResolvedValue(page);
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.resetAllMocks();
+});
 
 async function load() {
   fireEvent.click(screen.getByRole("button", { name: "Load responses" }));
@@ -19,9 +35,15 @@ async function load() {
 it("shows response provenance and requires confirmation before removing a holder's responses", async () => {
   render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />);
   await load();
-  expect(api.ownerAppResponses).toHaveBeenCalledWith({ action: "list", workspaceId: "workspace", grantId: "grant", limit: 100 });
+  expect(api.ownerAppResponses).toHaveBeenCalledWith({
+    action: "list",
+    workspaceId: "workspace",
+    grantId: "grant",
+    limit: 100,
+  });
   const trigger = screen.getByRole("button", { name: /Remove this holder.s responses/ });
-  trigger.focus(); fireEvent.click(trigger);
+  trigger.focus();
+  fireEvent.click(trigger);
   expect(screen.getByRole("dialog").textContent).toContain("including responses outside this page");
   expect(api.ownerAppResponses).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -37,16 +59,33 @@ it("retries an uncertain removal with the same identity and resumes the returned
   fireEvent.click(screen.getByRole("button", { name: "Remove responses" }));
   await screen.findByRole("alert");
   const first = api.ownerAppResponses.mock.calls[1][0];
-  expect(first).toMatchObject({ action: "undo", workspaceId: "workspace", grantId: "grant", publicPrincipalId: accepted.publicPrincipalId, limit: 100 });
-  api.ownerAppResponses.mockResolvedValueOnce({ action: "undo", items: [{ acceptanceId: accepted.acceptanceId, status: "deleted", momentId: "delete-1" }], nextCursor: "accepted-100" });
+  expect(first).toMatchObject({
+    action: "undo",
+    workspaceId: "workspace",
+    grantId: "grant",
+    publicPrincipalId: accepted.publicPrincipalId,
+    limit: 100,
+  });
+  api.ownerAppResponses.mockResolvedValueOnce({
+    action: "undo",
+    items: [{ acceptanceId: accepted.acceptanceId, status: "deleted", momentId: "delete-1" }],
+    nextCursor: "accepted-100",
+  });
   fireEvent.click(screen.getByRole("button", { name: "Retry removal" }));
   await screen.findByText("Restore removed files from workspace history.");
   expect(document.activeElement).toBe(screen.getByRole("heading", { name: "App responses" }));
   expect(api.ownerAppResponses.mock.calls[2][0]).toEqual(first);
-  api.ownerAppResponses.mockResolvedValueOnce({ action: "undo", items: [{ acceptanceId: "accepted-101", status: "conflict" }], nextCursor: null });
+  api.ownerAppResponses.mockResolvedValueOnce({
+    action: "undo",
+    items: [{ acceptanceId: "accepted-101", status: "conflict" }],
+    nextCursor: null,
+  });
   fireEvent.click(screen.getByRole("button", { name: "Continue removing responses" }));
   await screen.findByText("0 removed. 0 already absent. 1 conflicts kept. 0 failed.");
-  expect(api.ownerAppResponses.mock.calls[3][0]).toEqual({ ...first, afterAcceptanceId: "accepted-100" });
+  expect(api.ownerAppResponses.mock.calls[3][0]).toEqual({
+    ...first,
+    afterAcceptanceId: "accepted-100",
+  });
   expect(screen.queryByRole("button", { name: "Continue removing responses" })).toBeNull();
 });
 
@@ -56,13 +95,19 @@ it("discards a response page after switching workspaces", async () => {
   const view = render(<OwnerAppResponses workspaceId="workspace-a" grantId="grant" />);
   fireEvent.click(screen.getByRole("button", { name: "Load responses" }));
   view.rerender(<OwnerAppResponses workspaceId="workspace-b" grantId="grant" />);
-  await act(async () => { pending.resolve(page); });
+  await act(async () => {
+    pending.resolve(page);
+  });
   expect(screen.queryByText(accepted.path)).toBeNull();
   expect(screen.getByRole("button", { name: "Load responses" })).toBeTruthy();
 });
 
 it("reports a malformed result and offers a working reload", async () => {
-  api.ownerAppResponses.mockResolvedValueOnce({ action: "list", acceptances: [{ ...accepted, publicPrincipalId: undefined }], nextAcceptanceId: null });
+  api.ownerAppResponses.mockResolvedValueOnce({
+    action: "list",
+    acceptances: [{ ...accepted, publicPrincipalId: undefined }],
+    nextAcceptanceId: null,
+  });
   render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />);
   fireEvent.click(screen.getByRole("button", { name: "Load responses" }));
   await screen.findByRole("alert");
@@ -71,14 +116,26 @@ it("reports a malformed result and offers a working reload", async () => {
 });
 
 it("clears earlier outcome counts on reload and a new failed removal", async () => {
-  render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />); await load();
-  const remove = () => { fireEvent.click(screen.getByRole("button",{name:/Remove this holder.s responses/})); fireEvent.click(screen.getByRole("button",{name:"Remove responses"})); };
-  api.ownerAppResponses.mockResolvedValueOnce({action:"undo",items:[{acceptanceId:accepted.acceptanceId,status:"deleted"}],nextCursor:null});
-  remove(); await screen.findByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.");
-  fireEvent.click(screen.getByRole("button",{name:"Reload responses"}));
+  render(<OwnerAppResponses workspaceId="workspace" grantId="grant" />);
+  await load();
+  const remove = () => {
+    fireEvent.click(screen.getByRole("button", { name: /Remove this holder.s responses/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove responses" }));
+  };
+  api.ownerAppResponses.mockResolvedValueOnce({
+    action: "undo",
+    items: [{ acceptanceId: accepted.acceptanceId, status: "deleted" }],
+    nextCursor: null,
+  });
+  remove();
+  await screen.findByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.");
+  fireEvent.click(screen.getByRole("button", { name: "Reload responses" }));
   expect(screen.queryByText("1 removed. 0 already absent. 0 conflicts kept. 0 failed.")).toBeNull();
   await screen.findByText(accepted.path);
-  api.ownerAppResponses.mockRejectedValueOnce(new Error("Connection ended.")); remove(); await screen.findByRole("alert");
+  api.ownerAppResponses.mockRejectedValueOnce(new Error("Connection ended."));
+  remove();
+  await screen.findByRole("alert");
   expect(screen.queryByText("Restore removed files from workspace history.")).toBeNull();
-  fireEvent.click(screen.getByRole("button",{name:"Stop here"})); expect(screen.queryByRole("alert")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Stop here" }));
+  expect(screen.queryByRole("alert")).toBeNull();
 });

@@ -26,7 +26,9 @@ afterEach(async () => {
   for (const release of releases.splice(0)) release();
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   vi.mocked(lstat).mockReset().mockImplementation(actual.lstat);
-  await Promise.all(roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })),
+  );
 });
 
 async function tempWorkspace(workspaceId: string) {
@@ -43,7 +45,8 @@ async function hangRoot(rootPath: string) {
   const root = resolve(rootPath);
   const gate = Promise.withResolvers<void>();
   releases.push(() => gate.resolve());
-  let settled = false, error: Error | undefined;
+  let settled = false,
+    error: Error | undefined;
   vi.mocked(lstat).mockImplementation((async (path: PathLike) => {
     if (String(path) === root && !settled) {
       await gate.promise;
@@ -89,7 +92,13 @@ async function outcomeOf(run: Promise<unknown>): Promise<unknown> {
   const bound = Promise.withResolvers<string>();
   const timer = setTimeout(() => bound.resolve("still waiting"), DEADLINE_MS * 20);
   try {
-    return await Promise.race([run.then(() => "opened", (error: unknown) => error), bound.promise]);
+    return await Promise.race([
+      run.then(
+        () => "opened",
+        (error: unknown) => error,
+      ),
+      bound.promise,
+    ]);
   } finally {
     clearTimeout(timer);
   }

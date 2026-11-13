@@ -26,7 +26,7 @@ export function resolveChatFileMentionPath({
   pathByObjectId,
 }: ChatFileMentionPathInput): string | null {
   if (!requestedObjectId) {
-    return attachmentObjectId ? null : attachmentPathHint ?? null;
+    return attachmentObjectId ? null : (attachmentPathHint ?? null);
   }
   if (attachmentObjectId !== requestedObjectId) return null;
   return pathByObjectId.get(attachmentObjectId) ?? null;
@@ -52,7 +52,5 @@ export async function resolveTrackedChatFilePath(
   if (trimmedPath === path) return null;
 
   const trimmedObjectId = await fileObjectIdForPath(trimmedPath);
-  return trimmedObjectId
-    ? { objectId: trimmedObjectId, path: trimmedPath }
-    : null;
+  return trimmedObjectId ? { objectId: trimmedObjectId, path: trimmedPath } : null;
 }

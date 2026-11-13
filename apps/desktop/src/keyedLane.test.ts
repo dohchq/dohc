@@ -36,12 +36,7 @@ describe("runInKeyedLane", () => {
 
     finishSecond.resolve();
     await second;
-    expect(order).toEqual([
-      "first:start",
-      "first:end",
-      "second:start",
-      "second:end",
-    ]);
+    expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
     expect(lanes.size).toBe(0);
   });
 
@@ -167,7 +162,9 @@ describe("runInKeyedLane", () => {
     await second;
     await expect(third).resolves.toBe("third result");
     expect(events).toEqual(["second:start", "second:end", "third"]);
-    await expect(runInKeyedLane(lanes, "workspace", async () => "next pass")).resolves.toBe("next pass");
+    await expect(runInKeyedLane(lanes, "workspace", async () => "next pass")).resolves.toBe(
+      "next pass",
+    );
   });
 
   it("keeps attachment symbols distinct from each other and from workspace strings", async () => {

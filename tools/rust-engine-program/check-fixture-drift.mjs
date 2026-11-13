@@ -1,20 +1,14 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import {
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
-const dependencyError =
-  /could not resolve (?:yjs|tsx\/esm\/api) from any base:/;
+const dependencyError = /could not resolve (?:yjs|tsx\/esm\/api) from any base:/;
 
 // Every committed fixture set that a live TypeScript oracle regenerates. A
 // fixture set missing from this list is frozen output nothing can regenerate,
@@ -39,12 +33,7 @@ const fixtureSets = [
     // on every run even when its content is identical. The oracle-owned
     // projections, coverage, metadata, and expectations remain byte-stable and
     // are the drift signal this gate must protect.
-    volatileFields: [
-      "baseUpdateB64",
-      "mergedUpdateB64",
-      "stateVectorB64",
-      "updates",
-    ],
+    volatileFields: ["baseUpdateB64", "mergedUpdateB64", "stateVectorB64", "updates"],
   },
   {
     dir: "crates/dohc-engine-sync/tests/fixtures",
@@ -98,8 +87,7 @@ function comparableFixture(path, volatileFields) {
 
 function shortLine(line) {
   const maxLength = 240;
-  const excerpt =
-    line.length <= maxLength ? line : `${line.slice(0, maxLength - 1)}…`;
+  const excerpt = line.length <= maxLength ? line : `${line.slice(0, maxLength - 1)}…`;
   return JSON.stringify(excerpt);
 }
 
@@ -125,12 +113,8 @@ function printDiffExcerpt(name, committed, generated) {
     if (committedLine === generatedLine) {
       console.error(`  ${lineNumber}  ${shortLine(committedLine ?? "")}`);
     } else {
-      console.error(
-        `- ${lineNumber} committed ${shortLine(committedLine ?? "<missing>")}`,
-      );
-      console.error(
-        `+ ${lineNumber} generated ${shortLine(generatedLine ?? "<missing>")}`,
-      );
+      console.error(`- ${lineNumber} committed ${shortLine(committedLine ?? "<missing>")}`);
+      console.error(`+ ${lineNumber} generated ${shortLine(generatedLine ?? "<missing>")}`);
     }
   }
 }
@@ -138,19 +122,12 @@ function printDiffExcerpt(name, committed, generated) {
 function conciseGeneratorError(output) {
   const lines = output.trimEnd().split(/\r?\n/);
   const errorLine = lines.findLastIndex((line) => line.startsWith("Error:"));
-  return lines
-    .slice(errorLine >= 0 ? errorLine : Math.max(0, lines.length - 12))
-    .join("\n");
+  return lines.slice(errorLine >= 0 ? errorLine : Math.max(0, lines.length - 12)).join("\n");
 }
 
 // Returns this fixture set's exit code: 0 pass, 1 fail, 2 dependency SKIP.
 // Starts at 1 so any path that reaches no verdict fails closed.
-function checkFixtureSet({
-  dir,
-  oracle,
-  dependencyOverrideEnv,
-  volatileFields,
-}) {
+function checkFixtureSet({ dir, oracle, dependencyOverrideEnv, volatileFields }) {
   const fixturesDir = join(repoRoot, dir);
   const generator = join(fixturesDir, "gen-fixtures.mjs");
   const tempDir = mkdtempSync(join(tmpdir(), "dohc-fixture-drift-"));
@@ -168,14 +145,10 @@ function checkFixtureSet({
     const generatorOutput = `${generated.stdout ?? ""}${generated.stderr ?? ""}`;
 
     if (generated.error) {
-      console.error(
-        `fixture generator could not start: ${generated.error.message}`,
-      );
+      console.error(`fixture generator could not start: ${generated.error.message}`);
     } else if (generated.status !== 0) {
       if (dependencyError.test(generatorOutput)) {
-        const dependency = generatorOutput.includes("tsx/esm/api")
-          ? "tsx"
-          : "yjs";
+        const dependency = generatorOutput.includes("tsx/esm/api") ? "tsx" : "yjs";
         console.warn(
           `SKIP: ${dir} fixture drift was not checked because ${dependency} could not be resolved.`,
         );
@@ -199,9 +172,7 @@ function checkFixtureSet({
       const committedSet = new Set(committedNames);
       const generatedSet = new Set(generatedNames);
       const missing = committedNames.filter((name) => !generatedSet.has(name));
-      const unexpectedlyNew = generatedNames.filter(
-        (name) => !committedSet.has(name),
-      );
+      const unexpectedlyNew = generatedNames.filter((name) => !committedSet.has(name));
       const differing = committedNames.filter((name) => {
         if (!generatedSet.has(name)) return false;
         return !comparableFixture(join(fixturesDir, name), volatileFields).equals(
@@ -209,11 +180,7 @@ function checkFixtureSet({
         );
       });
 
-      if (
-        differing.length === 0 &&
-        missing.length === 0 &&
-        unexpectedlyNew.length === 0
-      ) {
+      if (differing.length === 0 && missing.length === 0 && unexpectedlyNew.length === 0) {
         console.log(
           `${dir}: ${committedNames.length} deterministic fixture payloads match byte-for-byte`,
         );
@@ -221,17 +188,10 @@ function checkFixtureSet({
       } else {
         console.error(`fixture drift detected in ${dir}.`);
         printList("Differing fixtures", differing);
-        printList(
-          "Missing fixtures (committed but not regenerated)",
-          missing,
-        );
-        printList(
-          "Unexpectedly new fixtures (generated but not committed)",
-          unexpectedlyNew,
-        );
+        printList("Missing fixtures (committed but not regenerated)", missing);
+        printList("Unexpectedly new fixtures (generated but not committed)", unexpectedlyNew);
 
-        const excerptName =
-          differing.find((name) => name !== "_manifest.json") ?? differing[0];
+        const excerptName = differing.find((name) => name !== "_manifest.json") ?? differing[0];
         if (excerptName) {
           printDiffExcerpt(
             excerptName,

@@ -23,7 +23,13 @@ const READY_WATCHER_STATUS = {
   running: true,
   degraded: false,
   terminal: false,
-  noAtomicPlacement: false, recoveryUnavailable: false, deferredWrites: [], keptFiles: [], captureRecoveries: [], heldFiles: [], retainedCopies: { count: 0, bytes: 0 },
+  noAtomicPlacement: false,
+  recoveryUnavailable: false,
+  deferredWrites: [],
+  keptFiles: [],
+  captureRecoveries: [],
+  heldFiles: [],
+  retainedCopies: { count: 0, bytes: 0 },
   phase: "ready",
 } satisfies WatcherStatusResult;
 
@@ -36,7 +42,8 @@ const READY_WATCHER_STATUS = {
  */
 export function daemonCaptureLifecycleAnswer(
   request: Request,
-  captureFlushResult: () => CaptureFlushResult = () => ({ deferredWrites: [],
+  captureFlushResult: () => CaptureFlushResult = () => ({
+    deferredWrites: [],
     settled: true,
     running: true,
     degraded: false,
@@ -91,7 +98,8 @@ export function daemonCaptureLifecycleAnswer(
 export function mockLiveSessions(
   loopback: VersionedLoopbackEngine,
   requests?: Request[],
-  captureFlushResult: () => CaptureFlushResult = () => ({ deferredWrites: [],
+  captureFlushResult: () => CaptureFlushResult = () => ({
+    deferredWrites: [],
     settled: true,
     running: true,
     degraded: false,
@@ -166,7 +174,8 @@ function loopbackSessions(
       requests?.push(request);
       const params = request.params as Record<string, JsonValue | undefined>;
       if (request.method === "workspace.open") {
-        if (typeof params.rootDir === "string") roots.set(String(params.workspaceId), params.rootDir);
+        if (typeof params.rootDir === "string")
+          roots.set(String(params.workspaceId), params.rootDir);
         return {
           id: request.id,
           result: { workspace: String(params.workspaceId) },
@@ -178,7 +187,8 @@ function loopbackSessions(
       const answered = answer ? await answer(request) : null;
       if (answered) return answered;
       const root = roots.get(String(request.workspace));
-      if (request.method === "files.replace" && root !== undefined) return replaceFileOnScratchDisk(root, request);
+      if (request.method === "files.replace" && root !== undefined)
+        return replaceFileOnScratchDisk(root, request);
       const lifecycle = daemonCaptureLifecycleAnswer(request, captureFlushResult);
       if (lifecycle) return lifecycle;
       const response = await loopback.sendRequest(request);

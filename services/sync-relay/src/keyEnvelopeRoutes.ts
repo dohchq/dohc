@@ -10,10 +10,7 @@ export function createKeyEnvelopeRoutes(
   storage: Pick<SyncRelayStorage, "putKeyEnvelope" | "getKeyEnvelope">,
   nowMs: () => number,
 ) {
-  async function respondToKeyEnvelopes(
-    request: Request,
-    workspaceId: string,
-  ): Promise<Response> {
+  async function respondToKeyEnvelopes(request: Request, workspaceId: string): Promise<Response> {
     if (request.method === "PUT") {
       const bytes = await readBytes(request, MAX_KEY_ENVELOPE_BYTES);
       const envelopeJson = Buffer.from(bytes).toString("utf8");
@@ -36,11 +33,9 @@ export function createKeyEnvelopeRoutes(
         updatedAtMs: nowMs(),
         expectedSha256: parseIfMatchSha256(request.headers.get("if-match")),
       });
-      return jsonResponse(
-        { ok: true, workspaceId, sha256: result.sha256 },
-        200,
-        { etag: `"${result.sha256}"` },
-      );
+      return jsonResponse({ ok: true, workspaceId, sha256: result.sha256 }, 200, {
+        etag: `"${result.sha256}"`,
+      });
     }
 
     if (request.method === "GET") {

@@ -2,7 +2,10 @@ import { hasPendingYDocDeliveries, settleYDocDeliveries } from "../pendingYDocDe
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
-import { YDOC_PENDING_MAX_BYTES, YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
+import {
+  YDOC_PENDING_MAX_BYTES,
+  YDOC_PENDING_MAX_RECORDS,
+} from "@dohc/workspace-engine-client/ydoc-limits";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../../ipc/channels";
 import {
   bindEngineYDoc,
@@ -15,61 +18,88 @@ import {
   type EngineYDocTransport,
 } from "./engineYDocProvider";
 
-it.each([false,true])("queues edits made during owner handoff and drains them after terminal result (failure=%s)", async fail => {
-  const fixture = mockTransport();
-  let enter!: () => void, release!: () => void;
-  const entered = new Promise<void>(resolve => { enter = resolve; });
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  fixture.transport.adoptOwner = async generation => { expect(generation).toBe(1); enter(); await gate; if (fail) throw new Error("adoption refused"); };
-  const binding = await bindEngineYDoc(fixture.transport);
-  const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
-  text.insert(0,"before ");
-  const adopted = binding.adoptOwner();
-  const outcome = adopted.then(() => "adopted", () => "refused");
-  await entered;
-  expect(fixture.shipped).toHaveLength(1);
-  text.insert(0,"during ");
-  expect(fixture.shipped).toHaveLength(1);
-  expect(fixture.staged()).toBe(2);
-  release();
-  expect(await outcome).toBe(fail ? "refused" : "adopted");
-  expect(fixture.shipped).toHaveLength(2);
-  expect(fixture.mainDoc.getXmlFragment("body").toString()).toBe(binding.doc!.getXmlFragment("body").toString());
-  await binding.destroy();
-  fixture.mainDoc.destroy();
-});
+it.each([false, true])(
+  "queues edits made during owner handoff and drains them after terminal result (failure=%s)",
+  async (fail) => {
+    const fixture = mockTransport();
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fixture.transport.adoptOwner = async (generation) => {
+      expect(generation).toBe(1);
+      enter();
+      await gate;
+      if (fail) throw new Error("adoption refused");
+    };
+    const binding = await bindEngineYDoc(fixture.transport);
+    const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    text.insert(0, "before ");
+    const adopted = binding.adoptOwner();
+    const outcome = adopted.then(
+      () => "adopted",
+      () => "refused",
+    );
+    await entered;
+    expect(fixture.shipped).toHaveLength(1);
+    text.insert(0, "during ");
+    expect(fixture.shipped).toHaveLength(1);
+    expect(fixture.staged()).toBe(2);
+    release();
+    expect(await outcome).toBe(fail ? "refused" : "adopted");
+    expect(fixture.shipped).toHaveLength(2);
+    expect(fixture.mainDoc.getXmlFragment("body").toString()).toBe(
+      binding.doc!.getXmlFragment("body").toString(),
+    );
+    await binding.destroy();
+    fixture.mainDoc.destroy();
+  },
+);
 
-it.each([false, true])("destroy drains edits queued during an unfinished owner handoff (failure=%s)", async fail => {
-  const fixture = mockTransport();
-  let enter!: () => void;
-  let release!: () => void;
-  const entered = new Promise<void>(resolve => { enter = resolve; });
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  fixture.transport.adoptOwner = async () => {
-    enter();
-    await gate;
-    if (fail) throw new Error("adoption refused");
-  };
-  const binding = await bindEngineYDoc(fixture.transport);
-  const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
-  text.insert(0, "before ");
-  const handoff = binding.adoptOwner().then(() => "adopted", () => "refused");
-  await entered;
-  text.insert(0, "during ");
-  const expected = binding.doc!.getXmlFragment("body").toString();
-  const destroying = binding.destroy();
-  expect(fixture.closed()).toBe(false);
-  expect(fixture.shipped).toHaveLength(1);
-  release();
-  expect(await handoff).toBe("refused");
-  await destroying;
-  expect(fixture.shipped).toHaveLength(2);
-  expect(fixture.mainDoc.getXmlFragment("body").toString()).toBe(expected);
-  expect(fixture.events.at(-1)).toBe("close");
-  expect(fixture.closed()).toBe(true);
-  await binding.destroy();
-  fixture.mainDoc.destroy();
-});
+it.each([false, true])(
+  "destroy drains edits queued during an unfinished owner handoff (failure=%s)",
+  async (fail) => {
+    const fixture = mockTransport();
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fixture.transport.adoptOwner = async () => {
+      enter();
+      await gate;
+      if (fail) throw new Error("adoption refused");
+    };
+    const binding = await bindEngineYDoc(fixture.transport);
+    const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    text.insert(0, "before ");
+    const handoff = binding.adoptOwner().then(
+      () => "adopted",
+      () => "refused",
+    );
+    await entered;
+    text.insert(0, "during ");
+    const expected = binding.doc!.getXmlFragment("body").toString();
+    const destroying = binding.destroy();
+    expect(fixture.closed()).toBe(false);
+    expect(fixture.shipped).toHaveLength(1);
+    release();
+    expect(await handoff).toBe("refused");
+    await destroying;
+    expect(fixture.shipped).toHaveLength(2);
+    expect(fixture.mainDoc.getXmlFragment("body").toString()).toBe(expected);
+    expect(fixture.events.at(-1)).toBe("close");
+    expect(fixture.closed()).toBe(true);
+    await binding.destroy();
+    fixture.mainDoc.destroy();
+  },
+);
 
 // A mock transport standing in for the main-process engine session: it holds a
 // "main" Y.Doc, seeds the renderer from it, records every shipped local update,
@@ -270,7 +300,9 @@ async function measureProviderDelivery(kind: "text" | "scene"): Promise<{
       callbacks.set(handle, { at: now + Math.max(1, delayMs), callback });
       return handle;
     },
-    cancel(handle) { callbacks.delete(handle as number); },
+    cancel(handle) {
+      callbacks.delete(handle as number);
+    },
   };
   async function advanceTo(target: number): Promise<void> {
     for (;;) {
@@ -294,29 +326,47 @@ async function measureProviderDelivery(kind: "text" | "scene"): Promise<{
   const latencies: number[] = [];
   let acknowledged = 0;
   let requests = 0;
-  const binding = await bindEngineYDoc({
-    initializeDoc,
-    async open() {
-      return { available: true, initialUpdate: Y.encodeStateAsUpdate(main), lineageGeneration: 1 };
+  const binding = await bindEngineYDoc(
+    {
+      initializeDoc,
+      async open() {
+        return {
+          available: true,
+          initialUpdate: Y.encodeStateAsUpdate(main),
+          lineageGeneration: 1,
+        };
+      },
+      stageLocalUpdate() {
+        stagedAt.push(now);
+        return stagedAt.length;
+      },
+      applyLocalUpdate(update, sequence) {
+        requests += 1;
+        Y.applyUpdate(main, update);
+        while (acknowledged < sequence) latencies.push(now - stagedAt[acknowledged++]!);
+      },
+      onRemoteUpdate() {
+        return () => undefined;
+      },
+      onLineageReplacement() {
+        return () => undefined;
+      },
+      async acknowledgeLineageReplacement() {
+        return [];
+      },
+      async close() {},
     },
-    stageLocalUpdate() { stagedAt.push(now); return stagedAt.length; },
-    applyLocalUpdate(update, sequence) {
-      requests += 1;
-      Y.applyUpdate(main, update);
-      while (acknowledged < sequence) latencies.push(now - stagedAt[acknowledged++]!);
-    },
-    onRemoteUpdate() { return () => undefined; },
-    onLineageReplacement() { return () => undefined; },
-    async acknowledgeLineageReplacement() { return []; },
-    async close() {},
-  }, scheduler);
+    scheduler,
+  );
   binding.doc!.clientID = 2;
   const count = kind === "scene" ? 120 : 100;
   const interval = kind === "scene" ? 1000 / 60 : 137;
   for (let index = 0; index < count; index += 1) {
     await advanceTo(index * interval);
     if (kind === "scene") {
-      binding.doc!.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("dragged", { x: index, y: index * 2 });
+      binding
+        .doc!.getMap(EXCALIDRAW_SCENE_ROOTS.revisions)
+        .set("dragged", { x: index, y: index * 2 });
     } else {
       const text = binding.doc!.getText("plainText");
       text.insert(text.length, "x");
@@ -385,10 +435,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
   it("declares scene maps before applying initial and remote updates", async () => {
     const seed = new Y.Doc();
     seed.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).set("initial", "one");
-    let remoteListener: (
-      update: Uint8Array,
-      lineageGeneration: number,
-    ) => void = () => {
+    let remoteListener: (update: Uint8Array, lineageGeneration: number) => void = () => {
       throw new Error("Remote listener was not registered.");
     };
     let initialized = false;
@@ -422,22 +469,14 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     });
 
     expect(initialized).toBe(true);
-    expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.revisions)).toBeInstanceOf(
-      Y.Map,
-    );
-    expect(
-      binding.doc?.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).get("initial"),
-    ).toBe("one");
+    expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.revisions)).toBeInstanceOf(Y.Map);
+    expect(binding.doc?.getMap(EXCALIDRAW_SCENE_ROOTS.revisions).get("initial")).toBe("one");
 
     const remote = new Y.Doc();
     remote.getMap(EXCALIDRAW_SCENE_ROOTS.assets).set("remote", "two");
     remoteListener(Y.encodeStateAsUpdate(remote), 1);
-    expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.assets)).toBeInstanceOf(
-      Y.Map,
-    );
-    expect(binding.doc?.getMap(EXCALIDRAW_SCENE_ROOTS.assets).get("remote")).toBe(
-      "two",
-    );
+    expect(binding.doc?.share.get(EXCALIDRAW_SCENE_ROOTS.assets)).toBeInstanceOf(Y.Map);
+    expect(binding.doc?.getMap(EXCALIDRAW_SCENE_ROOTS.assets).get("remote")).toBe("two");
 
     await binding.destroy();
   });
@@ -672,9 +711,14 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const fixture = mockTransport([]);
     const scheduler = manualBatchScheduler();
     let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let attempts = 0;
-    fixture.transport.applyLocalUpdate = async () => { attempts += 1; await gate; };
+    fixture.transport.applyLocalUpdate = async () => {
+      attempts += 1;
+      await gate;
+    };
     let recoveredText = "";
     let refused: unknown;
     const binding = await bindEngineYDoc(fixture.transport, scheduler.scheduler, {
@@ -723,8 +767,12 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       binding.doc!.getMap("values").set("latest", payload + index);
     }
     expect(refused).toBeInstanceOf(EngineYDocPendingLimitError);
-    expect((refused as EngineYDocPendingLimitError).observedBytes).toBeGreaterThan(YDOC_PENDING_MAX_BYTES);
-    expect((refused as EngineYDocPendingLimitError).observedRecords).toBeLessThan(YDOC_PENDING_MAX_RECORDS);
+    expect((refused as EngineYDocPendingLimitError).observedBytes).toBeGreaterThan(
+      YDOC_PENDING_MAX_BYTES,
+    );
+    expect((refused as EngineYDocPendingLimitError).observedRecords).toBeLessThan(
+      YDOC_PENDING_MAX_RECORDS,
+    );
     expect(recoveredValue).toBe(payload + 31);
     expect(fixture.staged()).toBe(31);
     expect(scheduler.pendingCount()).toBe(0);
@@ -764,9 +812,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       },
     };
     const batches = manualBatchScheduler();
-    let refusal:
-      | { constraint: string; limitBytes: number; observedBytes: number }
-      | undefined;
+    let refusal: { constraint: string; limitBytes: number; observedBytes: number } | undefined;
     let recoveredText = "";
     const binding = await bindEngineYDoc(transport, batches.scheduler, {
       onDeliveryFailure(_snapshot, error, doc) {
@@ -788,9 +834,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       constraint: "ENGINE_YDOC_UPDATE_MAX_BYTES",
       limitBytes: ENGINE_YDOC_UPDATE_MAX_BYTES,
     });
-    expect(refusal!.observedBytes).toBeGreaterThan(
-      ENGINE_YDOC_UPDATE_MAX_BYTES,
-    );
+    expect(refusal!.observedBytes).toBeGreaterThan(ENGINE_YDOC_UPDATE_MAX_BYTES);
     expect(recoveredText).toBe(text);
 
     await binding.destroy();
@@ -809,9 +853,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
         async applyLocalUpdate(update, sequence, generation, requestId) {
           if (refuseNext) {
             refuseNext = false;
-            throw new EngineYDocUpdateTooLargeError(
-              ENGINE_YDOC_UPDATE_MAX_BYTES + 1,
-            );
+            throw new EngineYDocUpdateTooLargeError(ENGINE_YDOC_UPDATE_MAX_BYTES + 1);
           }
           await baseApply(update, sequence, generation, requestId);
         },
@@ -1108,11 +1150,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     }
     expect(preserved).toHaveLength(1);
     expect(preserved[0]).toContain("Unacknowledged edit.");
-    for (
-      let turn = 0;
-      turn < 10 && mock.acknowledgedGenerations.length === 0;
-      turn += 1
-    ) {
+    for (let turn = 0; turn < 10 && mock.acknowledgedGenerations.length === 0; turn += 1) {
       await Promise.resolve();
     }
     expect(mock.acknowledgedGenerations).toEqual([2]);
@@ -1150,9 +1188,7 @@ describe("engine Y.Doc provider — renderer bridge", () => {
 
     const winnerBeforeRemote = Y.encodeStateVector(winner);
     typeIntoBody(winner, "Remote during handoff.");
-    mock.bufferDuringReplacement(
-      Y.encodeStateAsUpdate(winner, winnerBeforeRemote),
-    );
+    mock.bufferDuringReplacement(Y.encodeStateAsUpdate(winner, winnerBeforeRemote));
     mock.releaseReplacement();
     await replacing;
 
@@ -1179,10 +1215,18 @@ describe("engine Y.Doc provider — renderer bridge", () => {
   it("changes the head in the same task as the state it came with, and forgets it for a source without one", async () => {
     const mock = mockTransport();
     const binding = await bindEngineYDoc(mock.transport);
-    const seen: Array<{ text: string; head: string | null | undefined; saved: string | null | undefined }> = [];
-    binding.onHeadChanged(() => seen.push({
-      text: bodyText(binding.doc!), head: binding.headSha256, saved: binding.lastSave?.sha256,
-    }));
+    const seen: Array<{
+      text: string;
+      head: string | null | undefined;
+      saved: string | null | undefined;
+    }> = [];
+    binding.onHeadChanged(() =>
+      seen.push({
+        text: bodyText(binding.doc!),
+        head: binding.headSha256,
+        saved: binding.lastSave?.sha256,
+      }),
+    );
     const remote = new Y.Doc();
     Y.applyUpdate(remote, Y.encodeStateAsUpdate(mock.mainDoc));
     const push = (change: () => void, lineageGeneration?: number, head?: EngineYDocHead) => {
@@ -1194,7 +1238,11 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     push(() => typeIntoBody(remote, "Remote."), 1, { sha256: "a".repeat(64) });
     expect(seen).toEqual([{ text: bodyText(remote), head: "a".repeat(64), saved: undefined }]);
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "b".repeat(64), committed: true });
-    expect(seen.at(-1)).toEqual({ text: bodyText(remote), head: "b".repeat(64), saved: "b".repeat(64) });
+    expect(seen.at(-1)).toEqual({
+      text: bodyText(remote),
+      head: "b".repeat(64),
+      saved: "b".repeat(64),
+    });
 
     // A delta that keeps the source keeps its head.
     push(() => typeIntoBody(remote, "More."));
@@ -1237,7 +1285,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     remote.getMap("meta").set("dohcMarkdownSourceSha256", "c".repeat(64));
     mock.pushRemote(Y.encodeStateAsUpdate(remote), 1, { sha256: null });
     expect(binding.headSha256).toBeNull();
-    expect(binding.pairedInstalls, "count a null head -> a teammate's edit to a shared note drops Edit anyway").toBe(0);
+    expect(
+      binding.pairedInstalls,
+      "count a null head -> a teammate's edit to a shared note drops Edit anyway",
+    ).toBe(0);
     remote.destroy();
     await binding.destroy();
   });
@@ -1260,7 +1311,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       mock.pushRemote(Y.encodeStateAsUpdate(remote, before), 1, { sha256: null });
     }
     expect(bodyText(binding.doc!)).toContain("Typed.");
-    expect(changes, "wake on every head -> each keystroke on a shared note re-renders the inspector").toHaveBeenCalledOnce();
+    expect(
+      changes,
+      "wake on every head -> each keystroke on a shared note re-renders the inspector",
+    ).toHaveBeenCalledOnce();
     expect([binding.headSha256, binding.lastSave, binding.pairedInstalls]).toEqual([null, null, 0]);
     mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
     expect(changes).toHaveBeenCalledTimes(2);
@@ -1279,12 +1333,17 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     typeIntoBody(winner, "Winning root.");
     winner.getMap("meta").set("dohcMarkdownSourceSha256", "b".repeat(64));
     const replacing = mock.replaceLineage({
-      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [],
-      head: { sha256: "b".repeat(64) }, lineageGeneration: 2,
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: [],
+      artifactAssets: [],
+      head: { sha256: "b".repeat(64) },
+      lineageGeneration: 2,
     });
     const beforeRemote = Y.encodeStateVector(winner);
     typeIntoBody(winner, "Read with the next head.");
-    mock.bufferDuringReplacement(Y.encodeStateAsUpdate(winner, beforeRemote), { sha256: "c".repeat(64) });
+    mock.bufferDuringReplacement(Y.encodeStateAsUpdate(winner, beforeRemote), {
+      sha256: "c".repeat(64),
+    });
     mock.releaseReplacement();
     await replacing;
 
@@ -1298,23 +1357,29 @@ describe("engine Y.Doc provider — renderer bridge", () => {
   it.each([
     ["records another source", "b".repeat(64)],
     ["records the same source", undefined],
-  ])("does not keep the old head for a replacement that %s and came without one", async (_, source) => {
-    const mock = mockTransport(["Losing root."]);
-    const binding = await bindEngineYDoc(mock.transport);
-    mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
-    const winner = new Y.Doc();
-    typeIntoBody(winner, "Winning root.");
-    if (source) winner.getMap("meta").set("dohcMarkdownSourceSha256", source);
-    const replacing = mock.replaceLineage({
-      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
-    });
-    mock.releaseReplacement();
-    await replacing;
-    expect(bodyText(binding.doc!)).toContain("Winning root.");
-    expect(binding.headSha256).toBeUndefined();
-    winner.destroy();
-    await binding.destroy();
-  });
+  ])(
+    "does not keep the old head for a replacement that %s and came without one",
+    async (_, source) => {
+      const mock = mockTransport(["Losing root."]);
+      const binding = await bindEngineYDoc(mock.transport);
+      mock.pushRemote(new Uint8Array([0, 0]), 1, { sha256: "a".repeat(64) });
+      const winner = new Y.Doc();
+      typeIntoBody(winner, "Winning root.");
+      if (source) winner.getMap("meta").set("dohcMarkdownSourceSha256", source);
+      const replacing = mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner),
+        recoveredPaths: [],
+        artifactAssets: [],
+        lineageGeneration: 2,
+      });
+      mock.releaseReplacement();
+      await replacing;
+      expect(bodyText(binding.doc!)).toContain("Winning root.");
+      expect(binding.headSha256).toBeUndefined();
+      winner.destroy();
+      await binding.destroy();
+    },
+  );
 
   it("counts each state main installs with a head of its own and each replacement, but not this session's saves, and keeps the newest save's receipt", async () => {
     const mock = mockTransport(["Losing root."]);
@@ -1335,7 +1400,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const winner = new Y.Doc();
     typeIntoBody(winner, "Winning root.");
     const replacing = mock.replaceLineage({
-      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
+      update: Y.encodeStateAsUpdate(winner),
+      recoveredPaths: [],
+      artifactAssets: [],
+      lineageGeneration: 2,
     });
     mock.releaseReplacement();
     await replacing;
@@ -1459,7 +1527,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       typeIntoBody(winner, text);
       generations.push(lineageGeneration);
       return mock.replaceLineage({
-        update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration,
+        update: Y.encodeStateAsUpdate(winner),
+        recoveredPaths: [],
+        artifactAssets: [],
+        lineageGeneration,
       });
     };
 
@@ -1497,7 +1568,10 @@ describe("engine Y.Doc provider — renderer bridge", () => {
       const winner = new Y.Doc();
       typeIntoBody(winner, text);
       return mock.replaceLineage({
-        update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration,
+        update: Y.encodeStateAsUpdate(winner),
+        recoveredPaths: [],
+        artifactAssets: [],
+        lineageGeneration,
       });
     };
 
@@ -1526,9 +1600,14 @@ describe("engine Y.Doc provider — renderer bridge", () => {
     const winner = new Y.Doc();
     typeIntoBody(winner, "Winning root.");
 
-    await expect(mock.replaceLineage({
-      update: Y.encodeStateAsUpdate(winner), recoveredPaths: [], artifactAssets: [], lineageGeneration: 2,
-    })).rejects.toThrow("storage refused");
+    await expect(
+      mock.replaceLineage({
+        update: Y.encodeStateAsUpdate(winner),
+        recoveredPaths: [],
+        artifactAssets: [],
+        lineageGeneration: 2,
+      }),
+    ).rejects.toThrow("storage refused");
     expect(mock.acknowledgedGenerations).toEqual([]);
     expect(binding.doc).toBe(losingDoc);
 
@@ -1571,11 +1650,28 @@ describe("engine Y.Doc provider — renderer bridge", () => {
   });
 });
 
-it("holds only unresolved checkpoint debt after healthy typing is delivered",async()=>{
- const fixture=mockTransport();let unresolved=false;const checkpoint=vi.fn(async()=>{});
- const binding=await bindEngineYDoc(fixture.transport,undefined,{hasUnresolvedCheckpoint:()=>unresolved,checkpointForExit:checkpoint});
- try {const text=(binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;text.insert(0,"typed ");await binding.flushPendingLocalUpdates();
- expect(hasPendingYDocDeliveries()).toBe(false);expect(await settleYDocDeliveries()).toBe(true);expect(checkpoint).not.toHaveBeenCalled();
- unresolved=true;expect(hasPendingYDocDeliveries()).toBe(true);expect(await settleYDocDeliveries()).toBe(true);expect(checkpoint).toHaveBeenCalledOnce();expect(hasPendingYDocDeliveries()).toBe(false);
- }finally{await binding.destroy();fixture.mainDoc.destroy();}
+it("holds only unresolved checkpoint debt after healthy typing is delivered", async () => {
+  const fixture = mockTransport();
+  let unresolved = false;
+  const checkpoint = vi.fn(async () => {});
+  const binding = await bindEngineYDoc(fixture.transport, undefined, {
+    hasUnresolvedCheckpoint: () => unresolved,
+    checkpointForExit: checkpoint,
+  });
+  try {
+    const text = (binding.doc!.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    text.insert(0, "typed ");
+    await binding.flushPendingLocalUpdates();
+    expect(hasPendingYDocDeliveries()).toBe(false);
+    expect(await settleYDocDeliveries()).toBe(true);
+    expect(checkpoint).not.toHaveBeenCalled();
+    unresolved = true;
+    expect(hasPendingYDocDeliveries()).toBe(true);
+    expect(await settleYDocDeliveries()).toBe(true);
+    expect(checkpoint).toHaveBeenCalledOnce();
+    expect(hasPendingYDocDeliveries()).toBe(false);
+  } finally {
+    await binding.destroy();
+    fixture.mainDoc.destroy();
+  }
 });

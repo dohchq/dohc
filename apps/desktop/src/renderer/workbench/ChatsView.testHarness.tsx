@@ -11,10 +11,7 @@ import type {
 import { ChatsView as ProductionChatsView } from "./ChatsView";
 import { ReactionStoreProvider } from "./reactionStore";
 
-type TestChatsViewProps = Omit<
-  Parameters<typeof ProductionChatsView>[0],
-  "workspaces"
-> & {
+type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
   workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
 };
 
@@ -71,7 +68,8 @@ export function thread(overrides: Partial<ChannelThreadRecord> = {}): ChannelThr
 }
 
 export function message(overrides: Partial<ChatMessageRecord> = {}): ChatMessageRecord {
-  return { presentation: { group: "fixture", hue: null, self: false },
+  return {
+    presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "human",
@@ -85,7 +83,8 @@ export function message(overrides: Partial<ChatMessageRecord> = {}): ChatMessage
 export function openingPreview(
   overrides: Partial<NonNullable<ChannelThreadRecord["openingMessage"]>> = {},
 ): NonNullable<ChannelThreadRecord["openingMessage"]> {
-  return { presentation: { group: "fixture", hue: null, self: false },
+  return {
+    presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     authorKind: "human",
     authorDisplayName: "You",
@@ -257,19 +256,16 @@ beforeEach(() => {
   chatDispatchPausedCallbacks.clear();
   cloudSessionCallbacks.clear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
-  bridgeMock.onWorkspaceActivity.mockImplementation((callback: (event: { workspaceId: string }) => void) => {
-    workspaceActivityCallbacks.add(callback);
-    return () => {
-      workspaceActivityCallbacks.delete(callback);
-    };
-  });
+  bridgeMock.onWorkspaceActivity.mockImplementation(
+    (callback: (event: { workspaceId: string }) => void) => {
+      workspaceActivityCallbacks.add(callback);
+      return () => {
+        workspaceActivityCallbacks.delete(callback);
+      };
+    },
+  );
   bridgeMock.onCloudSessionChanged.mockImplementation(
-    (
-      callback: (event: {
-        sessionKey: string | null;
-        phase: "changing" | "ready";
-      }) => void,
-    ) => {
+    (callback: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void) => {
       cloudSessionCallbacks.add(callback);
       return () => {
         cloudSessionCallbacks.delete(callback);
@@ -358,16 +354,19 @@ beforeEach(() => {
     },
   });
   bridgeMock.chatDispatchStateForThread.mockResolvedValue({
-    liveRunId: null, liveTriggerMessageId: null,
+    liveRunId: null,
+    liveTriggerMessageId: null,
     pendingCount: 0,
     paused: false,
   });
   bridgeMock.stopAgentRun.mockResolvedValue(undefined);
   bridgeMock.readChatDispatchPaused.mockResolvedValue({ paused: false });
-  bridgeMock.onChatDispatchPaused.mockImplementation((listener: (event: { paused: boolean }) => void) => {
-    chatDispatchPausedCallbacks.add(listener);
-    return () => chatDispatchPausedCallbacks.delete(listener);
-  });
+  bridgeMock.onChatDispatchPaused.mockImplementation(
+    (listener: (event: { paused: boolean }) => void) => {
+      chatDispatchPausedCallbacks.add(listener);
+      return () => chatDispatchPausedCallbacks.delete(listener);
+    },
+  );
   bridgeMock.setChatDispatchPaused.mockImplementation(async ({ paused }: { paused: boolean }) => {
     for (const callback of [...chatDispatchPausedCallbacks]) callback({ paused });
   });
@@ -414,14 +413,10 @@ beforeEach(() => {
       failed: false,
       ...(await bridgeMock.syncDms(payload)),
     }),
-    listChatChannelShares: async (payload: {
-      workspaceId: string;
-      channelWireIds: string[];
-    }) => {
+    listChatChannelShares: async (payload: { workspaceId: string; channelWireIds: string[] }) => {
       const listing = await bridgeMock.listChatChannelShares(payload);
       if (!listing || !Array.isArray(listing.joined)) return listing;
-      const received =
-        listing.relay?.state === "answered" ? listing.relay.received ?? [] : [];
+      const received = listing.relay?.state === "answered" ? (listing.relay.received ?? []) : [];
       return {
         ...listing,
         joined: listing.answerOnly
@@ -469,7 +464,11 @@ export function navigatorView(readRevision: number, extra: ExtraProps = {}) {
   );
 }
 
-export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsViewProps["onError"]>(), extra: ExtraProps = {}) {
+export function renderView(
+  onOpenFileChat = vi.fn(),
+  onError = vi.fn<TestChatsViewProps["onError"]>(),
+  extra: ExtraProps = {},
+) {
   const { unmount } = render(
     <ChatsView
       workspaceId="workspace-a"
@@ -486,6 +485,12 @@ export function renderView(onOpenFileChat = vi.fn(), onError = vi.fn<TestChatsVi
 }
 
 export const mentionRoster = [
-  { id: "agent:default", kind: "agent" as const, handle: "Nova", label: "Nova", description: "your agent" },
+  {
+    id: "agent:default",
+    kind: "agent" as const,
+    handle: "Nova",
+    label: "Nova",
+    description: "your agent",
+  },
   { id: "user:you", kind: "user" as const, handle: "you", label: "You", description: "you" },
 ];

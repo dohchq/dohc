@@ -44,7 +44,9 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
     await panel.getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     await page.getByText("Advanced", { exact: true }).click();
-    await page.getByTestId("chats-add-agent-command").fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
+    await page
+      .getByTestId("chats-add-agent-command")
+      .fill(`node "${fakeRunner.replaceAll('"', '\\"')}" ask`);
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
     await expect(panel.getByTestId("chats-my-agent")).toHaveCount(1);
@@ -71,7 +73,13 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
     await menu.getByRole("menuitem", { name: "Archive" }).click();
     await expect(group).toHaveCount(0);
     await waitForCliEndpoint(temp.homeDir);
-    await runDohcCli(temp, ["chat", "post", "general", "--as-agent", "The venue is booked for Friday."]);
+    await runDohcCli(temp, [
+      "chat",
+      "post",
+      "general",
+      "--as-agent",
+      "The venue is booked for Friday.",
+    ]);
     const toggle = panel.getByTestId("chats-archived-toggle");
     await expect(toggle.getByTestId("chats-archived-unread")).toBeVisible();
     await expect(group).toHaveCount(0);
@@ -96,7 +104,12 @@ test("archives a chat from its menu, keeps it archived when a message arrives, a
     await agent.focus();
     await page.keyboard.press("Shift+F10");
     await expect(menu).toHaveCount(1);
-    await expect(menu.getByRole("menuitem")).toHaveText(["Agent settings", "Turn off", "Archive", "Remove agent…"]);
+    await expect(menu.getByRole("menuitem")).toHaveText([
+      "Agent settings",
+      "Turn off",
+      "Archive",
+      "Remove agent…",
+    ]);
     await expect(menu.getByRole("menuitem").first()).toBeFocused();
     await shoot(page, testInfo.outputPath("agent-menu-keyboard.png"));
     await page.keyboard.press("Escape");
@@ -120,26 +133,59 @@ test("asks before removing an agent, and manages archived agents in Settings", a
     const settings: DesktopUserSettings = {
       ...DEFAULT_USER_SETTINGS,
       agents: {
-        nova: { name: "Nova", hue: "olive", launch, changesFiles: true, enabled: true, timeoutMinutes: 1 },
-        scout: { name: "Scout", hue: "teal", launch, changesFiles: true, enabled: true, timeoutMinutes: 1 },
+        nova: {
+          name: "Nova",
+          hue: "olive",
+          launch,
+          changesFiles: true,
+          enabled: true,
+          timeoutMinutes: 1,
+        },
+        scout: {
+          name: "Scout",
+          hue: "teal",
+          launch,
+          changesFiles: true,
+          enabled: true,
+          timeoutMinutes: 1,
+        },
       },
     };
-    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
+    await writeFile(
+      join(temp.homeDir, USER_SETTINGS_FILE),
+      `${JSON.stringify(settings, null, 2)}\n`,
+    );
     desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);
     await page.emulateMedia({ reducedMotion: "reduce" });
-    await expect.poll(() => page.evaluate(async () => {
-      const api = (window as unknown as { dohcDesktop: {
-        getWorkspaceRegistry(): Promise<{ workspaces: { workspaceId: string }[] }>;
-        listChatChannels(payload: { workspaceId: string }): Promise<{ channels: { kind: string; agentId?: string }[] }>;
-      } }).dohcDesktop;
-      const workspace = (await api.getWorkspaceRegistry()).workspaces[0];
-      if (!workspace) return [];
-      const { channels } = await api.listChatChannels({ workspaceId: workspace.workspaceId });
-      return channels.flatMap((channel) => channel.kind === "agent" && channel.agentId ? [channel.agentId] : []).sort();
-    }), { timeout: 30_000 }).toEqual(["nova", "scout"]);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async () => {
+            const api = (
+              window as unknown as {
+                dohcDesktop: {
+                  getWorkspaceRegistry(): Promise<{ workspaces: { workspaceId: string }[] }>;
+                  listChatChannels(payload: {
+                    workspaceId: string;
+                  }): Promise<{ channels: { kind: string; agentId?: string }[] }>;
+                };
+              }
+            ).dohcDesktop;
+            const workspace = (await api.getWorkspaceRegistry()).workspaces[0];
+            if (!workspace) return [];
+            const { channels } = await api.listChatChannels({ workspaceId: workspace.workspaceId });
+            return channels
+              .flatMap((channel) =>
+                channel.kind === "agent" && channel.agentId ? [channel.agentId] : [],
+              )
+              .sort();
+          }),
+        { timeout: 30_000 },
+      )
+      .toEqual(["nova", "scout"]);
     const panel = await openChatsView(page);
     const agents = panel.getByTestId("chats-my-agent");
     await expect(agents).toHaveCount(2);
@@ -172,7 +218,10 @@ test("asks before removing an agent, and manages archived agents in Settings", a
 
     // Remove there asks too. Its chat stays, listed as removed.
     await archived.getByRole("button", { name: "Remove Scout…" }).click();
-    await page.getByTestId("remove-agent-dialog").getByRole("button", { name: "Remove agent" }).click();
+    await page
+      .getByTestId("remove-agent-dialog")
+      .getByRole("button", { name: "Remove agent" })
+      .click();
     await expect(page.getByTestId("notice-toasts")).toContainText("Removed Scout.");
     const removed = archived.getByTestId("agent-row-removed");
     await expect(removed).toHaveText(/Scout/u);
@@ -186,7 +235,10 @@ test("asks before removing an agent, and manages archived agents in Settings", a
     await shoot(page, testInfo.outputPath("hide-agent-chat-dialog.png"));
     await hide.getByRole("button", { name: "Remove from list" }).click();
     await expect(archived).toHaveCount(0);
-    await page.getByTestId(desktopPins.settingsDialog).getByRole("button", { name: "Close settings" }).click();
+    await page
+      .getByTestId(desktopPins.settingsDialog)
+      .getByRole("button", { name: "Close settings" })
+      .click();
     await expect(panel.getByTestId("chats-archived-toggle")).toHaveCount(0);
     await expect(agents).toHaveCount(1);
   } finally {

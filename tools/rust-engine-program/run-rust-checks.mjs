@@ -13,11 +13,7 @@ import {
   freeDiskGb,
   resolveBuildBudget,
 } from "./build-slot.mjs";
-import {
-  classifyTreeProvenance,
-  formatTreeState,
-  readTreeState,
-} from "./tree-provenance.mjs";
+import { classifyTreeProvenance, formatTreeState, readTreeState } from "./tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
@@ -56,7 +52,8 @@ const slot = budget ? await acquireBuildSlot(budget) : null;
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
   const capped = capBuildParallelism(process.env, budget.jobs);
-  for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) process.env[name] = capped[name];
+  for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"])
+    process.env[name] = capped[name];
 }
 // A caller's libtest cap carries to nextest unless the caller split them
 // deliberately: the evidence line must never claim a cap the child does
@@ -69,12 +66,11 @@ if (process.env.RUST_TEST_THREADS !== undefined) {
 // values rather than reporting a share nextest is not using.
 const libtestThreads = process.env.RUST_TEST_THREADS ?? "default";
 const nextestThreads = process.env.NEXTEST_TEST_THREADS ?? libtestThreads;
-const capsField =
-  `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${
-    nextestThreads === libtestThreads
-      ? libtestThreads
-      : `${nextestThreads} (doctests ${libtestThreads})`
-  }`;
+const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${
+  nextestThreads === libtestThreads
+    ? libtestThreads
+    : `${nextestThreads} (doctests ${libtestThreads})`
+}`;
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -113,8 +109,12 @@ const gitReadFailures = [];
 // Match the JS gate: invoke git directly in the checkout that ran each step.
 // Git must be an executable; a Windows installation with only a .cmd shim is unsupported.
 function captureGit(cmd) {
-  try { return readGit(cmd.split(" ").slice(1), repoRoot); }
-  catch (error) { gitReadFailures.push(error.message); return null; }
+  try {
+    return readGit(cmd.split(" ").slice(1), repoRoot);
+  } catch (error) {
+    gitReadFailures.push(error.message);
+    return null;
+  }
 }
 
 function toolAvailable(probe) {
@@ -233,7 +233,9 @@ readTreeAfter("native target");
 // An unverified host makes every later result unattributable, so nothing else
 // runs — and the expensive steps are the ones worth skipping.
 const archivedSteps = new Set(["test fixtures", "test --workspace", "reader tests"]);
-for (const step of native.ok ? required.filter(step => !policyOnly || !archivedSteps.has(step.name)) : []) {
+for (const step of native.ok
+  ? required.filter((step) => !policyOnly || !archivedSteps.has(step.name))
+  : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
   // Read as soon as the command returns, before anything else can touch the
@@ -341,8 +343,7 @@ const summary = results
 // rows are a parsed contract (`require-ci-pass-verdict.mjs`) that a PASS row
 // may not decorate. The judgement rows (tree provenance, scratch leak) carry
 // no duration because nothing timed ran for them.
-const stepSeconds = (ms) =>
-  ms === undefined ? "" : ` (${(ms / 1000).toFixed(1)}s)`;
+const stepSeconds = (ms) => (ms === undefined ? "" : ` (${(ms / 1000).toFixed(1)}s)`);
 
 console.log(`\n== summary ==`);
 console.log(`  tree ${treeStamp}`);
@@ -355,8 +356,22 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 if (resultPath) {
   mkdirSync(dirname(resultPath), { recursive: true });
-  writeFileSync(resultPath, JSON.stringify({ version: 1, scope: "rust", part: policyOnly ? "policy" : "gate",
-    commit: readings[0].state.head, verdict, steps: results, provenance }, null, 2) + "\n");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(
+      {
+        version: 1,
+        scope: "rust",
+        part: policyOnly ? "policy" : "gate",
+        commit: readings[0].state.head,
+        verdict,
+        steps: results,
+        provenance,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
 }
 console.log(`\nEVIDENCE (paste into the pull request):`);
 console.log(

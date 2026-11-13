@@ -138,7 +138,8 @@ export function createPresenceRoutes(
       const chatAttribution =
         parsePresenceObjectTopic(topic) === null &&
         (thread !== null
-          ? resolver.threadChannelWireId(thread) != null || resolver.threadFileBinding(thread) != null
+          ? resolver.threadChannelWireId(thread) != null ||
+            resolver.threadFileBinding(thread) != null
           : resolver.channelKind(topic) != null);
       const peers: PreparedPresenceSnapshot["peers"] = [];
       for (const peer of snapshot.peers) {
@@ -196,7 +197,8 @@ export function createPresenceRoutes(
         // Reserved agent identities belong to the authenticated workspace owner.
         if (
           viewerClientId.startsWith("agent:") &&
-          (viewerClientId !== `agent:${workspaceId}` || !storage.workspaceIsOwnedBy(workspaceId, userId))
+          (viewerClientId !== `agent:${workspaceId}` ||
+            !storage.workspaceIsOwnedBy(workspaceId, userId))
         ) {
           throw notFound();
         }
@@ -256,5 +258,9 @@ export function createPresenceRoutes(
     const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
     return await respondPresence(request, workspaceId, topic, userId);
   };
-  return { respondToSharePresence, respondToWorkspacePresence, deleteAccount: project.deleteAccount };
+  return {
+    respondToSharePresence,
+    respondToWorkspacePresence,
+    deleteAccount: project.deleteAccount,
+  };
 }

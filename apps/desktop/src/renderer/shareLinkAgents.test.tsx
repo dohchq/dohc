@@ -11,7 +11,12 @@ import {
   type ShareRemovalFailure,
   type ShareRemovalNotices,
 } from "./shell/useShareRemovalNotices";
-import { LINK_AGENTS_FAILED, LinkAgentsList, agentAddressFor, useLinkAgentDisconnects } from "./shareLinkAgents";
+import {
+  LINK_AGENTS_FAILED,
+  LinkAgentsList,
+  agentAddressFor,
+  useLinkAgentDisconnects,
+} from "./shareLinkAgents";
 
 const api = vi.hoisted(() => ({
   listRelayShareLinkAgents: vi.fn<(input: unknown) => Promise<ListRelayShareLinkAgentsResult>>(),
@@ -25,11 +30,17 @@ const AT_MS = Date.UTC(2026, 10, 9, 10, 30);
 const REVERSED_NAME = `${String.fromCodePoint(0x202e)}Claude`;
 const LINK = { workspaceId: "ws-1", shareId: "share-1", grantId: "grant-1" };
 
-function agent(connectionId: string, reportedName: string | null = `Agent ${connectionId}`): RelayShareLinkAgent {
+function agent(
+  connectionId: string,
+  reportedName: string | null = `Agent ${connectionId}`,
+): RelayShareLinkAgent {
   return { connectionId, reportedName, connectedAtMs: AT_MS, lastActionAtMs: AT_MS + 1_000 };
 }
 
-function page(agents: RelayShareLinkAgent[], nextCursor: string | null = null): ListRelayShareLinkAgentsResult {
+function page(
+  agents: RelayShareLinkAgent[],
+  nextCursor: string | null = null,
+): ListRelayShareLinkAgentsResult {
   return { agents, nextCursor };
 }
 
@@ -59,24 +70,40 @@ type View = {
 };
 
 // The Share dialog's link pane, reduced to its Disconnects and one link's list.
-function Dialog(props: { notices: ShareRemovalNotices; disconnected: ReadonlySet<string>; listShown: boolean; revision: number }) {
+function Dialog(props: {
+  notices: ShareRemovalNotices;
+  disconnected: ReadonlySet<string>;
+  listShown: boolean;
+  revision: number;
+}) {
   const disconnects = useLinkAgentDisconnects(props.notices, props.disconnected);
-  return props.listShown ? <LinkAgentsList {...LINK} revision={props.revision} disconnects={disconnects} /> : null;
+  return props.listShown ? (
+    <LinkAgentsList {...LINK} revision={props.revision} disconnects={disconnects} />
+  ) : null;
 }
 
 // The shell, which outlives each Share dialog.
 function Shell(props: View) {
   const [disconnected, agentDisconnected] = useDisconnectedLinkAgents();
-  const notices = useMemo<ShareRemovalNotices>(() => ({
-    removed: () => {},
-    failed: (failure) => shell.failed(failure),
-    agentDisconnected: (gone) => {
-      shell.agentDisconnected(gone);
-      agentDisconnected(gone);
-    },
-  }), [agentDisconnected]);
+  const notices = useMemo<ShareRemovalNotices>(
+    () => ({
+      removed: () => {},
+      failed: (failure) => shell.failed(failure),
+      agentDisconnected: (gone) => {
+        shell.agentDisconnected(gone);
+        agentDisconnected(gone);
+      },
+    }),
+    [agentDisconnected],
+  );
   return props.open ? (
-    <Dialog key={props.dialog} notices={notices} disconnected={disconnected} listShown={props.listShown} revision={props.revision} />
+    <Dialog
+      key={props.dialog}
+      notices={notices}
+      disconnected={disconnected}
+      listShown={props.listShown}
+      revision={props.revision}
+    />
   ) : null;
 }
 
@@ -93,15 +120,21 @@ function renderList(revision = 1) {
 beforeEach(() => {
   vi.resetAllMocks();
   api.listRelayShareLinkAgents.mockResolvedValue(page([]));
-  api.disconnectRelayShareLinkAgent.mockImplementation(async (input) => ({ connectionId: (input as { connectionId: string }).connectionId }));
+  api.disconnectRelayShareLinkAgent.mockImplementation(async (input) => ({
+    connectionId: (input as { connectionId: string }).connectionId,
+  }));
 });
 
 afterEach(() => cleanup());
 
 describe("agentAddressFor", () => {
   it("is the link's own origin at /mcp/s/<secret>", () => {
-    expect(agentAddressFor(`https://share.dohc.test/s/#${SECRET}`)).toBe(`https://share.dohc.test/mcp/s/${SECRET}`);
-    expect(agentAddressFor(`http://127.0.0.1:4318/s/#${SECRET}`)).toBe(`http://127.0.0.1:4318/mcp/s/${SECRET}`);
+    expect(agentAddressFor(`https://share.dohc.test/s/#${SECRET}`)).toBe(
+      `https://share.dohc.test/mcp/s/${SECRET}`,
+    );
+    expect(agentAddressFor(`http://127.0.0.1:4318/s/#${SECRET}`)).toBe(
+      `http://127.0.0.1:4318/mcp/s/${SECRET}`,
+    );
   });
 
   it("is nothing for a URL that is not a share link", () => {
@@ -133,7 +166,9 @@ describe("LinkAgentsList", () => {
   });
 
   it("names each agent as it reported itself, and marks the name as reported", async () => {
-    api.listRelayShareLinkAgents.mockResolvedValue(page([agent("c1", REVERSED_NAME), { ...agent("c2", null), lastActionAtMs: null }]));
+    api.listRelayShareLinkAgents.mockResolvedValue(
+      page([agent("c1", REVERSED_NAME), { ...agent("c2", null), lastActionAtMs: null }]),
+    );
     renderList();
     const list = await screen.findByRole("region", { name: "Agents" });
     const named = within(list).getByTestId("share-link-agent-c1");
@@ -160,12 +195,18 @@ describe("LinkAgentsList", () => {
     expect(button.textContent).toBe("Disconnecting…");
     expect(button.hasAttribute("disabled")).toBe(true);
     expect(button.getAttribute("aria-busy")).toBe("true");
-    expect(screen.getByTestId("share-link-agent-disconnect-c2").hasAttribute("disabled")).toBe(false);
+    expect(screen.getByTestId("share-link-agent-disconnect-c2").hasAttribute("disabled")).toBe(
+      false,
+    );
     await act(async () => pending.resolve({ connectionId: "c1" }));
     await waitFor(() => expect(screen.queryByTestId("share-link-agent-c1")).toBeNull());
     expect(screen.getByTestId("share-link-agent-c2")).toBeTruthy();
     // The shell takes back any failure an earlier, closed Share dialog filed.
-    expect(shell.agentDisconnected).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", grantId: "grant-1", connectionId: "c1" });
+    expect(shell.agentDisconnected).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      grantId: "grant-1",
+      connectionId: "c1",
+    });
     expect(shell.failed).not.toHaveBeenCalled();
   });
 
@@ -216,7 +257,9 @@ describe("LinkAgentsList", () => {
     const error = await screen.findByTestId("share-link-agent-error-c1");
     expect(error.getAttribute("role")).toBe("alert");
     expect(error.textContent).toMatch(/^dohc could not disconnect Codex\./u);
-    expect(within(screen.getByTestId("share-link-agent-c1")).getByTestId("share-link-agent-error-c1")).toBe(error);
+    expect(
+      within(screen.getByTestId("share-link-agent-c1")).getByTestId("share-link-agent-error-c1"),
+    ).toBe(error);
     expect(screen.queryByTestId("share-link-agent-error-c2")).toBeNull();
     const button = screen.getByTestId("share-link-agent-disconnect-c1");
     expect(button.textContent).toBe("Disconnect");
@@ -227,7 +270,11 @@ describe("LinkAgentsList", () => {
     expect(api.disconnectRelayShareLinkAgent).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(screen.queryByTestId("share-link-agent-c1")).toBeNull());
     expect(shell.failed).not.toHaveBeenCalled();
-    expect(shell.agentDisconnected).toHaveBeenCalledWith({ workspaceId: "ws-1", grantId: "grant-1", connectionId: "c1" });
+    expect(shell.agentDisconnected).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      grantId: "grant-1",
+      connectionId: "c1",
+    });
   });
 
   it("keeps a Disconnect while its list is off screen, and shows its failure in place with no notice", async () => {
@@ -281,10 +328,17 @@ describe("LinkAgentsList", () => {
 
     // Try again in Notices succeeds, and the open list drops the agent.
     await act(async () => failure.retry!());
-    expect(api.disconnectRelayShareLinkAgent).toHaveBeenLastCalledWith({ ...LINK, connectionId: "c1" });
+    expect(api.disconnectRelayShareLinkAgent).toHaveBeenLastCalledWith({
+      ...LINK,
+      connectionId: "c1",
+    });
     await waitFor(() => expect(screen.queryByTestId("share-link-agent-c1")).toBeNull());
     expect(screen.getByTestId("share-link-agent-c2")).toBeTruthy();
-    expect(shell.agentDisconnected).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", grantId: "grant-1", connectionId: "c1" });
+    expect(shell.agentDisconnected).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1",
+      grantId: "grant-1",
+      connectionId: "c1",
+    });
     expect(shell.failed).toHaveBeenCalledOnce();
   });
 
@@ -334,7 +388,9 @@ describe("LinkAgentsList", () => {
     rerender(2);
     await waitFor(() => expect(more.hasAttribute("disabled")).toBe(true));
     await act(async () => refresh.resolve(page([agent("c1")], "next")));
-    expect(screen.getByRole("button", { name: "Show more agents" }).hasAttribute("disabled")).toBe(false);
+    expect(screen.getByRole("button", { name: "Show more agents" }).hasAttribute("disabled")).toBe(
+      false,
+    );
 
     // A page that failed waits the same way.
     const again = controllable<ListRelayShareLinkAgentsResult>();
@@ -345,45 +401,54 @@ describe("LinkAgentsList", () => {
     await user.click(screen.getByRole("button", { name: "Show more agents" }));
     const retry = await screen.findByTestId("share-link-agents-retry-grant-1");
     rerender(3);
-    await waitFor(() => expect(within(retry).getByRole("button", { name: "Try again" }).hasAttribute("disabled")).toBe(true));
+    await waitFor(() =>
+      expect(
+        within(retry).getByRole("button", { name: "Try again" }).hasAttribute("disabled"),
+      ).toBe(true),
+    );
     await act(async () => again.resolve(page([agent("c1")])));
     expect(screen.queryByTestId("share-link-agents-retry-grant-1")).toBeNull();
   });
 
-  it.each(["the page", "the read again"])("keeps only the read again when %s answers first", async (first) => {
-    const more = controllable<ListRelayShareLinkAgentsResult>();
-    const refresh = controllable<ListRelayShareLinkAgentsResult>();
-    api.listRelayShareLinkAgents
-      .mockResolvedValueOnce(page([agent("c1")], "p2"))
-      .mockReturnValueOnce(more.promise)
-      .mockReturnValueOnce(refresh.promise);
-    const user = userEvent.setup();
-    const { rerender } = renderList(1);
-    await user.click(await screen.findByRole("button", { name: "Show more agents" }));
-    expect(api.listRelayShareLinkAgents).toHaveBeenLastCalledWith({ ...LINK, cursor: "p2" });
-    rerender(2);
-    await waitFor(() => expect(api.listRelayShareLinkAgents).toHaveBeenCalledTimes(3));
-    expect(api.listRelayShareLinkAgents).toHaveBeenLastCalledWith(LINK);
+  it.each(["the page", "the read again"])(
+    "keeps only the read again when %s answers first",
+    async (first) => {
+      const more = controllable<ListRelayShareLinkAgentsResult>();
+      const refresh = controllable<ListRelayShareLinkAgentsResult>();
+      api.listRelayShareLinkAgents
+        .mockResolvedValueOnce(page([agent("c1")], "p2"))
+        .mockReturnValueOnce(more.promise)
+        .mockReturnValueOnce(refresh.promise);
+      const user = userEvent.setup();
+      const { rerender } = renderList(1);
+      await user.click(await screen.findByRole("button", { name: "Show more agents" }));
+      expect(api.listRelayShareLinkAgents).toHaveBeenLastCalledWith({ ...LINK, cursor: "p2" });
+      rerender(2);
+      await waitFor(() => expect(api.listRelayShareLinkAgents).toHaveBeenCalledTimes(3));
+      expect(api.listRelayShareLinkAgents).toHaveBeenLastCalledWith(LINK);
 
-    const answers = [
-      () => more.resolve(page([agent("old-page")], "old-next")),
-      () => refresh.resolve(page([agent("c1"), agent("c3")], "r2")),
-    ];
-    for (const answer of first === "the page" ? answers : [...answers].reverse()) await act(async () => answer());
+      const answers = [
+        () => more.resolve(page([agent("old-page")], "old-next")),
+        () => refresh.resolve(page([agent("c1"), agent("c3")], "r2")),
+      ];
+      for (const answer of first === "the page" ? answers : [...answers].reverse())
+        await act(async () => answer());
 
-    const list = screen.getByRole("region", { name: "Agents" });
-    expect(within(list).getAllByRole("listitem").map((item) => item.dataset.testid)).toEqual([
-      "share-link-agent-c1",
-      "share-link-agent-c3",
-    ]);
-    // Show more continues from the read again's cursor, so no agent is skipped.
-    const button = within(list).getByRole("button", { name: "Show more agents" });
-    expect(button.hasAttribute("disabled")).toBe(false);
-    api.listRelayShareLinkAgents.mockResolvedValueOnce(page([agent("c4")]));
-    await user.click(button);
-    expect(api.listRelayShareLinkAgents).toHaveBeenLastCalledWith({ ...LINK, cursor: "r2" });
-    expect(await within(list).findByTestId("share-link-agent-c4")).toBeTruthy();
-  });
+      const list = screen.getByRole("region", { name: "Agents" });
+      expect(
+        within(list)
+          .getAllByRole("listitem")
+          .map((item) => item.dataset.testid),
+      ).toEqual(["share-link-agent-c1", "share-link-agent-c3"]);
+      // Show more continues from the read again's cursor, so no agent is skipped.
+      const button = within(list).getByRole("button", { name: "Show more agents" });
+      expect(button.hasAttribute("disabled")).toBe(false);
+      api.listRelayShareLinkAgents.mockResolvedValueOnce(page([agent("c4")]));
+      await user.click(button);
+      expect(api.listRelayShareLinkAgents).toHaveBeenLastCalledWith({ ...LINK, cursor: "r2" });
+      expect(await within(list).findByTestId("share-link-agent-c4")).toBeTruthy();
+    },
+  );
 
   it("drops a read the list has moved past, and a read after it is gone", async () => {
     const stale = controllable<ListRelayShareLinkAgentsResult>();

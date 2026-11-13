@@ -53,14 +53,10 @@ describe("conflictPreview", () => {
     ["\n", 1],
     ["\r\n", 2],
   ])("bounds line boxes for a body broken by %j", (lineBreak, breakUnits) => {
-    const text = `${"line".repeat(4)}${lineBreak}`.repeat(
-      CONFLICT_PREVIEW_MAX_LINES * 3,
-    );
+    const text = `${"line".repeat(4)}${lineBreak}`.repeat(CONFLICT_PREVIEW_MAX_LINES * 3);
     const preview = conflictPreview(text, 1);
     expect(preview.text.split("\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
-    expect(preview.text.length).toBe(
-      CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits),
-    );
+    expect(preview.text.length).toBe(CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits));
     expect(preview.hiddenChars).toBeGreaterThan(0);
     // CRLF must cost one line, not two. Counting each half separately would
     // halve the window for every Windows document.
@@ -80,9 +76,7 @@ describe("conflictPreview", () => {
     ["FF", "\u000c"],
     ["NEL", "\u0085"],
   ])("holds a body separated by %s at the character window", (_label, separator) => {
-    const text = `${"line".repeat(4)}${separator}`.repeat(
-      CONFLICT_PREVIEW_MAX_LINES * 3,
-    );
+    const text = `${"line".repeat(4)}${separator}`.repeat(CONFLICT_PREVIEW_MAX_LINES * 3);
     const preview = conflictPreview(text, 1);
     expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS);
     expect(preview.text.length + preview.hiddenChars).toBe(text.length);

@@ -12,12 +12,20 @@ describe("agent presence activity", () => {
   });
 
   it("shows no hint for malformed state", () => {
-    for (const state of [null, [], "working", { agent: true, activity: "busy" }, { activity: "idle" }]) {
+    for (const state of [
+      null,
+      [],
+      "working",
+      { agent: true, activity: "busy" },
+      { activity: "idle" },
+    ]) {
       expect(resolveAgentPresenceActivity([{ ...hint(), state }])).toBeNull();
     }
   });
 
   it("ignores ordinary peers before the relay-admitted agent hint", () => {
-    expect(resolveAgentPresenceActivity([{ sessionToken: "ordinary", state: {} }, hint()])).toBe("working");
+    expect(resolveAgentPresenceActivity([{ sessionToken: "ordinary", state: {} }, hint()])).toBe(
+      "working",
+    );
   });
 });

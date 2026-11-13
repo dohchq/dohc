@@ -2,7 +2,12 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollectionSchema, CollectionValue } from "@dohc/workspace-contracts";
-import { TableView, type TableNewRecord, type TableUnsavedRow, type TableViewProps } from "./TableView";
+import {
+  TableView,
+  type TableNewRecord,
+  type TableUnsavedRow,
+  type TableViewProps,
+} from "./TableView";
 import { indexedValue, makeRecord, makeSchema } from "../testSupport";
 
 // The virtualizer measures its scroll element, which jsdom reports as 0, so
@@ -32,7 +37,10 @@ const FIELDS: CollectionSchema["fields"] = [
   { name: "status", type: "select", options: ["todo", "doing"] },
 ];
 const schema = makeSchema(FIELDS);
-const records = (ids = ["a", "b"]) => ids.map((id) => makeRecord(`rec-${id}`, [indexedValue("title", `Task ${id}`), indexedValue("estimate", 3)]));
+const records = (ids = ["a", "b"]) =>
+  ids.map((id) =>
+    makeRecord(`rec-${id}`, [indexedValue("title", `Task ${id}`), indexedValue("estimate", 3)]),
+  );
 
 type Values = Record<string, CollectionValue>;
 type Stop = { field: string; reason: string };
@@ -42,7 +50,10 @@ type Stop = { field: string; reason: string };
  * save it takes never answers the table again: the save is the host's.
  * `stops` answers a value that stops a save, before anything is taken.
  */
-function host(extra: Partial<TableNewRecord> = {}, stops: (values: Values) => Stop | undefined = () => undefined) {
+function host(
+  extra: Partial<TableNewRecord> = {},
+  stops: (values: Values) => Stop | undefined = () => undefined,
+) {
   const saves: Values[] = [];
   let table: { start(): void; shows(recordId: string): boolean } | null = null;
   const unsaved = vi.fn<(row: TableUnsavedRow) => string | void>();
@@ -61,16 +72,40 @@ function host(extra: Partial<TableNewRecord> = {}, stops: (values: Values) => St
     onUnsaved: unsaved,
     ...extra,
   };
-  return { newRecord, saves, unsaved, start: () => act(() => table?.start()), shows: (recordId: string) => table?.shows(recordId) };
+  return {
+    newRecord,
+    saves,
+    unsaved,
+    start: () => act(() => table?.start()),
+    shows: (recordId: string) => table?.shows(recordId),
+  };
 }
 
-function setup(props: Partial<TableViewProps> = {}, extra: Partial<TableNewRecord> = {}, stops?: (values: Values) => Stop | undefined) {
+function setup(
+  props: Partial<TableViewProps> = {},
+  extra: Partial<TableNewRecord> = {},
+  stops?: (values: Values) => Stop | undefined,
+) {
   const made = host(extra, stops);
   const onNewRecord = vi.fn();
   const onCellChange = vi.fn(() => 1);
-  const all: TableViewProps = { schema, records: records(), onCellChange, onOpenRecord: vi.fn(), onNewRecord, newRecord: made.newRecord, ...props };
+  const all: TableViewProps = {
+    schema,
+    records: records(),
+    onCellChange,
+    onOpenRecord: vi.fn(),
+    onNewRecord,
+    newRecord: made.newRecord,
+    ...props,
+  };
   const view = render(<TableView {...all} />);
-  return { ...made, ...view, onNewRecord, onCellChange, again: (next: Partial<TableViewProps>) => view.rerender(<TableView {...all} {...next} />) };
+  return {
+    ...made,
+    ...view,
+    onNewRecord,
+    onCellChange,
+    again: (next: Partial<TableViewProps>) => view.rerender(<TableView {...all} {...next} />),
+  };
 }
 
 const grid = () => screen.getByRole("grid");
@@ -82,14 +117,17 @@ const newRow = () => {
 };
 /** The new row's field cells, without the gutter that holds Discard. */
 const cells = () => within(newRow()).getAllByRole("gridcell").slice(1);
-const selected = () => screen.getAllByRole("gridcell").find((cell) => cell.getAttribute("aria-selected") === "true") ?? null;
+const selected = () =>
+  screen.getAllByRole("gridcell").find((cell) => cell.getAttribute("aria-selected") === "true") ??
+  null;
 const editorInput = () => {
   const input = document.querySelector<HTMLInputElement>("[data-cell-editor] input");
   if (!input) throw new Error("no open editor");
   return input;
 };
 const addRow = () => screen.getByRole("button", { name: "New record" });
-const key = (name: string, extra: Parameters<typeof fireEvent.keyDown>[1] = {}) => fireEvent.keyDown(grid(), { key: name, ...extra });
+const key = (name: string, extra: Parameters<typeof fireEvent.keyDown>[1] = {}) =>
+  fireEvent.keyDown(grid(), { key: name, ...extra });
 /** Types into the open editor and leaves it with a key. */
 function type(text: string, leave: "Enter" | "Tab" | "Escape") {
   const input = editorInput();
@@ -169,7 +207,9 @@ describe("a new record's row", () => {
 
     // A select opens its picker with F2, and the pick stays in the row.
     key("F2");
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("doing"));
+    fireEvent.click(
+      within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("doing"),
+    );
     expect(cells()[3]!.textContent).toBe("doing");
 
     // Typing replaces what the cell holds.
@@ -206,7 +246,11 @@ describe("a new record's row", () => {
 
   it("keeps a row whose save a value stops, sends nothing for it, and goes on typing in it", () => {
     // Every record after the first needs an estimate.
-    const { saves } = setup({}, {}, (values) => (values.title !== "One" && values.estimate === undefined ? { field: "estimate", reason: "Enter estimate." } : undefined));
+    const { saves } = setup({}, {}, (values) =>
+      values.title !== "One" && values.estimate === undefined
+        ? { field: "estimate", reason: "Enter estimate." }
+        : undefined,
+    );
     press(addRow());
     type("One", "Enter");
     type("Two", "Enter");
@@ -227,15 +271,29 @@ describe("a new record's row", () => {
     type("Three", "Tab");
     key("7");
     type("7", "Enter");
-    expect(saves).toEqual([{ title: "One" }, { title: "Two", estimate: 5 }, { title: "Three", estimate: 7 }]);
+    expect(saves).toEqual([
+      { title: "One" },
+      { title: "Two", estimate: 5 },
+      { title: "Three", estimate: 7 },
+    ]);
     expect(cells().map((cell) => cell.textContent)).toEqual(["", "", "", ""]);
   });
 
   it.each([
     ["a press on another row", () => press(screen.getByText("Task a"))],
-    ["a press on a header, which sorts", () => press(screen.getByRole("button", { name: /estimate/ }))],
+    [
+      "a press on a header, which sorts",
+      () => press(screen.getByRole("button", { name: /estimate/ })),
+    ],
     ["a press outside the table", () => press(document.body)],
-    ["Tab past its last cell", () => { key("ArrowRight"); key("ArrowRight"); key("Tab"); }],
+    [
+      "Tab past its last cell",
+      () => {
+        key("ArrowRight");
+        key("ArrowRight");
+        key("Tab");
+      },
+    ],
     ["Escape with no editor open", () => key("Escape")],
     ["the arrow up", () => key("ArrowUp")],
   ])("saves the row once when it is left by %s, and starts no new row", (_way, leave) => {
@@ -282,7 +340,13 @@ describe("a new record's row", () => {
   });
 
   it.each([
-    ["Escape", () => { fireEvent.keyDown(editorInput(), { key: "Escape" }); key("Escape"); }],
+    [
+      "Escape",
+      () => {
+        fireEvent.keyDown(editorInput(), { key: "Escape" });
+        key("Escape");
+      },
+    ],
     ["a press away", () => press(screen.getByText("Task a"))],
     ["the table closing", () => undefined],
   ])("removes a row with nothing typed in it on %s, and makes no record", async (_way, leave) => {
@@ -326,7 +390,9 @@ describe("a new record's row", () => {
   });
 
   it("moves the cursor to a value that stops the save, and says why on that cell", () => {
-    const { saves } = setup({}, {}, (values) => (values.estimate === undefined ? { field: "estimate", reason: "Enter estimate." } : undefined));
+    const { saves } = setup({}, {}, (values) =>
+      values.estimate === undefined ? { field: "estimate", reason: "Enter estimate." } : undefined,
+    );
     press(addRow());
     type("Milk", "Enter");
 
@@ -350,14 +416,24 @@ describe("a new record's row", () => {
   });
 
   it("hands the host a row that a value stops when the table closes, and creates nothing", async () => {
-    const { saves, unsaved, unmount } = setup({}, {}, (values) => (values.estimate === undefined ? { field: "estimate", reason: "Enter estimate." } : undefined));
+    const { saves, unsaved, unmount } = setup({}, {}, (values) =>
+      values.estimate === undefined ? { field: "estimate", reason: "Enter estimate." } : undefined,
+    );
     press(addRow());
     type("Milk", "Tab");
     unmount();
     await Promise.resolve();
     // No row is left to say why, so the host keeps what the row held, with what stopped it.
     expect(saves).toHaveLength(0);
-    expect(unsaved.mock.calls).toEqual([[{ values: { title: "Milk" }, stopped: { field: "estimate", reason: "Enter estimate." }, why: "closed" }]]);
+    expect(unsaved.mock.calls).toEqual([
+      [
+        {
+          values: { title: "Milk" },
+          stopped: { field: "estimate", reason: "Enter estimate." },
+          why: "closed",
+        },
+      ],
+    ]);
   });
 
   it("keeps one new row: New record moves the cursor to the row that is open", () => {
@@ -405,14 +481,28 @@ describe("a new record's row", () => {
     key("5");
     type("5", "Tab");
 
-    again({ schema: makeSchema([FIELDS[0]!, FIELDS[2]!, { name: "status", type: "select", options: ["todo"] }]) });
+    again({
+      schema: makeSchema([
+        FIELDS[0]!,
+        FIELDS[2]!,
+        { name: "status", type: "select", options: ["todo"] },
+      ]),
+    });
     expect(unsaved.mock.calls).toEqual([[{ values: { estimate: 5 }, why: "field" }]]);
     expect(cells().map((cell) => cell.textContent)).toEqual(["Milk", "", ""]);
   });
 
   it("gives back a value whose field stops taking one, says so on the row, and keeps the rest", () => {
     const first = host();
-    const view = render(<TableView schema={schema} records={records()} onCellChange={vi.fn(() => 1)} onOpenRecord={vi.fn()} newRecord={first.newRecord} />);
+    const view = render(
+      <TableView
+        schema={schema}
+        records={records()}
+        onCellChange={vi.fn(() => 1)}
+        onOpenRecord={vi.fn()}
+        newRecord={first.newRecord}
+      />,
+    );
     press(addRow());
     type("Milk", "Tab");
     key("5");
@@ -420,10 +510,20 @@ describe("a new record's row", () => {
     // The host builds its contract again: a new record no longer takes an estimate, though the table still shows the column.
     const next = host({ canEdit: (field) => field.name !== "estimate" });
     next.unsaved.mockReturnValue("A new record no longer takes estimate. dohc kept 5 in a notice.");
-    view.rerender(<TableView schema={schema} records={records()} onCellChange={vi.fn(() => 1)} onOpenRecord={vi.fn()} newRecord={next.newRecord} />);
+    view.rerender(
+      <TableView
+        schema={schema}
+        records={records()}
+        onCellChange={vi.fn(() => 1)}
+        onOpenRecord={vi.fn()}
+        newRecord={next.newRecord}
+      />,
+    );
     expect(next.unsaved.mock.calls).toEqual([[{ values: { estimate: 5 }, why: "field" }]]);
     expect(cells().map((cell) => cell.textContent)).toEqual(["Milk", "", "", ""]);
-    expect(screen.getByRole("note").textContent).toContain("A new record no longer takes estimate. dohc kept 5 in a notice.");
+    expect(screen.getByRole("note").textContent).toContain(
+      "A new record no longer takes estimate. dohc kept 5 in a notice.",
+    );
     // The save goes without it, once: nothing was dropped in silence.
     press(cells()[0]!);
     fireEvent.keyDown(editorInput(), { key: "Enter" });
@@ -434,7 +534,11 @@ describe("a new record's row", () => {
     const made = host({ canEdit: (field) => field.name !== "title" });
     render(
       <TableView
-        schema={makeSchema([...FIELDS, { name: "blocks", type: "relation", collection: "tasks", many: true }, { name: "Run", type: "button" }])}
+        schema={makeSchema([
+          ...FIELDS,
+          { name: "blocks", type: "relation", collection: "tasks", many: true },
+          { name: "Run", type: "button" },
+        ])}
         records={records()}
         onCellChange={vi.fn(() => 1)}
         relationExecutor={vi.fn()}
@@ -458,7 +562,13 @@ describe("a new record's row", () => {
 
   it("has the host make the record at once where the table has no field to type in", () => {
     const made = host();
-    render(<TableView schema={makeSchema([{ name: "Run", type: "button" }])} records={[]} newRecord={made.newRecord} />);
+    render(
+      <TableView
+        schema={makeSchema([{ name: "Run", type: "button" }])}
+        records={[]}
+        newRecord={made.newRecord}
+      />,
+    );
     fireEvent.click(addRow());
     expect(newRows()).toHaveLength(0);
     expect(made.saves).toEqual([{}]);
@@ -507,7 +617,9 @@ describe("a new record's row", () => {
     unmount();
     await Promise.resolve();
     expect(saves).toHaveLength(0);
-    expect(unsaved.mock.calls).toEqual([[{ values: { title: "Milk" }, text: { field: "estimate", text: "abc" }, why: "closed" }]]);
+    expect(unsaved.mock.calls).toEqual([
+      [{ values: { title: "Milk" }, text: { field: "estimate", text: "abc" }, why: "closed" }],
+    ]);
   });
 
   it("hands the host text its field cannot take when that is all the row holds", async () => {
@@ -520,7 +632,9 @@ describe("a new record's row", () => {
     again({ newRecord: undefined, onNewRecord: undefined });
     await Promise.resolve();
     expect(saves).toHaveLength(0);
-    expect(unsaved.mock.calls).toEqual([[{ values: {}, text: { field: "estimate", text: "abc" }, why: "closed" }]]);
+    expect(unsaved.mock.calls).toEqual([
+      [{ values: {}, text: { field: "estimate", text: "abc" }, why: "closed" }],
+    ]);
   });
 
   it("saves the row on Enter with no editor open: a checkbox is not ticked, and a picker is not opened again", () => {
@@ -541,7 +655,9 @@ describe("a new record's row", () => {
     key("ArrowRight");
     key("ArrowRight");
     key("F2");
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("doing"));
+    fireEvent.click(
+      within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("doing"),
+    );
     expect(document.querySelector("[data-cell-editor]")).toBeNull();
     key("Enter");
     expect(saves).toEqual([{ title: "Milk" }, { title: "Bread", status: "doing" }]);
@@ -624,9 +740,14 @@ describe("a new record's row", () => {
     key("ArrowRight");
     key("Delete");
     key("F2");
-    fireEvent.click(within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("todo"));
+    fireEvent.click(
+      within(document.querySelector<HTMLElement>("[data-cell-editor]")!).getByText("todo"),
+    );
     expect(cells()[3]!.textContent).toBe("todo");
     press(document.body);
-    expect(saves).toEqual([{ title: "Draft", status: "todo" }, { title: "Draft", status: "todo" }]);
+    expect(saves).toEqual([
+      { title: "Draft", status: "todo" },
+      { title: "Draft", status: "todo" },
+    ]);
   });
 });

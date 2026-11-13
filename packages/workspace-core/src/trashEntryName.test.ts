@@ -47,9 +47,7 @@ describe("the component limit, and its unit", () => {
     expect(lastOf(name, PREFIX, { unit: "utf16" })).toBe(`${PREFIX}${name}`);
     // ...and a byte-counting filesystem legitimately cannot.
     expect(lastOf(name, PREFIX, { unit: "utf8" })).not.toBe(`${PREFIX}${name}`);
-    expect(byteLength(lastOf(name, PREFIX, { unit: "utf8" }))).toBeLessThanOrEqual(
-      NAME_MAX_UNITS,
-    );
+    expect(byteLength(lastOf(name, PREFIX, { unit: "utf8" }))).toBeLessThanOrEqual(NAME_MAX_UNITS);
   });
 
   it("leaves a name that already fits exactly as it is", () => {
@@ -76,9 +74,7 @@ describe("the component limit, and its unit", () => {
   it("trims a replacement character produced by the cut", () => {
     const budget = NAME_MAX_UNITS - byteLength(PREFIX);
     const name = `${"c".repeat(budget - 1)}é`;
-    expect(lastOf(name, PREFIX, { unit: "utf8" })).toBe(
-      `${PREFIX}${"c".repeat(budget - 1)}`,
-    );
+    expect(lastOf(name, PREFIX, { unit: "utf8" })).toBe(`${PREFIX}${"c".repeat(budget - 1)}`);
   });
 
   it("answers an empty name when the prefix alone exhausts the limit", () => {
@@ -148,9 +144,7 @@ describe("the ladder, longest name first", () => {
   });
 
   it("budgets the whole path on Windows and nothing anywhere else", () => {
-    expect(entryCharBudget(TRASH_DIR, "win32")).toBe(
-      WINDOWS_MAX_PATH_CHARS - TRASH_DIR.length - 1,
-    );
+    expect(entryCharBudget(TRASH_DIR, "win32")).toBe(WINDOWS_MAX_PATH_CHARS - TRASH_DIR.length - 1);
     expect(entryCharBudget(TRASH_DIR, "linux")).toBe(Number.POSITIVE_INFINITY);
     expect(entryCharBudget(TRASH_DIR, "darwin")).toBe(Number.POSITIVE_INFINITY);
   });
@@ -206,9 +200,7 @@ describe("truncation decodes filename bytes, not a text stream", () => {
   it("keeps a lone surrogate it did not create", () => {
     const budget = 8;
     const prefix = "p".repeat(NAME_MAX_UNITS - budget);
-    expect(fitWithinNameMax("abcdefg\uD800xyz", prefix, { unit: "utf16" })).toBe(
-      "abcdefg\uD800",
-    );
+    expect(fitWithinNameMax("abcdefg\uD800xyz", prefix, { unit: "utf16" })).toBe("abcdefg\uD800");
     // And a pair the cut does split loses its half.
     expect(fitWithinNameMax("abcdefg😀z", prefix, { unit: "utf16" })).toBe("abcdefg");
   });
@@ -271,16 +263,12 @@ describe("collision variants ride the same ladder", () => {
   const DEEP = `C:${"/nested-folder".repeat(13)}/inbox`;
 
   it("offers the plain variant first, and only that when it fits", () => {
-    expect(collisionVariantPlan("report.md", 2, { unit: "utf16" })).toEqual([
-      "report (2).md",
-    ]);
+    expect(collisionVariantPlan("report.md", 2, { unit: "utf16" })).toEqual(["report (2).md"]);
   });
 
   it("suffixes dotfiles and extensionless names at the end", () => {
     expect(collisionVariantPlan(".env", 2, { unit: "utf16" })).toEqual([".env (2)"]);
-    expect(collisionVariantPlan("Makefile", 3, { unit: "utf16" })).toEqual([
-      "Makefile (3)",
-    ]);
+    expect(collisionVariantPlan("Makefile", 3, { unit: "utf16" })).toEqual(["Makefile (3)"]);
   });
 
   // The regression: 84 CJK characters is 84 UTF-16 units, so the component

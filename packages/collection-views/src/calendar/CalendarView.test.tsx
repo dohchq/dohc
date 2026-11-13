@@ -56,7 +56,10 @@ const AUGUST = new Date(2026, 7, 15);
 
 function makeRecords() {
   return [
-    makeRecord("rec-dated", [indexedValue("title", "Book flights"), indexedValue("due", "2026-08-10")]),
+    makeRecord("rec-dated", [
+      indexedValue("title", "Book flights"),
+      indexedValue("due", "2026-08-10"),
+    ]),
     makeRecord("rec-invalid", [
       indexedValue("title", "Bad date"),
       flaggedValue("due", "not-a-date", "invalid-date"),
@@ -68,14 +71,24 @@ function makeRecords() {
 describe("CalendarView", () => {
   it("renders an event for each record with a valid keyed date", () => {
     render(
-      <CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+      />,
     );
     expect(screen.getByText("Book flights")).toBeDefined();
   });
 
   it("does not render records whose keyed date is invalid or missing", () => {
     render(
-      <CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+      />,
     );
     expect(screen.queryByText("Bad date")).toBeNull();
     expect(screen.queryByText("No date yet")).toBeNull();
@@ -130,7 +143,15 @@ describe("CalendarView", () => {
 
   it("moves a month at a time with the arrows and back with Today", () => {
     const onNavigate = vi.fn<(date: Date) => void>();
-    render(<CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} onNavigate={onNavigate} />);
+    render(
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+        onNavigate={onNavigate}
+      />,
+    );
     expect(screen.getByText("August 2026")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Next month" }));
     expect(screen.getByText("September 2026")).toBeDefined();
@@ -145,9 +166,14 @@ describe("CalendarView", () => {
   it("offers to go to the month of the nearest record from an empty month", () => {
     const records = [
       makeRecord("rec-may", [indexedValue("title", "May trip"), indexedValue("due", "2026-05-02")]),
-      makeRecord("rec-oct", [indexedValue("title", "October trip"), indexedValue("due", "2026-10-20")]),
+      makeRecord("rec-oct", [
+        indexedValue("title", "October trip"),
+        indexedValue("due", "2026-10-20"),
+      ]),
     ];
-    render(<CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} />);
+    render(
+      <CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Go to October 2026" }));
     expect(screen.getByText("October trip")).toBeDefined();
     expect(screen.queryByRole("button", { name: /^Go to/ })).toBeNull();
@@ -155,8 +181,15 @@ describe("CalendarView", () => {
 
   it("makes no offer when the month grid already shows a record", () => {
     // 1 August 2026 is a Saturday, so the August grid starts on 26 July.
-    const records = [makeRecord("rec-july", [indexedValue("title", "Late July"), indexedValue("due", "2026-07-27")])];
-    render(<CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} />);
+    const records = [
+      makeRecord("rec-july", [
+        indexedValue("title", "Late July"),
+        indexedValue("due", "2026-07-27"),
+      ]),
+    ];
+    render(
+      <CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} />,
+    );
     expect(screen.getByText("Late July")).toBeDefined();
     expect(screen.queryByRole("button", { name: /^Go to/ })).toBeNull();
   });
@@ -164,14 +197,28 @@ describe("CalendarView", () => {
   it("measures from the grid's last day, so a record one day before it beats one two days after", () => {
     // The August 2026 grid runs from 26 July to 5 September.
     render(
-      <CalendarView schema={makeSchema()} records={[]} dateField="due" date={AUGUST} onNavigate={() => undefined} nearbyDates={["2026-09-07", "2026-07-25"]} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={[]}
+        dateField="due"
+        date={AUGUST}
+        onNavigate={() => undefined}
+        nearbyDates={["2026-09-07", "2026-07-25"]}
+      />,
     );
     expect(screen.getByRole("button", { name: "Go to July 2026" })).toBeDefined();
   });
 
   it("offers the later record on a tie", () => {
     render(
-      <CalendarView schema={makeSchema()} records={[]} dateField="due" date={AUGUST} onNavigate={() => undefined} nearbyDates={["2026-07-24", "2026-09-07"]} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={[]}
+        dateField="due"
+        date={AUGUST}
+        onNavigate={() => undefined}
+        nearbyDates={["2026-07-24", "2026-09-07"]}
+      />,
     );
     expect(screen.getByRole("button", { name: "Go to September 2026" })).toBeDefined();
   });
@@ -179,7 +226,14 @@ describe("CalendarView", () => {
   it("offers the nearest of the dates a querying host found outside the month", () => {
     const onNavigate = vi.fn<(date: Date) => void>();
     render(
-      <CalendarView schema={makeSchema()} records={[]} dateField="due" date={AUGUST} onNavigate={onNavigate} nearbyDates={["2025-12-30", "2026-11-03"]} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={[]}
+        dateField="due"
+        date={AUGUST}
+        onNavigate={onNavigate}
+        nearbyDates={["2025-12-30", "2026-11-03"]}
+      />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Go to November 2026" }));
     expect(onNavigate.mock.calls[0]?.[0].toDateString()).toBe(new Date(2026, 10, 3).toDateString());
@@ -188,9 +242,17 @@ describe("CalendarView", () => {
   it("marks the entry of the record the host shows open, and no other", () => {
     const records = makeRecords();
     const { container } = render(
-      <CalendarView schema={makeSchema()} records={records} dateField="due" defaultDate={AUGUST} openRecordId={records[0]!.id} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={records}
+        dateField="due"
+        defaultDate={AUGUST}
+        openRecordId={records[0]!.id}
+      />,
     );
-    const marked = [...container.querySelectorAll(".rbc-event")].filter((entry) => entry.classList.contains("ring-ink"));
+    const marked = [...container.querySelectorAll(".rbc-event")].filter((entry) =>
+      entry.classList.contains("ring-ink"),
+    );
     expect(marked).toHaveLength(1);
     expect(marked[0]!.textContent).toBe("Book flights");
   });
@@ -198,7 +260,13 @@ describe("CalendarView", () => {
   it("offers New record on each day where a record can be created, by the day's date, and on no day otherwise", () => {
     const onNewRecord = vi.fn();
     const view = render(
-      <CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} onNewRecord={onNewRecord} />,
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+        onNewRecord={onNewRecord}
+      />,
     );
     // Every day of the month's grid has one, off-range days too. The keyboard reaches each.
     const days = screen.getAllByRole("button", { name: /^New record on / });
@@ -213,7 +281,14 @@ describe("CalendarView", () => {
     // The day still shows its number.
     expect(day.parentElement?.textContent).toBe("20");
 
-    view.rerender(<CalendarView schema={makeSchema()} records={makeRecords()} dateField="due" defaultDate={AUGUST} />);
+    view.rerender(
+      <CalendarView
+        schema={makeSchema()}
+        records={makeRecords()}
+        dateField="due"
+        defaultDate={AUGUST}
+      />,
+    );
     expect(screen.queryAllByRole("button", { name: /^New record on / })).toEqual([]);
   });
 

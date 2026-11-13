@@ -2,9 +2,21 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import {
-  UsageAppVersion, UsageInvocation, UsageVersionCoverage, decodeUsageSnapshot,
-  USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
-  type StoredSnapshot, type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
+  UsageAppVersion,
+  UsageInvocation,
+  UsageVersionCoverage,
+  decodeUsageSnapshot,
+  USAGE_MAX_COUNT,
+  USAGE_RETENTION_DAYS,
+  localUsageDay,
+  queryUsage,
+  usageRowKey,
+  type StoredSnapshot,
+  type UsageBuildPair,
+  type UsageCount,
+  type UsageDayRecord,
+  type UsageQuery,
+  type UsageSnapshot,
 } from "@dohc/workspace-contracts/usage";
 import { INVALID_USAGE_RECORD } from "../ipc/bridgeContract";
 
@@ -34,23 +46,31 @@ export interface UsageFileSystem {
 }
 const nodeFiles: UsageFileSystem = {
   readFile: (path, encoding) => fs.readFile(path, encoding),
-  readdir: path => fs.readdir(path),
+  readdir: (path) => fs.readdir(path),
   copyFile: (from, to) => fs.copyFile(from, to),
   mkdir: (path, options) => fs.mkdir(path, options),
   writeFile: (path, data, options) => fs.writeFile(path, data, options),
   rename: (from, to) => fs.rename(from, to),
   link: (from, to) => fs.link(from, to),
-  unlink: path => fs.unlink(path),
+  unlink: (path) => fs.unlink(path),
   rm: (path, options) => fs.rm(path, options),
   async sync(path) {
     const file = await fs.open(path, "r+");
-    try { await file.sync(); } finally { await file.close(); }
+    try {
+      await file.sync();
+    } finally {
+      await file.close();
+    }
   },
   async syncDirectory(path) {
     // Windows cannot fsync a directory handle the way POSIX can.
     if (process.platform === "win32") return;
     const directory = await fs.open(path, "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   },
 };
 const errorCode = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
@@ -114,12 +134,18 @@ export function createUsageStore(deps: {
     if (loaded) scheduleWrite();
   }
   function scheduleWrite() {
-    if (closing || writeTimer || revision === savedRevision && !committedCleanExit) return;
-    const delay = Math.max(USAGE_WRITE_INTERVAL_MS, lastWriteAt + USAGE_WRITE_INTERVAL_MS - now().getTime());
+    if (closing || writeTimer || (revision === savedRevision && !committedCleanExit)) return;
+    const delay = Math.max(
+      USAGE_WRITE_INTERVAL_MS,
+      lastWriteAt + USAGE_WRITE_INTERVAL_MS - now().getTime(),
+    );
     writeTimer = setTimeout(() => {
       writeTimer = undefined;
       void enqueue(async () => {
-        if (now().getTime() - lastWriteAt < USAGE_WRITE_INTERVAL_MS) { scheduleWrite(); return; }
+        if (now().getTime() - lastWriteAt < USAGE_WRITE_INTERVAL_MS) {
+          scheduleWrite();
+          return;
+        }
         await write();
       }).catch(() => {});
     }, delay);
@@ -127,7 +153,10 @@ export function createUsageStore(deps: {
   }
   function incomplete(day = localUsageDay(now())) {
     const record = days.get(day);
-    if (record?.complete) { record.complete = false; changed(); }
+    if (record?.complete) {
+      record.complete = false;
+      changed();
+    }
   }
   function touchDay(day: string) {
     const current = days.get(day);
@@ -135,7 +164,10 @@ export function createUsageStore(deps: {
       days.set(day, { day, appVersions: [appVersion], complete: enabled });
       changed();
     } else if (!current.appVersions.includes(appVersion)) {
-      if (current.appVersions.length >= 90) { incomplete(day); return; }
+      if (current.appVersions.length >= 90) {
+        incomplete(day);
+        return;
+      }
       current.appVersions.push(appVersion);
       changed();
     }
@@ -151,18 +183,30 @@ export function createUsageStore(deps: {
     const oldest = oldestDay();
     for (const map of [days, counts]) {
       for (const [key, row] of map) {
-        if (row.day < oldest) { map.delete(key); changed(); }
+        if (row.day < oldest) {
+          map.delete(key);
+          changed();
+        }
       }
     }
     for (const [key, row] of unknownCounts) {
-      if (row.day < oldest) { unknownCounts.delete(key); changed(); }
+      if (row.day < oldest) {
+        unknownCounts.delete(key);
+        changed();
+      }
     }
-    const versions = new Set([...days.values()].flatMap(day => day.appVersions));
+    const versions = new Set([...days.values()].flatMap((day) => day.appVersions));
     for (const version of coverage.keys()) {
-      if (version !== appVersion && !versions.has(version)) { coverage.delete(version); changed(); }
+      if (version !== appVersion && !versions.has(version)) {
+        coverage.delete(version);
+        changed();
+      }
     }
     for (const version of unknownCoverage.keys()) {
-      if (version !== appVersion && !versions.has(version)) { unknownCoverage.delete(version); changed(); }
+      if (version !== appVersion && !versions.has(version)) {
+        unknownCoverage.delete(version);
+        changed();
+      }
     }
     touchDay(today);
     activeDay = today;
@@ -173,15 +217,24 @@ export function createUsageStore(deps: {
     const date = now();
     const midnight = new Date(date);
     midnight.setHours(24, 0, 0, 0);
-    dayTimer = setTimeout(() => { dayTimer = undefined; refreshDay(); scheduleDay(); },
-      Math.max(1, midnight.getTime() - date.getTime()));
+    dayTimer = setTimeout(
+      () => {
+        dayTimer = undefined;
+        refreshDay();
+        scheduleDay();
+      },
+      Math.max(1, midnight.getTime() - date.getTime()),
+    );
     dayTimer.unref?.();
   }
   function increment(row: UsageCount): boolean {
     touchDay(row.day);
     const key = usageRowKey(row);
     const current = counts.get(key)?.count ?? 0;
-    if (current >= USAGE_MAX_COUNT) { incomplete(row.day); return false; }
+    if (current >= USAGE_MAX_COUNT) {
+      incomplete(row.day);
+      return false;
+    }
     counts.set(key, { ...row, count: current + 1 });
     changed();
     return true;
@@ -234,10 +287,12 @@ export function createUsageStore(deps: {
           for (const version of decoded.dropped.coverage) {
             if (version.appVersion !== appVersion) unknownCoverage.set(version.appVersion, version);
           }
-        }
-        catch (error) {
-          pause(Object.assign(new Error("Usage record could not be decoded", { cause: error }),
-            { code: INVALID_USAGE_RECORD }));
+        } catch (error) {
+          pause(
+            Object.assign(new Error("Usage record could not be decoded", { cause: error }), {
+              code: INVALID_USAGE_RECORD,
+            }),
+          );
           return;
         }
       }
@@ -253,7 +308,11 @@ export function createUsageStore(deps: {
       refreshDay();
       if (!restored || !restored.cleanExit) {
         // An unflushed crash can straddle midnight. Preserve both days' gaps.
-        const previous = restored?.days.map(day => day.day).filter(day => day <= localUsageDay(now())).sort().at(-1);
+        const previous = restored?.days
+          .map((day) => day.day)
+          .filter((day) => day <= localUsageDay(now()))
+          .sort()
+          .at(-1);
         if (previous && restored && !restored.cleanExit) incomplete(previous);
         incomplete();
       }
@@ -265,16 +324,36 @@ export function createUsageStore(deps: {
     return loading;
   }
   function snapshot(cleanExit = false): UsageSnapshot {
-    return { version: 1, enabled, cleanExit,
-      days: [...days.values()].map(row => ({ day: row.day, appVersions: row.appVersions.slice(), complete: row.complete })),
-      counts: [...counts.values()].map(row => ({ day: row.day, capabilityId: row.capabilityId, door: row.door, count: row.count })),
-      coverage: [...coverage.values()].map(version => ({ appVersion: version.appVersion,
-        pairs: version.pairs.map(pair => ({ capabilityId: pair.capabilityId, door: pair.door, status: pair.status })) })),
+    return {
+      version: 1,
+      enabled,
+      cleanExit,
+      days: [...days.values()].map((row) => ({
+        day: row.day,
+        appVersions: row.appVersions.slice(),
+        complete: row.complete,
+      })),
+      counts: [...counts.values()].map((row) => ({
+        day: row.day,
+        capabilityId: row.capabilityId,
+        door: row.door,
+        count: row.count,
+      })),
+      coverage: [...coverage.values()].map((version) => ({
+        appVersion: version.appVersion,
+        pairs: version.pairs.map((pair) => ({
+          capabilityId: pair.capabilityId,
+          door: pair.door,
+          status: pair.status,
+        })),
+      })),
     };
   }
   function storedSnapshot(cleanExit = false): StoredSnapshot {
     const current: StoredSnapshot = snapshot(cleanExit);
-    const versions = new Map(current.coverage.map(version => [version.appVersion, version.pairs]));
+    const versions = new Map(
+      current.coverage.map((version) => [version.appVersion, version.pairs]),
+    );
     for (const version of unknownCoverage.values()) {
       const pairs = versions.get(version.appVersion);
       if (pairs) pairs.push(...version.pairs);
@@ -293,13 +372,18 @@ export function createUsageStore(deps: {
     const writingRevision = revision;
     lastWriteAt = now().getTime();
     try {
-      if (!justRead && await readIfPresent(path) !== lastBytes) {
+      if (!justRead && (await readIfPresent(path)) !== lastBytes) {
         // Someone replaced or removed the file. Count nothing until it is read
         // again. A control reports this itself; a timed save tells main.
         loaded = false;
         const error = new Error("The usage record changed outside dohc.");
         pause(error);
-        if (!controls) try { deps.onStop?.(); } catch { /* Preserve the write error. */ }
+        if (!controls)
+          try {
+            deps.onStop?.();
+          } catch {
+            /* Preserve the write error. */
+          }
         throw error;
       }
       // Maps contain only validated aggregates; avoid re-validating the whole store.
@@ -318,23 +402,33 @@ export function createUsageStore(deps: {
       if (admissionReady) applyPending();
     } catch (error) {
       incomplete();
-      try { deps.onWriteFailure?.(); } catch { /* Preserve the write error. */ }
+      try {
+        deps.onWriteFailure?.();
+      } catch {
+        /* Preserve the write error. */
+      }
       throw error;
-    } finally { scheduleWrite(); }
+    } finally {
+      scheduleWrite();
+    }
   }
   function requireReadable() {
     if (unreadable) throw unreadable.error;
   }
   async function readIfPresent(file: string): Promise<string | undefined> {
-    try { return await io.readFile(file, "utf8"); }
-    catch (error) { if (errorCode(error) === "ENOENT") return undefined; throw error; }
+    try {
+      return await io.readFile(file, "utf8");
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return undefined;
+      throw error;
+    }
   }
   // Reads the file again unless it still holds what dohc last read or wrote,
   // so a person's repair, replacement or removal shows. A read that fails,
   // such as during an antivirus scan, keeps the unsaved counts and reports.
   async function refresh() {
     if (!loaded && !unreadable) return load();
-    if (loaded && await readIfPresent(path) === lastBytes) return;
+    if (loaded && (await readIfPresent(path)) === lastBytes) return;
     forget();
     await load();
   }
@@ -342,20 +436,33 @@ export function createUsageStore(deps: {
   function exclusive(task: () => Promise<void>): Promise<void> {
     if (closing) return Promise.reject(new Error("Usage store is closed"));
     controls++;
-    return enqueue(task).finally(() => { controls--; });
+    return enqueue(task).finally(() => {
+      controls--;
+    });
   }
   function control(change: () => Promise<void>): Promise<void> {
-    return exclusive(async () => { await refresh(); requireReadable(); refreshDay(); await change(); });
+    return exclusive(async () => {
+      await refresh();
+      requireReadable();
+      refreshDay();
+      await change();
+    });
   }
   async function asideNumbers(): Promise<number[]> {
     let names: string[];
-    try { names = await io.readdir(directory); }
-    catch (error) { if (errorCode(error) === "ENOENT") return []; throw error; }
+    try {
+      names = await io.readdir(directory);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return [];
+      throw error;
+    }
     // A number too large to add one to cannot name the next file.
-    return names.flatMap(name => {
-      const number = Number(ASIDE_NAME.exec(name)?.[1]);
-      return Number.isSafeInteger(number) && number < Number.MAX_SAFE_INTEGER ? [number] : [];
-    }).sort((a, b) => a - b);
+    return names
+      .flatMap((name) => {
+        const number = Number(ASIDE_NAME.exec(name)?.[1]);
+        return Number.isSafeInteger(number) && number < Number.MAX_SAFE_INTEGER ? [number] : [];
+      })
+      .sort((a, b) => a - b);
   }
   // Rename replaces an existing file on every platform; a link refuses with
   // EEXIST. Where links fail, such as on FAT drives, nothing moves.
@@ -378,10 +485,18 @@ export function createUsageStore(deps: {
   // record, is discarded instead.
   async function finishSwap(): Promise<string | undefined> {
     const incoming = path + INCOMING;
-    const [ready, text] = await Promise.all([readIfPresent(incoming + READY), readIfPresent(incoming)]);
+    const [ready, text] = await Promise.all([
+      readIfPresent(incoming + READY),
+      readIfPresent(incoming),
+    ]);
     const [sum, aside] = ready?.split(" ") ?? [];
-    if (text === undefined || sum !== digest(text) || !aside || !ASIDE_NAME.test(aside)
-      || await readIfPresent(join(directory, aside)) === undefined) {
+    if (
+      text === undefined ||
+      sum !== digest(text) ||
+      !aside ||
+      !ASIDE_NAME.test(aside) ||
+      (await readIfPresent(join(directory, aside))) === undefined
+    ) {
       await discardIncoming();
       return undefined;
     }
@@ -399,7 +514,11 @@ export function createUsageStore(deps: {
     await io.sync(incoming);
     const asideName = usageAsideName(((await asideNumbers()).at(-1) ?? 0) + 1);
     const aside = join(directory, asideName);
-    await io.writeFile(incoming + READY, `${digest(await io.readFile(incoming, "utf8"))} ${asideName}`, { mode: 0o600 });
+    await io.writeFile(
+      incoming + READY,
+      `${digest(await io.readFile(incoming, "utf8"))} ${asideName}`,
+      { mode: 0o600 },
+    );
     await io.sync(incoming + READY);
     await io.syncDirectory(directory);
     try {
@@ -420,7 +539,10 @@ export function createUsageStore(deps: {
         // again; the next read installs the one waiting.
         loaded = false;
         pause(rollback);
-        throw new AggregateError([error, rollback], "dohc could not put either usage record back in place.");
+        throw new AggregateError(
+          [error, rollback],
+          "dohc could not put either usage record back in place.",
+        );
       }
       await discardIncoming().catch(() => {});
       throw error;
@@ -433,22 +555,41 @@ export function createUsageStore(deps: {
   function forget() {
     if (writeTimer) clearTimeout(writeTimer);
     if (dayTimer) clearTimeout(dayTimer);
-    writeTimer = undefined; dayTimer = undefined;
-    days.clear(); counts.clear(); coverage.clear(); unknownCounts.clear(); unknownCoverage.clear();
-    pending.length = 0; pendingOverflow = false;
-    loaded = false; admissionReady = false; unreadable = undefined; loading = undefined; activeDay = undefined;
-    revision = 0; savedRevision = 0; committedCleanExit = true; lastBytes = undefined;
+    writeTimer = undefined;
+    dayTimer = undefined;
+    days.clear();
+    counts.clear();
+    coverage.clear();
+    unknownCounts.clear();
+    unknownCoverage.clear();
+    pending.length = 0;
+    pendingOverflow = false;
+    loaded = false;
+    admissionReady = false;
+    unreadable = undefined;
+    loading = undefined;
+    activeDay = undefined;
+    revision = 0;
+    savedRevision = 0;
+    committedCleanExit = true;
+    lastBytes = undefined;
   }
   return {
-    load: () => closing ? Promise.reject(new Error("Usage store is closed")) : load(),
+    load: () => (closing ? Promise.reject(new Error("Usage store is closed")) : load()),
     recordSuccess(input: unknown): boolean {
       if (closing || controls || unreadable) return false;
       const parsed = UsageInvocation.safeParse(input);
       if (!parsed.success) return false;
       const row = { day: localUsageDay(now()), ...parsed.data, count: 1 };
-      if (loaded) { refreshDay(); if (!enabled) return false; }
+      if (loaded) {
+        refreshDay();
+        if (!enabled) return false;
+      }
       if (!loaded || !admissionReady) {
-        if (pending.length >= USAGE_PENDING_LIMIT) { pendingOverflow = true; return false; }
+        if (pending.length >= USAGE_PENDING_LIMIT) {
+          pendingOverflow = true;
+          return false;
+        }
         pending.push(row);
         return true;
       }
@@ -456,12 +597,16 @@ export function createUsageStore(deps: {
     },
     async query(input: UsageQuery) {
       if (closing) throw new Error("Usage store is closed");
-      await load(); requireReadable(); refreshDay();
+      await load();
+      requireReadable();
+      refreshDay();
       return queryUsage(snapshot(), input);
     },
     async read(): Promise<UsageSnapshot> {
       if (closing) throw new Error("Usage store is closed");
-      await enqueue(refresh); requireReadable(); refreshDay();
+      await enqueue(refresh);
+      requireReadable();
+      refreshDay();
       return snapshot();
     },
     // The newest record set aside in the record's folder, by file name.
@@ -478,8 +623,15 @@ export function createUsageStore(deps: {
         await refresh();
         if (!unreadable) return;
         if (errorCode(unreadable.error) !== INVALID_USAGE_RECORD) throw unreadable.error;
-        const empty: UsageSnapshot = { version: 1, enabled: false, cleanExit: true, days: [], counts: [], coverage: [] };
-        await swapIn(incoming => io.writeFile(incoming, JSON.stringify(empty), { mode: 0o600 }));
+        const empty: UsageSnapshot = {
+          version: 1,
+          enabled: false,
+          cleanExit: true,
+          days: [],
+          counts: [],
+          coverage: [],
+        };
+        await swapIn((incoming) => io.writeFile(incoming, JSON.stringify(empty), { mode: 0o600 }));
         forget();
         await load();
       });
@@ -489,13 +641,14 @@ export function createUsageStore(deps: {
     restoreSetAside(): Promise<void> {
       return exclusive(async () => {
         await refresh();
-        if (unreadable && errorCode(unreadable.error) !== INVALID_USAGE_RECORD) throw unreadable.error;
+        if (unreadable && errorCode(unreadable.error) !== INVALID_USAGE_RECORD)
+          throw unreadable.error;
         const newest = (await asideNumbers()).at(-1);
         if (newest === undefined) throw new Error("dohc has no usage record set aside.");
         // The active record leaves with its last counts.
         await write();
         const source = join(directory, usageAsideName(newest));
-        await swapIn(incoming => io.copyFile(source, incoming));
+        await swapIn((incoming) => io.copyFile(source, incoming));
         forget();
         await load();
         // Its copy is the record now. Remove the source only once the record,
@@ -503,7 +656,9 @@ export function createUsageStore(deps: {
         try {
           await io.sync(path);
           await io.rm(source, { force: true });
-        } catch { /* Keep the source. */ }
+        } catch {
+          /* Keep the source. */
+        }
       });
     },
     setEnabled(value: boolean): Promise<void> {
@@ -511,12 +666,22 @@ export function createUsageStore(deps: {
       return control(async () => {
         const previous = enabled;
         const previousBytes = lastBytes;
-        if (enabled !== value) { enabled = value; incomplete(); changed(); }
-        if (!enabled) { pending.length = 0; pendingOverflow = false; }
+        if (enabled !== value) {
+          enabled = value;
+          incomplete();
+          changed();
+        }
+        if (!enabled) {
+          pending.length = 0;
+          pendingOverflow = false;
+        }
         try {
           await write();
         } catch (error) {
-          if (lastBytes === previousBytes && enabled !== previous) { enabled = previous; changed(); }
+          if (lastBytes === previousBytes && enabled !== previous) {
+            enabled = previous;
+            changed();
+          }
           throw error;
         }
       });
@@ -524,25 +689,40 @@ export function createUsageStore(deps: {
     clear(): Promise<void> {
       return control(async () => {
         const previousBytes = lastBytes;
-        const saved = { days: [...days], counts: [...counts], coverage: [...coverage],
-          unknownCounts: [...unknownCounts], unknownCoverage: [...unknownCoverage] };
-        pending.length = 0; pendingOverflow = false;
-        counts.clear(); days.clear(); coverage.clear(); unknownCounts.clear(); unknownCoverage.clear();
+        const saved = {
+          days: [...days],
+          counts: [...counts],
+          coverage: [...coverage],
+          unknownCounts: [...unknownCounts],
+          unknownCoverage: [...unknownCoverage],
+        };
+        pending.length = 0;
+        pendingOverflow = false;
+        counts.clear();
+        days.clear();
+        coverage.clear();
+        unknownCounts.clear();
+        unknownCoverage.clear();
         coverage.set(appVersion, buildCoverage);
-        refreshDay(); incomplete(); changed();
+        refreshDay();
+        incomplete();
+        changed();
         try {
           await io.rm(path + ".tmp", { force: true });
           await write();
         } catch (error) {
           // Unless the file was replaced meanwhile, it keeps the old counts, so memory keeps them too.
           if (lastBytes === previousBytes) {
-            days.clear(); counts.clear(); coverage.clear();
+            days.clear();
+            counts.clear();
+            coverage.clear();
             for (const [key, row] of saved.days) days.set(key, row);
             for (const [key, row] of saved.counts) counts.set(key, row);
             for (const [key, row] of saved.coverage) coverage.set(key, row);
             for (const [key, row] of saved.unknownCounts) unknownCounts.set(key, row);
             for (const [key, row] of saved.unknownCoverage) unknownCoverage.set(key, row);
-            incomplete(); changed();
+            incomplete();
+            changed();
           }
           throw error;
         }
@@ -550,14 +730,19 @@ export function createUsageStore(deps: {
     },
     flush(): Promise<void> {
       if (closing) return Promise.reject(new Error("Usage store is closed"));
-      return enqueue(async () => { await load(); requireReadable(); await write(); });
+      return enqueue(async () => {
+        await load();
+        requireReadable();
+        await write();
+      });
     },
     close(): Promise<void> {
       if (closePromise) return closePromise;
       closing = true;
       if (writeTimer) clearTimeout(writeTimer);
       if (dayTimer) clearTimeout(dayTimer);
-      writeTimer = undefined; dayTimer = undefined;
+      writeTimer = undefined;
+      dayTimer = undefined;
       closePromise = enqueue(async () => {
         if (loading) await loading;
         else if (pending.length) await load();

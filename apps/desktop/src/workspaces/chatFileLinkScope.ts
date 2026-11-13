@@ -17,7 +17,8 @@ const ANY: ChatFileLinkScope = { kind: "any" };
 const NONE: ChatFileLinkScope = { kind: "none" };
 
 function folderCovers(folderPath: string | undefined) {
-  return (path: string) => folderPath !== undefined && shareCoversLinkPath({ paths: [folderPath], versionId: null }, path);
+  return (path: string) =>
+    folderPath !== undefined && shareCoversLinkPath({ paths: [folderPath], versionId: null }, path);
 }
 
 // A Group grant whose channel does not serve files, and a chat-only grant,
@@ -34,20 +35,26 @@ export function chatFileLinkScope(
 ): ChatFileLinkScope {
   if (!channel || channel.kind === "agent") return ANY;
   if (channel.kind === "dm") return NONE;
-  const joined = channelWireId === null ? null : joinedSharedChannelForWireId(workspace.sharedChannels, channelWireId);
+  const joined =
+    channelWireId === null
+      ? null
+      : joinedSharedChannelForWireId(workspace.sharedChannels, channelWireId);
   // A member's Group: its owner shares the Group's folder.
   if (joined) return { kind: "shared", covers: folderCovers(channel.folderPath) };
   const roster = workspace.shareRoster;
   if (!roster || roster.grants === null || channelWireId === null) return ANY;
   const onChannel = (grant: ListedGrant) =>
-    (grant.selector.kind === "group" || grant.selector.kind === "chat") && grant.selector.channelWireId === channelWireId;
+    (grant.selector.kind === "group" || grant.selector.kind === "chat") &&
+    grant.selector.channelWireId === channelWireId;
   const shares = [
-    ...roster.grants.filter(grant => grant.status === "active" && onChannel(grant)),
-    ...roster.links.filter(link => !link.ended && onChannel(link.grant)).map(link => link.grant),
+    ...roster.grants.filter((grant) => grant.status === "active" && onChannel(grant)),
+    ...roster.links
+      .filter((link) => !link.ended && onChannel(link.grant))
+      .map((link) => link.grant),
   ];
   if (shares.length === 0) return ANY;
   // Everyone the Group is shared with reads the message, so every share must cover it.
-  return { kind: "shared", covers: path => shares.every(grant => grantCovers(grant, path)) };
+  return { kind: "shared", covers: (path) => shares.every((grant) => grantCovers(grant, path)) };
 }
 
 // Throws on the first file link the scope does not take, across a message's
@@ -58,7 +65,9 @@ export function refuseChatFileLinks(scope: ChatFileLinkScope, texts: readonly st
     for (const { path } of extractChatFileReferences(text)) {
       if (scope.kind === "none") throw new Error("Files can't be linked in a direct message.");
       if (!scope.covers(path)) {
-        throw new Error(`This Group's share doesn't include ${path}. Remove the link or share the file first.`);
+        throw new Error(
+          `This Group's share doesn't include ${path}. Remove the link or share the file first.`,
+        );
       }
     }
   }
@@ -67,5 +76,5 @@ export function refuseChatFileLinks(scope: ChatFileLinkScope, texts: readonly st
 // Whether any of the texts holds a well-formed file link, so a write without
 // one skips the channel lookup.
 export function hasChatFileLink(texts: readonly string[]): boolean {
-  return texts.some(text => extractChatFileReferences(text).length > 0);
+  return texts.some((text) => extractChatFileReferences(text).length > 0);
 }

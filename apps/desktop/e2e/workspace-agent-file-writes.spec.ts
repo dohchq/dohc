@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { writeWorkspaceFile } from "../../../packages/mcp/src/tools";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { waitForCliEndpoint } from "./helpers/dohcCli";
-import { cleanupDesktopWorkspace, createTempWorkspace, openHistoryView, openWorkspaceFromFirstRun, waitForWorkspaceFile } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openHistoryView,
+  openWorkspaceFromFirstRun,
+  waitForWorkspaceFile,
+} from "./helpers/workspace";
 
 test("dashboard-03: four MCP file writes show the agent in History", async () => {
   const temp = await createTempWorkspace();
@@ -16,13 +22,23 @@ test("dashboard-03: four MCP file writes show the agent in History", async () =>
     await waitForCliEndpoint(temp.homeDir);
     const ctx = { root: temp.rootPath, home: temp.homeDir };
     const files = [
-      { path: "dashboard/index.html", content: '<!doctype html><title>Project dashboard</title><h1>Project dashboard</h1><script src="script.js"></script>' },
+      {
+        path: "dashboard/index.html",
+        content:
+          '<!doctype html><title>Project dashboard</title><h1>Project dashboard</h1><script src="script.js"></script>',
+      },
       { path: "dashboard/styles.css", content: "body { font-family: sans-serif; }" },
       { path: "dashboard/script.js", content: 'document.body.dataset.ready = "true";' },
-      { path: "dashboard/data.json", content: '{"tasks":[{"title":"Ship dashboard","done":true}]}' },
+      {
+        path: "dashboard/data.json",
+        content: '{"tasks":[{"title":"Ship dashboard","done":true}]}',
+      },
     ];
     for (const file of files) {
-      expect(await writeWorkspaceFile(ctx, file, "Dashboard agent")).toMatchObject({ ok: true, path: file.path });
+      expect(await writeWorkspaceFile(ctx, file, "Dashboard agent")).toMatchObject({
+        ok: true,
+        path: file.path,
+      });
       expect(await readFile(join(temp.rootPath, file.path), "utf8")).toBe(file.content);
       await waitForWorkspaceFile(page, workspace.workspaceId, file.path);
     }
@@ -30,14 +46,28 @@ test("dashboard-03: four MCP file writes show the agent in History", async () =>
     const rows = page.locator('[data-testid="engine-moment-open"][data-moment-path^="dashboard/"]');
     await expect(rows).toHaveCount(4);
     // History shows the name a connected agent gave, beside the plug.
-    await expect(rows.getByTestId("engine-moment-source")).toHaveText(Array(4).fill("Dashboard agent"));
+    await expect(rows.getByTestId("engine-moment-source")).toHaveText(
+      Array(4).fill("Dashboard agent"),
+    );
     await expect(rows.locator('[data-agent-mark="connected"]')).toHaveCount(4);
-    for (const label of ["Local file edit", "Changed while dohc was closed", "Added existing files", "Found changes in the folder", "dohc-mcp"]) {
+    for (const label of [
+      "Local file edit",
+      "Changed while dohc was closed",
+      "Added existing files",
+      "Found changes in the folder",
+      "dohc-mcp",
+    ]) {
       await expect(rows.filter({ hasText: label })).toHaveCount(0);
     }
     // A flush before a fifth request ensures watcher observations of the four
     // publications cannot add neutral duplicates after the first assertion.
-    expect(await writeWorkspaceFile(ctx, { path: "capture-barrier.txt", content: "settled" }, "Dashboard agent")).toMatchObject({ ok: true });
+    expect(
+      await writeWorkspaceFile(
+        ctx,
+        { path: "capture-barrier.txt", content: "settled" },
+        "Dashboard agent",
+      ),
+    ).toMatchObject({ ok: true });
     await waitForWorkspaceFile(page, workspace.workspaceId, "capture-barrier.txt");
     await expect(rows).toHaveCount(4);
     await rows.first().click();

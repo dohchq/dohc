@@ -9,10 +9,13 @@ export function createTypingCheckpointWriter<T>(input: {
   const completion = () => {
     let resolve!: () => void;
     let reject!: (error: unknown) => void;
-    const promise = new Promise<void>((accept, refuse) => {resolve = accept; reject = refuse;});
-    return {promise, resolve, reject};
+    const promise = new Promise<void>((accept, refuse) => {
+      resolve = accept;
+      reject = refuse;
+    });
+    return { promise, resolve, reject };
   };
-  type Write = {revision: number; snapshot: T | null; done: ReturnType<typeof completion>};
+  type Write = { revision: number; snapshot: T | null; done: ReturnType<typeof completion> };
   let revision = 0;
   let syncRevision = 0;
   let active: Write | null = null;
@@ -42,7 +45,7 @@ export function createTypingCheckpointWriter<T>(input: {
         pending.revision = nextRevision;
         pending.snapshot = snapshot;
       } else {
-        pending = {revision: nextRevision, snapshot, done: completion()};
+        pending = { revision: nextRevision, snapshot, done: completion() };
       }
       const done = pending.done.promise;
       if (!active) draining = drain();

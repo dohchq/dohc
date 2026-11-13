@@ -93,12 +93,7 @@ export interface FileObjectRecord {
   createdAtMs: number;
 }
 
-type ActorNeutralWriteOrigin =
-  | "api"
-  | "local-file"
-  | "restore"
-  | "sync"
-  | "unknown";
+type ActorNeutralWriteOrigin = "api" | "local-file" | "restore" | "sync" | "unknown";
 
 export interface ActorNeutralWriteMetadata {
   origin: ActorNeutralWriteOrigin;
@@ -109,11 +104,22 @@ export interface ActorNeutralWriteMetadata {
 export const OPERATION_ID_PREFIX = "dohc-operation:";
 
 export function refuseCallerOperationId(id: string | undefined): void {
-  if (id?.startsWith(OPERATION_ID_PREFIX)) throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
+  if (id?.startsWith(OPERATION_ID_PREFIX))
+    throw new VersionedTextStoreError("invalid-input", "Reserved operation id.");
 }
 
-export interface HistoryOperation { operationId: string; versionId: string; momentCount: number; kind: "file-duplicate" | null }
-export interface HistoryUndoResult extends Omit<HistoryOperation, "kind"> { compensationOperationId: string; deduped: boolean; materialized: boolean; notRestored: readonly string[] }
+export interface HistoryOperation {
+  operationId: string;
+  versionId: string;
+  momentCount: number;
+  kind: "file-duplicate" | null;
+}
+export interface HistoryUndoResult extends Omit<HistoryOperation, "kind"> {
+  compensationOperationId: string;
+  deduped: boolean;
+  materialized: boolean;
+  notRestored: readonly string[];
+}
 export interface HistoryLinkRewriteResult {
   documents: number;
   links: number;
@@ -122,9 +128,22 @@ export interface HistoryLinkRewriteResult {
   complete: boolean;
 }
 export interface HistoryOperationsStore {
-  readHistoryOperation(input: {workspaceId: string; operationId: string}): Promise<HistoryOperation>;
-  undoHistoryOperation(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryUndoResult>;
-  rewriteHistoryLinks(input: {workspaceId: string; operationId: string; requestId: string; author?: MomentWriteAuthor}): Promise<HistoryLinkRewriteResult>;
+  readHistoryOperation(input: {
+    workspaceId: string;
+    operationId: string;
+  }): Promise<HistoryOperation>;
+  undoHistoryOperation(input: {
+    workspaceId: string;
+    operationId: string;
+    requestId: string;
+    author?: MomentWriteAuthor;
+  }): Promise<HistoryUndoResult>;
+  rewriteHistoryLinks(input: {
+    workspaceId: string;
+    operationId: string;
+    requestId: string;
+    author?: MomentWriteAuthor;
+  }): Promise<HistoryLinkRewriteResult>;
 }
 
 // A recorded moment can also say that a live document session settled it.
@@ -265,11 +284,7 @@ export interface VersionedTextFileState {
   metadata?: ActorNeutralWriteMetadata;
 }
 
-type VersionedTextComparisonStatus =
-  | "same"
-  | "incoming-changed"
-  | "current-changed"
-  | "diverged";
+type VersionedTextComparisonStatus = "same" | "incoming-changed" | "current-changed" | "diverged";
 
 interface VersionedTextComparison {
   workspaceId: WorkspaceId;
@@ -283,10 +298,7 @@ interface VersionedTextComparison {
 }
 
 type VersionedTextConflictStatus = "open" | "resolved";
-type VersionedTextConflictResolution =
-  | "applied-incoming"
-  | "applied-merged"
-  | "kept-current";
+type VersionedTextConflictResolution = "applied-incoming" | "applied-merged" | "kept-current";
 type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
 interface VersionedTextConflictWaitingVersion {
@@ -339,13 +351,12 @@ type VersionedTextMergeResult =
       conflict: VersionedTextConflictRecord;
     };
 
-type VersionedTextConflictResolveResult =
-  | {
-      kind: "resolved";
-      conflict: VersionedTextConflictRecord;
-      write?: VersionedTextWriteResult;
-      delete?: VersionedTextDeleteResult;
-    };
+type VersionedTextConflictResolveResult = {
+  kind: "resolved";
+  conflict: VersionedTextConflictRecord;
+  write?: VersionedTextWriteResult;
+  delete?: VersionedTextDeleteResult;
+};
 
 interface VersionedTextConflictPage {
   conflicts: VersionedTextConflictRecord[];
@@ -622,10 +633,7 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
   }): Promise<Uint8Array | null>;
-  readBinaryBlob(input: {
-    workspaceId: WorkspaceId;
-    sha256: string;
-  }): Promise<Uint8Array | null>;
+  readBinaryBlob(input: { workspaceId: WorkspaceId; sha256: string }): Promise<Uint8Array | null>;
   readTextFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -760,7 +768,13 @@ type ChatActor =
   | { kind: "automation"; displayName: string }
   // `agentConnectionId` marks an agent that joined with the link and posted
   // through its sign-in; the link principal stays the authority.
-  | { kind: "link"; displayName: string; grantId: string; principalId: string; agentConnectionId?: string };
+  | {
+      kind: "link";
+      displayName: string;
+      grantId: string;
+      principalId: string;
+      agentConnectionId?: string;
+    };
 type ChatWriteActor = Exclude<ChatActor, { kind: "link" }>;
 
 // The automation executor's claim on a message it writes. Stays on this computer.
@@ -895,7 +909,12 @@ interface ChatStreamPosition {
 interface ChatStreamPost {
   replyCount: number;
   // Distinct repliers, newest first, at most three.
-  repliers: Array<{ author: ChatActor; authorUserId?: string; authorAgentId?: string; lastReplyAtMs: number }>;
+  repliers: Array<{
+    author: ChatActor;
+    authorUserId?: string;
+    authorAgentId?: string;
+    lastReplyAtMs: number;
+  }>;
   lastReplyAtMs?: number;
   // The latest agent reply, cut to its first 280 characters.
   latestAgentReply?: {
@@ -1208,10 +1227,7 @@ export interface LinkedChatStore {
   }): Promise<ChatChannel>;
   listChannels(input: { workspaceId: WorkspaceId }): Promise<ChatChannelSummary[]>;
   // Slug is a lookup ALIAS only; durable state keys on channelId.
-  findChannelBySlug(input: {
-    workspaceId: WorkspaceId;
-    slug: string;
-  }): Promise<ChatChannel | null>;
+  findChannelBySlug(input: { workspaceId: WorkspaceId; slug: string }): Promise<ChatChannel | null>;
   // The channel's cross-machine WIRE identity (MU-C4 shared channels key on
   // it): its own id for a locally created channel, the originating store's id
   // for a replicated one, the well-known constant for "general". Null for a
@@ -1304,10 +1320,12 @@ export interface LinkedChatStore {
     before?: ChatStreamPosition;
     limit?: number;
   }): Promise<ChatStreamPage>;
-  getThread(input: {
-    workspaceId: WorkspaceId;
-    threadId: ChatThreadId;
-  }): Promise<{ thread: ChatThread; channel: ChatChannel | null; messageCount: number; work?: ChatThreadWork }>;
+  getThread(input: { workspaceId: WorkspaceId; threadId: ChatThreadId }): Promise<{
+    thread: ChatThread;
+    channel: ChatChannel | null;
+    messageCount: number;
+    work?: ChatThreadWork;
+  }>;
   listThreads(input: { workspaceId: WorkspaceId }): Promise<ChatThread[]>;
   listThreadsForFile(input: {
     workspaceId: WorkspaceId;
@@ -1354,10 +1372,7 @@ export interface LinkedChatStore {
       headingOccurrence?: number;
     }>;
   }): Promise<ChatMessage>;
-  listMessages(input: {
-    workspaceId: WorkspaceId;
-    threadId: ChatThreadId;
-  }): Promise<ChatMessage[]>;
+  listMessages(input: { workspaceId: WorkspaceId; threadId: ChatThreadId }): Promise<ChatMessage[]>;
   // One page of a thread's messages in order. Message orders count from zero;
   // the page starts after `afterMessageOrder`, or at the first message.
   listMessagesPage(input: {
@@ -1366,10 +1381,7 @@ export interface LinkedChatStore {
     afterMessageOrder?: number;
     limit: number;
   }): Promise<{ messages: ChatMessage[]; nextAfterMessageOrder: number | null }>;
-  getThreadRevision(input: {
-    workspaceId: WorkspaceId;
-    threadId: ChatThreadId;
-  }): Promise<number>;
+  getThreadRevision(input: { workspaceId: WorkspaceId; threadId: ChatThreadId }): Promise<number>;
   resolveChatDecision(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -1399,8 +1411,14 @@ export interface LinkedChatStore {
     upTo: { createdAtMs: number; messageId: ChatMessageId };
     expectedRevision?: number;
   }): Promise<ChatAgentReadState>;
-  listAgentUnreadThreads(workspaceId: WorkspaceId, reader: ChatAgentReader): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
-  listAgentUnreadRequests(workspaceId: WorkspaceId, reader: ChatAgentReader): Promise<ChatAgentRequestRecord[]>;
+  listAgentUnreadThreads(
+    workspaceId: WorkspaceId,
+    reader: ChatAgentReader,
+  ): Promise<Array<ChatThread & { lastRead: { createdAtMs: number; messageId: string } }>>;
+  listAgentUnreadRequests(
+    workspaceId: WorkspaceId,
+    reader: ChatAgentReader,
+  ): Promise<ChatAgentRequestRecord[]>;
   // One page of a reader's unread requests after `after`, oldest first, in
   // one Group or thread when named. `more` is set when another page follows.
   listAgentRequestsPage(input: {
@@ -1411,10 +1429,7 @@ export interface LinkedChatStore {
     after?: { createdAtMs: number; messageId: ChatMessageId };
     limit?: number;
   }): Promise<{ requests: ChatAgentRequestDetail[]; more: boolean }>;
-  listMentionsForHandle(
-    workspaceId: WorkspaceId,
-    handle: string,
-  ): Promise<ChatMentionRecord[]>;
+  listMentionsForHandle(workspaceId: WorkspaceId, handle: string): Promise<ChatMentionRecord[]>;
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Set (add or remove) one author's emoji reaction on a message. A
   // set-membership CRDT cell keyed by (messageId, emoji, author.authorId):
@@ -1801,9 +1816,7 @@ interface SecretFileRestoreOutcome {
   path: string;
 }
 
-type SecretFileMaterialization =
-  | { present: false }
-  | { present: true; text: string };
+type SecretFileMaterialization = { present: false } | { present: true; text: string };
 
 /**
  * Internal server-side storage primitive for secret-backed files.

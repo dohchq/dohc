@@ -54,8 +54,7 @@ const ROW_HEAD = /(?<name>[^=]+)=(?<status>PASS|FAIL|SKIP)/y;
 // gate reads the tree at every step boundary and reports how many readings
 // agreed. It does not watch the tree between them, and a stamp that omitted
 // the count would read as if it had.
-const HEAD_STAMP =
-  / head (?<sha>[0-9a-f]{8,40}) (?:clean|dirty\(\d+\)), (?<reads>\d+) reads\)$/;
+const HEAD_STAMP = / head (?<sha>[0-9a-f]{8,40}) (?:clean|dirty\(\d+\)), (?<reads>\d+) reads\)$/;
 
 /** `name -> [status, ...]`, one entry per row, or a throw if this is no list. */
 function parseStepRows(summary) {
@@ -114,9 +113,7 @@ export function requireCiPassVerdict(log, resolveHead) {
       "requireCiPassVerdict needs a resolveHead() to check the stamped commit against; a verdict cannot be verified without the commit it is being accepted for",
     );
   }
-  const verdictLines = log
-    .split(/\r?\n/)
-    .filter((line) => line.includes("| run-rust-checks |"));
+  const verdictLines = log.split(/\r?\n/).filter((line) => line.includes("| run-rust-checks |"));
 
   if (verdictLines.length !== 1) {
     throw new Error(
@@ -204,9 +201,7 @@ export function requireCiPassVerdict(log, resolveHead) {
       );
     }
     if (statuses[0] !== "PASS") {
-      throw new Error(
-        `required CI gate step did not report PASS: ${step}=${statuses[0]}`,
-      );
+      throw new Error(`required CI gate step did not report PASS: ${step}=${statuses[0]}`);
     }
   }
 }
@@ -214,7 +209,10 @@ export function requireCiPassVerdict(log, resolveHead) {
 // The checkout this verdict is being accepted for. A git that cannot answer
 // throws with stderr, which refuses the verdict rather than skipping the check.
 function resolveCheckoutHead() {
-  const head = readGit(["rev-parse", "HEAD"], resolve(dirname(fileURLToPath(import.meta.url)), "../..")).trim();
+  const head = readGit(
+    ["rev-parse", "HEAD"],
+    resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
+  ).trim();
   return /^[0-9a-f]{40}$/.test(head) ? head : null;
 }
 

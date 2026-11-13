@@ -6,9 +6,29 @@ import { existsSync } from "node:fs";
 import { readFile, rename, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createShareViewDaemonHarness, type ShareViewDaemonHarness } from "../testing/shareViewLoopbackTransport";
-import { allocateShareMountLabel, classifyShareMountRefreshError, shareMountResultRow, mountRootFor, mountStoreWorkspaceIdFor, refuseImportIntoShareProjection, refuseMoveAcrossShareMount, resolveShareMountPath, overlayCanonicalShareMountFiles, planShareMountRemoval, validMountLabel, withoutShareMountRecords } from "./shareMounts";
-import { createShareMountDirectoryThroughOwnerForTest, refreshShareMountThroughOwnerForTest, removeShareMountFolderThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
+import {
+  createShareViewDaemonHarness,
+  type ShareViewDaemonHarness,
+} from "../testing/shareViewLoopbackTransport";
+import {
+  allocateShareMountLabel,
+  classifyShareMountRefreshError,
+  shareMountResultRow,
+  mountRootFor,
+  mountStoreWorkspaceIdFor,
+  refuseImportIntoShareProjection,
+  refuseMoveAcrossShareMount,
+  resolveShareMountPath,
+  overlayCanonicalShareMountFiles,
+  planShareMountRemoval,
+  validMountLabel,
+  withoutShareMountRecords,
+} from "./shareMounts";
+import {
+  createShareMountDirectoryThroughOwnerForTest,
+  refreshShareMountThroughOwnerForTest,
+  removeShareMountFolderThroughOwnerForTest,
+} from "../testing/shareViewFilesMountHarness";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // These tests drive the pull with the selector a mount record pins. No paths
@@ -75,10 +95,7 @@ async function refreshShareMount(
     hostRoot: string;
     mount: { shareId: string; label: string };
     pinnedSelector?: unknown;
-    openStore?: (workspace: {
-      workspaceId: string;
-      rootPath: string;
-    }) => CaptureVersionedTextStore;
+    openStore?: (workspace: { workspaceId: string; rootPath: string }) => CaptureVersionedTextStore;
   },
 ) {
   await ensureMountFolder(input.hostRoot, input.mount.label);
@@ -200,10 +217,7 @@ class FakeShareRelay {
 
 describe("mount labels", () => {
   it("derives a safe label from the granter email and deduplicates", () => {
-    const allocate = (
-      granterEmail: string | null,
-      onDiskNames: readonly string[] = [],
-    ) =>
+    const allocate = (granterEmail: string | null, onDiskNames: readonly string[] = []) =>
       allocateShareMountLabel({
         storedMounts: [],
         onDiskNames,
@@ -211,9 +225,7 @@ describe("mount labels", () => {
       });
     expect(allocate("alex@example.com")).toBe("alex");
     expect(allocate("alex@example.com", ["alex"])).toBe("alex (2)");
-    expect(allocate("alex@example.com", ["alex", "alex (2)"])).toBe(
-      "alex (3)",
-    );
+    expect(allocate("alex@example.com", ["alex", "alex (2)"])).toBe("alex (3)");
     expect(allocate("Wild! Chars?@x.com")).toBe("wild-chars");
     expect(allocate(null)).toBe("share");
     expect(allocate("...@x.com")).toBe("share");
@@ -230,13 +242,28 @@ describe("mount labels", () => {
         labelHint: "Launch Team",
       }),
     ).toBe("launch-team (2)");
-    expect(allocateShareMountLabel({
-      storedMounts: [], onDiskNames: [], granterEmail: "alex@example.com", labelHint: "platform@eu",
-    })).toBe("platform-eu");
+    expect(
+      allocateShareMountLabel({
+        storedMounts: [],
+        onDiskNames: [],
+        granterEmail: "alex@example.com",
+        labelHint: "platform@eu",
+      }),
+    ).toBe("platform-eu");
   });
 
   it("refuses traversal, separators, reserved and secret-shaped labels", () => {
-    for (const label of ["", "..", "a/b", "a\\b", ".dohc", "x".repeat(65), ". .", ".env", "prod.env"]) {
+    for (const label of [
+      "",
+      "..",
+      "a/b",
+      "a\\b",
+      ".dohc",
+      "x".repeat(65),
+      ". .",
+      ".env",
+      "prod.env",
+    ]) {
       expect(validMountLabel(label)).toBe(false);
     }
     expect(validMountLabel("alex (2)")).toBe(true);
@@ -277,9 +304,10 @@ describe("mount labels", () => {
     await expect(
       resolveShareMountPath(host, "shared-with-me/alex", [mount], true),
     ).resolves.toEqual({ mount, path: "" });
-    await expect(
-      resolveShareMountPath(host, "inbox", [mount], true),
-    ).resolves.toEqual({ mount, path: "" });
+    await expect(resolveShareMountPath(host, "inbox", [mount], true)).resolves.toEqual({
+      mount,
+      path: "",
+    });
     await expect(
       resolveShareMountPath(host, "inbox/docs/brief.md", [mount], true),
     ).resolves.toEqual({ mount, path: "docs/brief.md" });
@@ -295,12 +323,7 @@ describe("mount labels", () => {
     });
 
     await expect(
-      resolveShareMountPath(
-        host,
-        "shared-with-me/orphan/docs/brief.md",
-        [],
-        true,
-      ),
+      resolveShareMountPath(host, "shared-with-me/orphan/docs/brief.md", [], true),
       "an empty but present registry lets stale projection bytes fall through to disk",
     ).rejects.toThrow(
       "dohc cannot use this path because no share owns it. Add the share again, or move the file or folder outside shared-with-me/.",
@@ -351,31 +374,13 @@ describe("mount labels", () => {
     const mounts = [{ shareId: SHARE_ID, label: "alex" }];
 
     await expect(
-      refuseMoveAcrossShareMount(
-        host,
-        "notes/local.md",
-        "inbox/docs/local.md",
-        mounts,
-        true,
-      ),
+      refuseMoveAcrossShareMount(host, "notes/local.md", "inbox/docs/local.md", mounts, true),
     ).rejects.toThrow(/mounted share is read-only/i);
     await expect(
-      refuseMoveAcrossShareMount(
-        host,
-        "inbox/docs/shared.md",
-        "notes/shared.md",
-        mounts,
-        true,
-      ),
+      refuseMoveAcrossShareMount(host, "inbox/docs/shared.md", "notes/shared.md", mounts, true),
     ).rejects.toThrow(/mounted share is read-only/i);
     await expect(
-      refuseMoveAcrossShareMount(
-        host,
-        "notes/a.md",
-        "notes/b.md",
-        mounts,
-        true,
-      ),
+      refuseMoveAcrossShareMount(host, "notes/a.md", "notes/b.md", mounts, true),
     ).resolves.toBeUndefined();
   });
 
@@ -387,19 +392,10 @@ describe("mount labels", () => {
     await mkdir(join(host, SHARED_WITH_ME_FOLDER, ".env"), {
       recursive: true,
     });
-    await symlink(
-      join(host, SHARED_WITH_ME_FOLDER),
-      join(host, "projection-alias"),
-      "dir",
-    );
+    await symlink(join(host, SHARED_WITH_ME_FOLDER), join(host, "projection-alias"), "dir");
 
     await expect(
-      refuseImportIntoShareProjection(
-        host,
-        "shared-with-me/orphan",
-        [],
-        true,
-      ),
+      refuseImportIntoShareProjection(host, "shared-with-me/orphan", [], true),
       "an empty ownership tombstone must not turn stale projection bytes into a local import destination",
     ).rejects.toThrow(/no share owns it/i);
     await expect(
@@ -432,11 +428,7 @@ describe("mount labels", () => {
             { path: "shared-with-me/alex/recipient-only.md", size: 10 },
             { path: "shared-with-me/sam/stale.md", size: 11 },
           ],
-          folders: [
-            "notes",
-            "shared-with-me/alex",
-            "shared-with-me/sam",
-          ],
+          folders: ["notes", "shared-with-me/alex", "shared-with-me/sam"],
         },
         mounts,
         listCanonical: async (mount) => {
@@ -453,12 +445,7 @@ describe("mount labels", () => {
         { path: "notes/local.md", size: 5 },
         { path: "shared-with-me/sam/docs/canonical.md", size: 12 },
       ],
-      folders: [
-        "notes",
-        "shared-with-me/alex",
-        "shared-with-me/sam",
-        "shared-with-me/sam/docs",
-      ],
+      folders: ["notes", "shared-with-me/alex", "shared-with-me/sam", "shared-with-me/sam/docs"],
     });
     expect(failures).toEqual(["damaged"]);
   });
@@ -480,9 +467,7 @@ describe("refreshShareMount", () => {
     expect(first.changedPaths).toBe(2);
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
     expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("the brief");
-    expect(await readFile(join(mountRoot, "docs/deep/notes.md"), "utf8")).toBe(
-      "deep notes",
-    );
+    expect(await readFile(join(mountRoot, "docs/deep/notes.md"), "utf8")).toBe("deep notes");
     expect(harness.transport.requests).toContainEqual(
       expect.objectContaining({
         method: "workspace.open",
@@ -512,9 +497,7 @@ describe("refreshShareMount", () => {
       mount: { shareId: SHARE_ID, label: "alex" },
     });
     expect(third.status).toBe("updated");
-    expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe(
-      "the brief v2",
-    );
+    expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("the brief v2");
   });
 
   // The mount closes its own store, and that close is now an RPC that can
@@ -552,9 +535,9 @@ describe("refreshShareMount", () => {
       refusedOps: 0,
       refusedDetail: null,
     });
-    expect(
-      await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8"),
-    ).toBe("the brief");
+    expect(await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex/docs/brief.md"), "utf8")).toBe(
+      "the brief",
+    );
   });
 
   it("reports ended on revocation and leaves the files untouched", async () => {
@@ -580,9 +563,9 @@ describe("refreshShareMount", () => {
       refusedOps: 0,
       refusedDetail: null,
     });
-    expect(
-      await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8"),
-    ).toBe("keep me");
+    expect(await readFile(join(host, SHARED_WITH_ME_FOLDER, "alex", "plan.md"), "utf8")).toBe(
+      "keep me",
+    );
   });
 
   it("refuses a symlinked shared-with-me or label directory (real-path guard)", async () => {
@@ -690,9 +673,9 @@ describe("refreshShareMount", () => {
     expect(await readFile(mounted, "utf8")).toBe("authoritative");
     const storeAfter = harness.openStore(target);
     expect(
-      (
-        await storeAfter.listMoments({ workspaceId: target.workspaceId, limit: 100 })
-      ).moments.map((moment) => moment.id),
+      (await storeAfter.listMoments({ workspaceId: target.workspaceId, limit: 100 })).moments.map(
+        (moment) => moment.id,
+      ),
     ).toEqual(momentIdsBefore);
     await storeAfter.close();
 
@@ -753,42 +736,53 @@ describe("refreshShareMount", () => {
     expect(await readFile(join(elsewhere, "victim.md"), "utf8")).toBe("untouched");
   });
 
-  it.each(["present", "absent"] as const)("keeps a mount's folder path apart with %s saved state", async savedState => {
-    const host = await tempHostRoot();
-    const relay = new FakeShareRelay();
-    const harness = daemonHarness(relay);
-    const mount = { shareId: SHARE_ID, label: "alex" };
-    relay.addWrite("docs/brief.md", "v1");
-    await refreshShareMount(harness, { hostRoot: host, mount });
-    const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
-    await mkdir(join(mountRoot, "notes"));
-    await writeFile(join(mountRoot, "notes/mine.md"), "my own file");
-    relay.addWrite("notes/mine.md", "shared file");
-    await refreshShareMount(harness, { hostRoot: host, mount });
-    await expect(readSharedViewProjectionDebt(mountRoot, SHARE_ID)).resolves.toMatchObject({
-      collisionPaths: new Set(["notes/mine.md"]),
-    });
-    if (savedState === "absent") {
-      await writeFile(join(mountRoot, "notes/mine.md"), "shared file");
-      await rm(join(mountRoot, ".dohc/local/share-refresh/share-collision-record.json"));
-    }
-    await rename(join(mountRoot, "docs"), join(mountRoot, "kept-folder"));
-    await writeFile(join(mountRoot, "docs"), "my own blocking file");
+  it.each(["present", "absent"] as const)(
+    "keeps a mount's folder path apart with %s saved state",
+    async (savedState) => {
+      const host = await tempHostRoot();
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const mount = { shareId: SHARE_ID, label: "alex" };
+      relay.addWrite("docs/brief.md", "v1");
+      await refreshShareMount(harness, { hostRoot: host, mount });
+      const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
+      await mkdir(join(mountRoot, "notes"));
+      await writeFile(join(mountRoot, "notes/mine.md"), "my own file");
+      relay.addWrite("notes/mine.md", "shared file");
+      await refreshShareMount(harness, { hostRoot: host, mount });
+      await expect(readSharedViewProjectionDebt(mountRoot, SHARE_ID)).resolves.toMatchObject({
+        collisionPaths: new Set(["notes/mine.md"]),
+      });
+      if (savedState === "absent") {
+        await writeFile(join(mountRoot, "notes/mine.md"), "shared file");
+        await rm(join(mountRoot, ".dohc/local/share-refresh/share-collision-record.json"));
+      }
+      await rename(join(mountRoot, "docs"), join(mountRoot, "kept-folder"));
+      await writeFile(join(mountRoot, "docs"), "my own blocking file");
 
-    for (let pass = 0; pass < 2; pass += 1) {
-      const kept = await refreshShareMount(harness, { hostRoot: host, mount });
-      expect(kept).toMatchObject({ status: "unchanged",
-        unjournalablePaths: expect.arrayContaining([{ path: "docs/brief.md", reason: "local-collision", owner: "docs" }]) });
-      expect(await readFile(join(mountRoot, "docs"), "utf8")).toBe("my own blocking file");
-      expect((await readSharedViewProjectionDebt(mountRoot, SHARE_ID)).collisionPaths).toContain("docs/brief.md");
-    }
+      for (let pass = 0; pass < 2; pass += 1) {
+        const kept = await refreshShareMount(harness, { hostRoot: host, mount });
+        expect(kept).toMatchObject({
+          status: "unchanged",
+          unjournalablePaths: expect.arrayContaining([
+            { path: "docs/brief.md", reason: "local-collision", owner: "docs" },
+          ]),
+        });
+        expect(await readFile(join(mountRoot, "docs"), "utf8")).toBe("my own blocking file");
+        expect((await readSharedViewProjectionDebt(mountRoot, SHARE_ID)).collisionPaths).toContain(
+          "docs/brief.md",
+        );
+      }
 
-    await rename(join(mountRoot, "docs"), join(mountRoot, "my-file"));
-    const restored = await refreshShareMount(harness, { hostRoot: host, mount });
-    expect(restored.status).toBe("updated");
-    expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v1");
-    expect((await readSharedViewProjectionDebt(mountRoot, SHARE_ID)).collisionPaths).not.toContain("docs/brief.md");
-  });
+      await rename(join(mountRoot, "docs"), join(mountRoot, "my-file"));
+      const restored = await refreshShareMount(harness, { hostRoot: host, mount });
+      expect(restored.status).toBe("updated");
+      expect(await readFile(join(mountRoot, "docs/brief.md"), "utf8")).toBe("v1");
+      expect(
+        (await readSharedViewProjectionDebt(mountRoot, SHARE_ID)).collisionPaths,
+      ).not.toContain("docs/brief.md");
+    },
+  );
 
   it("routes DELETE ops through the same real-parent containment", async () => {
     const host = await tempHostRoot();
@@ -827,12 +821,11 @@ describe("owner-mediated mount removal", () => {
     await writeFile(join(elsewhere, "alex", "victim.md"), "untouched");
     await symlink(elsewhere, join(host, SHARED_WITH_ME_FOLDER), "dir");
 
-    await expect(
-      removeShareMountFolderThroughOwnerForTest(host, "alex"),
-    ).resolves.toMatchObject({ folderLeft: true, error: expect.any(Error) });
-    expect(await readFile(join(elsewhere, "alex", "victim.md"), "utf8")).toBe(
-      "untouched",
-    );
+    await expect(removeShareMountFolderThroughOwnerForTest(host, "alex")).resolves.toMatchObject({
+      folderLeft: true,
+      error: expect.any(Error),
+    });
+    expect(await readFile(join(elsewhere, "alex", "victim.md"), "utf8")).toBe("untouched");
   });
 });
 
@@ -872,11 +865,7 @@ describe("refresh result wire shape", () => {
   // The classifier and the schema must agree: whatever the classifier can
   // return as a row status has to be a status the result can carry.
   it("carries whatever the classifier decides a row is", () => {
-    for (const error of [
-      new SharePinInvalidError("s"),
-      new Error("offline"),
-      null,
-    ]) {
+    for (const error of [new SharePinInvalidError("s"), new Error("offline"), null]) {
       const verdict = classifyShareMountRefreshError(error);
       if (verdict.kind !== "row") continue;
       expect(

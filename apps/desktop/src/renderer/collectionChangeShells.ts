@@ -5,7 +5,14 @@ export interface CollectionChangeReports {
    * `quiet` changes that row where it stands, with no new toast.
    * `onDismiss` runs when the person dismisses the row.
    */
-  onError(fallback: string, error: unknown, retry: (() => void) | null, identity?: string, quiet?: boolean, onDismiss?: () => void): void;
+  onError(
+    fallback: string,
+    error: unknown,
+    retry: (() => void) | null,
+    identity?: string,
+    quiet?: boolean,
+    onDismiss?: () => void,
+  ): void;
   /** Removes the row in Notices a report with this identity left. */
   onSettled?(identity: string): void;
   onNotice?(message: string): void;
@@ -24,11 +31,17 @@ const resumers = new Set<(workspaceId: string) => void>();
  * the session of the workspace the window showed before. Returns what closes
  * the shell.
  */
-export function openCollectionChangeShell(workspaceId: string, reports: CollectionChangeReports): () => void {
+export function openCollectionChangeShell(
+  workspaceId: string,
+  reports: CollectionChangeReports,
+): () => void {
   const shell: Shell = { reports, admitted: false };
   shells.set(workspaceId, shell);
   // A shell that closes late leaves a newer shell of its workspace open.
-  return () => { shell.admitted = false; if (shells.get(workspaceId) === shell) shells.delete(workspaceId); };
+  return () => {
+    shell.admitted = false;
+    if (shells.get(workspaceId) === shell) shells.delete(workspaceId);
+  };
 }
 /** The reports of the workspace's open shell, or undefined while the window shows another workspace. */
 export function collectionChangeShell(workspaceId: string): CollectionChangeReports | undefined {
@@ -49,7 +62,9 @@ export function admitCollectionChanges(workspaceId: string): () => void {
   if (!shell) return () => {};
   shell.admitted = true;
   for (const resume of resumers) resume(workspaceId);
-  return () => { shell.admitted = false; };
+  return () => {
+    shell.admitted = false;
+  };
 }
 /** Calls `resume` each time a workspace's changes go on. */
 export function onCollectionChangesResumed(resume: (workspaceId: string) => void): void {

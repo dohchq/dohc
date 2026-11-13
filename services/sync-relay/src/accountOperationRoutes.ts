@@ -1,7 +1,13 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { ResolveAccountSession } from "@dohc/workspace-auth/session";
 import {
-  isPhoneWriteOperation, parseMarkRead, parsePhoneWrite, parseRetryWake, runAccountMarkRead, runAccountRetryWake, runAccountWrite,
+  isPhoneWriteOperation,
+  parseMarkRead,
+  parsePhoneWrite,
+  parseRetryWake,
+  runAccountMarkRead,
+  runAccountRetryWake,
+  runAccountWrite,
 } from "./accountChatWrites";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import { readAccountFeed, type AccountFeedWaits } from "./accountFeed";
@@ -13,7 +19,11 @@ import type { ServerCopies } from "./serverCopies";
 import type { SyncRelayStorage } from "./storage";
 import { parseLogHold } from "./workspaceReplicationRoutes";
 
-export type AccountOperationRoute = { route: "account-operation"; workspaceId: string; operation: string };
+export type AccountOperationRoute = {
+  route: "account-operation";
+  workspaceId: string;
+  operation: string;
+};
 
 /** The most an operation's arguments take. */
 const ACCOUNT_OPERATION_MAX_BODY_BYTES = 256 * 1024;
@@ -24,7 +34,11 @@ const BODY_RECEIPT_MS = 10_000;
  * The answer while this server has no copies to read from, as when it is still starting. It is the copies' own refusal
  * of a visit they can't take (serverCopies.ts), and every workspace gets it alike, before any is looked at.
  */
-const copiesUnavailable = () => new RelayError("server_busy", "Your server can't open workspaces for the phone right now. Try again later.");
+const copiesUnavailable = () =>
+  new RelayError(
+    "server_busy",
+    "Your server can't open workspaces for the phone right now. Try again later.",
+  );
 
 /** One sign-in's reads: a burst for opening a workspace, then a steady pace. */
 export function createAccountOperationRateLimiter(): TokenBucketLimiter {
@@ -34,8 +48,15 @@ export function createAccountOperationRateLimiter(): TokenBucketLimiter {
 /** Parses `/sync/:workspaceId/ops/:operation`, already split into segments. */
 export function parseAccountOperationRoute(parts: readonly string[]): AccountOperationRoute {
   // An ID that cannot be a workspace answers as one this account does not own.
-  try { return { route: "account-operation", workspaceId: parseWorkspaceId(parts[1]), operation: parts[3]! }; }
-  catch { throw notFound(); }
+  try {
+    return {
+      route: "account-operation",
+      workspaceId: parseWorkspaceId(parts[1]),
+      operation: parts[3]!,
+    };
+  } catch {
+    throw notFound();
+  }
 }
 
 /**
@@ -67,47 +88,80 @@ export function createAccountOperationRoute(options: {
   serverUrl?: string;
 }) {
   const { storage, limiter } = options;
-  const session = (request: Request) => bearerAccountSession(storage, options.resolveAccountSession, request);
+  const session = (request: Request) =>
+    bearerAccountSession(storage, options.resolveAccountSession, request);
 
-  return async function respondToAccountOperation(request: Request, route: AccountOperationRoute): Promise<Response> {
+  return async function respondToAccountOperation(
+    request: Request,
+    route: AccountOperationRoute,
+  ): Promise<Response> {
     const feed = route.operation === "changes" && request.method === "GET";
     if (!feed && request.method !== "POST") throw relayError("method_not_allowed");
     const caller = await session(request);
     if (!limiter.allow(caller.sessionId, options.nowMs())) {
-      throw new RelayError("server_busy", "This sign-in is asking faster than your server answers. Try again shortly.");
+      throw new RelayError(
+        "server_busy",
+        "This sign-in is asking faster than your server answers. Try again shortly.",
+      );
     }
     // The feed reads only the relay's log; every other operation needs a copy.
     if (!feed && options.copies() === undefined) throw copiesUnavailable();
     // The phone reaches a workspace its account owns while it shows on the phone.
     const reaches = (userId: string) =>
-      storage.workspaceIsOwnedBy(route.workspaceId, userId) && storage.showsOnPhone(userId, route.workspaceId);
+      storage.workspaceIsOwnedBy(route.workspaceId, userId) &&
+      storage.showsOnPhone(userId, route.workspaceId);
     const write = isPhoneWriteOperation(route.operation);
     const mark = route.operation === "markRead";
     const retry = route.operation === "retryWake";
-    if (!(feed || write || mark || retry || isAccountOperation(route.operation)) || !reaches(caller.userId)) throw notFound();
+    if (
+      !(feed || write || mark || retry || isAccountOperation(route.operation)) ||
+      !reaches(caller.userId)
+    )
+      throw notFound();
     const authorize = async () => {
       const current = await session(request);
-      if (current.sessionId !== caller.sessionId || current.userId !== caller.userId || !reaches(caller.userId)) throw notFound();
+      if (
+        current.sessionId !== caller.sessionId ||
+        current.userId !== caller.userId ||
+        !reaches(caller.userId)
+      )
+        throw notFound();
     };
     if (feed) {
       const url = new URL(request.url);
       const hold = url.searchParams.get("hold");
       const answer = await readAccountFeed(storage, options.feedWaits, {
-        workspaceId: route.workspaceId, userId: caller.userId, caller: caller.sessionId, since: url.searchParams.get("since"),
-        holdMs: hold === null ? 0 : parseLogHold(hold), signal: request.signal, authorize,
+        workspaceId: route.workspaceId,
+        userId: caller.userId,
+        caller: caller.sessionId,
+        since: url.searchParams.get("since"),
+        holdMs: hold === null ? 0 : parseLogHold(hold),
+        signal: request.signal,
+        authorize,
       });
       await authorize();
       return jsonResponse({ ok: true, ...answer });
     }
     let args: unknown;
     try {
-      args = await readBoundedJson(request, ACCOUNT_OPERATION_MAX_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]));
+      args = await readBoundedJson(
+        request,
+        ACCOUNT_OPERATION_MAX_BODY_BYTES,
+        AbortSignal.any([request.signal, AbortSignal.timeout(BODY_RECEIPT_MS)]),
+      );
     } catch (error) {
-      throw error instanceof RangeError ? relayError("payload_too_large") : badRequest("request body must be valid JSON");
+      throw error instanceof RangeError
+        ? relayError("payload_too_large")
+        : badRequest("request body must be valid JSON");
     }
     await authorize();
     // A Bearer session reaches what shows on the phone, whatever the request says.
-    const visitor = { reason: "account", caller: caller.sessionId, signal: request.signal, phone: true } as const;
+    const visitor = {
+      reason: "account",
+      caller: caller.sessionId,
+      signal: request.signal,
+      phone: true,
+    } as const;
     if (write) {
       const parsed = parsePhoneWrite(route.operation, args);
       // The author is the session's account, by the name it has now.
@@ -115,31 +169,60 @@ export function createAccountOperationRoute(options: {
       await authorize();
       const copies = options.copies();
       if (copies === undefined || options.serverUrl === undefined) throw copiesUnavailable();
-      const { result, cursor } = await runAccountWrite({ storage, copies }, {
-        workspaceId: route.workspaceId, write: parsed, visitor, authorize,
-        writer: { accountId: caller.userId, displayName, serverUrl: options.serverUrl },
-        // One clock with the runner declarations, so their leases read the same here.
-        nowMs: () => options.nowMs(),
-      });
+      const { result, cursor } = await runAccountWrite(
+        { storage, copies },
+        {
+          workspaceId: route.workspaceId,
+          write: parsed,
+          visitor,
+          authorize,
+          writer: { accountId: caller.userId, displayName, serverUrl: options.serverUrl },
+          // One clock with the runner declarations, so their leases read the same here.
+          nowMs: () => options.nowMs(),
+        },
+      );
       return jsonResponse({ ok: true, result, cursor });
     }
     const copies = options.copies();
     if (copies === undefined) throw copiesUnavailable();
     if (retry) {
-      const { result, cursor } = await runAccountRetryWake({ storage, copies }, {
-        workspaceId: route.workspaceId, accountId: caller.userId, retry: parseRetryWake(args), visitor, authorize, nowMs: () => options.nowMs(),
-      });
+      const { result, cursor } = await runAccountRetryWake(
+        { storage, copies },
+        {
+          workspaceId: route.workspaceId,
+          accountId: caller.userId,
+          retry: parseRetryWake(args),
+          visitor,
+          authorize,
+          nowMs: () => options.nowMs(),
+        },
+      );
       return jsonResponse({ ok: true, result, cursor });
     }
     if (mark) {
-      const { result, cursor } = await runAccountMarkRead({ storage, copies }, {
-        workspaceId: route.workspaceId, accountId: caller.userId, mark: parseMarkRead(args), visitor, authorize,
-      });
+      const { result, cursor } = await runAccountMarkRead(
+        { storage, copies },
+        {
+          workspaceId: route.workspaceId,
+          accountId: caller.userId,
+          mark: parseMarkRead(args),
+          visitor,
+          authorize,
+        },
+      );
       return jsonResponse({ ok: true, result, cursor });
     }
-    const { result, cursor } = await runAccountOperation({ storage, copies }, {
-      owner: caller.userId, workspaceId: route.workspaceId, operation: route.operation, args, authorize, visitor,
-    });
+    const { result, cursor } = await runAccountOperation(
+      { storage, copies },
+      {
+        owner: caller.userId,
+        workspaceId: route.workspaceId,
+        operation: route.operation,
+        args,
+        authorize,
+        visitor,
+      },
+    );
     return jsonResponse({ ok: true, result, cursor });
   };
 }

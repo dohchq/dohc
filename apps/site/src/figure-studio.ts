@@ -1,6 +1,6 @@
-import * as T from 'three';
-import { HorizontalBlurShader } from 'three/addons/shaders/HorizontalBlurShader.js';
-import { VerticalBlurShader } from 'three/addons/shaders/VerticalBlurShader.js';
+import * as T from "three";
+import { HorizontalBlurShader } from "three/addons/shaders/HorizontalBlurShader.js";
+import { VerticalBlurShader } from "three/addons/shaders/VerticalBlurShader.js";
 
 /** The page's two figures share one studio: the same exposure, reflections
  * and key light from the upper left, so both models sit on the paper the
@@ -15,7 +15,13 @@ export interface FigureStudio {
 
 const shadowOpacity = { light: { cast: 0.08, contact: 0.55 }, dark: { cast: 0.3, contact: 0.8 } };
 
-export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T.Object3D, studio: T.DataTexture, { animated = false } = {}): FigureStudio {
+export function stageFigure(
+  renderer: T.WebGLRenderer,
+  scene: T.Scene,
+  figure: T.Object3D,
+  studio: T.DataTexture,
+  { animated = false } = {},
+): FigureStudio {
   renderer.setClearColor(0, 0);
   renderer.outputColorSpace = T.SRGBColorSpace;
   renderer.toneMapping = T.ACESFilmicToneMapping;
@@ -45,7 +51,14 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   key.target.position.copy(center);
   key.castShadow = true;
   key.shadow.mapSize.set(512, 512);
-  Object.assign(key.shadow.camera, { left: -radius * 1.4, right: radius * 1.4, top: radius * 1.4, bottom: -radius * 1.4, near: radius * 0.5, far: radius * 5 });
+  Object.assign(key.shadow.camera, {
+    left: -radius * 1.4,
+    right: radius * 1.4,
+    top: radius * 1.4,
+    bottom: -radius * 1.4,
+    near: radius * 0.5,
+    far: radius * 5,
+  });
   key.shadow.camera.updateProjectionMatrix();
   key.shadow.normalBias = 0.02;
   key.shadow.bias = -0.0001;
@@ -71,22 +84,35 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   const reach = size.y * 0.3;
   const target = new T.WebGLRenderTarget(512, 512);
   const blurTarget = new T.WebGLRenderTarget(512, 512);
-  const floorCamera = new T.OrthographicCamera(-width / 2, width / 2, depth / 2, -depth / 2, 0, reach);
+  const floorCamera = new T.OrthographicCamera(
+    -width / 2,
+    width / 2,
+    depth / 2,
+    -depth / 2,
+    0,
+    reach,
+  );
   floorCamera.position.set(center.x, groundY, center.z);
   floorCamera.rotation.x = Math.PI / 2;
   floorCamera.updateMatrixWorld();
   const depthMaterial = new T.MeshDepthMaterial();
-  depthMaterial.onBeforeCompile = shader => {
+  depthMaterial.onBeforeCompile = (shader) => {
     shader.fragmentShader = shader.fragmentShader.replace(
-      'gl_FragColor = vec4( vec3( 1.0 - fragCoordZ ), opacity );',
-      'gl_FragColor = vec4( vec3( 0.0 ), pow( 1.0 - fragCoordZ, 1.6 ) );',
+      "gl_FragColor = vec4( vec3( 1.0 - fragCoordZ ), opacity );",
+      "gl_FragColor = vec4( vec3( 0.0 ), pow( 1.0 - fragCoordZ, 1.6 ) );",
     );
   };
   const quad = new T.Mesh(new T.PlaneGeometry(2, 2));
   const quadCamera = new T.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   quadCamera.position.z = 0.5;
-  const horizontal = new T.ShaderMaterial({ ...HorizontalBlurShader, uniforms: T.UniformsUtils.clone(HorizontalBlurShader.uniforms) });
-  const vertical = new T.ShaderMaterial({ ...VerticalBlurShader, uniforms: T.UniformsUtils.clone(VerticalBlurShader.uniforms) });
+  const horizontal = new T.ShaderMaterial({
+    ...HorizontalBlurShader,
+    uniforms: T.UniformsUtils.clone(HorizontalBlurShader.uniforms),
+  });
+  const vertical = new T.ShaderMaterial({
+    ...VerticalBlurShader,
+    uniforms: T.UniformsUtils.clone(VerticalBlurShader.uniforms),
+  });
   horizontal.depthTest = vertical.depthTest = false;
   const blur = (amount: number) => {
     quad.material = horizontal;
@@ -100,9 +126,17 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
     renderer.setRenderTarget(target);
     renderer.render(quad, quadCamera);
   };
-  const contactMaterial = new T.MeshBasicMaterial({ map: target.texture, color: 0x000000, transparent: true, depthWrite: false });
+  const contactMaterial = new T.MeshBasicMaterial({
+    map: target.texture,
+    color: 0x000000,
+    transparent: true,
+    depthWrite: false,
+  });
   // The floor camera sees +z at the top of its image, so the plane faces up with v along +z.
-  const contact = new T.Mesh(new T.PlaneGeometry(width, depth).rotateX(Math.PI / 2), contactMaterial);
+  const contact = new T.Mesh(
+    new T.PlaneGeometry(width, depth).rotateX(Math.PI / 2),
+    contactMaterial,
+  );
   contact.scale.y = -1;
   contact.position.set(center.x, groundY + 0.002, center.z);
   contact.renderOrder = 1;
@@ -118,7 +152,10 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
   // The bake ran with the floor hidden; draw the cast shadow again with it in place.
   renderer.shadowMap.needsUpdate = true;
   blurTarget.dispose();
-  depthMaterial.dispose(); horizontal.dispose(); vertical.dispose(); quad.geometry.dispose();
+  depthMaterial.dispose();
+  horizontal.dispose();
+  vertical.dispose();
+  quad.geometry.dispose();
   scene.add(contact);
 
   const setDark = (dark: boolean) => {
@@ -143,4 +180,3 @@ export function stageFigure(renderer: T.WebGLRenderer, scene: T.Scene, figure: T
     },
   };
 }
-

@@ -18,7 +18,10 @@ const DESCRIPTOR: ServerDescriptor = {
 const SIGNED_IN = { user: { name: "Ada", email: "ada@example.com", emailVerified: true } };
 
 /** A Better Auth stand-in: the routes only read sessions and claim device codes. */
-function gateway(overrides: Partial<AuthGateway["api"]> = {}, handler?: AuthGateway["handler"]): AuthGateway {
+function gateway(
+  overrides: Partial<AuthGateway["api"]> = {},
+  handler?: AuthGateway["handler"],
+): AuthGateway {
   return {
     handler: handler ?? (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })),
     api: {
@@ -141,12 +144,15 @@ describe("auth body limit", () => {
   /** An endless body in 16 KiB chunks that counts what the router pulls. */
   function endless() {
     const counted = { pulled: 0 };
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        counted.pulled += 1;
-        controller.enqueue(new Uint8Array(16 * 1024));
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          counted.pulled += 1;
+          controller.enqueue(new Uint8Array(16 * 1024));
+        },
       },
-    }, { highWaterMark: 0 });
+      { highWaterMark: 0 },
+    );
     return { body, counted };
   }
 
@@ -161,8 +167,16 @@ describe("auth body limit", () => {
 
   it("passes a body within the limit to Better Auth unchanged", async () => {
     const received: string[] = [];
-    const handle = router({ auth: gateway({}, async (request) => (received.push(await request.text()), Response.json({ ok: true }))) });
-    const body = JSON.stringify({ email: "ada@example.com", password: "x".repeat(AUTH_BODY_MAX_BYTES - 64) });
+    const handle = router({
+      auth: gateway(
+        {},
+        async (request) => (received.push(await request.text()), Response.json({ ok: true })),
+      ),
+    });
+    const body = JSON.stringify({
+      email: "ada@example.com",
+      password: "x".repeat(AUTH_BODY_MAX_BYTES - 64),
+    });
     const response = await handle(post(body));
     expect(response.status).toBe(200);
     expect(received).toEqual([body]);
@@ -260,7 +274,9 @@ describe("account pages", () => {
 
   it("sends a closed server's new accounts to their email to choose a password", async () => {
     const closed = await (
-      await router({ closedSignUp: true })(get("/account/verify-email?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))
+      await router({ closedSignUp: true })(
+        get("/account/verify-email?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"),
+      )
     ).text();
     expect(closed).toContain("<h1>Choose your password</h1>");
     expect(closed).toContain('data-sign-up="closed"');
@@ -271,10 +287,14 @@ describe("account pages", () => {
 
   it("continues a device sign-in after a new password", async () => {
     const body = await (
-      await router()(get("/account/reset-password?token=abc&next=%2Fdevice%3Fuser_code%3DABCD-EFGH"))
+      await router()(
+        get("/account/reset-password?token=abc&next=%2Fdevice%3Fuser_code%3DABCD-EFGH"),
+      )
     ).text();
     expect(body).toContain('href="/account/sign-in?next=%2Fdevice%3Fuser_code%3DABCD-EFGH"');
-    const hostile = await (await router()(get("/account/reset-password?token=abc&next=https%3A%2F%2Fevil.example"))).text();
+    const hostile = await (
+      await router()(get("/account/reset-password?token=abc&next=https%3A%2F%2Fevil.example"))
+    ).text();
     expect(hostile).not.toContain("evil.example");
   });
 
@@ -347,7 +367,9 @@ describe("device verification page", () => {
     expect(body).toContain("Approve");
     expect(body).toContain("Deny");
     expect(body).toContain("ada@example.com");
-    expect(body).toContain("<p>Only approve this if you just started signing in on your phone.</p>");
+    expect(body).toContain(
+      "<p>Only approve this if you just started signing in on your phone.</p>",
+    );
   });
 
   it("explains an expired code and offers no decision", async () => {
@@ -355,7 +377,10 @@ describe("device verification page", () => {
       auth: gateway({
         getSession: async () => SIGNED_IN,
         deviceVerify: async () => {
-          throw new ApiError({ error: "expired_token", error_description: "User code has expired" });
+          throw new ApiError({
+            error: "expired_token",
+            error_description: "User code has expired",
+          });
         },
       }),
     })(get("/device?user_code=ABCD-EFGH"));
@@ -371,7 +396,10 @@ describe("device verification page", () => {
         auth: gateway({
           getSession: async () => SIGNED_IN,
           deviceVerify: async () => {
-            throw new ApiError({ error: "invalid_request", error_description: "Invalid user code" });
+            throw new ApiError({
+              error: "invalid_request",
+              error_description: "Invalid user code",
+            });
           },
         }),
       })(get("/device?user_code=NOPE"))
@@ -396,7 +424,9 @@ describe("device verification page", () => {
 describe("test seams", () => {
   it("has no device approval seam and no captured mail by default", async () => {
     const handle = router();
-    expect((await handle(get("/test/device/approve", { method: "POST", body: "{}" }))).status).toBe(404);
+    expect((await handle(get("/test/device/approve", { method: "POST", body: "{}" }))).status).toBe(
+      404,
+    );
     expect((await handle(get("/test/email/messages"))).status).toBe(404);
   });
 
@@ -462,7 +492,10 @@ describe("crash reports", () => {
   it("stores a report when crash reports are on", async () => {
     const stored: string[] = [];
     const crashReports = createCrashReportIntake({
-      store: { insert: async ({ body }) => (stored.push(body), true), deleteExpired: async () => 0 },
+      store: {
+        insert: async ({ body }) => (stored.push(body), true),
+        deleteExpired: async () => 0,
+      },
     });
     const response = await router({ crashReports })(send());
     expect(response.status).toBe(201);
@@ -478,9 +511,15 @@ describe("crash reports", () => {
   it("never logs a report, even when storing it fails", async () => {
     const logged: unknown[] = [];
     const spies = (["log", "info", "warn", "error"] as const).map((method) =>
-      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => void logged.push(args)));
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => void logged.push(args)),
+    );
     const crashReports = createCrashReportIntake({
-      store: { insert: async () => { throw new Error(`insert failed for ${REPORT}`); }, deleteExpired: async () => 0 },
+      store: {
+        insert: async () => {
+          throw new Error(`insert failed for ${REPORT}`);
+        },
+        deleteExpired: async () => 0,
+      },
     });
     const response = await router({ crashReports })(send());
     for (const spy of spies) spy.mockRestore();

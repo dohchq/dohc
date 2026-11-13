@@ -35,27 +35,23 @@ describe("LazyMarkdownReadView", () => {
       </div>,
     );
 
-    expect(
-      await screen.findByTestId("error-boundary-markdown-read-view"),
-    ).toBeTruthy();
+    expect(await screen.findByTestId("error-boundary-markdown-read-view")).toBeTruthy();
     expect(screen.getByTestId("workspace")).toBeTruthy();
 
-    await userEvent.click(
-      screen.getByTestId("error-boundary-markdown-read-view-retry"),
-    );
+    await userEvent.click(screen.getByTestId("error-boundary-markdown-read-view-retry"));
 
     expect(loader).toHaveBeenCalledTimes(2);
     await act(async () => {
       await loader.mock.results[1]!.value;
     });
-    expect(
-      await screen.findByRole("heading", { name: "Recovered document" }),
-    ).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Recovered document" })).toBeTruthy();
     await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 
   it("renders a later document in its first commit once the chunk has loaded", async () => {
-    const first = render(<LazyMarkdownReadView body="# First document" resetKey="workspace-1:first.md" />);
+    const first = render(
+      <LazyMarkdownReadView body="# First document" resetKey="workspace-1:first.md" />,
+    );
     expect(await screen.findByRole("heading", { name: "First document" })).toBeTruthy();
     first.unmount();
 
@@ -68,19 +64,13 @@ describe("LazyMarkdownReadView", () => {
   });
 
   it("marks completion only after the loaded child parses and commits", async () => {
-    let resolve!: (
-      module: typeof import("./IncrementalMarkdownDocument"),
-    ) => void;
-    const pending = new Promise<
-      typeof import("./IncrementalMarkdownDocument")
-    >((done) => {
+    let resolve!: (module: typeof import("./IncrementalMarkdownDocument")) => void;
+    const pending = new Promise<typeof import("./IncrementalMarkdownDocument")>((done) => {
       resolve = done;
     });
     const loader = vi.fn(() => pending);
     const onRendered = vi.fn(() => {
-      expect(
-        screen.getByRole("heading", { name: "Measured document" }),
-      ).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Measured document" })).toBeTruthy();
     });
 
     render(
@@ -92,9 +82,7 @@ describe("LazyMarkdownReadView", () => {
       />,
     );
 
-    expect(screen.getByTestId("markdown-read-loading").textContent).toBe(
-      "Loading document...",
-    );
+    expect(screen.getByTestId("markdown-read-loading").textContent).toBe("Loading document...");
     expect(onRendered).not.toHaveBeenCalled();
 
     const recoveredModule = await import("./IncrementalMarkdownDocument");
@@ -103,9 +91,7 @@ describe("LazyMarkdownReadView", () => {
       await pending;
     });
 
-    expect(
-      await screen.findByRole("heading", { name: "Measured document" }),
-    ).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Measured document" })).toBeTruthy();
     await waitFor(() => expect(onRendered).toHaveBeenCalledOnce());
   });
 });

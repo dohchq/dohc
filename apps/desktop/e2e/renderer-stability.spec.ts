@@ -127,9 +127,7 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "hello.md", contents: "# Hello\n\ncontent\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "hello.md", contents: "# Hello\n\ncontent\n" }]);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
 
@@ -149,11 +147,7 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
         () =>
           desktop!.app.evaluate(async ({ BrowserWindow }) => {
             const window = BrowserWindow.getAllWindows()[0];
-            if (
-              !window ||
-              window.webContents.isCrashed() ||
-              window.webContents.isLoading()
-            ) {
+            if (!window || window.webContents.isCrashed() || window.webContents.isLoading()) {
               return false;
             }
             const mounted = window.webContents
@@ -172,9 +166,7 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
 
     // The handler must have logged the crash + reload decision.
     expect(
-      desktop.logs.some((entry) =>
-        entry.text.includes("[desktop] renderer process gone"),
-      ),
+      desktop.logs.some((entry) => entry.text.includes("[desktop] renderer process gone")),
     ).toBe(true);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

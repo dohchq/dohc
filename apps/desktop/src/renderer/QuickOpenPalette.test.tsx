@@ -20,13 +20,15 @@ const pinned = ["notes.md"];
 const onOpenPath = vi.fn();
 const onClose = vi.fn();
 
-function palette(overrides: {
-  files?: readonly { path: string }[];
-  recent?: readonly string[];
-  pinned?: readonly string[];
-  onOpenPath?: (path: string) => void;
-  onClose?: () => void;
-} = {}) {
+function palette(
+  overrides: {
+    files?: readonly { path: string }[];
+    recent?: readonly string[];
+    pinned?: readonly string[];
+    onOpenPath?: (path: string) => void;
+    onClose?: () => void;
+  } = {},
+) {
   return (
     <QuickOpenPalette
       files={overrides.files ?? files}
@@ -59,28 +61,36 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it.each(["win32", "darwin"].flatMap((platform) =>
-  ["input", "result row", "panel"].map((focus) => ({ platform, focus })),
-))("handles its own Go to toggle shortcut on $platform with focus on the $focus", ({ platform, focus }) => {
-  vi.stubGlobal("dohcDesktop", { platform });
-  const close = vi.fn();
-  render(palette({ onClose: close }));
-  const target = focus === "input"
-    ? screen.getByRole("textbox", { name: "File" })
-    : focus === "result row"
-      ? screen.getByRole("button", { name: /notes.md/ })
-      : screen.getByTestId("quick-open").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
-  target.focus();
-  expect(document.activeElement).toBe(target);
-  const event = new KeyboardEvent("keydown", {
-    key: SHORTCUTS["quick-open"].accelerators[0].split("+").at(-1)!,
-    ctrlKey: platform === "win32", metaKey: platform === "darwin",
-    bubbles: true, cancelable: true,
-  });
-  fireEvent(target, event);
-  expect(event.defaultPrevented).toBe(true);
-  expect(close).toHaveBeenCalledOnce();
-});
+it.each(
+  ["win32", "darwin"].flatMap((platform) =>
+    ["input", "result row", "panel"].map((focus) => ({ platform, focus })),
+  ),
+)(
+  "handles its own Go to toggle shortcut on $platform with focus on the $focus",
+  ({ platform, focus }) => {
+    vi.stubGlobal("dohcDesktop", { platform });
+    const close = vi.fn();
+    render(palette({ onClose: close }));
+    const target =
+      focus === "input"
+        ? screen.getByRole("textbox", { name: "File" })
+        : focus === "result row"
+          ? screen.getByRole("button", { name: /notes.md/ })
+          : screen.getByTestId("quick-open").closest<HTMLElement>('[data-focus-surface="dialog"]')!;
+    target.focus();
+    expect(document.activeElement).toBe(target);
+    const event = new KeyboardEvent("keydown", {
+      key: SHORTCUTS["quick-open"].accelerators[0].split("+").at(-1)!,
+      ctrlKey: platform === "win32",
+      metaKey: platform === "darwin",
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(target, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+  },
+);
 
 it("does not rebuild derived file data for unrelated shell renders", () => {
   const view = render(<Harness unrelatedShellRevision={0} />);
@@ -102,9 +112,7 @@ it("rebuilds derived file data when each ranking input identity changes", () => 
   view.rerender(palette({ files: changedFiles, recent: changedRecent }));
   expect(prepareQuickOpenPaths).toHaveBeenCalledTimes(3);
 
-  view.rerender(
-    palette({ files: changedFiles, recent: changedRecent, pinned: [...pinned] }),
-  );
+  view.rerender(palette({ files: changedFiles, recent: changedRecent, pinned: [...pinned] }));
   expect(prepareQuickOpenPaths).toHaveBeenCalledTimes(4);
 });
 

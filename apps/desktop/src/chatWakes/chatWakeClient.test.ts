@@ -1,14 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
-import { CHAT_WAKE_MUTATION_MS, ChatWakeAnswerError, ChatWakeBusyError, ChatWakeMissingError, createChatWakeClient } from "./chatWakeClient";
+import {
+  CHAT_WAKE_MUTATION_MS,
+  ChatWakeAnswerError,
+  ChatWakeBusyError,
+  ChatWakeMissingError,
+  createChatWakeClient,
+} from "./chatWakeClient";
 
 const WAKE = `wake-${"a".repeat(32)}`;
 const view = {
-  wakeId: WAKE, workspaceId: "ws", messageId: "m1", threadId: "t1", generation: 1, state: "claimed",
-  prerequisiteMessageId: null, winnerLabel: "Mac",
+  wakeId: WAKE,
+  workspaceId: "ws",
+  messageId: "m1",
+  threadId: "t1",
+  generation: 1,
+  state: "claimed",
+  prerequisiteMessageId: null,
+  winnerLabel: "Mac",
 };
 const waiting = {
-  ...view, state: "waiting", winnerLabel: null,
+  ...view,
+  state: "waiting",
+  winnerLabel: null,
   candidate: { installId: "mac", agentId: "default", label: "Mac", matched: { handle: "claude" } },
 };
 
@@ -27,7 +41,10 @@ function world(...answers: Array<{ status?: number; body: unknown } | "hang">) {
         init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
       });
     }
-    return new Response(typeof answer.body === "string" ? answer.body : JSON.stringify(answer.body), { status: answer.status ?? 200 });
+    return new Response(
+      typeof answer.body === "string" ? answer.body : JSON.stringify(answer.body),
+      { status: answer.status ?? 200 },
+    );
   };
   const client = createChatWakeClient({
     relay: { baseUrl: "https://relay.test/", token: "secret", fetch },
@@ -62,14 +79,33 @@ describe("the chat wake client", () => {
   it.each<[string, unknown]>([
     ["an extra field", { ok: true, cursor: "1", wakes: [], more: true }],
     ["a cursor that isn't a sequence", { ok: true, cursor: "01", wakes: [] }],
-    ["a row that isn't waiting", { ok: true, cursor: "1", wakes: [{ ...waiting, state: "claimed" }] }],
-    ["another computer's candidate", { ok: true, cursor: "1", wakes: [{ ...waiting, candidate: { ...waiting.candidate, installId: "pc" } }] }],
-    ["a personal agent", { ok: true, cursor: "1", wakes: [{ ...waiting, candidate: { ...waiting.candidate, agentId: "p-ana" } }] }],
+    [
+      "a row that isn't waiting",
+      { ok: true, cursor: "1", wakes: [{ ...waiting, state: "claimed" }] },
+    ],
+    [
+      "another computer's candidate",
+      {
+        ok: true,
+        cursor: "1",
+        wakes: [{ ...waiting, candidate: { ...waiting.candidate, installId: "pc" } }],
+      },
+    ],
+    [
+      "a personal agent",
+      {
+        ok: true,
+        cursor: "1",
+        wakes: [{ ...waiting, candidate: { ...waiting.candidate, agentId: "p-ana" } }],
+      },
+    ],
     ["a malformed wake ID", { ok: true, cursor: "1", wakes: [{ ...waiting, wakeId: "wake-1" }] }],
     ["text that isn't JSON", "{"],
   ])("refuses a page with %s", async (_name, body) => {
     const w = world({ body });
-    await expect(w.client.waitWakes({ installId: "mac", since: 0, holdMs: 0 }, w.signal)).rejects.toBeInstanceOf(ChatWakeAnswerError);
+    await expect(
+      w.client.waitWakes({ installId: "mac", since: 0, holdMs: 0 }, w.signal),
+    ).rejects.toBeInstanceOf(ChatWakeAnswerError);
   });
 
   it("claims with exactly the install ID and a short deadline", async () => {
@@ -82,12 +118,32 @@ describe("the chat wake client", () => {
   });
 
   it.each<[string, { status?: number; body: unknown }, new (...args: never[]) => Error]>([
-    ["another wake", { body: { ok: true, won: true, wake: { ...view, wakeId: `wake-${"b".repeat(32)}` } } }, ChatWakeAnswerError],
+    [
+      "another wake",
+      { body: { ok: true, won: true, wake: { ...view, wakeId: `wake-${"b".repeat(32)}` } } },
+      ChatWakeAnswerError,
+    ],
     ["no won flag", { body: { ok: true, wake: view } }, ChatWakeAnswerError],
-    ["an unknown state", { body: { ok: true, won: true, wake: { ...view, state: "started" } } }, ChatWakeAnswerError],
-    ["not found", { status: 404, body: { ok: false, error: "not found", code: "not_found" } }, ChatWakeMissingError],
-    ["busy", { status: 503, body: { ok: false, error: "busy", code: "server_busy" } }, ChatWakeBusyError],
-    ["an expired sign-in", { status: 401, body: { ok: false, error: "no", code: "unauthorized" } }, RelayUnauthorizedError],
+    [
+      "an unknown state",
+      { body: { ok: true, won: true, wake: { ...view, state: "started" } } },
+      ChatWakeAnswerError,
+    ],
+    [
+      "not found",
+      { status: 404, body: { ok: false, error: "not found", code: "not_found" } },
+      ChatWakeMissingError,
+    ],
+    [
+      "busy",
+      { status: 503, body: { ok: false, error: "busy", code: "server_busy" } },
+      ChatWakeBusyError,
+    ],
+    [
+      "an expired sign-in",
+      { status: 401, body: { ok: false, error: "no", code: "unauthorized" } },
+      RelayUnauthorizedError,
+    ],
   ])("answers a claim with %s as its error", async (_name, answer, error) => {
     const w = world(answer);
     await expect(w.client.claimWake(WAKE, "mac", w.signal)).rejects.toBeInstanceOf(error);
@@ -95,9 +151,14 @@ describe("the chat wake client", () => {
 
   it("confirms only an answer about the wake it named", async () => {
     const queued = { ...view, state: "queued" };
-    const w = world({ body: { ok: true, wake: queued } }, { body: { ok: true, wake: { ...queued, wakeId: `wake-${"b".repeat(32)}` } } });
+    const w = world(
+      { body: { ok: true, wake: queued } },
+      { body: { ok: true, wake: { ...queued, wakeId: `wake-${"b".repeat(32)}` } } },
+    );
     expect(await w.client.confirmQueued(WAKE, "mac", w.signal)).toEqual(queued);
-    await expect(w.client.confirmQueued(WAKE, "mac", w.signal)).rejects.toBeInstanceOf(ChatWakeAnswerError);
+    await expect(w.client.confirmQueued(WAKE, "mac", w.signal)).rejects.toBeInstanceOf(
+      ChatWakeAnswerError,
+    );
     expect(w.sent[0]!.url).toBe(`https://relay.test/sync/wakes/${WAKE}/queued`);
   });
 
@@ -109,12 +170,21 @@ describe("the chat wake client", () => {
   });
 
   it("replaces runners with exactly the declaration and checks the count", async () => {
-    const declaration = { installId: "mac", computerLabel: "Mac", runners: [{ agentId: "default", displayName: "Claude", enabled: true }] };
-    const w = world({ body: { ok: true, workspaceId: "ws", installId: "mac", runners: 1 } }, { body: { ok: true, workspaceId: "ws", installId: "mac", runners: 0 } });
+    const declaration = {
+      installId: "mac",
+      computerLabel: "Mac",
+      runners: [{ agentId: "default", displayName: "Claude", enabled: true }],
+    };
+    const w = world(
+      { body: { ok: true, workspaceId: "ws", installId: "mac", runners: 1 } },
+      { body: { ok: true, workspaceId: "ws", installId: "mac", runners: 0 } },
+    );
     await w.client.replaceRunners("ws", declaration, w.signal);
     expect(w.sent[0]!.init.method).toBe("PUT");
     expect(w.sent[0]!.url).toBe("https://relay.test/sync/workspaces/ws/runners");
     expect(JSON.parse(String(w.sent[0]!.init.body))).toEqual(declaration);
-    await expect(w.client.replaceRunners("ws", declaration, w.signal)).rejects.toBeInstanceOf(ChatWakeAnswerError);
+    await expect(w.client.replaceRunners("ws", declaration, w.signal)).rejects.toBeInstanceOf(
+      ChatWakeAnswerError,
+    );
   });
 });

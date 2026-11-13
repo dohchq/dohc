@@ -15,7 +15,8 @@ export const LOCK_BUSY = 75;
 // Node cannot take an flock, so perl takes it without waiting, records the
 // descriptor, keeps it open across exec ($^F), and becomes the command.
 // 6 is LOCK_EX | LOCK_NB.
-const TAKE = '$^F = 255; open(my $lock, ">>", shift) or die "$!\\n"; flock($lock, 6) or exit 75; $ENV{DOHC_RELEASE_LOCK_FD} = fileno($lock); exec @ARGV or die "$!\\n"';
+const TAKE =
+  '$^F = 255; open(my $lock, ">>", shift) or die "$!\\n"; flock($lock, 6) or exit 75; $ENV{DOHC_RELEASE_LOCK_FD} = fileno($lock); exec @ARGV or die "$!\\n"';
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 /** The descriptor through which this process holds the lock, or null. */
@@ -41,15 +42,21 @@ function heldDescriptor(lock, env) {
 export async function underReleaseLock(lock, { env = process.env, argv = process.argv } = {}) {
   if (heldDescriptor(lock, env) !== null) return null;
   mkdirSync(dirname(lock), { recursive: true });
-  const child = spawn("/usr/bin/perl", ["-e", TAKE, lock, process.execPath, ...argv.slice(1)], { stdio: "inherit", env: { ...env, [HELD]: lock } });
-  const forward = signal => child.kill(signal);
+  const child = spawn("/usr/bin/perl", ["-e", TAKE, lock, process.execPath, ...argv.slice(1)], {
+    stdio: "inherit",
+    env: { ...env, [HELD]: lock },
+  });
+  const forward = (signal) => child.kill(signal);
   for (const signal of SIGNALS) process.on(signal, forward);
   try {
     const status = await new Promise((resolve, reject) => {
       child.once("error", reject);
       child.once("exit", (code, signal) => resolve(code ?? 128 + (constants.signals[signal] ?? 0)));
     });
-    if (status === LOCK_BUSY) console.error(`Another release command on this Mac holds ${lock}. Run this one after it finishes.`);
+    if (status === LOCK_BUSY)
+      console.error(
+        `Another release command on this Mac holds ${lock}. Run this one after it finishes.`,
+      );
     return status;
   } finally {
     for (const signal of SIGNALS) process.off(signal, forward);
@@ -64,7 +71,10 @@ export async function underReleaseLock(lock, { env = process.env, argv = process
 export function heldLockOptions(lock, env = process.env) {
   const fd = heldDescriptor(lock, env);
   if (fd === null) throw new Error(`This process does not hold ${lock}.`);
-  return { stdio: ["inherit", "inherit", "inherit", fd], env: { ...env, [HELD]: lock, [HELD_FD]: "3" } };
+  return {
+    stdio: ["inherit", "inherit", "inherit", fd],
+    env: { ...env, [HELD]: lock, [HELD_FD]: "3" },
+  };
 }
 
 /** Whether a release command holds the lock now. */

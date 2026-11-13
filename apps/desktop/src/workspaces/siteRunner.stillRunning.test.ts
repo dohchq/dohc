@@ -16,7 +16,11 @@ vi.mock("../process/windowsSpawn", async (importOriginal) => ({
 vi.mock("../process/posixSpawn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../process/posixSpawn")>()),
   killProcessTreePosix: vi.fn(async (pid: number, signal: NodeJS.Signals) => {
-    try { process.kill(pid, signal); } catch { /* already gone */ }
+    try {
+      process.kill(pid, signal);
+    } catch {
+      /* already gone */
+    }
     return [];
   }),
 }));
@@ -24,7 +28,11 @@ vi.mock("../process/posixSpawn", async (importOriginal) => ({
 const started: ChildProcess[] = [];
 afterEach(() => {
   for (const each of started.splice(0)) {
-    try { each.kill("SIGKILL"); } catch { /* gone */ }
+    try {
+      each.kill("SIGKILL");
+    } catch {
+      /* gone */
+    }
   }
 });
 
@@ -38,7 +46,8 @@ function orphan(): ChildProcess {
 async function app(files: Record<string, string>) {
   const workspaceRoot = await realpath(await createTestScratch("site-runner-still-running-"));
   await mkdir(join(workspaceRoot, "portal"));
-  for (const [name, text] of Object.entries(files)) await writeFile(join(workspaceRoot, "portal", name), text);
+  for (const [name, text] of Object.entries(files))
+    await writeFile(join(workspaceRoot, "portal", name), text);
   return workspaceRoot;
 }
 
@@ -46,10 +55,14 @@ describe("an app command a failed tree kill leaves running", () => {
   it("says which processes outlived the stop of a running dev server", async () => {
     const left = orphan();
     const workspaceRoot = await app({
-      "server.js": "require('node:http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log('http://127.0.0.1:' + this.address().port + '/'); });",
+      "server.js":
+        "require('node:http').createServer((q, r) => r.end('ok')).listen(0, '127.0.0.1', function () { console.log('http://127.0.0.1:' + this.address().port + '/'); });",
     });
     const handle = await startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["server.js"],
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["server.js"],
       descendantsReader: async () => [left.pid!],
     });
     await handle.stop();
@@ -64,13 +77,20 @@ describe("an app command a failed tree kill leaves running", () => {
     const workspaceRoot = await app({ "idle.js": "setInterval(() => {}, 1000);" });
     const controller = new AbortController();
     const starting = startSiteDevServer({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["idle.js"], signal: controller.signal,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["idle.js"],
+      signal: controller.signal,
       descendantsReader: async () => {
         queueMicrotask(() => controller.abort());
         return [left.pid!];
       },
     });
-    const error = await starting.then(() => null, (cause: unknown) => cause);
+    const error = await starting.then(
+      () => null,
+      (cause: unknown) => cause,
+    );
     expect(error).toBeInstanceOf(AppCommandStillRunningError);
     expect((error as AppCommandStillRunningError).pids).toContain(left.pid);
     left.kill("SIGKILL");
@@ -85,7 +105,11 @@ describe("an app command a failed tree kill leaves running", () => {
     const workspaceRoot = await app({ "build.js": "setInterval(() => {}, 1000);" });
     const controller = new AbortController();
     const building = buildSite({
-      workspaceRoot, siteRoot: "portal", command: "node", args: ["build.js"], signal: controller.signal,
+      workspaceRoot,
+      siteRoot: "portal",
+      command: "node",
+      args: ["build.js"],
+      signal: controller.signal,
       descendantsReader: async () => {
         queueMicrotask(() => controller.abort());
         return [left.pid!];

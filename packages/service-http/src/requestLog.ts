@@ -27,7 +27,8 @@ export function createRequestLog<const Patterns extends readonly string[]>(
   routePatterns: Patterns,
 ): RequestLog<Patterns[number]> {
   for (const pattern of routePatterns) {
-    if (!PATTERN.test(pattern) || pattern === UNMATCHED) throw new TypeError(`${service} lists an unsafe route pattern.`);
+    if (!PATTERN.test(pattern) || pattern === UNMATCHED)
+      throw new TypeError(`${service} lists an unsafe route pattern.`);
   }
   const listed: ReadonlySet<string> = new Set(routePatterns);
   return {
@@ -37,7 +38,9 @@ export function createRequestLog<const Patterns extends readonly string[]>(
     },
     write(request, method, status, arrivedAtMs) {
       const route = (request && patterns.get(request)) ?? UNMATCHED;
-      console.log(`[${service}] request ${new Date(arrivedAtMs).toISOString()} ${METHODS.has(method) ? method : "OTHER"} ${route} ${status}`);
+      console.log(
+        `[${service}] request ${new Date(arrivedAtMs).toISOString()} ${METHODS.has(method) ? method : "OTHER"} ${route} ${status}`,
+      );
     },
   };
 }

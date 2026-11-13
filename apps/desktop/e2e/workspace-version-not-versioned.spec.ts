@@ -16,7 +16,10 @@ import {
 // rename, and the rename then shows in Main too.
 
 async function pathExists(path: string): Promise<boolean> {
-  return access(path).then(() => true, () => false);
+  return access(path).then(
+    () => true,
+    () => false,
+  );
 }
 
 async function chooseVersion(page: Page, name: string, create: boolean): Promise<void> {
@@ -65,7 +68,9 @@ test("in a version, a file over the size limit is marked and its rename asks fir
     await rename.press("Enter");
     const dialog = page.getByTestId("not-versioned-confirm");
     await expect(dialog).toContainText("Rename clip.bin in Main too?");
-    await expect(dialog).toContainText("It isn't versioned, so Main and every version have the same copy.");
+    await expect(dialog).toContainText(
+      "It isn't versioned, so Main and every version have the same copy.",
+    );
     await page.screenshot({ path: testInfo.outputPath("not-versioned-confirm.png") });
     await page.getByTestId("cancel-not-versioned").click();
     await expect(dialog).toHaveCount(0);

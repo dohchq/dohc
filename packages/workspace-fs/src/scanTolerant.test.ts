@@ -21,10 +21,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
           { code: "ENOENT" },
         );
       }
-      return (actual.stat as (...args: unknown[]) => ReturnType<typeof actual.stat>)(
-        path,
-        ...rest,
-      );
+      return (actual.stat as (...args: unknown[]) => ReturnType<typeof actual.stat>)(path, ...rest);
     }) as typeof actual.stat,
   };
 });
@@ -43,7 +40,6 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-
 async function writeFixture(path: string, text = "content\n") {
   const absolute = join(root, path);
   await mkdir(dirname(absolute), { recursive: true });
@@ -55,27 +51,30 @@ async function writeFixture(path: string, text = "content\n") {
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 describe("scanWorkspaceFilesTolerant", () => {
-  itNonRoot("skips an unreadable subdirectory, keeps scanning, and reports the failure", async () => {
-    await writeFixture("notes/keep.md", "# Keep\n");
-    await writeFixture("docs/deep/nested.md", "# Nested\n");
-    await writeFixture("locked/secret.md", "# Locked away\n");
-    await denyRead(join(root, "locked"), "dir");
-    try {
-      const scan = await scanWorkspaceFilesTolerant(root);
-      expect(scan.files.map((file) => file.path)).toEqual([
-        "docs/deep/nested.md",
-        "notes/keep.md",
-      ]);
-      expect(scan.failures).toEqual([
-        { path: "locked", reason: expect.stringContaining(deniedReadCode) },
-      ]);
+  itNonRoot(
+    "skips an unreadable subdirectory, keeps scanning, and reports the failure",
+    async () => {
+      await writeFixture("notes/keep.md", "# Keep\n");
+      await writeFixture("docs/deep/nested.md", "# Nested\n");
+      await writeFixture("locked/secret.md", "# Locked away\n");
+      await denyRead(join(root, "locked"), "dir");
+      try {
+        const scan = await scanWorkspaceFilesTolerant(root);
+        expect(scan.files.map((file) => file.path)).toEqual([
+          "docs/deep/nested.md",
+          "notes/keep.md",
+        ]);
+        expect(scan.failures).toEqual([
+          { path: "locked", reason: expect.stringContaining(deniedReadCode) },
+        ]);
 
-      // The strict default is unchanged: the same tree still throws.
-      await expect(scanWorkspaceFiles(root)).rejects.toThrow(new RegExp(deniedReadCode));
-    } finally {
-      await restoreRead(join(root, "locked"), 0o755);
-    }
-  });
+        // The strict default is unchanged: the same tree still throws.
+        await expect(scanWorkspaceFiles(root)).rejects.toThrow(new RegExp(deniedReadCode));
+      } finally {
+        await restoreRead(join(root, "locked"), 0o755);
+      }
+    },
+  );
 
   itNonRoot("skips an unreadable file without dropping its siblings", async () => {
     await writeFixture("notes/readable.md", "# Fine\n");
@@ -99,10 +98,7 @@ describe("scanWorkspaceFilesTolerant", () => {
     midScanDelete.suffix = join("notes", "ghost.md");
     try {
       const scan = await scanWorkspaceFilesTolerant(root);
-      expect(scan.files.map((file) => file.path)).toEqual([
-        "docs/other.md",
-        "notes/stays.md",
-      ]);
+      expect(scan.files.map((file) => file.path)).toEqual(["docs/other.md", "notes/stays.md"]);
       expect(scan.failures).toEqual([
         { path: "notes/ghost.md", reason: expect.stringContaining("ENOENT") },
       ]);
@@ -118,8 +114,6 @@ describe("scanWorkspaceFilesTolerant", () => {
     const missing = join(root, "never-created");
     const scan = await scanWorkspaceFilesTolerant(missing);
     expect(scan.files).toEqual([]);
-    expect(scan.failures).toEqual([
-      { path: ".", reason: expect.stringContaining("ENOENT") },
-    ]);
+    expect(scan.failures).toEqual([{ path: ".", reason: expect.stringContaining("ENOENT") }]);
   });
 });

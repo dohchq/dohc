@@ -49,7 +49,10 @@ function heldOpenBridge() {
       status: "written",
       contentHash: TEST_CONTENT_HASH,
     })),
-    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "a.md", kind: "file" }], folders: [] })),
+    listWorkspaceFiles: vi.fn(async () => ({
+      files: [{ path: "a.md", kind: "file" }],
+      folders: [],
+    })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({
       settings: DEFAULT_WORKSPACE_SETTINGS,
@@ -84,12 +87,16 @@ function heldOpenBridge() {
 // until its nodes and images have rendered.
 function stubPaneLayout(tall: () => boolean = () => true) {
   const pane = (element: Element) => element.matches("[data-testid='view-markdown']");
-  const scrollHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return pane(this) && tall() && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
-  });
-  const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
-    return pane(this) ? 200 : 0;
-  });
+  const scrollHeight = vi
+    .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+    .mockImplementation(function (this: HTMLElement) {
+      return pane(this) && tall() && this.textContent?.includes("Base paragraph.") ? 2_000 : 0;
+    });
+  const clientHeight = vi
+    .spyOn(HTMLElement.prototype, "clientHeight", "get")
+    .mockImplementation(function (this: HTMLElement) {
+      return pane(this) ? 200 : 0;
+    });
   return () => {
     scrollHeight.mockRestore();
     clientHeight.mockRestore();
@@ -99,13 +106,21 @@ function stubPaneLayout(tall: () => boolean = () => true) {
 // Keeps each ResizeObserver, so a test can report that the note's content
 // changed size.
 function stubResizeObservers() {
-  const observers: Array<{ callback: ResizeObserverCallback; targets: Element[]; observer: ResizeObserver }> = [];
+  const observers: Array<{
+    callback: ResizeObserverCallback;
+    targets: Element[];
+    observer: ResizeObserver;
+  }> = [];
   vi.stubGlobal(
     "ResizeObserver",
     class {
       private readonly targets: Element[] = [];
       constructor(callback: ResizeObserverCallback) {
-        observers.push({ callback, targets: this.targets, observer: this as unknown as ResizeObserver });
+        observers.push({
+          callback,
+          targets: this.targets,
+          observer: this as unknown as ResizeObserver,
+        });
       }
       observe(target: Element) {
         this.targets.push(target);
@@ -130,7 +145,10 @@ function stubResizeObservers() {
         const content = targets.filter((target) => target.parentElement === pane);
         if (content.length === 0) continue;
         callback(
-          content.map((target) => ({ target, contentRect: target.getBoundingClientRect() }) as ResizeObserverEntry),
+          content.map(
+            (target) =>
+              ({ target, contentRect: target.getBoundingClientRect() }) as ResizeObserverEntry,
+          ),
           observer,
         );
       }

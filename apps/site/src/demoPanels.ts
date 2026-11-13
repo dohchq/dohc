@@ -1,7 +1,4 @@
-import type {
-  ActivityViewId,
-  ViewId,
-} from "../../desktop/src/renderer/workbench/workbenchState";
+import type { ActivityViewId, ViewId } from "../../desktop/src/renderer/workbench/workbenchState";
 
 // The desktop views the demo implements. The rail offers only these.
 export const DEMO_PANEL_IDS = [

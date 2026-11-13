@@ -16,19 +16,26 @@ async function waitForGroupExit(group) {
     let stdout;
     try {
       ({ stdout } = await execFileAsync("ps", ["-A", "-o", "pgid=", "-o", "stat="], {
-        encoding: "utf8", timeout: 1000, maxBuffer: 32 * 1024 * 1024,
+        encoding: "utf8",
+        timeout: 1000,
+        maxBuffer: 32 * 1024 * 1024,
       }));
     } catch (cause) {
       throw new Error(`Cannot confirm process group ${group} stopped.`, { cause });
     }
-    const members = stdout.trim().split("\n").filter(Boolean).map(line => line.trim().split(/\s+/u));
+    const members = stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.trim().split(/\s+/u));
     if (members.some(([pgid, state]) => !/^\d+$/u.test(pgid) || !state)) {
       throw new Error(`Cannot read process group ${group} state.`);
     }
     // Zombies retain a group ID but have already released their files and sockets.
     if (!members.some(([pgid, state]) => Number(pgid) === group && !state.startsWith("Z"))) return;
-    if (Date.now() >= deadline) throw new Error(`Process group ${group} still has live members after SIGKILL.`);
-    await new Promise(done => setTimeout(done, 20));
+    if (Date.now() >= deadline)
+      throw new Error(`Process group ${group} still has live members after SIGKILL.`);
+    await new Promise((done) => setTimeout(done, 20));
   }
 }
 
@@ -42,22 +49,61 @@ export function git(args, cwd = repoRoot) {
   return readGit(args, cwd).trim();
 }
 
-export function run(command, args, { cwd = repoRoot, env = process.env, log, onSpawn, quietStdout = false, timeoutMs, signal: abortSignal } = {}) {
-  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw new Error("Command timeout must be a positive number of milliseconds.");
-  if (abortSignal?.aborted) return Promise.reject(Object.assign(new Error(`${command} failed (interrupted).`), {
-    exitCode: null, signal: null, stdout: "", stderr: "", interrupted: true, timedOut: false,
-  }));
+export function run(
+  command,
+  args,
+  {
+    cwd = repoRoot,
+    env = process.env,
+    log,
+    onSpawn,
+    quietStdout = false,
+    timeoutMs,
+    signal: abortSignal,
+  } = {},
+) {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0))
+    throw new Error("Command timeout must be a positive number of milliseconds.");
+  if (abortSignal?.aborted)
+    return Promise.reject(
+      Object.assign(new Error(`${command} failed (interrupted).`), {
+        exitCode: null,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        interrupted: true,
+        timedOut: false,
+      }),
+    );
   return new Promise((resolveRun, reject) => {
     if (log) mkdirSync(dirname(log), { recursive: true });
     const output = log ? createWriteStream(log) : null;
     const windows = process.platform === "win32";
     const launchCommand = windows ? "pwsh.exe" : command;
     const quotePowerShell = (value) => `'${value.replaceAll("'", "''")}'`;
-    const launchArgs = windows ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-      `& ([scriptblock]::Create([IO.File]::ReadAllText(${quotePowerShell(resolve(import.meta.dirname, "windows-job.ps1"))}))) ${[
-        process.execPath, resolve(import.meta.dirname, "windows-command.mjs"), Buffer.from(JSON.stringify({ command, args })).toString("base64"), String(process.pid),
-      ].map(quotePowerShell).join(" ")}`] : args;
-    const child = spawn(launchCommand, launchArgs, { cwd, env, windowsHide: true, detached: !windows, stdio: ["ignore", "pipe", "pipe"] });
+    const launchArgs = windows
+      ? [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `& ([scriptblock]::Create([IO.File]::ReadAllText(${quotePowerShell(resolve(import.meta.dirname, "windows-job.ps1"))}))) ${[
+            process.execPath,
+            resolve(import.meta.dirname, "windows-command.mjs"),
+            Buffer.from(JSON.stringify({ command, args })).toString("base64"),
+            String(process.pid),
+          ]
+            .map(quotePowerShell)
+            .join(" ")}`,
+        ]
+      : args;
+    const child = spawn(launchCommand, launchArgs, {
+      cwd,
+      env,
+      windowsHide: true,
+      detached: !windows,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     const stdoutDecoder = new StringDecoder("utf8");
@@ -87,9 +133,13 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       if (cancellation) return cancellation;
       clearTimeout(escalation);
       cancellation = (async () => {
-        // oxlint-disable-next-line typescript/no-unsafe-unary-minus -- pid is set: stopGroup runs only after interrupt saw it
-        try { process.kill(-child.pid, "SIGKILL"); }
-        catch (error) { if (error.code === "ESRCH") return; throw error; }
+        try {
+          // oxlint-disable-next-line typescript/no-unsafe-unary-minus -- pid is set: stopGroup runs only after interrupt saw it
+          process.kill(-child.pid, "SIGKILL");
+        } catch (error) {
+          if (error.code === "ESRCH") return;
+          throw error;
+        }
         await waitForGroupExit(child.pid);
       })();
       cancellation.catch(() => {});
@@ -103,7 +153,11 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
         // The retained handle belongs to the job owner, even after the command exits.
         child.kill("SIGKILL");
       } else {
-        try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch (error) {
+          if (error.code !== "ESRCH") throw error;
+        }
         escalation = setTimeout(stopGroup, 5000);
         escalation.unref();
       }
@@ -112,8 +166,17 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     process.on("SIGTERM", interrupt);
     abortSignal?.addEventListener("abort", interrupt, { once: true });
     if (abortSignal?.aborted) interrupt();
-    const deadline = timeoutMs === undefined ? null : setTimeout(() => { timedOut = true; interrupt(); }, timeoutMs);
-    output?.once("error", (error) => { outputError = error; interrupt(); });
+    const deadline =
+      timeoutMs === undefined
+        ? null
+        : setTimeout(() => {
+            timedOut = true;
+            interrupt();
+          }, timeoutMs);
+    output?.once("error", (error) => {
+      outputError = error;
+      interrupt();
+    });
     const cleanup = () => {
       completed = true;
       clearTimeout(escalation);
@@ -123,29 +186,75 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       abortSignal?.removeEventListener("abort", interrupt);
     };
     child.once("error", (error) => {
-      cleanup(); output?.end();
-      reject(Object.assign(error, { exitCode: null, signal: null, stdout, stderr, interrupted, timedOut }));
+      cleanup();
+      output?.end();
+      reject(
+        Object.assign(error, {
+          exitCode: null,
+          signal: null,
+          stdout,
+          stderr,
+          interrupted,
+          timedOut,
+        }),
+      );
     });
     child.once("close", async (code, signal) => {
       clearTimeout(deadline);
       if (interrupted && !windows) {
-        try { await stopGroup(); } catch (error) { cancellationError = error; }
+        try {
+          await stopGroup();
+        } catch (error) {
+          cancellationError = error;
+        }
       }
       cleanup();
       stdout = (stdout + stdoutDecoder.end()).slice(-16 * 1024 * 1024);
       stderr = (stderr + stderrDecoder.end()).slice(-1024 * 1024);
-      if (output && !output.destroyed) await new Promise((done) => output.end(error => { outputError ??= error; done(); }));
+      if (output && !output.destroyed)
+        await new Promise((done) =>
+          output.end((error) => {
+            outputError ??= error;
+            done();
+          }),
+        );
       const cut = interrupted && !exitedFirst;
-      const failure = outputError ?? cancellationError ?? (code !== 0 || cut || timedOut
-        ? new Error(`${command} failed (${timedOut ? `timed out after ${timeoutMs}ms` : cut ? "interrupted" : signal ?? code}).${log ? ` Log: ${log}` : `\n${stderr.slice(-4000)}`}`) : null);
-      if (failure) reject(Object.assign(failure, { exitCode: code, signal, stdout, stderr, interrupted: cut, timedOut,
-        commandExitFailure: !outputError && !cancellationError && typeof code === "number" && code !== 0 && !cut && !timedOut }));
+      const failure =
+        outputError ??
+        cancellationError ??
+        (code !== 0 || cut || timedOut
+          ? new Error(
+              `${command} failed (${timedOut ? `timed out after ${timeoutMs}ms` : cut ? "interrupted" : (signal ?? code)}).${log ? ` Log: ${log}` : `\n${stderr.slice(-4000)}`}`,
+            )
+          : null);
+      if (failure)
+        reject(
+          Object.assign(failure, {
+            exitCode: code,
+            signal,
+            stdout,
+            stderr,
+            interrupted: cut,
+            timedOut,
+            commandExitFailure:
+              !outputError &&
+              !cancellationError &&
+              typeof code === "number" &&
+              code !== 0 &&
+              !cut &&
+              !timedOut,
+          }),
+        );
       else resolveRun({ pid: child.pid, code, stdout, stderr });
     });
   });
 }
 
 export function readJson(path) {
-  try { return JSON.parse(readFileSync(path, "utf8")); }
-  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
 }

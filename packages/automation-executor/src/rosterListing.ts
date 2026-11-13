@@ -12,15 +12,19 @@ import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./au
 const MAX_INVENTORY_PAGES = 50;
 
 const EndedHolder = z.object({
-  grantId: z.string().min(1).max(256), recipientUserId: z.string().min(1).max(256),
-  recipientEmail: z.string().min(1).max(320).nullable(), parentGrantId: z.string().min(1).max(256),
+  grantId: z.string().min(1).max(256),
+  recipientUserId: z.string().min(1).max(256),
+  recipientEmail: z.string().min(1).max(320).nullable(),
+  parentGrantId: z.string().min(1).max(256),
 });
 export type HistoryAccount = z.infer<typeof EndedHolder>;
 export type HistoryAccountIds = { grantIds: readonly string[]; userIds: readonly string[] };
 
 /** Owner-only History attribution, fetched separately from the reach roster. */
 export async function lookupHistoryAccounts(
-  workspaceId: string, get: (path: string) => Promise<{ status: number; body: unknown }>, ids: HistoryAccountIds,
+  workspaceId: string,
+  get: (path: string) => Promise<{ status: number; body: unknown }>,
+  ids: HistoryAccountIds,
 ): Promise<HistoryAccount[] | null> {
   if (ids.grantIds.length + ids.userIds.length === 0) return [];
   if (ids.grantIds.length + ids.userIds.length > 200) return null;
@@ -31,9 +35,18 @@ export async function lookupHistoryAccounts(
     const response = await get(`/sync/${encodeURIComponent(workspaceId)}/shares/links?${query}`);
     if (response.status !== 200) return null;
     const parsed = z.object({ holders: z.array(EndedHolder).max(200) }).safeParse(response.body);
-    if (!parsed.success || parsed.data.holders.some(holder => !ids.grantIds.includes(holder.grantId) && !ids.userIds.includes(holder.recipientUserId))) return null;
+    if (
+      !parsed.success ||
+      parsed.data.holders.some(
+        (holder) =>
+          !ids.grantIds.includes(holder.grantId) && !ids.userIds.includes(holder.recipientUserId),
+      )
+    )
+      return null;
     return parsed.data.holders;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 const ID = z.string().min(1).max(256);
@@ -65,7 +78,12 @@ const BASE = {
 // answer and the registry's copy, so a damaged copy cannot widen a grant.
 const GroupGrant = z.object({
   ...BASE,
-  selector: z.object({ kind: z.literal("group"), channelWireId: ID, paths: PATHS.min(1), versionId: z.null() }),
+  selector: z.object({
+    kind: z.literal("group"),
+    channelWireId: ID,
+    paths: PATHS.min(1),
+    versionId: z.null(),
+  }),
   access: CHAT_ACCESS,
   fileScope: z.enum(["served", "not-served"]),
 });
@@ -82,7 +100,9 @@ const FileGrant = z.object({
   access: z.enum(SHARE_ACCESS_VALUES),
 });
 const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant]);
-const ListedGrantSchema = GrantSchema.refine((grant) => grant.recipientUserId !== null || grant.recipientEmail !== null);
+const ListedGrantSchema = GrantSchema.refine(
+  (grant) => grant.recipientUserId !== null || grant.recipientEmail !== null,
+);
 export type ListedGrant = z.infer<typeof ListedGrantSchema>;
 
 // A share link's own grant. It names nobody: whoever holds the link is one
@@ -90,11 +110,15 @@ export type ListedGrant = z.infer<typeof ListedGrantSchema>;
 // Collection's automations.yaml directly (ADR 0013), so the reach check can
 // still hold what it may have written. `automationsGeneration` is the newest
 // grant generation it wrote one under, or null.
-const ListedLinkSchema = z.object({
-  grant: GrantSchema.refine((grant) => grant.recipientUserId === null && grant.recipientEmail === null),
-  ended: z.boolean(),
-  automationsGeneration: GENERATION.nullable(),
-}).refine((link) => link.automationsGeneration === null || declaresFilePaths(link.grant));
+const ListedLinkSchema = z
+  .object({
+    grant: GrantSchema.refine(
+      (grant) => grant.recipientUserId === null && grant.recipientEmail === null,
+    ),
+    ended: z.boolean(),
+    automationsGeneration: GENERATION.nullable(),
+  })
+  .refine((link) => link.automationsGeneration === null || declaresFilePaths(link.grant));
 
 // A recorded automation write requires stored file paths. Group paths
 // remain historical scope when its channel no longer serves files.
@@ -105,18 +129,23 @@ export type ListedLink = z.infer<typeof ListedLinkSchema>;
 
 // A named grant that wrote a Collection's automations.yaml directly (ADR
 // 0013) and can no longer edit files: revoked, or narrowed below Edit.
-const FormerGrantSchema = z.object({ grant: ListedGrantSchema, automationsGeneration: GENERATION })
+const FormerGrantSchema = z
+  .object({ grant: ListedGrantSchema, automationsGeneration: GENERATION })
   .refine((former) => declaresFilePaths(former.grant));
 export type FormerGrant = z.infer<typeof FormerGrantSchema>;
 
 // A person's grant that was revoked without writing automations. Only
 // History reads it, to name who wrote through it; reach never does.
-const EndedGrantSchema = z.object({ ...BASE, status: z.literal("revoked") })
-  .refine(grant => grant.recipientUserId !== null || grant.recipientEmail !== null);
+const EndedGrantSchema = z
+  .object({ ...BASE, status: z.literal("revoked") })
+  .refine((grant) => grant.recipientUserId !== null || grant.recipientEmail !== null);
 export type EndedGrant = z.infer<typeof EndedGrantSchema>;
 
 const ProblemSchema = z.union([
-  z.object({ kind: z.literal("damaged-share"), recipientEmail: z.string().min(1).max(320).nullable() }),
+  z.object({
+    kind: z.literal("damaged-share"),
+    recipientEmail: z.string().min(1).max(320).nullable(),
+  }),
   z.object({ kind: z.literal("damaged-link") }),
   z.object({ kind: z.literal("unusable-listing") }),
   z.object({ kind: z.literal("outdated-server") }),
@@ -128,15 +157,22 @@ const ProblemSchema = z.union([
  * named grants; or why dohc cannot use them.
  */
 export type RosterListing =
-  | { grants: ListedGrant[]; links: ListedLink[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] }
+  | {
+      grants: ListedGrant[];
+      links: ListedLink[];
+      formerGrants: FormerGrant[];
+      endedGrants: EndedGrant[];
+    }
   | { grants: null; problem: Exclude<RosterProblem, { kind: "unchecked" }> };
 
 // A copy from before links were listed has no `links`, so it reads as
 // unchecked rather than as a workspace with no links.
 const StoredRoster = z.union([
   z.object({
-    grants: z.array(ListedGrantSchema), links: z.array(ListedLinkSchema),
-    formerGrants: z.array(FormerGrantSchema), endedGrants: z.array(EndedGrantSchema),
+    grants: z.array(ListedGrantSchema),
+    links: z.array(ListedLinkSchema),
+    formerGrants: z.array(FormerGrantSchema),
+    endedGrants: z.array(EndedGrantSchema),
   }),
   z.object({ grants: z.null(), problem: ProblemSchema }),
 ]);
@@ -168,7 +204,11 @@ function isGroupGrant(grant: ListedGrant): grant is z.infer<typeof GroupGrant> {
 }
 
 function rosterGrantOf(grant: ListedGrant): RosterGrant {
-  const recipient = { grantId: grant.grantId, recipientUserId: grant.recipientUserId, recipientEmail: grant.recipientEmail };
+  const recipient = {
+    grantId: grant.grantId,
+    recipientUserId: grant.recipientUserId,
+    recipientEmail: grant.recipientEmail,
+  };
   if (isFileGrant(grant)) {
     const { paths, versionId } = grant.selector;
     return { ...recipient, files: { paths, versionId, access: grant.access }, channel: null };
@@ -178,8 +218,12 @@ function rosterGrantOf(grant: ListedGrant): RosterGrant {
   const canPost = grant.access === "read-write";
   const channel = { wireId: grant.selector.channelWireId, canPost };
   if (isGroupGrant(grant)) {
-    if (grant.fileScope === "not-served") return {...recipient, files: null, channel: null};
-    return { ...recipient, files: { paths: grant.selector.paths, versionId: null, access: canPost ? "edit" : "view" }, channel };
+    if (grant.fileScope === "not-served") return { ...recipient, files: null, channel: null };
+    return {
+      ...recipient,
+      files: { paths: grant.selector.paths, versionId: null, access: canPost ? "edit" : "view" },
+      channel,
+    };
   }
   return { ...recipient, files: null, channel };
 }
@@ -201,12 +245,27 @@ const LinkRow = z.object({
   selector: z.unknown(),
   access: z.unknown(),
   automationsGeneration: GENERATION.nullable(),
-  dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown(), generation: GENERATION })),
+  dependents: z.array(
+    z.object({
+      grantId: z.unknown(),
+      recipientUserId: z.unknown(),
+      recipientEmail: z.unknown(),
+      access: z.unknown(),
+      generation: GENERATION,
+    }),
+  ),
 });
 
-const GrantedPage = z.object({ ...GRANTER_DISPLAY, granted: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
+const GrantedPage = z.object({
+  ...GRANTER_DISPLAY,
+  granted: z.array(z.unknown()),
+  nextCursor: z.string().min(1).max(1024).optional(),
+});
 
-const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
+const LinkPage = z.object({
+  links: z.array(z.unknown()),
+  nextCursor: z.string().min(1).max(1024).optional(),
+});
 
 // The parsed granted rows for the requested workspace.
 // Every row must belong to the requested workspace. A revoked grant that
@@ -215,7 +274,9 @@ const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().
 function grantedListing(
   workspaceId: string,
   rows: readonly unknown[],
-): { grants: ListedGrant[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] } | Extract<RosterListing, { grants: null }> {
+):
+  | { grants: ListedGrant[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] }
+  | Extract<RosterListing, { grants: null }> {
   const grants: ListedGrant[] = [];
   const formerGrants: FormerGrant[] = [];
   const endedGrants: EndedGrant[] = [];
@@ -239,11 +300,22 @@ function grantedListing(
       continue;
     }
     const grant = ListedGrantSchema.safeParse(row);
-    if (!state.success || !grant.success || (generation !== null && !declaresFilePaths(grant.data))) {
+    if (
+      !state.success ||
+      !grant.success ||
+      (generation !== null && !declaresFilePaths(grant.data))
+    ) {
       const email = RecipientEmail.safeParse(row);
-      return { grants: null, problem: { kind: "damaged-share", recipientEmail: email.success ? email.data.recipientEmail : null } };
+      return {
+        grants: null,
+        problem: {
+          kind: "damaged-share",
+          recipientEmail: email.success ? email.data.recipientEmail : null,
+        },
+      };
     }
-    if (grant.data.status !== (revoked ? "revoked" : "active")) return { grants: null, problem: { kind: "unusable-listing" } };
+    if (grant.data.status !== (revoked ? "revoked" : "active"))
+      return { grants: null, problem: { kind: "unusable-listing" } };
     if (!revoked) grants.push(grant.data);
     if (generation !== null && (revoked || rosterGrantOf(grant.data).files?.access !== "edit")) {
       formerGrants.push({ grant: grant.data, automationsGeneration: generation });
@@ -253,7 +325,10 @@ function grantedListing(
 }
 
 // Retain every active link for Access. Automation reach applies its own Edit rules.
-function linkListing(links: readonly unknown[], granter: Pick<ListedGrant, "granterUserId" | "granterEmail">): RosterListing {
+function linkListing(
+  links: readonly unknown[],
+  granter: Pick<ListedGrant, "granterUserId" | "granterEmail">,
+): RosterListing {
   const grants: ListedGrant[] = [];
   const listed: ListedLink[] = [];
   const damaged = { grants: null, problem: { kind: "damaged-link" } } as const;
@@ -277,7 +352,13 @@ function linkListing(links: readonly unknown[], granter: Pick<ListedGrant, "gran
     listed.push(own.data);
     if (ended) continue;
     for (const dependent of link.data.dependents) {
-      const grant = ListedGrantSchema.safeParse({ ...link.data, ...dependent, ...granter, status: "active", selector: link.data.selector });
+      const grant = ListedGrantSchema.safeParse({
+        ...link.data,
+        ...dependent,
+        ...granter,
+        status: "active",
+        selector: link.data.selector,
+      });
       if (!grant.success) return damaged;
       grants.push(grant.data);
     }
@@ -307,8 +388,11 @@ export async function listRosterGrants(
   get: (path: string) => Promise<{ status: number; body: unknown }>,
 ): Promise<RosterAnswer> {
   let partial = false;
-  const noAnswer = (next: string) => ({ ok: false, answer: { kind: "unanswered", next, partial } }) as const;
-  async function read(path: string): Promise<{ ok: true; body: unknown } | { ok: false; answer: RosterAnswer }> {
+  const noAnswer = (next: string) =>
+    ({ ok: false, answer: { kind: "unanswered", next, partial } }) as const;
+  async function read(
+    path: string,
+  ): Promise<{ ok: true; body: unknown } | { ok: false; answer: RosterAnswer }> {
     let response: { status: number; body: unknown };
     try {
       response = await get(path);
@@ -319,7 +403,8 @@ export async function listRosterGrants(
     if (response.status === 408 || response.status === 429 || response.status >= 500) {
       return noAnswer("Your server is not answering. Try again later.");
     }
-    if (response.status < 200 || response.status >= 300) return { ok: false, answer: UNUSABLE_ROSTER };
+    if (response.status < 200 || response.status >= 300)
+      return { ok: false, answer: UNUSABLE_ROSTER };
     partial = true;
     return { ok: true, body: response.body };
   }
@@ -390,9 +475,14 @@ export function ownerRoster(ownerUserId: string, listing: unknown, next: string)
   return {
     kind: "owner",
     ownerUserId,
-    grants: [...stored.grants, ...links.filter((link) => !link.ended).map((link) => link.grant)].map(rosterGrantOf),
+    grants: [
+      ...stored.grants,
+      ...links.filter((link) => !link.ended).map((link) => link.grant),
+    ].map(rosterGrantOf),
     formerEditors: [
-      ...stored.formerGrants.flatMap(({ grant, automationsGeneration }) => formerEditorOf(grant, automationsGeneration, "person")),
+      ...stored.formerGrants.flatMap(({ grant, automationsGeneration }) =>
+        formerEditorOf(grant, automationsGeneration, "person"),
+      ),
       ...links.flatMap(formerLinkOf),
     ],
   };
@@ -406,11 +496,16 @@ function formerEditorOf(
   holder: FormerEditor["holder"],
 ): FormerEditor[] {
   if (grant.selector.kind === "chat") return [];
-  const {paths, versionId} = grant.selector;
-  return [{
-    grantId: grant.grantId, generation, holder, recipientEmail: grant.recipientEmail,
-    files: {paths, versionId},
-  }];
+  const { paths, versionId } = grant.selector;
+  return [
+    {
+      grantId: grant.grantId,
+      generation,
+      holder,
+      recipientEmail: grant.recipientEmail,
+      files: { paths, versionId },
+    },
+  ];
 }
 
 // A link that wrote automations directly and can no longer edit files.

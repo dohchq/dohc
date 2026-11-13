@@ -4,10 +4,7 @@ import type {
   EngineWorkspaceSessions,
   ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
-import type {
-  EngineRelayClient,
-  EngineRelayWorkspaceClient,
-} from "./engineRelayClient";
+import type { EngineRelayClient, EngineRelayWorkspaceClient } from "./engineRelayClient";
 import { shareViewIsPresent } from "./shareViewMarker";
 import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
@@ -28,8 +25,7 @@ interface RegisteredWorkspaceEngineLocation {
   shareView?: unknown;
 }
 
-interface RegisteredWorkspaceRelayLocation
-  extends RegisteredWorkspaceEngineLocation {
+interface RegisteredWorkspaceRelayLocation extends RegisteredWorkspaceEngineLocation {
   relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
 }
 
@@ -40,27 +36,17 @@ export function createReceivedShareEngineAccess(dependencies: {
   relayClient(): Pick<EngineRelayClient, "bind">;
   createStores: typeof createCaptureLiveStores;
 }): {
-  workspaceFor(
-    location: ReceivedShareEngineLocation,
-  ): ShareMountEngineWorkspace;
-  workspaceForRegistered(
-    location: RegisteredWorkspaceEngineLocation,
-  ): AttachedEngineWorkspace;
+  workspaceFor(location: ReceivedShareEngineLocation): ShareMountEngineWorkspace;
+  workspaceForRegistered(location: RegisteredWorkspaceEngineLocation): AttachedEngineWorkspace;
   storeFor(location: ReceivedShareEngineLocation): CaptureStores["store"];
   relayFor(location: ReceivedShareRelayLocation): EngineRelayWorkspaceClient;
-  relayForRegistered(
-    location: RegisteredWorkspaceRelayLocation,
-  ): EngineRelayWorkspaceClient;
+  relayForRegistered(location: RegisteredWorkspaceRelayLocation): EngineRelayWorkspaceClient;
 } {
   function workspaceFor(
     location: ReceivedShareEngineLocation & { attachmentId: symbol },
   ): ShareMountEngineWorkspace & AttachedEngineWorkspace;
-  function workspaceFor(
-    location: ReceivedShareEngineLocation,
-  ): ShareMountEngineWorkspace;
-  function workspaceFor(
-    location: ReceivedShareEngineLocation,
-  ): ShareMountEngineWorkspace {
+  function workspaceFor(location: ReceivedShareEngineLocation): ShareMountEngineWorkspace;
+  function workspaceFor(location: ReceivedShareEngineLocation): ShareMountEngineWorkspace {
     const sessions = dependencies.sessions();
     // This is stronger than carrying `shareMount` on one descriptor. Sessions
     // are keyed by physical attachment when one is present, and otherwise by
@@ -102,12 +88,8 @@ export function createReceivedShareEngineAccess(dependencies: {
     workspaceFor,
     workspaceForRegistered,
     storeFor: (location) =>
-      dependencies.createStores(
-        workspaceFor(location),
-        dependencies.sessions(),
-      ).store,
+      dependencies.createStores(workspaceFor(location), dependencies.sessions()).store,
     relayFor: (location) => bind(workspaceFor(location), location.relay),
-    relayForRegistered: (location) =>
-      bind(workspaceForRegistered(location), location.relay),
+    relayForRegistered: (location) => bind(workspaceForRegistered(location), location.relay),
   };
 }

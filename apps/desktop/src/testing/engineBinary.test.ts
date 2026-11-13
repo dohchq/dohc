@@ -116,9 +116,7 @@ describe("the required-mode gate", () => {
     // silent skip is indistinguishable from a pass.
     vi.stubEnv(ENGINE_BINARY_ENV_VAR, join(tmpdir(), "dohc-absent-engine-xyz"));
     vi.stubEnv(REQUIRE_ENGINE_ENV_VAR, "1");
-    expect(() => requireEngineBinaryOrSkip()).toThrow(
-      new RegExp(REQUIRE_ENGINE_ENV_VAR),
-    );
+    expect(() => requireEngineBinaryOrSkip()).toThrow(new RegExp(REQUIRE_ENGINE_ENV_VAR));
   });
 
   it("resolves and reports present when a binary exists", () => {

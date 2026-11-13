@@ -6,7 +6,8 @@ export const RESTRICTED_APP_WORDS = "In Restricted Mode, dohc does not run this 
 // Shown through the shell's error hook, with Try again. Until main answers,
 // nothing that runs app code starts.
 export const TRUST_READ_FAILED_MESSAGE = "dohc could not read whether it trusts this workspace.";
-const RESTRICTED_WORKSPACE_WORDS = "In Restricted Mode, dohc does not run this workspace's app code.";
+const RESTRICTED_WORKSPACE_WORDS =
+  "In Restricted Mode, dohc does not run this workspace's app code.";
 
 // The workspace's Restricted Mode, beside its save state in the title bar.
 // It opens main's trust dialog. Below 1100px, where the title bar's names
@@ -36,7 +37,9 @@ export function RestrictedModeState(props: {
   onTrust: () => void;
 }) {
   if (props.variant === "band") {
-    return <RestrictedModeBand testId="restricted-mode-state" words={RESTRICTED_APP_WORDS} {...props} />;
+    return (
+      <RestrictedModeBand testId="restricted-mode-state" words={RESTRICTED_APP_WORDS} {...props} />
+    );
   }
   return (
     <EmptyState
@@ -55,10 +58,21 @@ export function RestrictedModeState(props: {
 
 // Above Chats in a workspace whose agent Restricted Mode holds back.
 export function RestrictedAgentsBand(props: { asking: boolean; onTrust: () => void }) {
-  return <RestrictedModeBand testId="restricted-agents-state" words={AGENTS_RESTRICTED_MESSAGE} {...props} />;
+  return (
+    <RestrictedModeBand
+      testId="restricted-agents-state"
+      words={AGENTS_RESTRICTED_MESSAGE}
+      {...props}
+    />
+  );
 }
 
-function RestrictedModeBand(props: { testId: string; words: string; asking: boolean; onTrust: () => void }) {
+function RestrictedModeBand(props: {
+  testId: string;
+  words: string;
+  asking: boolean;
+  onTrust: () => void;
+}) {
   return (
     <div
       data-testid={props.testId}
@@ -66,7 +80,9 @@ function RestrictedModeBand(props: { testId: string; words: string; asking: bool
       className="flex shrink-0 items-center gap-2 border-b border-line bg-panel px-4 py-1.5 text-[12px] text-muted"
     >
       <ShieldAlert size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-warning" />
-      <span className="min-w-0 truncate" title={props.words}>{props.words}</span>
+      <span className="min-w-0 truncate" title={props.words}>
+        {props.words}
+      </span>
       <SecondaryButton
         size="compact"
         className="ml-auto shrink-0"

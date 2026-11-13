@@ -8,11 +8,7 @@ import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import type { JSONContent } from "@tiptap/core";
 import { desktopMarkdownExtensions } from "./extensions";
-import {
-  applyWikilinkPick,
-  WikilinkPicker,
-  type WikilinkPickerState,
-} from "./WikilinkPicker";
+import { applyWikilinkPick, WikilinkPicker, type WikilinkPickerState } from "./WikilinkPicker";
 import type { WikilinkFile } from "./wikilinkPlugin";
 import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 import { indexFileListing } from "../workbench/file-listing-index";
@@ -67,9 +63,7 @@ function makeEditor(markdown: string): Editor {
   });
 }
 
-const files: ReadonlyArray<WikilinkFile> = [
-  { path: "notes/roadmap.md", title: "Roadmap" },
-];
+const files: ReadonlyArray<WikilinkFile> = [{ path: "notes/roadmap.md", title: "Roadmap" }];
 
 function firstWikilinkNode(json: JSONContent): JSONContent | undefined {
   return json.content?.[0]?.content?.find((n) => n.type === "wikilink");
@@ -121,12 +115,9 @@ describe("WikilinkPicker — option names", () => {
       }),
     );
 
-    expect(screen.getAllByRole("option").map((option) => option.getAttribute("aria-label"))).toEqual([
-      "alpha notes/alpha",
-      "guide notes/guide.markdown",
-      "Roadmap notes/roadmap",
-      "plan",
-    ]);
+    expect(
+      screen.getAllByRole("option").map((option) => option.getAttribute("aria-label")),
+    ).toEqual(["alpha notes/alpha", "guide notes/guide.markdown", "Roadmap notes/roadmap", "plan"]);
     expect(screen.getByRole("option", { name: "alpha notes/alpha" })).toBeTruthy();
     editor.destroy();
   });
@@ -203,7 +194,15 @@ describe("WikilinkPicker during IME composition", () => {
         { path: "notes/roadmap.md", title: "Roadmap" },
         { path: "notes/roads.md", title: "Roads" },
       ];
-      render(createElement(WikilinkPicker, { state: { open: true, from: 1, query: "road" }, files: roads, view: editor.view, insertMode: "node", onDismiss }));
+      render(
+        createElement(WikilinkPicker, {
+          state: { open: true, from: 1, query: "road" },
+          files: roads,
+          view: editor.view,
+          insertMode: "node",
+          onDismiss,
+        }),
+      );
       const list = screen.getByRole("listbox", { name: "page links" });
       const options = screen.getAllByRole("option");
       const doc = editor.getJSON();
@@ -230,7 +229,10 @@ describe("WikilinkPicker during IME composition", () => {
       expect(list.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
       fireEvent.keyDown(dom, { key: "Enter" });
       expect(onDismiss).toHaveBeenCalledTimes(1);
-      expect(firstWikilinkNode(editor.getJSON())?.attrs).toMatchObject({ target: "notes/roads", label: "Roads" });
+      expect(firstWikilinkNode(editor.getJSON())?.attrs).toMatchObject({
+        target: "notes/roads",
+        label: "Roads",
+      });
     } finally {
       editor.destroy();
       dom.remove();
@@ -247,8 +249,17 @@ describe("WikilinkPicker on the Menu part's recipe", () => {
     Element.prototype.scrollIntoView = scrollIntoView;
     const editor = makeEditor("[[");
     try {
-      const many = Array.from({ length: 12 }, (_, index) => ({ path: `notes/page-${index + 1}.md` }));
-      render(createElement(WikilinkPicker, { state: { open: true, from: 1, query: "" }, files: many, view: editor.view, onDismiss: vi.fn() }));
+      const many = Array.from({ length: 12 }, (_, index) => ({
+        path: `notes/page-${index + 1}.md`,
+      }));
+      render(
+        createElement(WikilinkPicker, {
+          state: { open: true, from: 1, query: "" },
+          files: many,
+          view: editor.view,
+          onDismiss: vi.fn(),
+        }),
+      );
       const list = screen.getByRole("listbox", { name: "page links" });
       const options = screen.getAllByRole("option");
       expect(options).toHaveLength(12);
@@ -273,7 +284,14 @@ describe("WikilinkPicker on the Menu part's recipe", () => {
   it("takes the active option only from a pointer that moves", () => {
     const editor = makeEditor("[[");
     const two = [{ path: "notes/one.md" }, { path: "notes/two.md" }];
-    render(createElement(WikilinkPicker, { state: { open: true, from: 1, query: "" }, files: two, view: editor.view, onDismiss: vi.fn() }));
+    render(
+      createElement(WikilinkPicker, {
+        state: { open: true, from: 1, query: "" },
+        files: two,
+        view: editor.view,
+        onDismiss: vi.fn(),
+      }),
+    );
     const list = screen.getByRole("listbox", { name: "page links" });
     const second = screen.getAllByRole("option")[1]!;
     fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });

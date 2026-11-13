@@ -3,7 +3,12 @@ import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { LocalDatasetHost } from "./localDatasetHost";
 import type { DatasetTransferStatus } from "./localDatasetTransfer";
-import { createDatasetAuthorityRouter, createRemoteDatasetTransferTarget, type DatasetAuthorityRoute, type OwnerDatasetData } from "./remoteDataset";
+import {
+  createDatasetAuthorityRouter,
+  createRemoteDatasetTransferTarget,
+  type DatasetAuthorityRoute,
+  type OwnerDatasetData,
+} from "./remoteDataset";
 
 /** The transfer record of a Collection whose move to a server finished. */
 export type FinishedTransfer = DatasetTransferStatus & { state: "imported" };
@@ -22,7 +27,14 @@ export async function collectionPlace(input: {
   if (input.transfer) return { kind: "server", host: new URL(input.transfer.targetOrigin).host };
   if (!input.relayUrl) return { kind: "here", server: null };
   const counts = await input.automations();
-  return { kind: "here", server: { host: new URL(input.relayUrl).host, runs: counts.automations ? await input.runs() : null, ...counts } };
+  return {
+    kind: "here",
+    server: {
+      host: new URL(input.relayUrl).host,
+      runs: counts.automations ? await input.runs() : null,
+      ...counts,
+    },
+  };
 }
 
 /**
@@ -33,20 +45,34 @@ export async function collectionPlace(input: {
  */
 export async function moveCollectionToServer(input: {
   local: Pick<LocalDatasetHost, "transferToShared" | "transferStatus">;
-  workspaceId: string; datasetId: string;
-  credentials: CloudCredentials; credentialGeneration: number; currentCredentialGeneration(): number;
+  workspaceId: string;
+  datasetId: string;
+  credentials: CloudCredentials;
+  credentialGeneration: number;
+  currentCredentialGeneration(): number;
   relayStream(credentials: CloudCredentials, path: string, init: RequestInit): Promise<unknown>;
   signal: AbortSignal;
 }): Promise<void> {
   if (!input.credentials.relayUrl) throw new Error("Reconnect to your server, then try again.");
   const targetOrigin = new URL(input.credentials.relayUrl).origin;
-  const target = createRemoteDatasetTransferTarget({ workspaceId: input.workspaceId, datasetId: input.datasetId, origin: targetOrigin,
-    credentials: input.credentials, credentialGeneration: input.credentialGeneration, currentCredentialGeneration: input.currentCredentialGeneration,
-    signal: input.signal, assertCurrent: () => input.signal.throwIfAborted(), relayStream: input.relayStream });
-  await input.local.transferToShared({ datasetId: input.datasetId, targetOrigin, target, signal: input.signal }).catch((error: unknown) => {
-    if (input.signal.aborted || input.local.transferStatus(input.datasetId)?.state !== "ready") throw error;
-    throw new CollectionMoveUnfinishedError(new URL(targetOrigin).host, { cause: error });
+  const target = createRemoteDatasetTransferTarget({
+    workspaceId: input.workspaceId,
+    datasetId: input.datasetId,
+    origin: targetOrigin,
+    credentials: input.credentials,
+    credentialGeneration: input.credentialGeneration,
+    currentCredentialGeneration: input.currentCredentialGeneration,
+    signal: input.signal,
+    assertCurrent: () => input.signal.throwIfAborted(),
+    relayStream: input.relayStream,
   });
+  await input.local
+    .transferToShared({ datasetId: input.datasetId, targetOrigin, target, signal: input.signal })
+    .catch((error: unknown) => {
+      if (input.signal.aborted || input.local.transferStatus(input.datasetId)?.state !== "ready")
+        throw error;
+      throw new CollectionMoveUnfinishedError(new URL(targetOrigin).host, { cause: error });
+    });
 }
 
 /**
@@ -57,7 +83,8 @@ export async function moveCollectionToServer(input: {
  */
 export async function finishedTransfer(input: {
   local: Pick<LocalDatasetHost, "transferStatus" | "transferInFlight" | "transferToShared">;
-  workspaceId: string; datasetId: string;
+  workspaceId: string;
+  datasetId: string;
   /** The workspace's server session, asked for only to resume a move. */
   server(): Promise<{ credentials: CloudCredentials; credentialGeneration: number }>;
   currentCredentialGeneration(): number;
@@ -65,22 +92,34 @@ export async function finishedTransfer(input: {
   signal: AbortSignal;
 }): Promise<FinishedTransfer | null> {
   const moving = input.local.transferInFlight(input.datasetId);
-  const failure = moving ? await abortable(moving, input.signal).then(() => null, (error: unknown) => error) : null;
+  const failure = moving
+    ? await abortable(moving, input.signal).then(
+        () => null,
+        (error: unknown) => error,
+      )
+    : null;
   input.signal.throwIfAborted();
   const transfer = input.local.transferStatus(input.datasetId);
   if (!transfer || transfer.state === "imported") return transfer as FinishedTransfer | null;
   const host = new URL(transfer.targetOrigin).host;
   if (moving) throw new CollectionMoveUnfinishedError(host, { cause: failure, waited: true });
-  const needsHost = (cause?: unknown) => new Error(`This Collection is moving to ${host}. Sign in to ${host} to finish the move.`, { cause });
-  const { credentials, credentialGeneration } = await input.server().catch((error: unknown) => { throw needsHost(error); });
+  const needsHost = (cause?: unknown) =>
+    new Error(`This Collection is moving to ${host}. Sign in to ${host} to finish the move.`, {
+      cause,
+    });
+  const { credentials, credentialGeneration } = await input.server().catch((error: unknown) => {
+    throw needsHost(error);
+  });
   input.signal.throwIfAborted();
-  if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin) throw needsHost();
+  if (!credentials.relayUrl || new URL(credentials.relayUrl).origin !== transfer.targetOrigin)
+    throw needsHost();
   // Another read resumed the move while this one asked for the session: wait for that move, not after it.
   if (input.local.transferInFlight(input.datasetId)) return finishedTransfer(input);
   await moveCollectionToServer({ ...input, credentials, credentialGeneration });
   input.signal.throwIfAborted();
   const finished = input.local.transferStatus(input.datasetId);
-  if (finished?.state !== "imported") throw new CollectionMoveUnfinishedError(host, { cause: null });
+  if (finished?.state !== "imported")
+    throw new CollectionMoveUnfinishedError(host, { cause: null });
   return finished as FinishedTransfer;
 }
 
@@ -91,8 +130,12 @@ export async function finishedTransfer(input: {
  * unfinished move or resumes a stopped one. It waits only while a finished
  * move removes its archive.
  */
-export function movedTransfer(input: Parameters<typeof finishedTransfer>[0]): Promise<FinishedTransfer | null> {
-  return input.local.transferStatus(input.datasetId)?.state === "imported" ? finishedTransfer(input) : Promise.resolve(null);
+export function movedTransfer(
+  input: Parameters<typeof finishedTransfer>[0],
+): Promise<FinishedTransfer | null> {
+  return input.local.transferStatus(input.datasetId)?.state === "imported"
+    ? finishedTransfer(input)
+    : Promise.resolve(null);
 }
 
 /**
@@ -100,11 +143,18 @@ export function movedTransfer(input: Parameters<typeof finishedTransfer>[0]): Pr
  * `movedTransfer`, so a Collection whose move hasn't finished reads from this
  * computer, and the read never waits for the move or resumes it.
  */
-export function createBackgroundDatasetRouter(local: LocalDatasetHost, session: Omit<Parameters<typeof finishedTransfer>[0], "local" | "datasetId">,
-  remote: DatasetAuthorityRoute["remote"], assertCurrent: () => void): OwnerDatasetData {
+export function createBackgroundDatasetRouter(
+  local: LocalDatasetHost,
+  session: Omit<Parameters<typeof finishedTransfer>[0], "local" | "datasetId">,
+  remote: DatasetAuthorityRoute["remote"],
+  assertCurrent: () => void,
+): OwnerDatasetData {
   return createDatasetAuthorityRouter(local, {
-    status: async datasetId => { assertCurrent(); return movedTransfer({ ...session, local, datasetId }); },
-    marker: datasetId => local.transferStatus(datasetId),
+    status: async (datasetId) => {
+      assertCurrent();
+      return movedTransfer({ ...session, local, datasetId });
+    },
+    marker: (datasetId) => local.transferStatus(datasetId),
     remote,
   });
 }

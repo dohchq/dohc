@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { mountEngine } from './engine-scene';
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { mountEngine } from "./engine-scene";
 
 let worker, host, dispose, now, frames, reducedMotion;
 beforeEach(() => {
@@ -8,24 +8,50 @@ beforeEach(() => {
   frames = new Map();
   reducedMotion = false;
   let nextFrame = 0;
-  vi.spyOn(performance, 'now').mockImplementation(() => now);
-  vi.stubGlobal('requestAnimationFrame', callback => {
+  vi.spyOn(performance, "now").mockImplementation(() => now);
+  vi.stubGlobal("requestAnimationFrame", (callback) => {
     frames.set(++nextFrame, callback);
     return nextFrame;
   });
-  vi.stubGlobal('cancelAnimationFrame', id => frames.delete(id));
-  vi.stubGlobal('Worker', class extends EventTarget {
-    postMessage = vi.fn();
-    terminate = vi.fn();
-    constructor() { super(); worker = this; }
+  vi.stubGlobal("cancelAnimationFrame", (id) => frames.delete(id));
+  vi.stubGlobal(
+    "Worker",
+    class extends EventTarget {
+      postMessage = vi.fn();
+      terminate = vi.fn();
+      constructor() {
+        super();
+        worker = this;
+      }
+    },
+  );
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  vi.stubGlobal("matchMedia", () => ({
+    get matches() {
+      return reducedMotion;
+    },
+    addEventListener() {},
+  }));
+  vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  vi.stubGlobal("devicePixelRatio", 1);
+  Object.defineProperty(HTMLCanvasElement.prototype, "transferControlToOffscreen", {
+    configurable: true,
+    value: () => ({}),
   });
-  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
-  vi.stubGlobal('matchMedia', () => ({ get matches() { return reducedMotion; }, addEventListener() {} }));
-  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
-  vi.stubGlobal('devicePixelRatio', 1);
-  Object.defineProperty(HTMLCanvasElement.prototype, 'transferControlToOffscreen', { configurable: true, value: () => ({}) });
-  host = document.createElement('div');
+  host = document.createElement("div");
   Object.defineProperties(host, { clientWidth: { value: 548 }, clientHeight: { value: 510 } });
   document.body.append(host);
 });
@@ -40,64 +66,74 @@ function tick(time) {
   now = time;
   const pending = [...frames.values()];
   frames.clear();
-  pending.forEach(callback => callback(now));
+  pending.forEach((callback) => callback(now));
 }
-function message(type) { worker.dispatchEvent(new MessageEvent('message', { data: { type } })); }
-function views() { return worker.postMessage.mock.calls.map(([value]) => value).filter(value => value.type === 'view'); }
+function message(type) {
+  worker.dispatchEvent(new MessageEvent("message", { data: { type } }));
+}
+function views() {
+  return worker.postMessage.mock.calls
+    .map(([value]) => value)
+    .filter((value) => value.type === "view");
+}
 
-it('keeps the initial pose until the first frame is rendered, then rotates without catching up startup time', () => {
+it("keeps the initial pose until the first frame is rendered, then rotates without catching up startup time", () => {
   dispose = mountEngine(host);
   expect(views()).toHaveLength(0);
-  message('ready');
+  message("ready");
   tick(5000);
   expect(views()).toHaveLength(1);
   expect(views()[0].view.theta).toBe(Math.atan2(10, 7));
   expect(views()[0].view.phi).toBe(Math.atan2(Math.hypot(10, 7), 6.5));
   expect(frames.size).toBe(0);
-  expect(host.classList.contains('engine-loaded')).toBe(false);
+  expect(host.classList.contains("engine-loaded")).toBe(false);
   tick(15000);
-  message('rendered');
-  expect(host.classList.contains('engine-loaded')).toBe(true);
+  message("rendered");
+  expect(host.classList.contains("engine-loaded")).toBe(true);
   tick(15020);
   const rotation = views()[0].view.theta - views()[1].view.theta;
-  expect(rotation).toBeCloseTo(Math.PI * 2 / 60 * .28 * .02);
+  expect(rotation).toBeCloseTo(((Math.PI * 2) / 60) * 0.28 * 0.02);
   expect(frames.size).toBe(1);
 });
 
-it('shows the same stationary pose for reduced motion without running a continuous loop', () => {
+it("shows the same stationary pose for reduced motion without running a continuous loop", () => {
   reducedMotion = true;
   dispose = mountEngine(host);
-  message('ready');
+  message("ready");
   tick(5000);
-  message('rendered');
+  message("rendered");
   tick(5020);
   expect(views().every(({ view }) => view.theta === Math.atan2(10, 7))).toBe(true);
   expect(frames.size).toBe(0);
 });
 
-it('restores the preview and stops animation when the renderer fails after loading', () => {
-  vi.spyOn(console, 'error').mockImplementation(() => {});
+it("restores the preview and stops animation when the renderer fails after loading", () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
   dispose = mountEngine(host);
-  message('ready');
+  message("ready");
   tick(5000);
-  message('rendered');
-  message('error');
-  expect(host.classList.contains('engine-loaded')).toBe(false);
-  expect(host.querySelector('canvas')).toBeNull();
+  message("rendered");
+  message("error");
+  expect(host.classList.contains("engine-loaded")).toBe(false);
+  expect(host.querySelector("canvas")).toBeNull();
   expect(worker.terminate).toHaveBeenCalledOnce();
   expect(frames.size).toBe(0);
 });
 
-it('tells the renderer the page theme so the shadows match it', async () => {
-  document.documentElement.dataset.theme = 'light';
+it("tells the renderer the page theme so the shadows match it", async () => {
+  document.documentElement.dataset.theme = "light";
   dispose = mountEngine(host);
-  const themes = () => worker.postMessage.mock.calls.map(([value]) => value).filter((value) => value.type === 'theme').map((value) => value.dark);
+  const themes = () =>
+    worker.postMessage.mock.calls
+      .map(([value]) => value)
+      .filter((value) => value.type === "theme")
+      .map((value) => value.dark);
   expect(themes()).toEqual([false]);
-  document.documentElement.dataset.theme = 'dark';
+  document.documentElement.dataset.theme = "dark";
   await Promise.resolve();
   expect(themes()).toEqual([false, true]);
   dispose();
-  document.documentElement.dataset.theme = 'light';
+  document.documentElement.dataset.theme = "light";
   await Promise.resolve();
   expect(themes()).toEqual([false, true]);
 });

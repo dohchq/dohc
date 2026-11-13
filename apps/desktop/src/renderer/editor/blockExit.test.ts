@@ -23,8 +23,7 @@ const slashStateRef: { current: SlashCommandState } = {
   current: CLOSED_SLASH_COMMAND_STATE,
 };
 const applySlashState: Dispatch<SetStateAction<SlashCommandState>> = (next) => {
-  slashStateRef.current =
-    typeof next === "function" ? next(slashStateRef.current) : next;
+  slashStateRef.current = typeof next === "function" ? next(slashStateRef.current) : next;
 };
 
 // Mirrors MarkdownEditor's dohcDecorations plugin order: the slash-command
@@ -354,10 +353,7 @@ describe("blockExit folded callout (toggle) guards", () => {
   });
 
   it("Ctrl/Cmd-Backspace after a folded callout selects it without changing the doc", () => {
-    const modifiers: KeyboardEventInit[] = [
-      { ctrlKey: true },
-      { metaKey: true },
-    ];
+    const modifiers: KeyboardEventInit[] = [{ ctrlKey: true }, { metaKey: true }];
 
     for (const modifier of modifiers) {
       const editor = makeEditor("> [!note]- Title\n> hidden\n\nafter");
@@ -444,5 +440,4 @@ describe("blockExit locked defaults", () => {
 
     expect(topLevelTypes(editor)).toEqual(["mathBlock", "paragraph"]);
   });
-
 });

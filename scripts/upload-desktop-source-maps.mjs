@@ -35,9 +35,12 @@ export function sourceMapUpload(env, platform = process.platform) {
     if (platform === "win32" && name.toUpperCase() === "PSMODULEPATH") delete childEnv[name];
   }
   // A dry run uploads nothing, but installs and runs the CLI as a release does.
-  if (env.DOHC_SOURCE_MAPS_DRY_RUN === "true") return { args: [...CLI, "--version"], env: childEnv, dryRun: true };
+  if (env.DOHC_SOURCE_MAPS_DRY_RUN === "true")
+    return { args: [...CLI, "--version"], env: childEnv, dryRun: true };
   if (!env.DOHC_POSTHOG_KEY?.trim()) {
-    return { skip: "DOHC_POSTHOG_KEY is not set, so this build sends no error reports and needs no source maps." };
+    return {
+      skip: "DOHC_POSTHOG_KEY is not set, so this build sends no error reports and needs no source maps.",
+    };
   }
   const missing = REQUIRED_POSTHOG_SETTINGS.filter((name) => !env[name]?.trim());
   if (missing.length > 0) {
@@ -48,14 +51,20 @@ export function sourceMapUpload(env, platform = process.platform) {
   const version = env.DESKTOP_VERSION?.trim();
   if (!version) throw new Error("DESKTOP_VERSION is required to name the release.");
   const dist = env.DOHC_DESKTOP_DIST?.trim() ?? "";
-  if (!DIST_PATTERN.test(dist)) throw new Error(`DOHC_DESKTOP_DIST '${dist}' is not a dist the app accepts.`);
+  if (!DIST_PATTERN.test(dist))
+    throw new Error(`DOHC_DESKTOP_DIST '${dist}' is not a dist the app accepts.`);
   return {
     args: [
-      ...CLI, "sourcemap", "process",
+      ...CLI,
+      "sourcemap",
+      "process",
       ...REPORTED_CODE.flatMap((directory) => ["--directory", directory]),
-      "--release-name", "dohc-desktop",
-      "--release-version", version,
-      "--build", dist,
+      "--release-name",
+      "dohc-desktop",
+      "--release-version",
+      version,
+      "--build",
+      dist,
     ],
     env: childEnv,
   };
@@ -68,8 +77,12 @@ export function scriptsWithoutChunkIds(directories) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
-      else if (/\.[cm]?js$/.test(entry.name) && existsSync(`${path}.map`)
-        && !/\n\/\/# chunkId=[0-9a-f-]{36}\s*$/.test(readFileSync(path, "utf8"))) missing.push(path);
+      else if (
+        /\.[cm]?js$/.test(entry.name) &&
+        existsSync(`${path}.map`) &&
+        !/\n\/\/# chunkId=[0-9a-f-]{36}\s*$/.test(readFileSync(path, "utf8"))
+      )
+        missing.push(path);
     }
   };
   for (const directory of directories) visit(directory);
@@ -83,14 +96,22 @@ export function uploadSourceMaps(env, spawn = spawnSync, directories = REPORTED_
     console.log(upload.skip);
     return;
   }
-  const result = spawn("pnpm", upload.args, { env: upload.env, stdio: "inherit", shell: process.platform === "win32" });
+  const result = spawn("pnpm", upload.args, {
+    env: upload.env,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
   if (result.status !== 0) {
-    throw new Error(`The source map upload failed${result.error ? `: ${result.error.message}` : ` with exit code ${result.status}`}.`);
+    throw new Error(
+      `The source map upload failed${result.error ? `: ${result.error.message}` : ` with exit code ${result.status}`}.`,
+    );
   }
   if (upload.dryRun) return;
   const missing = scriptsWithoutChunkIds(directories);
   if (missing.length > 0) {
-    throw new Error(`These scripts carry no chunk ID, so PostHog cannot read their frames:\n${missing.join("\n")}`);
+    throw new Error(
+      `These scripts carry no chunk ID, so PostHog cannot read their frames:\n${missing.join("\n")}`,
+    );
   }
 }
 

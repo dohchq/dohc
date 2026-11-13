@@ -7,10 +7,7 @@ import {
   resolveReceivedShareAuthority,
   type ShareAction,
 } from "./shareAuthorization";
-import type {
-  SyncRelayShareGrantRow,
-  SyncRelayShareRow,
-} from "./storage";
+import type { SyncRelayShareGrantRow, SyncRelayShareRow } from "./storage";
 
 type AuthorizationStorage = Parameters<typeof authorizeShareAction>[0]["storage"];
 
@@ -36,12 +33,14 @@ const grant: SyncRelayShareGrantRow = {
   parentGrantId: null,
 };
 
-function storageFixture(options: {
-  share?: SyncRelayShareRow | null;
-  grant?: SyncRelayShareGrantRow | null;
-  ownerStanding?: boolean;
-  channelKind?: "channel" | "dm" | "agent" | null | undefined;
-} = {}): AuthorizationStorage {
+function storageFixture(
+  options: {
+    share?: SyncRelayShareRow | null;
+    grant?: SyncRelayShareGrantRow | null;
+    ownerStanding?: boolean;
+    channelKind?: "channel" | "dm" | "agent" | null | undefined;
+  } = {},
+): AuthorizationStorage {
   const storedShare = options.share === undefined ? share : options.share;
   const storedGrant = options.grant === undefined ? grant : options.grant;
   return {
@@ -53,11 +52,7 @@ function storageFixture(options: {
   };
 }
 
-function authorize(
-  action: ShareAction,
-  storage = storageFixture(),
-  actorUserId = "recipient-1",
-) {
+function authorize(action: ShareAction, storage = storageFixture(), actorUserId = "recipient-1") {
   return authorizeShareAction({
     storage,
     actorUserId,
@@ -95,15 +90,21 @@ describe("share authorization", () => {
     const edit = { ...grant, grantId: "edit-grant", generation: 19 };
     const storage = receivedAuthorityStorage({
       grants: [view, edit],
-      onScan: () => { throw new Error("live Edit must not scan other grants"); },
+      onScan: () => {
+        throw new Error("live Edit must not scan other grants");
+      },
     });
-    const resolve = (grantId: string) => authorizeNamedLiveEditShareGrant({
-      storage, actorUserId: "recipient-1", grantId,
-    });
+    const resolve = (grantId: string) =>
+      authorizeNamedLiveEditShareGrant({
+        storage,
+        actorUserId: "recipient-1",
+        grantId,
+      });
     expect(resolve(view.grantId)).toEqual({ ok: false, reason: "stale-selector" });
     expect(resolve("missing-grant")).toEqual({ ok: false, reason: "not-authorized" });
     expect(resolve(edit.grantId)).toMatchObject({
-      ok: true, grant: { grantId: edit.grantId, generation: 19 },
+      ok: true,
+      grant: { grantId: edit.grantId, generation: 19 },
       effectiveSelector: { access: "edit", versionId: null, paths: ["docs"] },
     });
     edit.generation = 20;
@@ -111,92 +112,145 @@ describe("share authorization", () => {
   });
 
   it("distinguishes lost named standing from an ineligible live Edit selector", () => {
-    expect(authorizeNamedLiveEditShareGrant({
-      storage: storageFixture(), actorUserId: "stranger", grantId: grant.grantId,
-    })).toEqual({ ok: false, reason: "not-authorized" });
-    for (const revoked of [{ status: "revoked" }, { revokedAtMs: 2000 }] satisfies Partial<SyncRelayShareGrantRow>[]) {
-      expect(authorizeNamedLiveEditShareGrant({
-        storage: storageFixture({ grant: { ...grant, ...revoked } }),
-        actorUserId: "recipient-1", grantId: grant.grantId,
-      }), JSON.stringify(revoked)).toEqual({ ok: false, reason: "not-authorized" });
+    expect(
+      authorizeNamedLiveEditShareGrant({
+        storage: storageFixture(),
+        actorUserId: "stranger",
+        grantId: grant.grantId,
+      }),
+    ).toEqual({ ok: false, reason: "not-authorized" });
+    for (const revoked of [
+      { status: "revoked" },
+      { revokedAtMs: 2000 },
+    ] satisfies Partial<SyncRelayShareGrantRow>[]) {
+      expect(
+        authorizeNamedLiveEditShareGrant({
+          storage: storageFixture({ grant: { ...grant, ...revoked } }),
+          actorUserId: "recipient-1",
+          grantId: grant.grantId,
+        }),
+        JSON.stringify(revoked),
+      ).toEqual({ ok: false, reason: "not-authorized" });
     }
     for (const selectorJson of [
-      "{", JSON.stringify({ paths: ["docs"], versionId: "pinned-version" }),
+      "{",
+      JSON.stringify({ paths: ["docs"], versionId: "pinned-version" }),
       JSON.stringify({ paths: [], versionId: null }),
       JSON.stringify({ kind: "chat", channelWireId: "channel-1" }),
     ]) {
-      expect(authorizeNamedLiveEditShareGrant({
-        storage: storageFixture({ share: { ...share, selectorJson } }),
-        actorUserId: "recipient-1", grantId: grant.grantId,
-      }), selectorJson).toEqual({ ok: false, reason: "stale-selector" });
+      expect(
+        authorizeNamedLiveEditShareGrant({
+          storage: storageFixture({ share: { ...share, selectorJson } }),
+          actorUserId: "recipient-1",
+          grantId: grant.grantId,
+        }),
+        selectorJson,
+      ).toEqual({ ok: false, reason: "stale-selector" });
     }
     for (const access of ["view", "comment"]) {
-      expect(authorizeNamedLiveEditShareGrant({
-        storage: storageFixture({ grant: { ...grant, access } }),
-        actorUserId: "recipient-1", grantId: grant.grantId,
-      }), access).toEqual({ ok: false, reason: "stale-selector" });
+      expect(
+        authorizeNamedLiveEditShareGrant({
+          storage: storageFixture({ grant: { ...grant, access } }),
+          actorUserId: "recipient-1",
+          grantId: grant.grantId,
+        }),
+        access,
+      ).toEqual({ ok: false, reason: "stale-selector" });
     }
-    expect(authorizeNamedLiveEditShareGrant({
-      storage: storageFixture({ ownerStanding: false, share: { ...share, selectorJson: "{" } }),
-      actorUserId: "recipient-1", grantId: grant.grantId,
-    })).toEqual({ ok: false, reason: "not-authorized" });
+    expect(
+      authorizeNamedLiveEditShareGrant({
+        storage: storageFixture({ ownerStanding: false, share: { ...share, selectorJson: "{" } }),
+        actorUserId: "recipient-1",
+        grantId: grant.grantId,
+      }),
+    ).toEqual({ ok: false, reason: "not-authorized" });
   });
 
   it("keeps dependent live Edit contingent on its exact active parent", () => {
     const parent: SyncRelayShareGrantRow = {
-      ...grant, grantId: "parent-link", principalKind: "link", principalUserId: null,
+      ...grant,
+      grantId: "parent-link",
+      principalKind: "link",
+      principalUserId: null,
     };
     const dependent = { ...grant, parentGrantId: parent.grantId };
     for (const currentParent of [parent, null]) {
       const result = authorizeNamedLiveEditShareGrant({
         storage: receivedAuthorityStorage({
-          grants: [dependent], otherGrants: currentParent ? [currentParent] : [],
-          onScan: () => { throw new Error("live Edit must not scan other grants"); },
+          grants: [dependent],
+          otherGrants: currentParent ? [currentParent] : [],
+          onScan: () => {
+            throw new Error("live Edit must not scan other grants");
+          },
         }),
-        actorUserId: "recipient-1", grantId: dependent.grantId,
+        actorUserId: "recipient-1",
+        grantId: dependent.grantId,
       });
       expect(result.ok, JSON.stringify(currentParent)).toBe(currentParent === parent);
       if (currentParent !== parent) expect(result).toEqual({ ok: false, reason: "not-authorized" });
     }
     expect(authorize("live-edit", storageFixture())).toMatchObject({ ok: true });
-    expect(authorize("live-edit", storageFixture({ grant: { ...grant, access: "comment" } })))
-      .toEqual({ ok: false, reason: "denied" });
-    expect(authorizeLinkShareAction({
-      storage: storageFixture({ grant: parent }), grantId: parent.grantId, action: "live-edit",
-    })).toMatchObject({ ok: true, effectiveSelector: { access: "edit" } });
+    expect(
+      authorize("live-edit", storageFixture({ grant: { ...grant, access: "comment" } })),
+    ).toEqual({ ok: false, reason: "denied" });
+    expect(
+      authorizeLinkShareAction({
+        storage: storageFixture({ grant: parent }),
+        grantId: parent.grantId,
+        action: "live-edit",
+      }),
+    ).toMatchObject({ ok: true, effectiveSelector: { access: "edit" } });
   });
 
   it("splits a Group link into its folder for file callers and its channel for chat", () => {
     const groupShare: SyncRelayShareRow = {
       ...share,
-      selectorJson: JSON.stringify({ kind: "group", channelWireId: "wire-1", paths: ["team"], versionId: null }),
+      selectorJson: JSON.stringify({
+        kind: "group",
+        channelWireId: "wire-1",
+        paths: ["team"],
+        versionId: null,
+      }),
     };
     const chatShare: SyncRelayShareRow = {
       ...share,
       selectorJson: JSON.stringify({ kind: "chat", channelWireId: "wire-1" }),
     };
     const link = (access: string): SyncRelayShareGrantRow => ({
-      ...grant, grantId: "link-grant", principalKind: "link", principalUserId: null, access,
+      ...grant,
+      grantId: "link-grant",
+      principalKind: "link",
+      principalUserId: null,
+      access,
     });
-    const files = (storage: AuthorizationStorage, action: "read" | "live-edit" | "direct-write" = "read") =>
-      authorizeLinkShareAction({ storage, grantId: "link-grant", action });
+    const files = (
+      storage: AuthorizationStorage,
+      action: "read" | "live-edit" | "direct-write" = "read",
+    ) => authorizeLinkShareAction({ storage, grantId: "link-grant", action });
     const chat = (storage: AuthorizationStorage, action: "read" | "append" = "read") =>
       authorizeLinkChatAction({ storage, grantId: "link-grant", action });
 
-    for (const [access, fileAccess] of [["read-only", "view"], ["read-write", "edit"]] as const) {
+    for (const [access, fileAccess] of [
+      ["read-only", "view"],
+      ["read-write", "edit"],
+    ] as const) {
       const storage = storageFixture({ share: groupShare, grant: link(access) });
       expect(files(storage), access).toMatchObject({
-        ok: true, effectiveSelector: { paths: ["team"], versionId: null, access: fileAccess },
+        ok: true,
+        effectiveSelector: { paths: ["team"], versionId: null, access: fileAccess },
       });
       expect(files(storage, "live-edit"), access).toEqual({ ok: false, reason: "gauntlet" });
       expect(chat(storage), access).toMatchObject({
-        ok: true, effectiveSelector: { kind: "group", channelWireId: "wire-1", access },
+        ok: true,
+        effectiveSelector: { kind: "group", channelWireId: "wire-1", access },
       });
     }
-    expect(chat(storageFixture({ share: groupShare, grant: link("read-only") }), "append"))
-      .toEqual({ ok: false, reason: "denied" });
-    expect(chat(storageFixture({ share: groupShare, grant: link("read-write") }), "append"))
-      .toMatchObject({ ok: true });
+    expect(chat(storageFixture({ share: groupShare, grant: link("read-only") }), "append")).toEqual(
+      { ok: false, reason: "denied" },
+    );
+    expect(
+      chat(storageFixture({ share: groupShare, grant: link("read-write") }), "append"),
+    ).toMatchObject({ ok: true });
     for (const channelKind of ["dm", "agent"] as const) {
       const storage = storageFixture({ share: groupShare, grant: link("read-write"), channelKind });
       expect(files(storage), String(channelKind)).toEqual({ ok: false, reason: "gauntlet" });
@@ -205,7 +259,10 @@ describe("share authorization", () => {
     const chatOnly = storageFixture({ share: chatShare, grant: link("read-write") });
     expect(files(chatOnly)).toEqual({ ok: false, reason: "gauntlet" });
     expect(chat(chatOnly)).toEqual({ ok: false, reason: "gauntlet" });
-    expect(chat(storageFixture({ grant: link("view") }))).toEqual({ ok: false, reason: "gauntlet" });
+    expect(chat(storageFixture({ grant: link("view") }))).toEqual({
+      ok: false,
+      reason: "gauntlet",
+    });
   });
 
   it("derives received-share read selection and generic appendability from one grant pass", () => {
@@ -353,9 +410,7 @@ describe("share authorization", () => {
       });
 
       expect(scans, testCase.name).toBe(1);
-      expect(result.genericChatWritable, testCase.name).toBe(
-        testCase.genericChatWritable,
-      );
+      expect(result.genericChatWritable, testCase.name).toBe(testCase.genericChatWritable);
       if (testCase.selectedGrantId === null) {
         expect(result, testCase.name).toMatchObject({
           ok: false,
@@ -363,9 +418,7 @@ describe("share authorization", () => {
           genericChatWritable: false,
         });
         if (!result.ok) {
-          expect(result.fallback?.grant.grantId, testCase.name).toBe(
-            testCase.fallbackGrantId,
-          );
+          expect(result.fallback?.grant.grantId, testCase.name).toBe(testCase.fallbackGrantId);
         }
       } else {
         expect(result.ok, testCase.name).toBe(true);
@@ -397,10 +450,7 @@ describe("share authorization", () => {
         testCase.action,
         storageFixture({ grant: { ...grant, access: testCase.access } }),
       );
-      expect(
-        result.ok,
-        `${testCase.access} ${testCase.action}`,
-      ).toBe(testCase.allowed);
+      expect(result.ok, `${testCase.access} ${testCase.action}`).toBe(testCase.allowed);
       if (!testCase.allowed) expect(result).toEqual({ ok: false, reason: "denied" });
     }
   });
@@ -495,23 +545,15 @@ describe("share authorization", () => {
         channelWireId: "wire-agent",
       }),
     };
+    expect(authorize("read", storageFixture({ share: chatShare, channelKind: "agent" }))).toEqual({
+      ok: false,
+      reason: "gauntlet",
+    });
     expect(
-      authorize(
-        "read",
-        storageFixture({ share: chatShare, channelKind: "agent" }),
-      ),
+      authorize("read", storageFixture({ share: chatShare, grant: { ...grant, access: "edit" } })),
     ).toEqual({ ok: false, reason: "gauntlet" });
     expect(
-      authorize(
-        "read",
-        storageFixture({ share: chatShare, grant: { ...grant, access: "edit" } }),
-      ),
-    ).toEqual({ ok: false, reason: "gauntlet" });
-    expect(
-      authorize(
-        "read",
-        storageFixture({ grant: { ...grant, access: "read-write" } }),
-      ),
+      authorize("read", storageFixture({ grant: { ...grant, access: "read-write" } })),
     ).toEqual({ ok: false, reason: "gauntlet" });
   });
 });

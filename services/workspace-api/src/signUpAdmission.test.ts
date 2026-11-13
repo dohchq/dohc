@@ -35,7 +35,9 @@ describe("closed sign-up", () => {
   it("admits an address with a pending invite, asking the relay with the key and the normalized address", async () => {
     const { asked, fetch } = relay(["guest@example.com"]);
     expect(await admission(fetch)(" Guest@Example.com ")).toBe("admitted");
-    expect(asked).toEqual([{ url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" }]);
+    expect(asked).toEqual([
+      { url: `${RELAY}/internal/sign-up-invite`, key: KEY, email: "guest@example.com" },
+    ]);
   });
 
   it("refuses an address that is neither listed nor invited", async () => {
@@ -55,7 +57,9 @@ describe("closed sign-up", () => {
       },
     ];
     for (const fetch of failing) {
-      expect(await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com")).toBe("unavailable");
+      expect(
+        await admission(fetch as unknown as typeof globalThis.fetch)("stranger@example.com"),
+      ).toBe("unavailable");
     }
   });
 });

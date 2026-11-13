@@ -4,7 +4,14 @@ import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
-import { asObject, decodeBase64, encodeBase64, optionalString, requiredString, sha256 } from "./json";
+import {
+  asObject,
+  decodeBase64,
+  encodeBase64,
+  optionalString,
+  requiredString,
+  sha256,
+} from "./json";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
@@ -136,18 +143,21 @@ function seedClientId(
   return (
     createHash("sha256")
       .update(
-        JSON.stringify([workspace, versionId, objectId, contentKind, file.headMomentId, sha256(file.content)]),
+        JSON.stringify([
+          workspace,
+          versionId,
+          objectId,
+          contentKind,
+          file.headMomentId,
+          sha256(file.content),
+        ]),
       )
       .digest()
       .readUInt32BE(0) || 1
   );
 }
 
-function lineageKey(
-  workspace: string,
-  versionId: string,
-  objectId: string,
-): string {
+function lineageKey(workspace: string, versionId: string, objectId: string): string {
   return `${workspace}\u0000${versionId}\u0000${objectId}`;
 }
 
@@ -320,7 +330,8 @@ export class YdocLoopbackEngine implements EngineTransport {
   readonly recordedUpdates: Uint8Array[] = [];
   // The author recorded beside each update. A seed is nobody's, as the
   // daemon records it (`ydoc_record_update`).
-  readonly recordedAuthors: Array<{ actorOriginId: string | null; attribution: JsonValue | null }> = [];
+  readonly recordedAuthors: Array<{ actorOriginId: string | null; attribution: JsonValue | null }> =
+    [];
   readonly helloAck = { capabilities: ["blobs"] } as const;
 
   private readonly files = new Map<string, LoopbackFile>();
@@ -337,19 +348,14 @@ export class YdocLoopbackEngine implements EngineTransport {
   // Seeds an open sent as blobs, by digest, for `versionedText.readBlob`.
   private readonly seedBlobs = new Map<string, string>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
-  private readonly blobHandlers = new Set<
-    (blob: CompletedDaemonBlob) => void
-  >();
+  private readonly blobHandlers = new Set<(blob: CompletedDaemonBlob) => void>();
   private nextSessionId = 1;
   private nextMomentId = 1;
   private nextHeadMomentId = 1;
   private nextRecaptureOrder = 2;
   // The daemon's request ledger for journal writes: a key answers its first
   // result again, and refuses content it was not first used with.
-  private readonly recordRequests = new Map<
-    string,
-    { payload: string; result: JsonValue }
-  >();
+  private readonly recordRequests = new Map<string, { payload: string; result: JsonValue }>();
 
   constructor(private readonly options: YdocLoopbackEngineOptions = {}) {}
 
@@ -407,11 +413,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     objectId: string,
   ): boolean {
     for (const [otherKey, file] of this.files) {
-      if (
-        file.workspace === workspace &&
-        otherKey !== excludingKey &&
-        file.objectId === objectId
-      ) {
+      if (file.workspace === workspace && otherKey !== excludingKey && file.objectId === objectId) {
         return true;
       }
     }
@@ -559,7 +561,11 @@ export class YdocLoopbackEngine implements EngineTransport {
     if (text === undefined) throw new Error(`Unknown loopback seed blob: ${digest}`);
     const bytes = new TextEncoder().encode(text);
     return {
-      result: { bytesBase64: null, byteLength: bytes.byteLength, inbandLimitBytes: INBAND_CONTENT_CAP_BYTES },
+      result: {
+        bytesBase64: null,
+        byteLength: bytes.byteLength,
+        inbandLimitBytes: INBAND_CONTENT_CAP_BYTES,
+      },
       blob: bytes,
     };
   }
@@ -619,9 +625,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     const contentKind = lineage
       ? lineage.contentKind
       : (requestedKind ?? file?.contentKind ?? "richdoc");
-    const doc = lineage
-      ? resurrectedDoc(lineage.doc, contentKind)
-      : declaredDoc(contentKind);
+    const doc = lineage ? resurrectedDoc(lineage.doc, contentKind) : declaredDoc(contentKind);
     const lineageAbsentAtOpen = lineage === undefined;
     // A captured file with no durable lineage yet ships its content as
     // `seedContent`, not embedded in the initial state blob — the CLIENT
@@ -635,8 +639,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     // this loopback did) leaves an ordinary settle over a freshly-opened
     // captured file looking untouched forever, and the NoMarker guard
     // refuses it.
-    const seed =
-      !lineage && file?.head === "present" ? file.content : undefined;
+    const seed = !lineage && file?.head === "present" ? file.content : undefined;
     // Like the engine, a seed past the in-band cap goes as a blob when the
     // open accepts one that large, and refuses the open otherwise.
     const seedBytes = seed === undefined ? 0 : Buffer.byteLength(seed, "utf8");
@@ -649,7 +652,8 @@ export class YdocLoopbackEngine implements EngineTransport {
     }
     const seedBlobSha256 =
       seed !== undefined && seedBytes > INBAND_CONTENT_CAP_BYTES ? sha256(seed) : undefined;
-    if (seedBlobSha256 !== undefined && seed !== undefined) this.seedBlobs.set(seedBlobSha256, seed);
+    if (seedBlobSha256 !== undefined && seed !== undefined)
+      this.seedBlobs.set(seedBlobSha256, seed);
     const seedContent = seedBlobSha256 === undefined ? seed : undefined;
     this.sessions.set(sessionId, {
       sessionId,
@@ -672,9 +676,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         path,
         contentKind,
         lineage: lineage ? "existing" : "absent",
-        unsettled:
-          lineage !== undefined &&
-          lineage.settledUpdates !== lineage.journaledUpdates,
+        unsettled: lineage !== undefined && lineage.settledUpdates !== lineage.journaledUpdates,
         lineageClaimId: null,
         lineageOriginatedHere: false,
         head: file ? file.head : "absent",
@@ -691,19 +693,14 @@ export class YdocLoopbackEngine implements EngineTransport {
   }
 
   private recordUpdate(request: Request): JsonValue {
-    if (
-      typeof request.idempotencyKey !== "string" ||
-      request.idempotencyKey.length === 0
-    ) {
+    if (typeof request.idempotencyKey !== "string" || request.idempotencyKey.length === 0) {
       throw new Error("ydoc.recordUpdate requires an idempotency key.");
     }
     const params = asObject(request.params, "ydoc.recordUpdate params");
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.recordUpdate params"),
     );
-    const update = decodeBase64(
-      requiredString(params, "updateBase64", "ydoc.recordUpdate params"),
-    );
+    const update = decodeBase64(requiredString(params, "updateBase64", "ydoc.recordUpdate params"));
     const expectedClaim = params.expectedLineageClaimId;
     if (expectedClaim !== null && typeof expectedClaim !== "string") {
       throw new Error("ydoc.recordUpdate params.expectedLineageClaimId is required.");
@@ -713,8 +710,13 @@ export class YdocLoopbackEngine implements EngineTransport {
     const seed = optionalBoolean(params, "seed") ?? false;
     // A seed can only be the first update of a lineage-absent session —
     // mirrors the daemon refusal in crates/dohc-workspace-engine/src/lib.rs.
-    const payload = JSON.stringify([this.lineageKeyFor(session), sha256(update),
-      params.actorOriginId ?? null, params.attribution ?? null, seed]);
+    const payload = JSON.stringify([
+      this.lineageKeyFor(session),
+      sha256(update),
+      params.actorOriginId ?? null,
+      params.attribution ?? null,
+      seed,
+    ]);
     const recorded = this.recordRequests.get(request.idempotencyKey);
     if (recorded !== undefined) {
       if (recorded.payload !== payload) throw idempotencyKeyReuseRefusal();
@@ -734,10 +736,14 @@ export class YdocLoopbackEngine implements EngineTransport {
       entry.settledUpdates = entry.journaledUpdates;
     }
     this.recordedUpdates.push(update);
-    this.recordedAuthors.push(seed ? { actorOriginId: null, attribution: null } : {
-      actorOriginId: typeof params.actorOriginId === "string" ? params.actorOriginId : null,
-      attribution: params.attribution ?? null,
-    });
+    this.recordedAuthors.push(
+      seed
+        ? { actorOriginId: null, attribution: null }
+        : {
+            actorOriginId: typeof params.actorOriginId === "string" ? params.actorOriginId : null,
+            attribution: params.attribution ?? null,
+          },
+    );
     session.updateSeq += 1;
     const result = { seq: session.updateSeq, lineageClaimId: null, lineageOriginatedHere: false };
     this.recordRequests.set(request.idempotencyKey, { payload, result });
@@ -795,9 +801,7 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   private settle(value: JsonValue): JsonValue {
     const params = asObject(value, "ydoc.settle params");
-    const session = this.requireSession(
-      requiredString(params, "sessionId", "ydoc.settle params"),
-    );
+    const session = this.requireSession(requiredString(params, "sessionId", "ydoc.settle params"));
     optionalString(params, "summary");
     const { content, sha256: digest } = this.settleSession(session);
     return {
@@ -837,8 +841,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     // lineage and has recorded no update yet — mirrors
     // `!(session.lineage_absent && session.first_update_pending)`
     // (crates/dohc-workspace-engine/src/lib.rs).
-    const shouldSettle =
-      settleFlag ?? !(session.lineageAbsentAtOpen && session.firstUpdatePending);
+    const shouldSettle = settleFlag ?? !(session.lineageAbsentAtOpen && session.firstUpdatePending);
     // Threaded through instead of recomputed below: when this settled, its
     // digest IS what `settleSession` just wrote to `lastSettledSha`, so the
     // coverage check a settling close can never refuse is stated here, not
@@ -886,11 +889,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
         sha256(capturedFile.content) === entry.seedSourceSha;
-      if (
-        entry.lastSettledSha !== currentSha &&
-        !coveredByCapture &&
-        !coveredBySeedOnly
-      ) {
+      if (entry.lastSettledSha !== currentSha && !coveredByCapture && !coveredBySeedOnly) {
         throw unsettledCloseRefusal();
       }
       this.lineages.delete(key);
@@ -930,9 +929,7 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   private resync(value: JsonValue): { result: JsonValue; blob: Uint8Array } {
     const params = asObject(value, "ydoc.resync params");
-    const session = this.requireSession(
-      requiredString(params, "sessionId", "ydoc.resync params"),
-    );
+    const session = this.requireSession(requiredString(params, "sessionId", "ydoc.resync params"));
     const head = this.capturedFileFor(session.workspace, session.versionId, session.objectId);
     // The live adapter preserves its event position across a resync, so the
     // loopback sequence stays monotonic — resetting it would make the next

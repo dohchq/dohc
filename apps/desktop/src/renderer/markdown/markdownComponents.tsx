@@ -13,7 +13,9 @@ function columnCount(table: ExtraProps["node"]): number {
   const row = table?.children
     .flatMap((section) => (section.type === "element" ? section.children : []))
     .find((child) => child.type === "element" && child.tagName === "tr");
-  return row?.type === "element" ? row.children.filter((cell) => cell.type === "element").length : 0;
+  return row?.type === "element"
+    ? row.children.filter((cell) => cell.type === "element").length
+    : 0;
 }
 
 function hastText(node: ElementContent): string {
@@ -33,17 +35,24 @@ function codeLanguage(code: ElementContent | undefined): string {
 function CodeBlock({ node, ...pre }: ComponentProps<"pre"> & ExtraProps) {
   const code = node?.children.find((child) => child.type === "element");
   const language = codeLanguage(code);
-  const label = CODE_LANGUAGE_OPTIONS.find((option) => option.value === language)?.label ?? language;
+  const label =
+    CODE_LANGUAGE_OPTIONS.find((option) => option.value === language)?.label ?? language;
   return (
     <>
       <div className="dohc-code-block-toolbar">
         <div className="dohc-code-block-toolbar-left">
           {/* The picker's box: a 1px transparent border, then the 4px
               Chromium puts before a select's text. */}
-          {language ? <span className="border border-transparent pl-1 text-muted">{label}</span> : null}
+          {language ? (
+            <span className="border border-transparent pl-1 text-muted">{label}</span>
+          ) : null}
         </div>
         {/* remark ends a fence's text with a newline the editor's block does not hold. */}
-        <CopyButton iconOnly label="Copy code" getText={() => (code ? hastText(code).replace(/\n$/u, "") : "")} />
+        <CopyButton
+          iconOnly
+          label="Copy code"
+          getText={() => (code ? hastText(code).replace(/\n$/u, "") : "")}
+        />
       </div>
       <pre {...pre} />
     </>

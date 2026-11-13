@@ -26,7 +26,9 @@ function relayChild() {
   });
 }
 
-const restoreList = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }));
+const restoreList = vi.fn(
+  async (_url: string, _init?: RequestInit) => new Response("{}", { status: 200 }),
+);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -72,14 +74,19 @@ it("waits for close before reporting a startup failure", async () => {
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   const starting = spawnSyncRelay(restart());
   let settled = false;
-  const result = starting.catch((error: unknown) => { settled = true; return error; });
+  const result = starting.catch((error: unknown) => {
+    settled = true;
+    return error;
+  });
   child.exitCode = 1;
   child.emit("exit", 1, null);
   await Promise.resolve();
   await Promise.resolve();
   expect(settled).toBe(false);
   child.emit("close", 1, null);
-  expect(await result).toMatchObject({ message: expect.stringContaining("exited before listening") });
+  expect(await result).toMatchObject({
+    message: expect.stringContaining("exited before listening"),
+  });
   expect(child.kill).not.toHaveBeenCalled();
 });
 
@@ -91,7 +98,9 @@ it("waits for close after escalating a stalled shutdown", async () => {
   child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
   const relay = await starting;
   let stopped = false;
-  const stopping = relay.stop().then(() => { stopped = true; });
+  const stopping = relay.stop().then(() => {
+    stopped = true;
+  });
   await vi.runAllTimersAsync();
   expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   expect(stopped).toBe(false);
@@ -109,45 +118,73 @@ const deploymentOptions = {
   editLinks: { engineExecutable: "engine", publicOrigin: "https://127.0.0.1:1234" },
 };
 
-it.each([false, true])("initializes with the source or sibling compiled entry (compiled=%s)", async compiled => {
-  const initializer = relayChild(), child = relayChild();
-  const compiledMain = join("build", "main.js");
-  vi.mocked(spawn).mockReturnValueOnce(initializer as unknown as ReturnType<typeof spawn>)
-    .mockReturnValueOnce(child as unknown as ReturnType<typeof spawn>);
-  const starting = spawnSyncRelay({ ...deploymentOptions, ...(compiled ? { compiledMain } : {}) });
-  expect(spawn).toHaveBeenNthCalledWith(1, process.execPath, [
-    ...(compiled ? [join("build", "relay-deployment.js")] : ["--import", "tsx/esm", "src/relayDeploymentCommand.ts"]),
-    "initialize", "--config", join("scratch", "relay-deployment", "deployment.json"),
-    "--database", deploymentOptions.dbPath, "--continuity-directory", join("scratch", "relay-deployment", "continuity"),
-  ], expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
-  initializer.exitCode = 0;
-  initializer.emit("exit", 0, null);
-  await Promise.resolve();
-  expect(spawn).toHaveBeenCalledTimes(1);
-  initializer.emit("close", 0, null);
-  await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
-  expect(mkdirSync).toHaveBeenCalledWith(join("scratch", "relay-deployment", "live-host"));
-  expect(vi.mocked(spawn).mock.calls[1]?.[2]).toMatchObject({ env: { DOHC_ENGINE_READER_CONFIG: "reader-config" } });
-  child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
-  const relay = await starting;
-  const stopping = relay.stop();
-  child.exitCode = 0;
-  child.emit("close", 0, null);
-  await stopping;
-});
+it.each([false, true])(
+  "initializes with the source or sibling compiled entry (compiled=%s)",
+  async (compiled) => {
+    const initializer = relayChild(),
+      child = relayChild();
+    const compiledMain = join("build", "main.js");
+    vi.mocked(spawn)
+      .mockReturnValueOnce(initializer as unknown as ReturnType<typeof spawn>)
+      .mockReturnValueOnce(child as unknown as ReturnType<typeof spawn>);
+    const starting = spawnSyncRelay({
+      ...deploymentOptions,
+      ...(compiled ? { compiledMain } : {}),
+    });
+    expect(spawn).toHaveBeenNthCalledWith(
+      1,
+      process.execPath,
+      [
+        ...(compiled
+          ? [join("build", "relay-deployment.js")]
+          : ["--import", "tsx/esm", "src/relayDeploymentCommand.ts"]),
+        "initialize",
+        "--config",
+        join("scratch", "relay-deployment", "deployment.json"),
+        "--database",
+        deploymentOptions.dbPath,
+        "--continuity-directory",
+        join("scratch", "relay-deployment", "continuity"),
+      ],
+      expect.objectContaining({ stdio: ["ignore", "pipe", "pipe"], windowsHide: true }),
+    );
+    initializer.exitCode = 0;
+    initializer.emit("exit", 0, null);
+    await Promise.resolve();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    initializer.emit("close", 0, null);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+    expect(mkdirSync).toHaveBeenCalledWith(join("scratch", "relay-deployment", "live-host"));
+    expect(vi.mocked(spawn).mock.calls[1]?.[2]).toMatchObject({
+      env: { DOHC_ENGINE_READER_CONFIG: "reader-config" },
+    });
+    child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
+    const relay = await starting;
+    const stopping = relay.stop();
+    child.exitCode = 0;
+    child.emit("close", 0, null);
+    await stopping;
+  },
+);
 
 it("runs a relay without Edit links from a deployment, with no live host", async () => {
-  const initializer = relayChild(), child = relayChild();
-  vi.mocked(spawn).mockReturnValueOnce(initializer as unknown as ReturnType<typeof spawn>)
+  const initializer = relayChild(),
+    child = relayChild();
+  vi.mocked(spawn)
+    .mockReturnValueOnce(initializer as unknown as ReturnType<typeof spawn>)
     .mockReturnValueOnce(child as unknown as ReturnType<typeof spawn>);
   const starting = spawnSyncRelay({ dbPath: deploymentOptions.dbPath });
-  expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain(join("scratch", "relay-deployment", "deployment.json"));
+  expect(vi.mocked(spawn).mock.calls[0]?.[1]).toContain(
+    join("scratch", "relay-deployment", "deployment.json"),
+  );
   initializer.exitCode = 0;
   initializer.emit("close", 0, null);
   await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
   expect(mkdirSync).not.toHaveBeenCalled();
   const env = vi.mocked(spawn).mock.calls[1]?.[2]?.env;
-  expect(env).toMatchObject({ DOHC_RELAY_DEPLOYMENT_CONFIG: join("scratch", "relay-deployment", "deployment.json") });
+  expect(env).toMatchObject({
+    DOHC_RELAY_DEPLOYMENT_CONFIG: join("scratch", "relay-deployment", "deployment.json"),
+  });
   expect(env?.SYNC_RELAY_DB_PATH).toBeUndefined();
   expect(env?.DOHC_SELF_HOST_LIVE).toBeUndefined();
   child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
@@ -165,7 +202,8 @@ it("runs a relay without Edit links from a deployment, with no live host", async
 it("stops a relay that cannot list an owner's unfinished restores", async () => {
   const child = relayChild();
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
-  restoreList.mockResolvedValueOnce(new Response("{}", { status: 200 }))
+  restoreList
+    .mockResolvedValueOnce(new Response("{}", { status: 200 }))
     .mockResolvedValueOnce(new Response("internal_error", { status: 500 }));
   const result = spawnSyncRelay(restart()).catch((error: unknown) => error);
   child.stdout.write("SYNC_RELAY_LISTENING host=127.0.0.1 port=1234\n");
@@ -181,7 +219,10 @@ it("reports initializer diagnostics only after its failed child closes", async (
   const child = relayChild();
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   let settled = false;
-  const result = spawnSyncRelay(deploymentOptions).catch((error: unknown) => { settled = true; return error; });
+  const result = spawnSyncRelay(deploymentOptions).catch((error: unknown) => {
+    settled = true;
+    return error;
+  });
   child.stdout.write("initializer output");
   child.stderr.write("initializer failure");
   child.exitCode = 7;
@@ -202,7 +243,10 @@ it("stops and awaits an initializer that fails before exit", async () => {
   const child = relayChild();
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   let settled = false;
-  const result = spawnSyncRelay(deploymentOptions).catch((error: unknown) => { settled = true; return error; });
+  const result = spawnSyncRelay(deploymentOptions).catch((error: unknown) => {
+    settled = true;
+    return error;
+  });
   child.emit("error", new Error("spawn failed"));
   await Promise.resolve();
   expect(child.kill).toHaveBeenCalledWith("SIGKILL");
@@ -218,12 +262,17 @@ it("stops and awaits a stalled initializer at the existing relay startup bound",
   const child = relayChild();
   vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
   let settled = false;
-  const result = spawnSyncRelay(deploymentOptions).catch((error: unknown) => { settled = true; return error; });
+  const result = spawnSyncRelay(deploymentOptions).catch((error: unknown) => {
+    settled = true;
+    return error;
+  });
   await vi.runAllTimersAsync();
   expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   expect(settled).toBe(false);
   child.signalCode = "SIGKILL";
   child.emit("close", null, "SIGKILL");
-  expect(await result).toMatchObject({ cause: { message: "Deployment initializer did not finish." } });
+  expect(await result).toMatchObject({
+    cause: { message: "Deployment initializer did not finish." },
+  });
   expect(spawn).toHaveBeenCalledTimes(1);
 });

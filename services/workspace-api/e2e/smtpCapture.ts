@@ -9,7 +9,9 @@ export async function startSmtpCapture() {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
     socket.on("error", () => undefined);
-    let pending = "", data = false, message: string[] = [];
+    let pending = "",
+      data = false,
+      message: string[] = [];
     socket.setEncoding("utf8");
     socket.write("220 localhost account-test SMTP\r\n");
     socket.on("data", (chunk: string) => {
@@ -23,13 +25,19 @@ export async function startSmtpCapture() {
             if (!refuseNext) messages.push(message.join("\r\n"));
             data = false;
             message = [];
-            socket.write(refuseNext ? "550 test sink refused delivery\r\n" : "250 accepted by local test sink\r\n");
+            socket.write(
+              refuseNext
+                ? "550 test sink refused delivery\r\n"
+                : "250 accepted by local test sink\r\n",
+            );
             refuseNext = false;
           } else message.push(line.startsWith("..") ? line.slice(1) : line);
         } else if (/^(EHLO|HELO) /i.test(line)) socket.write("250-localhost\r\n250 8BITMIME\r\n");
         else if (/^(MAIL FROM:|RCPT TO:|RSET|NOOP)/i.test(line)) socket.write("250 OK\r\n");
-        else if (line === "DATA") { data = true; socket.write("354 End with a dot\r\n"); }
-        else if (line === "QUIT") socket.end("221 Bye\r\n");
+        else if (line === "DATA") {
+          data = true;
+          socket.write("354 End with a dot\r\n");
+        } else if (line === "QUIT") socket.end("221 Bye\r\n");
         else socket.write("502 Unsupported command\r\n");
       }
     });
@@ -43,10 +51,14 @@ export async function startSmtpCapture() {
   return {
     port: address.port,
     messages,
-    refuseNextMessage() { refuseNext = true; },
+    refuseNextMessage() {
+      refuseNext = true;
+    },
     async close() {
       for (const socket of sockets) socket.destroy();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     },
   };
 }
@@ -58,6 +70,10 @@ export function mailLinks(message: string): string[] {
   const body = message.slice(separator + 4);
   const decoded = /content-transfer-encoding:\s*base64/i.test(headers)
     ? Buffer.from(body.replace(/\s/g, ""), "base64").toString("utf8")
-    : body.replace(/=\r\n/g, "").replace(/=([0-9A-F]{2})/gi, (_, value: string) => String.fromCharCode(Number.parseInt(value, 16)));
-  return [...decoded.matchAll(/https?:\/\/[^\s<>"']+/g)].map(match => match[0]!);
+    : body
+        .replace(/=\r\n/g, "")
+        .replace(/=([0-9A-F]{2})/gi, (_, value: string) =>
+          String.fromCharCode(Number.parseInt(value, 16)),
+        );
+  return [...decoded.matchAll(/https?:\/\/[^\s<>"']+/g)].map((match) => match[0]!);
 }

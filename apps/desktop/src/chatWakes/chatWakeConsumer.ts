@@ -1,9 +1,19 @@
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import { handleForName, normalizeHandle } from "@dohc/workspace-contracts/chat-mentions";
-import { CHAT_WAKE_WAIT_MAX_MS, type ChatWakeCandidate, type ChatWakeView, type WaitingChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import {
+  CHAT_WAKE_WAIT_MAX_MS,
+  type ChatWakeCandidate,
+  type ChatWakeView,
+  type WaitingChatWake,
+} from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatMessage, ChatThread } from "@dohc/workspace-contracts/engine";
 import type { FileResolution } from "@dohc/workspace-engine-client/daemon";
-import { ChatWakeAnswerError, ChatWakeMissingError, type ChatWakeClient, type ChatWakePageAnswer } from "./chatWakeClient";
+import {
+  ChatWakeAnswerError,
+  ChatWakeMissingError,
+  type ChatWakeClient,
+  type ChatWakePageAnswer,
+} from "./chatWakeClient";
 import type { ChatWakeIntent, ChatWakeIntents } from "./chatWakeIntents";
 
 // Runs this computer's share of an account's chat wakes for one credential
@@ -41,7 +51,10 @@ export interface ChatWakeAgent {
 
 export type ChatWakeThreadVisibility = "visible" | "hidden" | "missing" | "unknown";
 
-export type ChatWakeMessage = Pick<ChatMessage, "id" | "workspaceId" | "threadId" | "author" | "authorUserId" | "origin">;
+export type ChatWakeMessage = Pick<
+  ChatMessage,
+  "id" | "workspaceId" | "threadId" | "author" | "authorUserId" | "origin"
+>;
 
 export interface ChatWakeDecision {
   messageId: string;
@@ -62,7 +75,11 @@ export interface ChatWakeWorkspace {
   /** Null when this computer has no agent with this ID. */
   agent(agentId: string): Promise<ChatWakeAgent | null>;
   /** True when it queued a request, false when the same one was already there. Both mean the trigger exists. */
-  recordTrigger(input: { triggerMessageId: string; threadId: string; agentId: string }): Promise<boolean>;
+  recordTrigger(input: {
+    triggerMessageId: string;
+    threadId: string;
+    agentId: string;
+  }): Promise<boolean>;
   /** Arranges the dispatch scan that starts a recorded trigger. */
   dispatch(): void;
   release(): Promise<void>;
@@ -115,12 +132,16 @@ export interface ChatWakeConsumer {
 }
 
 type Verdict = "ready" | "defer" | "reject";
-type WakeFacts = Pick<ChatWakeView, "wakeId" | "workspaceId" | "threadId" | "messageId" | "generation" | "prerequisiteMessageId">
-  & { candidate: ChatWakeCandidate };
+type WakeFacts = Pick<
+  ChatWakeView,
+  "wakeId" | "workspaceId" | "threadId" | "messageId" | "generation" | "prerequisiteMessageId"
+> & { candidate: ChatWakeCandidate };
 
 /** Whether the agent still has the name its candidate matched: the mentioned handle, or the shown name it answered. */
 export function chatWakeAgentMatches(name: string, matched: ChatWakeCandidate["matched"]): boolean {
-  return "handle" in matched ? normalizeHandle(handleForName(name)) === matched.handle : name === matched.displayName;
+  return "handle" in matched
+    ? normalizeHandle(handleForName(name)) === matched.handle
+    : name === matched.displayName;
 }
 
 /**
@@ -151,8 +172,11 @@ export function chatWakeThreadVisibility(
 }
 
 const sameWake = (intent: ChatWakeIntent, wake: ChatWakeView) =>
-  wake.wakeId === intent.wakeId && wake.workspaceId === intent.workspaceId && wake.threadId === intent.threadId &&
-  wake.messageId === intent.messageId && wake.generation === intent.generation &&
+  wake.wakeId === intent.wakeId &&
+  wake.workspaceId === intent.workspaceId &&
+  wake.threadId === intent.threadId &&
+  wake.messageId === intent.messageId &&
+  wake.generation === intent.generation &&
   wake.prerequisiteMessageId === intent.prerequisiteMessageId;
 
 export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeConsumer {
@@ -179,14 +203,23 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   const unconfirmed = new Set<string>();
 
   const ours = (intent: ChatWakeIntent) =>
-    intent.account === account.scope && intent.userId === account.userId && intent.installId === account.installId;
-  const savedWakeIds = async () => new Set((await deps.intents.list()).filter(ours).map((intent) => intent.wakeId));
+    intent.account === account.scope &&
+    intent.userId === account.userId &&
+    intent.installId === account.installId;
+  const savedWakeIds = async () =>
+    new Set((await deps.intents.list()).filter(ours).map((intent) => intent.wakeId));
 
-  async function opened<T>(workspaceId: string, work: (workspace: ChatWakeWorkspace) => Promise<T>): Promise<T | null> {
+  async function opened<T>(
+    workspaceId: string,
+    work: (workspace: ChatWakeWorkspace) => Promise<T>,
+  ): Promise<T | null> {
     const workspace = await deps.openWorkspace(workspaceId);
     if (workspace === null) return null;
-    try { return await work(workspace); }
-    finally { await workspace.release(); }
+    try {
+      return await work(workspace);
+    } finally {
+      await workspace.release();
+    }
   }
 
   async function admit(workspace: ChatWakeWorkspace, wake: WakeFacts): Promise<Verdict> {
@@ -197,13 +230,22 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       workspace.requestSync();
       return "defer";
     }
-    if (message.id !== wake.messageId || message.threadId !== wake.threadId || message.workspaceId !== wake.workspaceId ||
-      message.author.kind !== "human" || message.authorUserId !== account.userId || message.origin === "cli") return "reject";
+    if (
+      message.id !== wake.messageId ||
+      message.threadId !== wake.threadId ||
+      message.workspaceId !== wake.workspaceId ||
+      message.author.kind !== "human" ||
+      message.authorUserId !== account.userId ||
+      message.origin === "cli"
+    )
+      return "reject";
     const visibility = await workspace.threadVisibility(wake.threadId);
     if (visibility === "hidden" || visibility === "missing") return "reject";
     if (visibility === "unknown") return "defer";
     if (wake.prerequisiteMessageId !== null) {
-      const decision = (await workspace.decisions(wake.threadId)).find((row) => row.messageId === wake.prerequisiteMessageId);
+      const decision = (await workspace.decisions(wake.threadId)).find(
+        (row) => row.messageId === wake.prerequisiteMessageId,
+      );
       if (decision === undefined || decision.state !== "resolved") {
         workspace.requestSync();
         return "defer";
@@ -213,7 +255,8 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     // The agent is read last, and `record` awaits nothing between this read and its enqueue,
     // so a rename or pause during an earlier read is seen here.
     const agent = await workspace.agent(wake.candidate.agentId);
-    if (agent === null || !chatWakeAgentMatches(agent.name, wake.candidate.matched)) return "reject";
+    if (agent === null || !chatWakeAgentMatches(agent.name, wake.candidate.matched))
+      return "reject";
     if (!agent.enabled || !agent.launch || !agent.admitted) return "defer";
     return workspace.current() ? "ready" : "defer";
   }
@@ -222,8 +265,9 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   async function claim(intent: ChatWakeIntent): Promise<ChatWakeIntent | null> {
     if (!live()) return null;
     let answer: { won: boolean; wake: ChatWakeView };
-    try { answer = await deps.client.claimWake(intent.wakeId, intent.installId, abort.signal); }
-    catch (error) {
+    try {
+      answer = await deps.client.claimWake(intent.wakeId, intent.installId, abort.signal);
+    } catch (error) {
       // Nothing was recorded here, so nothing runs. A claim that did commit ends unconfirmed on the server.
       // A 404 means the account was deleted, the workspace changed owner, this computer is no longer a
       // candidate, or the row is gone. None of these comes back, so it is not retried.
@@ -250,7 +294,10 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
   }
 
   // Records the won intent's trigger once the account, workspace, and agent still allow it. The recorded intent, or null.
-  async function record(intent: ChatWakeIntent, workspace: ChatWakeWorkspace): Promise<ChatWakeIntent | null> {
+  async function record(
+    intent: ChatWakeIntent,
+    workspace: ChatWakeWorkspace,
+  ): Promise<ChatWakeIntent | null> {
     if (!live()) return null;
     const verdict = await admit(workspace, intent);
     if (!live()) return null;
@@ -266,7 +313,11 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       await deps.intents.remove(intent);
       return null;
     }
-    await workspace.recordTrigger({ triggerMessageId: intent.messageId, threadId: intent.threadId, agentId: intent.candidate.agentId });
+    await workspace.recordTrigger({
+      triggerMessageId: intent.messageId,
+      threadId: intent.threadId,
+      agentId: intent.candidate.agentId,
+    });
     // The trigger is durable now, so its scan is arranged whether or not the recorded phase saves.
     if (!stopped) workspace.dispatch();
     const recorded: ChatWakeIntent = { ...intent, phase: "recorded" };
@@ -279,8 +330,9 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     // A missing wake keeps the intent: the trigger was recorded, and that is never undone here. After
     // CHAT_WAKE_CONFIRM_MISSES answers in a row, this lifetime stops asking and reports it instead.
     let wake: ChatWakeView;
-    try { wake = await deps.client.confirmQueued(intent.wakeId, intent.installId, abort.signal); }
-    catch (error) {
+    try {
+      wake = await deps.client.confirmQueued(intent.wakeId, intent.installId, abort.signal);
+    } catch (error) {
       if (!(error instanceof ChatWakeMissingError)) throw error;
       const missed = (misses.get(intent.wakeId) ?? 0) + 1;
       misses.set(intent.wakeId, missed);
@@ -290,7 +342,8 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       return;
     }
     misses.delete(intent.wakeId);
-    if (!sameWake(intent, wake) || wake.state !== "queued") throw new ChatWakeAnswerError("Wake confirmation");
+    if (!sameWake(intent, wake) || wake.state !== "queued")
+      throw new ChatWakeAnswerError("Wake confirmation");
     await deps.intents.remove(intent);
   }
 
@@ -302,7 +355,9 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
       const won = next;
       if (held) next = await record(won, held);
       else {
-        const result = await opened(won.workspaceId, async (workspace) => ({ next: await record(won, workspace) }));
+        const result = await opened(won.workspaceId, async (workspace) => ({
+          next: await record(won, workspace),
+        }));
         // No workspace to open: parked, as in `record`.
         if (result === null) deps.onStuck(won, "parked");
         next = result?.next ?? null;
@@ -328,11 +383,13 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
           owed = true;
         });
       }
-    })().catch(deps.onError).finally(() => {
-      retrying = null;
-      // Owed by a step that failed after the loop's last check.
-      if (owed) owe();
-    });
+    })()
+      .catch(deps.onError)
+      .finally(() => {
+        retrying = null;
+        // Owed by a step that failed after the loop's last check.
+        if (owed) owe();
+      });
   }
 
   async function recover(): Promise<void> {
@@ -371,9 +428,16 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
         const verdict = await admit(workspace, row);
         if (verdict !== "ready" || !live()) return verdict === "reject" ? "reject" : "defer";
         const intent: ChatWakeIntent = {
-          account: account.scope, userId: account.userId, installId: account.installId,
-          wakeId: row.wakeId, generation: row.generation, workspaceId: row.workspaceId, threadId: row.threadId,
-          messageId: row.messageId, prerequisiteMessageId: row.prerequisiteMessageId, candidate: row.candidate,
+          account: account.scope,
+          userId: account.userId,
+          installId: account.installId,
+          wakeId: row.wakeId,
+          generation: row.generation,
+          workspaceId: row.workspaceId,
+          threadId: row.threadId,
+          messageId: row.messageId,
+          prerequisiteMessageId: row.prerequisiteMessageId,
+          candidate: row.candidate,
           phase: "claim-pending",
         };
         stage = "saving";
@@ -435,8 +499,15 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     while (live()) {
       try {
         const startedAtMs = deps.nowMs();
-        const page = await deps.client.waitWakes({ installId: account.installId, since, holdMs }, abort.signal);
-        if (page.wakes.length === 0 && page.cursor === since && deps.nowMs() - startedAtMs < holdMs / 2) {
+        const page = await deps.client.waitWakes(
+          { installId: account.installId, since, holdMs },
+          abort.signal,
+        );
+        if (
+          page.wakes.length === 0 &&
+          page.cursor === since &&
+          deps.nowMs() - startedAtMs < holdMs / 2
+        ) {
           throw new Error("The server answered a wake read early without a change.");
         }
         if (!(await serial(() => take(page)))) continue;
@@ -459,10 +530,10 @@ export function createChatWakeConsumer(deps: ChatWakeConsumerDeps): ChatWakeCons
     },
     resume() {
       if (stopped) return Promise.resolve();
-      return pass ??= serial(async () => {
+      return (pass ??= serial(async () => {
         pass = null;
         await again();
-      }).catch(passFailed);
+      }).catch(passFailed));
     },
     async stop() {
       stopped = true;

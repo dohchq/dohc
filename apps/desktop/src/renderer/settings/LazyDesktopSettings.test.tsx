@@ -1,18 +1,9 @@
 // @vitest-environment jsdom
-import {
-  act,
-  cleanup,
-  render,
-  screen,
-  within,
-} from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Overlay } from "../Overlay";
-import {
-  LazyDesktopSettings,
-  type DesktopSettingsProps,
-} from "./LazyDesktopSettings";
+import { LazyDesktopSettings, type DesktopSettingsProps } from "./LazyDesktopSettings";
 
 vi.mock("./SettingsDialog", () => ({
   SettingsDialog: () => <div data-testid="settings-dialog">Settings ready</div>,
@@ -81,9 +72,7 @@ describe("LazyDesktopSettings", () => {
       </Overlay>,
     );
 
-    expect(screen.getByTestId("settings-loading").textContent).toBe(
-      "Loading settings...",
-    );
+    expect(screen.getByTestId("settings-loading").textContent).toBe("Loading settings...");
     const panel = document.querySelector<HTMLElement>(
       '[data-dohc-modal="true"] > [data-focus-surface="dialog"]',
     );
@@ -99,14 +88,24 @@ describe("LazyDesktopSettings", () => {
   it("closes from its X while loading and after a failed load", async () => {
     const onClose = vi.fn();
     const pending = render(
-      <LazyDesktopSettings {...settingsProps()} onClose={onClose} loader={() => new Promise(() => undefined)} />,
+      <LazyDesktopSettings
+        {...settingsProps()}
+        onClose={onClose}
+        loader={() => new Promise(() => undefined)}
+      />,
     );
     await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(onClose).toHaveBeenCalledTimes(1);
     pending.unmount();
 
     render(
-      <LazyDesktopSettings {...settingsProps()} onClose={onClose} loader={async () => { throw new Error("settings chunk unavailable"); }} />,
+      <LazyDesktopSettings
+        {...settingsProps()}
+        onClose={onClose}
+        loader={async () => {
+          throw new Error("settings chunk unavailable");
+        }}
+      />,
     );
     await screen.findByTestId("error-boundary-settings");
     await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
@@ -116,7 +115,12 @@ describe("LazyDesktopSettings", () => {
   // The boundary's own button says Try again, so its words don't say it too.
   it("says Try again only on its button after a failed load", async () => {
     render(
-      <LazyDesktopSettings {...settingsProps()} loader={async () => { throw new Error("settings chunk unavailable"); }} />,
+      <LazyDesktopSettings
+        {...settingsProps()}
+        loader={async () => {
+          throw new Error("settings chunk unavailable");
+        }}
+      />,
     );
     const boundary = await screen.findByTestId("error-boundary-settings");
     expect(within(boundary).getByText("The workspace is still available.")).toBeTruthy();

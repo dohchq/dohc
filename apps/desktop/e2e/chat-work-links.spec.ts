@@ -47,16 +47,35 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
     await waitForCliEndpoint(temp.homeDir);
 
     // An agent works through the CLI, as it would from a terminal.
-    const cli = async (...args: string[]) => JSON.parse((await runDohcCli(temp, [...args, "--as-agent", "--json"])).stdout);
+    const cli = async (...args: string[]) =>
+      JSON.parse((await runDohcCli(temp, [...args, "--as-agent", "--json"])).stdout);
     await cli("chat", "create-group", "Trip", "--type", "posts");
     await cli("chat", "create-group", "Notes", "--type", "posts");
-    const flights = await cli("chat", "post", "Trip", "--agent", "Nova", "--title", "Flights", "Book", "by", "Friday");
+    const flights = await cli(
+      "chat",
+      "post",
+      "Trip",
+      "--agent",
+      "Nova",
+      "--title",
+      "Flights",
+      "Book",
+      "by",
+      "Friday",
+    );
     const group = await cli("chat", "link", "--group", "Trip");
     const threadLink = await cli("chat", "link", "--thread", flights.threadId);
     const file = await cli("chat", "link", "--path", "plans/trip.md");
     expect([group.kind, threadLink.kind, file.kind]).toEqual(["chat", "thread", "file"]);
     expect(group.link).toMatch(/^@\[work:[A-Za-z0-9_-]{43}\]$/u);
-    await cli("chat", "post", "Notes", "--agent", "Nova", `Plans live in ${group.link}. See ${threadLink.link} and ${file.link}.`);
+    await cli(
+      "chat",
+      "post",
+      "Notes",
+      "--agent",
+      "Nova",
+      `Plans live in ${group.link}. See ${threadLink.link} and ${file.link}.`,
+    );
 
     await page.getByTestId(activityPin("chats")).click();
     const card = main.getByTestId("chats-post-card").filter({ hasText: "Plans live in" });
@@ -67,7 +86,8 @@ test("an agent links a Group, a thread, and a file in a message, and each chip o
       await page.getByTestId("chats-channel").filter({ hasText: "Notes" }).click();
       await expect(async () => {
         if (await card.isVisible()) await card.click();
-        else if (!(await thread.textContent())?.includes("Plans live in")) await main.getByRole("button", { name: "Back" }).click();
+        else if (!(await thread.textContent())?.includes("Plans live in"))
+          await main.getByRole("button", { name: "Back" }).click();
         await expect(thread).toContainText("Plans live in", { timeout: 1_000 });
       }).toPass();
     };

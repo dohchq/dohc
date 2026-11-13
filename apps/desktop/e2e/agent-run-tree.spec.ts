@@ -33,14 +33,21 @@ function alive(pid: number): boolean {
 // The runner's parent, the runner, and the process it started.
 async function runTree(path: string): Promise<number[] | null> {
   try {
-    const { parent, runner, child } = JSON.parse(await readFile(path, "utf8")) as Record<string, number>;
+    const { parent, runner, child } = JSON.parse(await readFile(path, "utf8")) as Record<
+      string,
+      number
+    >;
     return [parent!, runner!, child!];
   } catch {
     return null;
   }
 }
 
-async function seedAgent(temp: TempWorkspace, mode: "hold-tree" | "leave-tree", launch: "npm shim" | "direct"): Promise<string> {
+async function seedAgent(
+  temp: TempWorkspace,
+  mode: "hold-tree" | "leave-tree",
+  launch: "npm shim" | "direct",
+): Promise<string> {
   const pids = join(temp.baseDir, "run-tree.json");
   const direct = `"${process.execPath}" "${fakeRunner}" ${mode} "${pids}"`;
   let command = direct;
@@ -53,14 +60,24 @@ async function seedAgent(temp: TempWorkspace, mode: "hold-tree" | "leave-tree", 
     ...DEFAULT_USER_SETTINGS,
     profile: { preferredName: "Sam" },
     agents: {
-      default: { name: "Nova", hue: "olive", launch: { command }, changesFiles: true, enabled: true, timeoutMinutes: 5 },
+      default: {
+        name: "Nova",
+        hue: "olive",
+        launch: { command },
+        changesFiles: true,
+        enabled: true,
+        timeoutMinutes: 5,
+      },
     },
   };
   await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
   return pids;
 }
 
-async function startRun(temp: TempWorkspace, pids: string): Promise<{ desktop: LaunchedDesktopApp; tree: number[] }> {
+async function startRun(
+  temp: TempWorkspace,
+  pids: string,
+): Promise<{ desktop: LaunchedDesktopApp; tree: number[] }> {
   const desktop = await launchDesktopApp({ workspace: temp });
   await openWorkspaceFromFirstRun(desktop.page, temp);
   await trustOpenWorkspace(desktop);
@@ -79,7 +96,10 @@ for (const launch of ["npm shim", "direct"] as const) {
     let tree: number[] = [];
     let engines: number[] = [];
     try {
-      await seedWorkspaceManifest(temp, `agent-run-tree-${launch === "direct" ? "direct" : "shim"}`);
+      await seedWorkspaceManifest(
+        temp,
+        `agent-run-tree-${launch === "direct" ? "direct" : "shim"}`,
+      );
       const pids = await seedAgent(temp, "hold-tree", launch);
       ({ desktop, tree } = await startRun(temp, pids));
       expect(tree.filter(alive)).toEqual(tree);

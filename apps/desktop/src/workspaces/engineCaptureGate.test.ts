@@ -20,7 +20,10 @@ const unusedSessions = new Proxy({} as EngineWorkspaceSessions, {
 const hooks: WorkspaceCaptureHooks = {
   onCaptureOutcome: () => undefined,
   onAtomicPlacementUnavailable: () => undefined,
-  onRecoveryUnavailable: () => undefined, onKeptFiles: () => undefined, onRetainedCopies: () => undefined, onHeldFiles: () => undefined,
+  onRecoveryUnavailable: () => undefined,
+  onKeptFiles: () => undefined,
+  onRetainedCopies: () => undefined,
+  onHeldFiles: () => undefined,
 };
 const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 

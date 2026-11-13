@@ -33,12 +33,16 @@ const PendingReport = z.object({
   // its row. A problem after it is announced again.
   readThrough: z.number().int().nonnegative(),
   leftOut: z.number().int().nonnegative(),
-  problems: z.array(z.object({
-    seq: z.number().int().positive(),
-    atMs: z.number().int().nonnegative(),
-    source: CrashReportSource,
-    text: z.string().min(1).max(CRASH_EVENT_MAX_CHARS),
-  })).max(CRASH_REPORT_MAX_PROBLEMS),
+  problems: z
+    .array(
+      z.object({
+        seq: z.number().int().positive(),
+        atMs: z.number().int().nonnegative(),
+        source: CrashReportSource,
+        text: z.string().min(1).max(CRASH_EVENT_MAX_CHARS),
+      }),
+    )
+    .max(CRASH_REPORT_MAX_PROBLEMS),
 });
 type PendingReport = z.infer<typeof PendingReport>;
 
@@ -106,7 +110,14 @@ export function createCrashReportStore(deps: {
 
   function load(): PendingReport {
     if (cached) return cached;
-    const empty: PendingReport = { version: 3, revision: 0, seq: 0, readThrough: 0, leftOut: 0, problems: [] };
+    const empty: PendingReport = {
+      version: 3,
+      revision: 0,
+      seq: 0,
+      readThrough: 0,
+      leftOut: 0,
+      problems: [],
+    };
     let raw: string;
     try {
       raw = readFileSync(deps.path, "utf8");
@@ -124,7 +135,8 @@ export function createCrashReportStore(deps: {
       json = undefined;
     }
     const parsed = PendingReport.safeParse(json);
-    if (!parsed.success) console.error("[crash-report] the crash report file is damaged; starting a new one");
+    if (!parsed.success)
+      console.error("[crash-report] the crash report file is damaged; starting a new one");
     cached = parsed.success ? parsed.data : empty;
     return cached;
   }
@@ -132,13 +144,17 @@ export function createCrashReportStore(deps: {
   function save(report: Omit<PendingReport, "revision">): void {
     const next = { ...report, revision: load().revision + 1 };
     mkdirSync(dirname(deps.path), { recursive: true });
-    atomicReplaceFileSync(deps.path, (temporary) => writeFileSync(temporary, JSON.stringify(next), { mode: 0o600 }));
+    atomicReplaceFileSync(deps.path, (temporary) =>
+      writeFileSync(temporary, JSON.stringify(next), { mode: 0o600 }),
+    );
     cached = next;
   }
 
   function text(report: PendingReport): string {
-    return crashReportText(report.problems.map((problem) => problem.text), report.leftOut)
-      .slice(0, CRASH_REPORT_MAX_CHARS);
+    return crashReportText(
+      report.problems.map((problem) => problem.text),
+      report.leftOut,
+    ).slice(0, CRASH_REPORT_MAX_CHARS);
   }
 
   // The problems left out are older than every kept one, so they go too.
@@ -156,12 +172,15 @@ export function createCrashReportStore(deps: {
         const facts = deps.facts();
         const report = load();
         const seq = report.seq + 1;
-        const problems = [...report.problems, {
-          seq,
-          atMs: facts.atMs,
-          source: crashEventSource(event),
-          text: formatCrashEvent(event, facts, deps.codeFrame),
-        }];
+        const problems = [
+          ...report.problems,
+          {
+            seq,
+            atMs: facts.atMs,
+            source: crashEventSource(event),
+            text: formatCrashEvent(event, facts, deps.codeFrame),
+          },
+        ];
         const dropped = Math.max(0, problems.length - CRASH_REPORT_MAX_PROBLEMS);
         save({
           ...report,

@@ -32,7 +32,12 @@ import {
   type SyncRelayConnection,
   type PostableNoticeKind,
 } from "@dohc/workspace-contracts/relay";
-import { NoticeRow, NoticeTargetShape, RefusalCoordinate, type NoticeRef } from "../ipc/bridgeContract";
+import {
+  NoticeRow,
+  NoticeTargetShape,
+  RefusalCoordinate,
+  type NoticeRef,
+} from "../ipc/bridgeContract";
 import { relayRequest } from "../workspaces/relayRequest";
 import { isRefusalNoticeKind } from "./refusalNoticeKind";
 
@@ -101,7 +106,10 @@ export interface NoticeStore {
   mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void>;
   // Dismisses one notice now and says whether this was its first dismissal,
   // as Run now needs: "unanswered" when the relay could not say.
-  dismissFirst(ref: NoticeRef, account: string | null): Promise<"first" | "not-first" | "unanswered">;
+  dismissFirst(
+    ref: NoticeRef,
+    account: string | null,
+  ): Promise<"first" | "not-first" | "unanswered">;
   // Takes back a notice this computer posted: an unsent post goes, and a
   // sent one is dismissed.
   withdraw(noticeId: string): Promise<void>;
@@ -116,7 +124,11 @@ export interface NoticeStore {
   // The failure notice the signed-in person sent themselves about one run,
   // dismissed or not, with the computer that posted it, or null. Only read,
   // never shown.
-  sentFailure(run: { workspaceId: string; automationId: string; claimId: string }): Promise<SentFailure | null>;
+  sentFailure(run: {
+    workspaceId: string;
+    automationId: string;
+    claimId: string;
+  }): Promise<SentFailure | null>;
 }
 
 export interface SentFailure {
@@ -131,8 +143,12 @@ const postableKindValues = kindValues.filter(
 ) as [PostableNoticeKind, ...PostableNoticeKind[]];
 // The relay's rules, checked before a notice is kept anywhere.
 const NoticeContent = z.object({
-  noticeId: z.string().refine((value) =>
-    isNoticeLine(value, NOTICE_POSTED_ID_MAX_CHARS) && !value.startsWith(NOTICE_FROM_PREFIX)),
+  noticeId: z
+    .string()
+    .refine(
+      (value) =>
+        isNoticeLine(value, NOTICE_POSTED_ID_MAX_CHARS) && !value.startsWith(NOTICE_FROM_PREFIX),
+    ),
   workspaceId: z.string().refine((value) => isNoticeLine(value, 256)),
   kind: z.enum(postableKindValues),
   title: z.string().refine((value) => isNoticeLine(value, NOTICE_TITLE_MAX_CHARS)),
@@ -146,15 +162,17 @@ const Reach = z.union([
   z.object({ shareId: z.string().min(1), workspaceId: z.undefined().optional() }),
 ]);
 // Only your own posts wait in the outbox, so each names you.
-const PostRequest = z.object({
-  noticeId: z.string(),
-  recipientUserId: z.string().min(1),
-  kind: z.enum(kindValues),
-  title: z.string(),
-  body: z.string(),
-  target: NoticeTargetShape,
-  originInstallId: z.string().min(1),
-}).and(Reach);
+const PostRequest = z
+  .object({
+    noticeId: z.string(),
+    recipientUserId: z.string().min(1),
+    kind: z.enum(kindValues),
+    title: z.string(),
+    body: z.string(),
+    target: NoticeTargetShape,
+    originInstallId: z.string().min(1),
+  })
+  .and(Reach);
 
 const LocalRow = z.object({
   refusalCoordinates: NoticeRow.shape.refusalCoordinates,
@@ -174,23 +192,45 @@ const LocalRow = z.object({
 });
 type LocalRow = z.infer<typeof LocalRow>;
 
-export const RefusalNotices = z.object({ notices: z.array(z.object({
-  refusalCoordinates: z.array(RefusalCoordinate),
-  noticeId: z.string(), originId: z.string().nullable(), originSeq: z.number().nullable(), reason: z.string(),
-  document: z.object({ versionId: z.string().nullable(), path: z.string().nullable(), objectId: z.string(),
-    lineageClaimId: z.string(), conflictId: z.string().nullable() }).nullable(),
-})) });
+export const RefusalNotices = z.object({
+  notices: z.array(
+    z.object({
+      refusalCoordinates: z.array(RefusalCoordinate),
+      noticeId: z.string(),
+      originId: z.string().nullable(),
+      originSeq: z.number().nullable(),
+      reason: z.string(),
+      document: z
+        .object({
+          versionId: z.string().nullable(),
+          path: z.string().nullable(),
+          objectId: z.string(),
+          lineageClaimId: z.string(),
+          conflictId: z.string().nullable(),
+        })
+        .nullable(),
+    }),
+  ),
+});
 type RefusalNotice = z.infer<typeof RefusalNotices>["notices"][number];
 
 function coordinateKey(coordinate: RefusalCoordinate): string {
   return "obligationOrder" in coordinate
-    ? JSON.stringify(["local", coordinate.obligationOrder, coordinate.checkpointSha256, coordinate.headSha256])
+    ? JSON.stringify([
+        "local",
+        coordinate.obligationOrder,
+        coordinate.checkpointSha256,
+        coordinate.headSha256,
+      ])
     : JSON.stringify([coordinate.originId, coordinate.originSeq]);
 }
 
-function withoutCoordinates(rows: RefusalCoordinate[], removed: RefusalCoordinate[]): RefusalCoordinate[] {
+function withoutCoordinates(
+  rows: RefusalCoordinate[],
+  removed: RefusalCoordinate[],
+): RefusalCoordinate[] {
   const keys = new Set(removed.map(coordinateKey));
-  return rows.filter(row => !keys.has(coordinateKey(row)));
+  return rows.filter((row) => !keys.has(coordinateKey(row)));
 }
 
 // Names the file last, cut to fit a title, so a row's two-line clamp cuts only
@@ -236,7 +276,8 @@ const RelayRow = z.object({
 type RelayRow = z.infer<typeof RelayRow>;
 
 const LocalFile = z.object({
-  version: z.literal(1), rows: z.array(LocalRow),
+  version: z.literal(1),
+  rows: z.array(LocalRow),
 });
 type LocalFile = z.infer<typeof LocalFile>;
 
@@ -255,21 +296,23 @@ const AccountFile = z.object({
   // stay on this computer until a pull succeeds.
   routesMissing: z.boolean(),
   rows: z.array(RelayRow),
-  posts: z.array(z.object({
-    request: PostRequest,
-    // This computer's workspace, which a notice through a share does not
-    // name, so the notice can move to this computer's list.
-    workspaceId: z.string().min(1),
-    createdAtMs: NoticeRow.shape.createdAtMs,
-    // The relay accepted it; the next finished pull settles it.
-    sent: z.boolean(),
-    // Taken back while unsent. A post never sent is dropped; one that went
-    // out is dismissed once the relay confirms it holds it.
-    withdrawn: z.literal(true).optional(),
-    // It went out at least once, and the relay may hold it even though no
-    // answer came back.
-    attempted: z.literal(true).optional(),
-  })),
+  posts: z.array(
+    z.object({
+      request: PostRequest,
+      // This computer's workspace, which a notice through a share does not
+      // name, so the notice can move to this computer's list.
+      workspaceId: z.string().min(1),
+      createdAtMs: NoticeRow.shape.createdAtMs,
+      // The relay accepted it; the next finished pull settles it.
+      sent: z.boolean(),
+      // Taken back while unsent. A post never sent is dropped; one that went
+      // out is dismissed once the relay confirms it holds it.
+      withdrawn: z.literal(true).optional(),
+      // It went out at least once, and the relay may hold it even though no
+      // answer came back.
+      attempted: z.literal(true).optional(),
+    }),
+  ),
   marks: z.array(OutboxMark),
 });
 type AccountFile = z.infer<typeof AccountFile>;
@@ -285,7 +328,9 @@ const RelayPage = z.object({
 });
 
 class RelayRefusal extends Error {
-  constructor(readonly reason: "invalid" | "refused" | "rate-limited" | "list-full" | "routes-missing") {
+  constructor(
+    readonly reason: "invalid" | "refused" | "rate-limited" | "list-full" | "routes-missing",
+  ) {
     super(reason);
   }
 }
@@ -310,8 +355,14 @@ export function createNoticeStore(deps: {
   // reads the roster again when it holds another.
   onPersonalAgentsRevision?(account: NoticeAccount, revision: number): void;
   // Null keeps cached rows for a workspace whose engine could not be read.
-  refusalNotices?(openedWorkspaceId?: string): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
-  dismissRefusal?(workspaceId: string, noticeId: string, refusalCoordinates: RefusalCoordinate[]): Promise<void>;
+  refusalNotices?(
+    openedWorkspaceId?: string,
+  ): Promise<{ workspaceId: string; notices: RefusalNotice[] | null }[]>;
+  dismissRefusal?(
+    workspaceId: string,
+    noticeId: string,
+    refusalCoordinates: RefusalCoordinate[],
+  ): Promise<void>;
   nowMs?: () => number;
   outboxPostLimit?: number;
   fileOperations?: DurableFileOperations;
@@ -333,7 +384,7 @@ export function createNoticeStore(deps: {
   let refusalsDrained: Promise<void> | null = null;
   function stopWorkspaceRefusals(): Promise<void> {
     refusalsStopped = true;
-    return refusalsDrained ??= queue.then(() => undefined);
+    return (refusalsDrained ??= queue.then(() => undefined));
   }
 
   const accountFileName = (account: NoticeAccount) =>
@@ -391,8 +442,8 @@ export function createNoticeStore(deps: {
 
   function pruneLocal(file: LocalFile): boolean {
     // Dismissed refusal rows also wait for the engine to acknowledge them on next open.
-    const pending = file.rows.filter(row => isRefusalNoticeKind(row.kind));
-    const rest = file.rows.filter(row => !isRefusalNoticeKind(row.kind));
+    const pending = file.rows.filter((row) => isRefusalNoticeKind(row.kind));
+    const rest = file.rows.filter((row) => !isRefusalNoticeKind(row.kind));
     const kept = [...pending, ...retained(rest, LOCAL_NOTICE_ROW_LIMIT, nowMs())];
     if (kept.length === file.rows.length) return false;
     file.rows = kept;
@@ -404,7 +455,12 @@ export function createNoticeStore(deps: {
     let file = accountFiles.get(name);
     if (!file) {
       file = await load(name, AccountFile, {
-        version: 1, cursor: null, routesMissing: false, rows: [], posts: [], marks: [],
+        version: 1,
+        cursor: null,
+        routesMissing: false,
+        rows: [],
+        posts: [],
+        marks: [],
       });
       accountFiles.set(name, file);
       if (pruneAccount(file)) await saveAccount(account, file);
@@ -425,7 +481,11 @@ export function createNoticeStore(deps: {
     return true;
   }
 
-  function addLocal(file: LocalFile, content: Omit<LocalRow, "createdAtMs" | "readAtMs" | "dismissedAtMs">, createdAtMs: number): boolean {
+  function addLocal(
+    file: LocalFile,
+    content: Omit<LocalRow, "createdAtMs" | "readAtMs" | "dismissedAtMs">,
+    createdAtMs: number,
+  ): boolean {
     if (file.rows.some((existing) => existing.noticeId === content.noticeId)) return false;
     file.rows.push({ ...content, createdAtMs, readAtMs: null, dismissedAtMs: null });
     return true;
@@ -433,12 +493,27 @@ export function createNoticeStore(deps: {
 
   // One waiting mark per notice. Dismissed takes the place of read, and read
   // adds nothing to dismissed. Returns false when nothing changed.
-  function queueMark(file: AccountFile, noticeId: string, mark: NoticeMark, withdraw = false): boolean {
+  function queueMark(
+    file: AccountFile,
+    noticeId: string,
+    mark: NoticeMark,
+    withdraw = false,
+  ): boolean {
     const index = file.marks.findIndex((waiting) => waiting.noticeId === noticeId);
     const waiting = file.marks[index];
-    if (waiting && (waiting.mark === "dismissed" || mark === "read") && (!withdraw || waiting.withdraw)) return false;
+    if (
+      waiting &&
+      (waiting.mark === "dismissed" || mark === "read") &&
+      (!withdraw || waiting.withdraw)
+    )
+      return false;
     // A new object, so a batch already on its way still names the old mark.
-    const entry = { noticeId, mark, atMs: nowMs(), ...(withdraw ? { withdraw: true as const } : {}) };
+    const entry = {
+      noticeId,
+      mark,
+      atMs: nowMs(),
+      ...(withdraw ? { withdraw: true as const } : {}),
+    };
     if (waiting) file.marks[index] = entry;
     else file.marks.push(entry);
     return true;
@@ -450,11 +525,14 @@ export function createNoticeStore(deps: {
     return relayRequest({
       relay: session.account.relay,
       path,
-      init: body === undefined ? undefined : {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
+      init:
+        body === undefined
+          ? undefined
+          : {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            },
       // An older server answers 404 for every notice route.
       errors: {
         400: refusal("invalid"),
@@ -477,23 +555,35 @@ export function createNoticeStore(deps: {
       if (!session.isCurrent()) throw new SessionChanged();
       if (file.routesMissing && file.posts.length === 0 && file.marks.length === 0) return false;
       for (const { request, workspaceId, createdAtMs } of file.posts) {
-        addLocal(local, {
-          noticeId: request.noticeId, kind: request.kind, workspaceId,
-          title: request.title, body: request.body, target: request.target,
-        }, createdAtMs);
+        addLocal(
+          local,
+          {
+            noticeId: request.noticeId,
+            kind: request.kind,
+            workspaceId,
+            title: request.title,
+            body: request.body,
+            target: request.target,
+          },
+          createdAtMs,
+        );
       }
       file.posts = [];
       file.marks = [];
       if (!file.routesMissing) {
         file.routesMissing = true;
-        addLocal(local, {
-          noticeId: `${SERVER_OUTDATED_KIND}:${accountFileName(account)}`,
-          kind: SERVER_OUTDATED_KIND,
-          workspaceId: null,
-          title: "Your server doesn't sync notices",
-          body: "Notices stay on this computer until the server runs a newer version of dohc.",
-          target: {},
-        }, nowMs());
+        addLocal(
+          local,
+          {
+            noticeId: `${SERVER_OUTDATED_KIND}:${accountFileName(account)}`,
+            kind: SERVER_OUTDATED_KIND,
+            workspaceId: null,
+            title: "Your server doesn't sync notices",
+            body: "Notices stay on this computer until the server runs a newer version of dohc.",
+            target: {},
+          },
+          nowMs(),
+        );
       }
       await saveLocal(local);
       await saveAccount(account, file);
@@ -513,7 +603,9 @@ export function createNoticeStore(deps: {
         // A post taken back before it ever left never needs to go. One that
         // went out may already be on the relay: it goes again, which the
         // relay takes once, so its dismissal can follow.
-        const withdrawn = file.posts.filter((waiting) => !waiting.sent && waiting.withdrawn && !waiting.attempted);
+        const withdrawn = file.posts.filter(
+          (waiting) => !waiting.sent && waiting.withdrawn && !waiting.attempted,
+        );
         if (withdrawn.length > 0) {
           const ids = new Set(withdrawn.map((waiting) => waiting.request.noticeId));
           file.posts = file.posts.filter((waiting) => !withdrawn.includes(waiting));
@@ -565,10 +657,18 @@ export function createNoticeStore(deps: {
         if (outcome === "refused" && post.request.kind !== "schedule-skipped") {
           const local = await loadLocal();
           const { request } = post;
-          addLocal(local, {
-            noticeId, kind: request.kind, workspaceId: post.workspaceId,
-            title: request.title, body: request.body, target: request.target,
-          }, post.createdAtMs);
+          addLocal(
+            local,
+            {
+              noticeId,
+              kind: request.kind,
+              workspaceId: post.workspaceId,
+              title: request.title,
+              body: request.body,
+              target: request.target,
+            },
+            post.createdAtMs,
+          );
           const row = local.rows.find((candidate) => candidate.noticeId === noticeId);
           if (row && mark?.mark === "read") row.readAtMs ??= mark.atMs;
           if (row && mark?.mark === "dismissed") row.dismissedAtMs ??= mark.atMs;
@@ -588,17 +688,26 @@ export function createNoticeStore(deps: {
     for (;;) {
       const batch = await locked(async () => {
         const file = await loadAccount(account);
-        const unsent = new Set(file.posts.filter((post) => !post.sent).map((post) => post.request.noticeId));
-        return file.marks.filter((waiting) => !unsent.has(waiting.noticeId)).slice(0, NOTICE_MARKS_PER_REQUEST);
+        const unsent = new Set(
+          file.posts.filter((post) => !post.sent).map((post) => post.request.noticeId),
+        );
+        return file.marks
+          .filter((waiting) => !unsent.has(waiting.noticeId))
+          .slice(0, NOTICE_MARKS_PER_REQUEST);
       });
       if (batch.length === 0) return "done";
       try {
         await relay(session, "/sync/notices/marks", {
-          marks: batch.map(({ noticeId, mark, withdraw }) => ({ noticeId, mark, ...(withdraw ? { withdraw } : {}) })),
+          marks: batch.map(({ noticeId, mark, withdraw }) => ({
+            noticeId,
+            mark,
+            ...(withdraw ? { withdraw } : {}),
+          })),
         });
       } catch (error) {
         if (error instanceof SessionChanged) throw error;
-        if (error instanceof RelayRefusal && error.reason === "routes-missing") return "routes-missing";
+        if (error instanceof RelayRefusal && error.reason === "routes-missing")
+          return "routes-missing";
         if (!(error instanceof RelayRefusal) || error.reason === "rate-limited") {
           console.warn("[notices] marks could not be sent; the next pass tries again", error);
           return "done";
@@ -621,17 +730,23 @@ export function createNoticeStore(deps: {
     }
   }
 
-  async function syncAccount(session: NoticeSession, accountIsCurrent: () => boolean): Promise<void> {
+  async function syncAccount(
+    session: NoticeSession,
+    accountIsCurrent: () => boolean,
+  ): Promise<void> {
     const account = session.account;
-    if (await sendPosts(session) === "routes-missing") return await noteRoutesMissing(session);
-    if (await sendMarks(session) === "routes-missing") return await noteRoutesMissing(session);
+    if ((await sendPosts(session)) === "routes-missing") return await noteRoutesMissing(session);
+    if ((await sendMarks(session)) === "routes-missing") return await noteRoutesMissing(session);
 
     let changed = false;
     let personalAgentsRevision: number | null = null;
     try {
       for (let more = true; more;) {
         const cursor = await locked(async () => (await loadAccount(account)).cursor);
-        const query = new URLSearchParams({ limit: String(NOTICE_PAGE_MAX), ...(cursor === null ? {} : { cursor }) });
+        const query = new URLSearchParams({
+          limit: String(NOTICE_PAGE_MAX),
+          ...(cursor === null ? {} : { cursor }),
+        });
         let page: z.infer<typeof RelayPage>;
         try {
           page = RelayPage.parse(await (await relay(session, `/sync/notices?${query}`)).json());
@@ -641,16 +756,17 @@ export function createNoticeStore(deps: {
           }
           throw error;
         }
-        changed = await locked(async () => {
-          const file = await loadAccount(account);
-          if (!session.isCurrent()) throw new SessionChanged();
-          const merged = merge(file, page);
-          if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
-          file.cursor = page.nextCursor;
-          file.routesMissing = false;
-          await saveAccount(account, file);
-          return merged;
-        }) || changed;
+        changed =
+          (await locked(async () => {
+            const file = await loadAccount(account);
+            if (!session.isCurrent()) throw new SessionChanged();
+            const merged = merge(file, page);
+            if (!merged && file.cursor === page.nextCursor && !file.routesMissing) return false;
+            file.cursor = page.nextCursor;
+            file.routesMissing = false;
+            await saveAccount(account, file);
+            return merged;
+          })) || changed;
         personalAgentsRevision = page.personalAgentsRevision ?? personalAgentsRevision;
         more = page.hasMore;
       }
@@ -659,15 +775,16 @@ export function createNoticeStore(deps: {
       }
       // Every sent post went out before this pull began, so the pull has
       // settled it: its row arrived, or the relay already had that notice.
-      changed = await locked(async () => {
-        const file = await loadAccount(account);
-        const waiting = file.posts.filter((post) => !post.sent);
-        const settled = waiting.length !== file.posts.length;
-        file.posts = waiting;
-        const pruned = pruneAccount(file);
-        if (settled || pruned) await saveAccount(account, file);
-        return pruned;
-      }) || changed;
+      changed =
+        (await locked(async () => {
+          const file = await loadAccount(account);
+          const waiting = file.posts.filter((post) => !post.sent);
+          const settled = waiting.length !== file.posts.length;
+          file.posts = waiting;
+          const pruned = pruneAccount(file);
+          if (settled || pruned) await saveAccount(account, file);
+          return pruned;
+        })) || changed;
     } finally {
       // Saved rows outlive the share scope; announce them for this account.
       if (changed && accountIsCurrent()) deps.onChanged();
@@ -698,9 +815,16 @@ export function createNoticeStore(deps: {
           try {
             const session = await deps.session();
             if (current && !current()) continue;
-            if (session) await syncAccount(current ? {
-              ...session, isCurrent: () => current() && session.isCurrent(),
-            } : session, session.isCurrent);
+            if (session)
+              await syncAccount(
+                current
+                  ? {
+                      ...session,
+                      isCurrent: () => current() && session.isCurrent(),
+                    }
+                  : session,
+                session.isCurrent,
+              );
             if (current && !current()) continue;
             const pruned = await locked(async () => {
               const local = await loadLocal();
@@ -711,8 +835,9 @@ export function createNoticeStore(deps: {
             if (pruned) deps.onChanged();
           } catch (error) {
             // A pass for a session that ended stops; the next pass uses the new one.
-            if (error instanceof SessionChanged) { if (!current) again = true; }
-            else console.warn("[notices] sync failed; the next pass tries again", error);
+            if (error instanceof SessionChanged) {
+              if (!current) again = true;
+            } else console.warn("[notices] sync failed; the next pass tries again", error);
           }
         } while (again);
       } finally {
@@ -729,28 +854,46 @@ export function createNoticeStore(deps: {
       if (refusalsStopped) return false;
       const workspaces = await readRefusals(openedWorkspaceId);
       const prior = await loadLocal();
-      const previousRows = new Map(prior.rows.map(row => [row.noticeId, row]));
-      const failedWorkspaces = new Set(workspaces.filter(row => row.notices === null).map(row => row.workspaceId));
-      const rows = prior.rows.filter(row => !isRefusalNoticeKind(row.kind) || (row.workspaceId !== null && failedWorkspaces.has(row.workspaceId)));
+      const previousRows = new Map(prior.rows.map((row) => [row.noticeId, row]));
+      const failedWorkspaces = new Set(
+        workspaces.filter((row) => row.notices === null).map((row) => row.workspaceId),
+      );
+      const rows = prior.rows.filter(
+        (row) =>
+          !isRefusalNoticeKind(row.kind) ||
+          (row.workspaceId !== null && failedWorkspaces.has(row.workspaceId)),
+      );
       for (const { workspaceId, notices } of workspaces) {
         if (notices === null) continue;
         for (const refusal of notices) {
           const previous = previousRows.get(refusal.noticeId);
           const currentKeys = new Set(refusal.refusalCoordinates.map(coordinateKey));
-          const pendingRefusalDismissals = (previous?.pendingRefusalDismissals ?? [])
-            .filter(row => currentKeys.has(coordinateKey(row)));
+          const pendingRefusalDismissals = (previous?.pendingRefusalDismissals ?? []).filter(
+            (row) => currentKeys.has(coordinateKey(row)),
+          );
           if (pendingRefusalDismissals.length > 0) {
             try {
               await deps.dismissRefusal?.(workspaceId, refusal.noticeId, pendingRefusalDismissals);
             } catch (error) {
-              console.warn("[notices] could not apply queued sync refusal dismissal", workspaceId, error);
+              console.warn(
+                "[notices] could not apply queued sync refusal dismissal",
+                workspaceId,
+                error,
+              );
             }
           }
-          const refusalCoordinates = withoutCoordinates(refusal.refusalCoordinates, pendingRefusalDismissals);
+          const refusalCoordinates = withoutCoordinates(
+            refusal.refusalCoordinates,
+            pendingRefusalDismissals,
+          );
           if (refusalCoordinates.length === 0 && previous) {
             // Keep only the shown refusals hidden until an engine read confirms their deletion.
-            rows.push({ ...previous, refusalCoordinates, pendingRefusalDismissals,
-              dismissedAtMs: previous.dismissedAtMs ?? nowMs() });
+            rows.push({
+              ...previous,
+              refusalCoordinates,
+              pendingRefusalDismissals,
+              dismissedAtMs: previous.dismissedAtMs ?? nowMs(),
+            });
             continue;
           }
           const document = refusal.document;
@@ -760,28 +903,56 @@ export function createNoticeStore(deps: {
           const markdownHeld = refusal.reason === "markdown-write-held";
           // Says only what holds for every refused save: its author names did not sync.
           const attributionRefused = refusal.reason === SETTLEMENT_ATTRIBUTION_REFUSED;
-          const target = NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
+          const target =
+            NoticeTargetShape.safeParse(document?.path ? { path: document.path } : {}).data ?? {};
           const body = markdownHeld
             ? "Saving it would also change parts dohc can't show, such as raw HTML or reference links."
             : attributionRefused
-            ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
-            : bindingChanged
-            ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
-            : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${document?.conflictId
-            ? "Open its conflict and choose a copy."
-            : tooLarge ? "Make the file smaller, then try sync again." : "Review the file, then try sync again."}`;
-          rows.push(LocalRow.parse({ noticeId: refusal.noticeId, workspaceId, kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
-            refusalCoordinates, pendingRefusalDismissals,
-            title: attributionRefused ? unattributedTitle(document?.path)
-              : markdownHeld ? heldTitle(document?.path)
-              : bindingChanged ? "dohc skipped an earlier save" : "A change needs your review", body,
-            detail: [refusal.reason, `Workspace: ${workspaceId}`, `Object: ${document?.objectId ?? "unknown"}`,
-              `Lineage: ${document?.lineageClaimId ?? "unknown"}`,
-              ...(refusal.originId === null ? [] : [`Origin: ${refusal.originId}:${refusal.originSeq}`])].join("\n"),
-            target,
-            createdAtMs: previous?.dismissedAtMs == null ? previous?.createdAtMs ?? nowMs() : nowMs(),
-            readAtMs: withoutCoordinates(refusalCoordinates, previous?.refusalCoordinates ?? []).length === 0
-              ? previous?.readAtMs ?? null : null, dismissedAtMs: null }));
+              ? "dohc could not confirm who made one or more saves to this file, so it did not sync their author names. Other History entries keep theirs."
+              : bindingChanged
+                ? `The name, location, or sharing of ${name} changed before this save arrived.${target.path ? " Open the file to continue." : ""}`
+                : `dohc could not update ${name}.${tooLarge ? " The change is too large." : ""} ${
+                    document?.conflictId
+                      ? "Open its conflict and choose a copy."
+                      : tooLarge
+                        ? "Make the file smaller, then try sync again."
+                        : "Review the file, then try sync again."
+                  }`;
+          rows.push(
+            LocalRow.parse({
+              noticeId: refusal.noticeId,
+              workspaceId,
+              kind: markdownHeld ? "markdown-write-held" : "sync-refusal",
+              refusalCoordinates,
+              pendingRefusalDismissals,
+              title: attributionRefused
+                ? unattributedTitle(document?.path)
+                : markdownHeld
+                  ? heldTitle(document?.path)
+                  : bindingChanged
+                    ? "dohc skipped an earlier save"
+                    : "A change needs your review",
+              body,
+              detail: [
+                refusal.reason,
+                `Workspace: ${workspaceId}`,
+                `Object: ${document?.objectId ?? "unknown"}`,
+                `Lineage: ${document?.lineageClaimId ?? "unknown"}`,
+                ...(refusal.originId === null
+                  ? []
+                  : [`Origin: ${refusal.originId}:${refusal.originSeq}`]),
+              ].join("\n"),
+              target,
+              createdAtMs:
+                previous?.dismissedAtMs == null ? (previous?.createdAtMs ?? nowMs()) : nowMs(),
+              readAtMs:
+                withoutCoordinates(refusalCoordinates, previous?.refusalCoordinates ?? [])
+                  .length === 0
+                  ? (previous?.readAtMs ?? null)
+                  : null,
+              dismissedAtMs: null,
+            }),
+          );
         }
       }
       if (JSON.stringify(rows) === JSON.stringify(prior.rows)) return false;
@@ -803,9 +974,13 @@ export function createNoticeStore(deps: {
     // A session that changes while the notice is placed is read again.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        const to: NoticeRecipient | null = input.onlyHere ? null
-          : input.toWorkspaceOwner ? { toWorkspaceOwner: true }
-          : input.recipientUserId === undefined ? null : { recipientUserId: input.recipientUserId };
+        const to: NoticeRecipient | null = input.onlyHere
+          ? null
+          : input.toWorkspaceOwner
+            ? { toWorkspaceOwner: true }
+            : input.recipientUserId === undefined
+              ? null
+              : { recipientUserId: input.recipientUserId };
         return await postOnce(to, content, input.signal, input.onlyHere === true);
       } catch (error) {
         if (!(error instanceof SessionChanged)) throw error;
@@ -815,7 +990,12 @@ export function createNoticeStore(deps: {
   }
 
   // `to` is null for yourself.
-  async function postOnce(to: NoticeRecipient | null, content: NoticeContent, signal: AbortSignal | undefined, onlyHere: boolean): Promise<void> {
+  async function postOnce(
+    to: NoticeRecipient | null,
+    content: NoticeContent,
+    signal: AbortSignal | undefined,
+    onlyHere: boolean,
+  ): Promise<void> {
     // A notice kept only here never reads the session, so a sign-in cannot send it anywhere else.
     const session = onlyHere ? null : await deps.session();
     const reach = session?.reachFor(content.workspaceId) ?? null;
@@ -828,7 +1008,9 @@ export function createNoticeStore(deps: {
       originInstallId: deps.installId(),
     };
     // The owner's own computer names the workspace, so its owner is you.
-    const toSomeoneElse = to?.toWorkspaceOwner ? reach?.shareId !== undefined : to !== null && to.recipientUserId !== session?.account.userId;
+    const toSomeoneElse = to?.toWorkspaceOwner
+      ? reach?.shareId !== undefined
+      : to !== null && to.recipientUserId !== session?.account.userId;
     if (to !== null && toSomeoneElse) {
       if (!session || !reach) {
         throw new NoticeNotSentError(
@@ -847,7 +1029,8 @@ export function createNoticeStore(deps: {
       // A notice kept on this computer stays here.
       if (local.rows.some((row) => row.noticeId === content.noticeId)) return false;
       if (session && reach && file && !file.routesMissing) {
-        const known = file.rows.some((row) => row.noticeId === content.noticeId) ||
+        const known =
+          file.rows.some((row) => row.noticeId === content.noticeId) ||
           file.posts.some((post) => post.request.noticeId === content.noticeId);
         if (known) return false;
         // Copies, so a failed save leaves no post behind that a retry would
@@ -855,7 +1038,10 @@ export function createNoticeStore(deps: {
         const next: AccountFile = { ...file, posts: [...file.posts], marks: [...file.marks] };
         dropOldestUnsent(next);
         next.posts.push({
-          request: { ...reach, ...fields, recipientUserId: session.account.userId }, workspaceId: content.workspaceId, createdAtMs, sent: false,
+          request: { ...reach, ...fields, recipientUserId: session.account.userId },
+          workspaceId: content.workspaceId,
+          createdAtMs,
+          sent: false,
         });
         await saveAccount(session.account, next);
         return true;
@@ -874,7 +1060,9 @@ export function createNoticeStore(deps: {
   // any marks waiting on them. A skipped schedule's notice never goes: its
   // schedule's mark already moved past what it reports.
   function dropOldestUnsent(file: AccountFile): void {
-    const unsent = file.posts.filter((post) => !post.sent && post.request.kind !== "schedule-skipped");
+    const unsent = file.posts.filter(
+      (post) => !post.sent && post.request.kind !== "schedule-skipped",
+    );
     if (unsent.length < outboxPostLimit) return;
     const dropped = new Set(unsent.slice(0, unsent.length - outboxPostLimit + 1));
     const droppedIds = new Set([...dropped].map((post) => post.request.noticeId));
@@ -884,9 +1072,15 @@ export function createNoticeStore(deps: {
 
   // Sent at once rather than queued, so the caller learns whether the
   // relay accepted it.
-  async function postToAnotherPerson(session: NoticeSession, request: PostNoticeRequest, signal?: AbortSignal): Promise<void> {
+  async function postToAnotherPerson(
+    session: NoticeSession,
+    request: PostNoticeRequest,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (await locked(async () => (await loadAccount(session.account)).routesMissing)) {
-      throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
+      throw new NoticeNotSentError(
+        "Your server doesn't sync notices. Update the server, then try again.",
+      );
     }
     signal?.throwIfAborted();
     try {
@@ -896,11 +1090,15 @@ export function createNoticeStore(deps: {
       switch (error.reason) {
         case "routes-missing":
           await noteRoutesMissing(session);
-          throw new NoticeNotSentError("Your server doesn't sync notices. Update the server, then try again.");
+          throw new NoticeNotSentError(
+            "Your server doesn't sync notices. Update the server, then try again.",
+          );
         case "refused":
           throw new NoticeNotSentError("This person can't open what the notice points to.");
         case "rate-limited":
-          throw new NoticeNotSentError("Too many notices went to other people. Wait a minute, then try again.");
+          throw new NoticeNotSentError(
+            "Too many notices went to other people. Wait a minute, then try again.",
+          );
         case "list-full":
           throw new NoticeNotSentError("This person has too many unread notices to get this one.");
         case "invalid":
@@ -910,57 +1108,78 @@ export function createNoticeStore(deps: {
   }
 
   async function list(): Promise<{ account: string | null; notices: NoticeRow[] }> {
-    await refreshRefusals().catch(error => {
+    await refreshRefusals().catch((error) => {
       console.warn("[notices] could not refresh sync refusals", error);
     });
     const account = (await deps.session())?.account ?? null;
     return await locked(async () => {
       const local = await loadLocal();
       if (pruneLocal(local)) await saveLocal(local);
-      const rows = local.rows.filter((row) => row.dismissedAtMs === null).map((row): NoticeRow => ({
-        store: "local",
-        noticeId: row.noticeId,
-        kind: row.kind,
-        workspaceId: row.workspaceId,
-        recipientShareId: null,
-        senderKind: Object.hasOwn(NOTICE_KINDS, row.kind)
-          ? NOTICE_KINDS[row.kind as NoticeKind].senderKind
-          : null,
-        senderLabel: null,
-        title: row.title,
-        body: row.body,
-        ...(row.detail === undefined ? {} : { detail: row.detail }),
-        ...(row.refusalCoordinates === undefined ? {} : { refusalCoordinates: row.refusalCoordinates }),
-        target: row.target,
-        createdAtMs: row.createdAtMs,
-        readAtMs: row.readAtMs,
-        postedHere: true,
-      }));
+      const rows = local.rows
+        .filter((row) => row.dismissedAtMs === null)
+        .map((row): NoticeRow => ({
+          store: "local",
+          noticeId: row.noticeId,
+          kind: row.kind,
+          workspaceId: row.workspaceId,
+          recipientShareId: null,
+          senderKind: Object.hasOwn(NOTICE_KINDS, row.kind)
+            ? NOTICE_KINDS[row.kind as NoticeKind].senderKind
+            : null,
+          senderLabel: null,
+          title: row.title,
+          body: row.body,
+          ...(row.detail === undefined ? {} : { detail: row.detail }),
+          ...(row.refusalCoordinates === undefined
+            ? {}
+            : { refusalCoordinates: row.refusalCoordinates }),
+          target: row.target,
+          createdAtMs: row.createdAtMs,
+          readAtMs: row.readAtMs,
+          postedHere: true,
+        }));
       if (account) {
         const file = await loadAccount(account);
         if (pruneAccount(file)) await saveAccount(account, file);
         const marks = new Map(file.marks.map((waiting) => [waiting.noticeId, waiting]));
         const shown = (noticeId: string) => marks.get(noticeId)?.mark !== "dismissed";
-        const readAt = (noticeId: string, readAtMs: number | null) => readAtMs ?? marks.get(noticeId)?.atMs ?? null;
+        const readAt = (noticeId: string, readAtMs: number | null) =>
+          readAtMs ?? marks.get(noticeId)?.atMs ?? null;
         const pulled = new Set<string>();
         for (const row of file.rows) {
           pulled.add(row.noticeId);
           if (row.dismissedAtMs !== null || !shown(row.noticeId)) continue;
           rows.push({
-            store: "account", noticeId: row.noticeId, kind: row.kind, workspaceId: row.workspaceId,
-            recipientShareId: row.recipientShareId, senderKind: row.senderKind, senderLabel: row.senderLabel,
-            title: row.title, body: row.body, target: row.target, createdAtMs: row.createdAtMs,
+            store: "account",
+            noticeId: row.noticeId,
+            kind: row.kind,
+            workspaceId: row.workspaceId,
+            recipientShareId: row.recipientShareId,
+            senderKind: row.senderKind,
+            senderLabel: row.senderLabel,
+            title: row.title,
+            body: row.body,
+            target: row.target,
+            createdAtMs: row.createdAtMs,
             readAtMs: readAt(row.noticeId, row.readAtMs),
-            postedHere: row.senderUserId === account.userId && row.originInstallId === deps.installId(),
+            postedHere:
+              row.senderUserId === account.userId && row.originInstallId === deps.installId(),
           });
         }
         for (const { request, createdAtMs } of file.posts) {
           if (pulled.has(request.noticeId) || !shown(request.noticeId)) continue;
           rows.push({
-            store: "account", noticeId: request.noticeId, kind: request.kind,
-            workspaceId: request.workspaceId ?? null, recipientShareId: request.shareId ?? null,
-            senderKind: NOTICE_KINDS[request.kind].senderKind, senderLabel: null,
-            title: request.title, body: request.body, target: request.target, createdAtMs,
+            store: "account",
+            noticeId: request.noticeId,
+            kind: request.kind,
+            workspaceId: request.workspaceId ?? null,
+            recipientShareId: request.shareId ?? null,
+            senderKind: NOTICE_KINDS[request.kind].senderKind,
+            senderLabel: null,
+            title: request.title,
+            body: request.body,
+            target: request.target,
+            createdAtMs,
             readAtMs: readAt(request.noticeId, null),
             postedHere: request.originInstallId === deps.installId(),
           });
@@ -975,17 +1194,35 @@ export function createNoticeStore(deps: {
 
   // Marks every named notice in one write per list, so marking a whole list
   // read costs one save and one pass.
-  async function mark(refs: readonly NoticeRef[], mark: NoticeMark, account: string | null): Promise<void> {
+  async function mark(
+    refs: readonly NoticeRef[],
+    mark: NoticeMark,
+    account: string | null,
+  ): Promise<void> {
     const session = refs.some((ref) => ref.store === "account") ? await deps.session() : null;
     const changed = await locked(async () => {
-      const localRefs = new Map(refs.filter((ref) => ref.store === "local").map(ref => [ref.noticeId, ref]));
+      const localRefs = new Map(
+        refs.filter((ref) => ref.store === "local").map((ref) => [ref.noticeId, ref]),
+      );
       let localChanged = false;
       if (localRefs.size > 0) {
         const file = await loadLocal();
         // Once refusal work stops, a batch with a refusal dismissal fails before it changes any row.
-        if (refusalsStopped && mark === "dismissed" && file.rows.some(row => localRefs.has(row.noticeId) &&
-          row.dismissedAtMs === null && isRefusalNoticeKind(row.kind) && row.workspaceId)) {
-          throw new DOMException("dohc is closing. Dismiss this Notice after dohc opens again.", "AbortError");
+        if (
+          refusalsStopped &&
+          mark === "dismissed" &&
+          file.rows.some(
+            (row) =>
+              localRefs.has(row.noticeId) &&
+              row.dismissedAtMs === null &&
+              isRefusalNoticeKind(row.kind) &&
+              row.workspaceId,
+          )
+        ) {
+          throw new DOMException(
+            "dohc is closing. Dismiss this Notice after dohc opens again.",
+            "AbortError",
+          );
         }
         for (const row of file.rows) {
           const ref = localRefs.get(row.noticeId);
@@ -993,10 +1230,13 @@ export function createNoticeStore(deps: {
           if (row.dismissedAtMs !== null || (mark === "read" && row.readAtMs !== null)) continue;
           if (mark === "dismissed" && isRefusalNoticeKind(row.kind) && row.workspaceId) {
             const shown = ref.refusalCoordinates;
-            if (!shown?.length || !deps.dismissRefusal) throw new Error("The engine could not dismiss this Notice. Try again.");
+            if (!shown?.length || !deps.dismissRefusal)
+              throw new Error("The engine could not dismiss this Notice. Try again.");
             await deps.dismissRefusal(row.workspaceId, row.noticeId, shown);
-            row.pendingRefusalDismissals = [...(row.pendingRefusalDismissals ?? []),
-              ...withoutCoordinates(shown, row.pendingRefusalDismissals ?? [])];
+            row.pendingRefusalDismissals = [
+              ...(row.pendingRefusalDismissals ?? []),
+              ...withoutCoordinates(shown, row.pendingRefusalDismissals ?? []),
+            ];
             row.refusalCoordinates = withoutCoordinates(row.refusalCoordinates ?? [], shown);
             if (row.refusalCoordinates.length === 0) row.dismissedAtMs = nowMs();
             localChanged = true;
@@ -1021,7 +1261,12 @@ export function createNoticeStore(deps: {
           if (ref.store !== "account") continue;
           const row = rows.get(ref.noticeId);
           const post = posts.get(ref.noticeId);
-          if ((!row && !post) || row?.dismissedAtMs != null || (mark === "read" && row?.readAtMs != null)) continue;
+          if (
+            (!row && !post) ||
+            row?.dismissedAtMs != null ||
+            (mark === "read" && row?.readAtMs != null)
+          )
+            continue;
           if (!queueMark(file, ref.noticeId, mark)) continue;
           accountChanged = true;
           // A dismissed post that has not left never needs to. The mark
@@ -1069,9 +1314,14 @@ export function createNoticeStore(deps: {
         // "first" again when it asks again.
         installId: deps.installId(),
       });
-      dismissed = ((await response.json().catch(() => null)) as { dismissed?: unknown } | null)?.dismissed;
+      dismissed = ((await response.json().catch(() => null)) as { dismissed?: unknown } | null)
+        ?.dismissed;
     } catch (error) {
-      if (ref.noticeId.startsWith(AUTOMATION_WAKE_PREFIX) && error instanceof RelayRefusal && error.reason === "refused") {
+      if (
+        ref.noticeId.startsWith(AUTOMATION_WAKE_PREFIX) &&
+        error instanceof RelayRefusal &&
+        error.reason === "refused"
+      ) {
         dismissed = [];
       } else {
         console.warn("[notices] a dismissal for Run now could not be sent", error);
@@ -1114,7 +1364,10 @@ export function createNoticeStore(deps: {
           post.withdrawn = true;
           touched = true;
         }
-        if ((post || file.rows.some((candidate) => candidate.noticeId === noticeId)) && queueMark(file, noticeId, "dismissed", true)) {
+        if (
+          (post || file.rows.some((candidate) => candidate.noticeId === noticeId)) &&
+          queueMark(file, noticeId, "dismissed", true)
+        ) {
           touched = true;
         }
         if (touched) await saveAccount(session.account, file);
@@ -1126,22 +1379,43 @@ export function createNoticeStore(deps: {
     void sync();
   }
 
-  async function sentFailure(run: { workspaceId: string; automationId: string; claimId: string }): Promise<SentFailure | null> {
+  async function sentFailure(run: {
+    workspaceId: string;
+    automationId: string;
+    claimId: string;
+  }): Promise<SentFailure | null> {
     const session = await deps.session();
     if (!session) return null;
-    const names = (kind: string, workspaceId: string | null | undefined, target: NoticeTarget | null) =>
-      kind === "automation-failed" && workspaceId === run.workspaceId &&
-      target?.automation === run.automationId && target.run === run.claimId;
+    const names = (
+      kind: string,
+      workspaceId: string | null | undefined,
+      target: NoticeTarget | null,
+    ) =>
+      kind === "automation-failed" &&
+      workspaceId === run.workspaceId &&
+      target?.automation === run.automationId &&
+      target.run === run.claimId;
     return await locked(async () => {
       const file = await loadAccount(session.account);
       // An account that signed out meanwhile names no computer for this one.
       if (!session.isCurrent()) return null;
-      const row = file.rows.find((candidate) =>
-        candidate.senderUserId === session.account.userId && names(candidate.kind, candidate.workspaceId, candidate.target));
+      const row = file.rows.find(
+        (candidate) =>
+          candidate.senderUserId === session.account.userId &&
+          names(candidate.kind, candidate.workspaceId, candidate.target),
+      );
       if (row) return { title: row.title, body: row.body, originInstallId: row.originInstallId };
       // Your own post, not pulled back yet.
-      const post = file.posts.find(({ request }) => names(request.kind, request.workspaceId, request.target));
-      return post ? { title: post.request.title, body: post.request.body, originInstallId: post.request.originInstallId } : null;
+      const post = file.posts.find(({ request }) =>
+        names(request.kind, request.workspaceId, request.target),
+      );
+      return post
+        ? {
+            title: post.request.title,
+            body: post.request.body,
+            originInstallId: post.request.originInstallId,
+          }
+        : null;
     });
   }
 
@@ -1152,20 +1426,47 @@ export function createNoticeStore(deps: {
       const file = await loadAccount(session.account);
       if (!session.isCurrent()) return [];
       return file.rows.flatMap((row) => {
-        if (row.kind !== "automation-wake" || !row.noticeId.startsWith(AUTOMATION_WAKE_PREFIX) ||
-          row.originInstallId !== "server" || row.senderKind !== "automation" ||
-          row.senderUserId !== session.account.userId || row.workspaceId === null ||
-          row.recipientShareId !== null || row.dismissedAtMs !== null || row.removed || !row.wake ||
-          file.marks.some((mark) => mark.noticeId === row.noticeId && mark.mark === "dismissed")) return [];
+        if (
+          row.kind !== "automation-wake" ||
+          !row.noticeId.startsWith(AUTOMATION_WAKE_PREFIX) ||
+          row.originInstallId !== "server" ||
+          row.senderKind !== "automation" ||
+          row.senderUserId !== session.account.userId ||
+          row.workspaceId === null ||
+          row.recipientShareId !== null ||
+          row.dismissedAtMs !== null ||
+          row.removed ||
+          !row.wake ||
+          file.marks.some((mark) => mark.noticeId === row.noticeId && mark.mark === "dismissed")
+        )
+          return [];
         const reach = session.reachFor(row.workspaceId);
         return session.isCurrent() && reach?.workspaceId === row.workspaceId
-          ? [{ account: session.account.key, workspaceId: row.workspaceId, noticeId: row.noticeId, wake: row.wake }]
+          ? [
+              {
+                account: session.account.key,
+                workspaceId: row.workspaceId,
+                noticeId: row.noticeId,
+                wake: row.wake,
+              },
+            ]
           : [];
       });
     });
   }
 
-  return { postNotice, list, mark, sync, dismissFirst, withdraw, refreshRefusals, stopWorkspaceRefusals, sentFailure, pendingAutomationWakes };
+  return {
+    postNotice,
+    list,
+    mark,
+    sync,
+    dismissFirst,
+    withdraw,
+    refreshRefusals,
+    stopWorkspaceRefusals,
+    sentFailure,
+    pendingAutomationWakes,
+  };
 }
 
 // Folds one page into the stored rows. A page that starts the list over
@@ -1186,7 +1487,9 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
       continue;
     }
     const row = parsed.data;
-    file.posts = file.posts.filter((post) => !(post.sent && post.request.noticeId === row.noticeId));
+    file.posts = file.posts.filter(
+      (post) => !(post.sent && post.request.noticeId === row.noticeId),
+    );
     const index = file.rows.findIndex((existing) => existing.noticeId === row.noticeId);
     const existing = file.rows[index];
     if (row.removed) {
@@ -1195,7 +1498,11 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
       continue;
     }
     const next = existing
-      ? { ...row, readAtMs: row.readAtMs ?? existing.readAtMs, dismissedAtMs: row.dismissedAtMs ?? existing.dismissedAtMs }
+      ? {
+          ...row,
+          readAtMs: row.readAtMs ?? existing.readAtMs,
+          dismissedAtMs: row.dismissedAtMs ?? existing.dismissedAtMs,
+        }
       : row;
     if (existing) file.rows[index] = next;
     else file.rows.push(next);
@@ -1209,22 +1516,35 @@ function merge(file: AccountFile, page: z.infer<typeof RelayPage>): boolean {
 // reading, unread rows 180 days after arriving. Past the limit, read and
 // dismissed rows go first, oldest first, then the oldest unread. Returns
 // `rows` itself when nothing goes.
-function retained<Row extends { kind?: string; createdAtMs: number; readAtMs: number | null; dismissedAtMs: number | null }>(
-  rows: Row[],
-  limit: number,
-  nowMs: number,
-): Row[] {
+function retained<
+  Row extends {
+    kind?: string;
+    createdAtMs: number;
+    readAtMs: number | null;
+    dismissedAtMs: number | null;
+  },
+>(rows: Row[], limit: number, nowMs: number): Row[] {
   const parked = (row: Row) => row.kind === "automation-wake" && row.dismissedAtMs === null;
-  const live = rows.filter((row) => parked(row) || (
-    row.dismissedAtMs !== null ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
-    : row.readAtMs !== null ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
-    : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs));
+  const live = rows.filter(
+    (row) =>
+      parked(row) ||
+      (row.dismissedAtMs !== null
+        ? row.dismissedAtMs + NOTICE_DISMISSED_RETENTION_MS > nowMs
+        : row.readAtMs !== null
+          ? row.readAtMs + NOTICE_READ_RETENTION_MS > nowMs
+          : row.createdAtMs + NOTICE_UNREAD_RETENTION_MS > nowMs),
+  );
   if (live.length === rows.length && rows.length <= limit) return rows;
   if (live.length <= limit) return live;
-  const removed = new Set(live.filter((row) => !parked(row))
-    .sort((left, right) =>
-      Number(left.readAtMs === null) - Number(right.readAtMs === null) ||
-      left.createdAtMs - right.createdAtMs)
-    .slice(0, live.length - limit));
+  const removed = new Set(
+    live
+      .filter((row) => !parked(row))
+      .sort(
+        (left, right) =>
+          Number(left.readAtMs === null) - Number(right.readAtMs === null) ||
+          left.createdAtMs - right.createdAtMs,
+      )
+      .slice(0, live.length - limit),
+  );
   return live.filter((row) => !removed.has(row));
 }

@@ -27,9 +27,17 @@ export function RecordButtonsRow(props: {
   onRecord?: (record: { workspaceId: string; path: string; id: string } | null) => void;
 }) {
   const { workspaceId, path } = props;
-  const [found, setFound] = useState<{ record: CollectionRecord; collectionPath: string; fields: string[] } | null>(null);
+  const [found, setFound] = useState<{
+    record: CollectionRecord;
+    collectionPath: string;
+    fields: string[];
+  } | null>(null);
   const buttons = useAutomationButtons({
-    workspaceId, of: found === null || found.fields.length === 0 ? null : { collectionPath: found.collectionPath }, onError: props.onError, onNotice: props.onNotice,
+    workspaceId,
+    of:
+      found === null || found.fields.length === 0 ? null : { collectionPath: found.collectionPath },
+    onError: props.onError,
+    onNotice: props.onNotice,
   });
   const requests = useRef(0);
   // Rises when the files that decide what the buttons do change.
@@ -47,7 +55,15 @@ export function RecordButtonsRow(props: {
         const result = await bridge().listRecordButtons({ workspaceId, path });
         // A slower answer for an earlier read, or another file, never lands.
         if (!alive || request !== requests.current) return;
-        setFound(result.record === null ? null : { record: result.record, collectionPath: result.collectionPath, fields: result.fields });
+        setFound(
+          result.record === null
+            ? null
+            : {
+                record: result.record,
+                collectionPath: result.collectionPath,
+                fields: result.fields,
+              },
+        );
         tell.current?.(result.record === null ? null : { workspaceId, path, id: result.record.id });
       } catch (error) {
         if (!alive || request !== requests.current) return;
@@ -96,15 +112,29 @@ export function RecordButtonsRow(props: {
     // In the page's column, as the title and properties are.
     <div data-testid="record-buttons" className={`${TOPMATTER_ROW} pb-2`}>
       <div className={`${TOPMATTER_MEASURE} flex flex-wrap items-center gap-1.5`}>
-        {buttons === null ? null : found.fields.map((field) => (
-          <RecordButton key={field} buttons={buttons} field={field} recordId={found.record.id} recordLabel={label} />
-        ))}
+        {buttons === null
+          ? null
+          : found.fields.map((field) => (
+              <RecordButton
+                key={field}
+                buttons={buttons}
+                field={field}
+                recordId={found.record.id}
+                recordLabel={label}
+              />
+            ))}
         <SecondaryButton
           size="compact"
           data-testid="record-history-open"
           aria-haspopup="dialog"
           className="ml-auto inline-flex items-center gap-1.5"
-          onClick={() => props.onOpenHistory({ collectionPath: found.collectionPath, recordId: found.record.id, recordName: label })}
+          onClick={() =>
+            props.onOpenHistory({
+              collectionPath: found.collectionPath,
+              recordId: found.record.id,
+              recordName: label,
+            })
+          }
         >
           <HistoryIcon size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
           History

@@ -17,11 +17,16 @@ const STATUS_WORD: Record<ChatWorkStatus, string> = {
 function StatusMark(props: { status: ChatWorkStatus }) {
   switch (props.status) {
     // A running agent's dot.
-    case "working": return <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-agent" />;
-    case "waiting": return <Hourglass size={12} strokeWidth={2} aria-hidden />;
-    case "done": return <CircleCheck size={12} strokeWidth={2} aria-hidden />;
-    case "failed": return <CircleAlert size={12} strokeWidth={2} aria-hidden />;
-    case "stopped": return <CircleStop size={12} strokeWidth={2} aria-hidden />;
+    case "working":
+      return <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-agent" />;
+    case "waiting":
+      return <Hourglass size={12} strokeWidth={2} aria-hidden />;
+    case "done":
+      return <CircleCheck size={12} strokeWidth={2} aria-hidden />;
+    case "failed":
+      return <CircleAlert size={12} strokeWidth={2} aria-hidden />;
+    case "stopped":
+      return <CircleStop size={12} strokeWidth={2} aria-hidden />;
   }
 }
 
@@ -67,7 +72,9 @@ export function WorkStatus(props: {
         <StatusMark status={work.status} />
         {STATUS_WORD[work.status]}
         {reportedBy && props.showReporter ? (
-          <span data-testid={`${props.testIdPrefix}-work-reporter`} className="text-subtle">{reportedBy.name}</span>
+          <span data-testid={`${props.testIdPrefix}-work-reporter`} className="text-subtle">
+            {reportedBy.name}
+          </span>
         ) : null}
         <span className="sr-only">. {reported}</span>
       </span>

@@ -1,4 +1,8 @@
-import { isAutomationControlsTarget, SERVER_HOLD_NOTICE_PREFIX, SERVER_RUN_FAILED_NOTICE_PREFIX } from "@dohc/workspace-contracts/relay";
+import {
+  isAutomationControlsTarget,
+  SERVER_HOLD_NOTICE_PREFIX,
+  SERVER_RUN_FAILED_NOTICE_PREFIX,
+} from "@dohc/workspace-contracts/relay";
 import type { NoticeRow, WorkspaceSummary } from "../ipc/bridgeContract";
 
 // Where Open takes a notice sent to you, on this computer.
@@ -29,7 +33,8 @@ export function sentNoticePlace(
   currentWorkspaceId: string,
 ): SentNoticePlace {
   if (notice.target === null) return { kind: "access-ended" };
-  if (notice.target.settings === "agents") return { kind: "agents-settings", agent: notice.target.agent ?? null };
+  if (notice.target.settings === "agents")
+    return { kind: "agents-settings", agent: notice.target.agent ?? null };
   const path = notice.target.path ?? null;
   if (notice.workspaceId !== null) {
     const workspace = workspaces.find((candidate) => candidate.workspaceId === notice.workspaceId);
@@ -44,19 +49,34 @@ export function sentNoticePlace(
   // Only a separate Edit view can switch an automation. A shared-with-me
   // folder is read-only, so an Edit share there opens as its own workspace.
   if (isAutomationControlsTarget(notice.target)) {
-    const editView = ordered.find(({ shareView }) => shareView?.shareId === shareId && shareView.access === "edit" &&
-      !shareView.ended && !shareView.damaged);
+    const editView = ordered.find(
+      ({ shareView }) =>
+        shareView?.shareId === shareId &&
+        shareView.access === "edit" &&
+        !shareView.ended &&
+        !shareView.damaged,
+    );
     if (editView) return { kind: "workspace", workspace: editView, path, mount: null };
-    if (ordered.some(({ shareMounts }) => shareMounts?.some((mount) => mount.shareId === shareId && mount.access === "edit"))) {
+    if (
+      ordered.some(({ shareMounts }) =>
+        shareMounts?.some((mount) => mount.shareId === shareId && mount.access === "edit"),
+      )
+    ) {
       return { kind: "share", shareId, path };
     }
   }
   for (const workspace of ordered) {
-    if (workspace.shareView?.shareId === shareId) return { kind: "workspace", workspace, path, mount: null };
+    if (workspace.shareView?.shareId === shareId)
+      return { kind: "workspace", workspace, path, mount: null };
     const mount = workspace.shareMounts?.find((candidate) => candidate.shareId === shareId);
     if (mount) {
       const folder = `shared-with-me/${mount.label}`;
-      return { kind: "workspace", workspace, path: path === null ? null : `${folder}/${path}`, mount: mount.label };
+      return {
+        kind: "workspace",
+        workspace,
+        path: path === null ? null : `${folder}/${path}`,
+        mount: mount.label,
+      };
     }
   }
   return { kind: "share", shareId, path };
@@ -81,7 +101,8 @@ export function serverRunOfNotice(
   const claimId = notice.target?.run;
   if (notice.store !== "account" || notice.kind !== "automation-failed") return null;
   if (!notice.noticeId.startsWith(SERVER_RUN_FAILED_NOTICE_PREFIX)) return null;
-  if (notice.workspaceId === null || automationId === undefined || claimId === undefined) return null;
+  if (notice.workspaceId === null || automationId === undefined || claimId === undefined)
+    return null;
   return { workspaceId: notice.workspaceId, automationId, claimId };
 }
 
@@ -89,10 +110,17 @@ export function serverRunOfNotice(
  * The server's notices about steps it holds in this workspace, as one key
  * that changes when one arrives or goes, so the holds are read again then.
  */
-export function serverHoldNoticesKey(notices: readonly NoticeRow[] | undefined, workspaceId: string): string {
+export function serverHoldNoticesKey(
+  notices: readonly NoticeRow[] | undefined,
+  workspaceId: string,
+): string {
   return (notices ?? [])
-    .filter((notice) => notice.store === "account" && notice.workspaceId === workspaceId &&
-      notice.noticeId.startsWith(SERVER_HOLD_NOTICE_PREFIX))
+    .filter(
+      (notice) =>
+        notice.store === "account" &&
+        notice.workspaceId === workspaceId &&
+        notice.noticeId.startsWith(SERVER_HOLD_NOTICE_PREFIX),
+    )
     .map((notice) => notice.noticeId)
     .sort()
     .join("\n");

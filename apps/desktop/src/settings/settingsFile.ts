@@ -9,10 +9,12 @@ import { z } from "zod";
 export const MAX_IGNORED_SETTINGS = 50;
 const MAX_IGNORED_KEY_CHARS = 200;
 
-export const IgnoredSetting = z.object({
-  key: z.string().max(MAX_IGNORED_KEY_CHARS),
-  reason: z.enum(["unknown", "invalid"]),
-}).strict();
+export const IgnoredSetting = z
+  .object({
+    key: z.string().max(MAX_IGNORED_KEY_CHARS),
+    reason: z.enum(["unknown", "invalid"]),
+  })
+  .strict();
 export type IgnoredSetting = z.infer<typeof IgnoredSetting>;
 
 export const IgnoredSettings = z.array(IgnoredSetting).min(1).max(MAX_IGNORED_SETTINGS);
@@ -61,7 +63,7 @@ function unwrapped(schema: z.ZodType): z.ZodType {
 function childSchema(schema: z.ZodType, key: string): z.ZodType | undefined {
   const inner = unwrapped(schema);
   if (inner instanceof z.ZodObject) {
-    return Object.hasOwn(inner.shape, key) ? inner.shape[key] as z.ZodType : undefined;
+    return Object.hasOwn(inner.shape, key) ? (inner.shape[key] as z.ZodType) : undefined;
   }
   if (inner instanceof z.ZodRecord) return inner.valueType as z.ZodType;
   return undefined;
@@ -92,9 +94,7 @@ export function settingKinds(
 
 function ignoredKey(path: SettingsPath): string {
   const key = path.join(".");
-  return key.length > MAX_IGNORED_KEY_CHARS
-    ? `${key.slice(0, MAX_IGNORED_KEY_CHARS - 1)}…`
-    : key;
+  return key.length > MAX_IGNORED_KEY_CHARS ? `${key.slice(0, MAX_IGNORED_KEY_CHARS - 1)}…` : key;
 }
 
 /**

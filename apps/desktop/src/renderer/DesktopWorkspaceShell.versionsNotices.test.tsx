@@ -25,8 +25,21 @@ import {
 type Read = "lastChanges" | "counts" | "conflicts";
 type Step = "ok" | "fail" | "hold";
 
-const MAIN = { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false };
-const DRAFT = { id: "draft", name: "Draft", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true, madeFromVersionId: "main" };
+const MAIN = {
+  id: "main",
+  name: "Main",
+  kind: "main" as const,
+  createdAtMs: 0,
+  canMergeIntoMain: false,
+};
+const DRAFT = {
+  id: "draft",
+  name: "Draft",
+  kind: "named" as const,
+  createdAtMs: 1,
+  canMergeIntoMain: true,
+  madeFromVersionId: "main",
+};
 const BROKE: Record<Read, string> = {
   lastChanges: "last changes broke",
   counts: "count broke",
@@ -34,9 +47,15 @@ const BROKE: Record<Read, string> = {
 };
 
 function versionsShell() {
-  const bridge = makeBridge(Promise.resolve(storedStateWithTabs([VERSIONS_TAB_PATH], VERSIONS_TAB_PATH)));
+  const bridge = makeBridge(
+    Promise.resolve(storedStateWithTabs([VERSIONS_TAB_PATH], VERSIONS_TAB_PATH)),
+  );
   const plan: Record<Read, Step[]> = { lastChanges: [], counts: [], conflicts: [] };
-  const held: Record<Read, Array<ReturnType<typeof deferred<never>>>> = { lastChanges: [], counts: [], conflicts: [] };
+  const held: Record<Read, Array<ReturnType<typeof deferred<never>>>> = {
+    lastChanges: [],
+    counts: [],
+    conflicts: [],
+  };
   const calls: Record<Read, number> = { lastChanges: 0, counts: 0, conflicts: 0 };
   // Each answer that settles at once. A held answer is not here.
   const answered: Array<Promise<unknown>> = [];
@@ -54,15 +73,28 @@ function versionsShell() {
     return wait.promise;
   };
   Object.assign(bridge, {
-    listWorkspaceVersions: vi.fn(async () => ({ versions: [MAIN, DRAFT], activeVersionId: "main", ...historyPageFields })),
-    listVersionLastChanges: vi.fn(() => answer("lastChanges", {
-      versions: [{ versionId: "main", lastChange: null }, { versionId: "draft", lastChange: null }],
+    listWorkspaceVersions: vi.fn(async () => ({
+      versions: [MAIN, DRAFT],
+      activeVersionId: "main",
+      ...historyPageFields,
     })),
+    listVersionLastChanges: vi.fn(() =>
+      answer("lastChanges", {
+        versions: [
+          { versionId: "main", lastChange: null },
+          { versionId: "draft", lastChange: null },
+        ],
+      }),
+    ),
     countWorkspaceVersionChanges: vi.fn(() => answer("counts", { count: 2 })),
     countWorkspaceVersionConflicts: vi.fn(() => answer("conflicts", { versions: [], more: false })),
     // Each refresh finds a newer moment, so the page reads its history again.
     listEngineMoments: vi.fn(async () => ({
-      moments: [], nextCursor: null, latestMomentOrder: (moment += 1), activeVersionId: "main", ...historyPageFields,
+      moments: [],
+      nextCursor: null,
+      latestMomentOrder: (moment += 1),
+      activeVersionId: "main",
+      ...historyPageFields,
     })),
   });
   vi.stubGlobal("dohcDesktop", bridge);
@@ -90,27 +122,38 @@ function versionsShell() {
   };
 }
 
-const READ_WORDS = /dohc could not (read when each version|count the files|read which merges|finish loading Versions)/;
+const READ_WORDS =
+  /dohc could not (read when each version|count the files|read which merges|finish loading Versions)/;
 
 // Each toast for a Versions read: its whole text and its buttons.
 function toasts() {
-  return screen.queryAllByTestId("workspace-shell-error")
+  return screen
+    .queryAllByTestId("workspace-shell-error")
     .filter((toast) => READ_WORDS.test(toast.textContent ?? ""))
     .map((toast) => ({
       text: toast.textContent,
-      buttons: within(toast).queryAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent),
+      buttons: within(toast)
+        .queryAllByRole("button")
+        .map((button) => button.getAttribute("aria-label") ?? button.textContent),
     }));
 }
 
 // Each Notices row for a Versions read: its text, its buttons, and its unread mark.
 async function rows(user: ReturnType<typeof userEvent.setup>) {
-  if (screen.queryByTestId("notice-center") === null) await user.click(screen.getByTestId("notice-center-toggle"));
+  if (screen.queryByTestId("notice-center") === null)
+    await user.click(screen.getByTestId("notice-center-toggle"));
   const panel = await screen.findByTestId("notice-center");
   const found = [...panel.querySelectorAll<HTMLElement>("[data-testid^='notice-shell-error-']")]
-    .filter((row) => /^notice-shell-error-\d+$/.test(row.dataset.testid ?? "") && READ_WORDS.test(row.textContent ?? ""))
+    .filter(
+      (row) =>
+        /^notice-shell-error-\d+$/.test(row.dataset.testid ?? "") &&
+        READ_WORDS.test(row.textContent ?? ""),
+    )
     .map((row) => ({
       text: row.textContent,
-      buttons: within(row).queryAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent),
+      buttons: within(row)
+        .queryAllByRole("button")
+        .map((button) => button.getAttribute("aria-label") ?? button.textContent),
       unread: within(row).queryByTestId(`${row.dataset.testid}-unread`) !== null,
     }));
   await user.click(screen.getByTestId("notice-center-toggle"));
@@ -125,11 +168,17 @@ async function opened() {
 
 // Waits for the page to ask for these reads, then for every answer given to
 // reach it and for what it did with them.
-async function settled(shell: ReturnType<typeof versionsShell>, counts: Partial<Record<Read, number>>) {
+async function settled(
+  shell: ReturnType<typeof versionsShell>,
+  counts: Partial<Record<Read, number>>,
+) {
   await waitFor(() => {
-    for (const [read, count] of Object.entries(counts)) expect(shell.calls[read as Read]).toBe(count);
+    for (const [read, count] of Object.entries(counts))
+      expect(shell.calls[read as Read]).toBe(count);
   });
-  await act(async () => { await Promise.allSettled(shell.answered); });
+  await act(async () => {
+    await Promise.allSettled(shell.answered);
+  });
 }
 
 // History grows, so the page reads when each version last changed and its
@@ -145,15 +194,21 @@ async function look(user: ReturnType<typeof userEvent.setup>) {
 }
 
 function toast(): HTMLElement {
-  const [found] = screen.getAllByTestId("workspace-shell-error").filter((shown) => READ_WORDS.test(shown.textContent ?? ""));
+  const [found] = screen
+    .getAllByTestId("workspace-shell-error")
+    .filter((shown) => READ_WORDS.test(shown.textContent ?? ""));
   return found!;
 }
 
 async function versionsRow(user: ReturnType<typeof userEvent.setup>): Promise<HTMLElement> {
-  if (screen.queryByTestId("notice-center") === null) await user.click(screen.getByTestId("notice-center-toggle"));
+  if (screen.queryByTestId("notice-center") === null)
+    await user.click(screen.getByTestId("notice-center-toggle"));
   const panel = await screen.findByTestId("notice-center");
-  return [...panel.querySelectorAll<HTMLElement>("[data-testid^='notice-shell-error-']")]
-    .find((row) => /^notice-shell-error-\d+$/.test(row.dataset.testid ?? "") && READ_WORDS.test(row.textContent ?? ""))!;
+  return [...panel.querySelectorAll<HTMLElement>("[data-testid^='notice-shell-error-']")].find(
+    (row) =>
+      /^notice-shell-error-\d+$/.test(row.dataset.testid ?? "") &&
+      READ_WORDS.test(row.textContent ?? ""),
+  )!;
 }
 
 describe("the Versions page's read notices, as a person sees them", () => {
@@ -249,7 +304,9 @@ describe("the Versions page's read notices, as a person sees them", () => {
         "toasts": [],
       }
     `);
-    await user.click(within(await versionsRow(user)).getByRole("button", { name: "Dismiss notice" }));
+    await user.click(
+      within(await versionsRow(user)).getByRole("button", { name: "Dismiss notice" }),
+    );
     await user.click(screen.getByTestId("notice-center-toggle"));
     expect(await look(user)).toMatchInlineSnapshot(`
       {
@@ -292,7 +349,9 @@ describe("the Versions page's read notices, as a person sees them", () => {
     const user = userEvent.setup();
     await opened();
     await settled(shell, { lastChanges: 1, conflicts: 1, counts: 1 });
-    await user.click(within(await versionsRow(user)).getByRole("button", { name: "Dismiss notice" }));
+    await user.click(
+      within(await versionsRow(user)).getByRole("button", { name: "Dismiss notice" }),
+    );
     await user.click(screen.getByTestId("notice-center-toggle"));
     await historyGrows(shell);
     expect(await look(user)).toMatchInlineSnapshot(`
@@ -600,7 +659,11 @@ describe("the Versions page's read notices, as a person sees them", () => {
         "toasts": [],
       }
     `);
-    await user.click(within(screen.getByTestId("editor-group-primary")).getByRole("button", { name: "Close Versions" }));
+    await user.click(
+      within(screen.getByTestId("editor-group-primary")).getByRole("button", {
+        name: "Close Versions",
+      }),
+    );
     await waitFor(() => expect(screen.queryByTestId("versions-page")).toBeNull());
     await act(async () => {
       shell.held.conflicts[0]!.reject(new Error(BROKE.conflicts));
@@ -620,7 +683,11 @@ describe("the Versions page's read notices, as a person sees them", () => {
     const user = userEvent.setup();
     await opened();
     await settled(shell, { lastChanges: 1, conflicts: 1, counts: 1 });
-    await user.click(within(screen.getByTestId("editor-group-primary")).getByRole("button", { name: "Close Versions" }));
+    await user.click(
+      within(screen.getByTestId("editor-group-primary")).getByRole("button", {
+        name: "Close Versions",
+      }),
+    );
     await waitFor(() => expect(screen.queryByTestId("versions-page")).toBeNull());
     expect(await look(user)).toMatchInlineSnapshot(`
       {
@@ -656,7 +723,9 @@ describe("the Versions page's read notices, as a person sees them", () => {
   it("mark read fails", async () => {
     const shell = versionsShell();
     // Main would refuse to save a read. A read of this row is this window's own.
-    const markNotices = vi.fn(async () => { throw new Error("could not save the read"); });
+    const markNotices = vi.fn(async () => {
+      throw new Error("could not save the read");
+    });
     Object.assign(shell.bridge, { markNotices });
     shell.plan.lastChanges.push("fail", "fail", "fail");
     const user = userEvent.setup();

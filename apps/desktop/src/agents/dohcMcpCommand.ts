@@ -9,9 +9,7 @@ import { dirname, join, resolve } from "node:path";
  * its environment gets treated as an AppImage with no stable copy, and MCP
  * becomes wrongly unavailable even though its ordinary resources/cli-bin
  * is perfectly stable. */
-export function isAppImageBoot(
-  env: Record<string, string | undefined> = process.env,
-): boolean {
+export function isAppImageBoot(env: Record<string, string | undefined> = process.env): boolean {
   return Boolean(env.APPIMAGE);
 }
 
@@ -63,8 +61,5 @@ export function resolveDohcMcpCommand(input: {
   } else {
     cliBinDir = resolve(resourcesPath, "cli-bin");
   }
-  return join(
-    cliBinDir,
-    platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp",
-  );
+  return join(cliBinDir, platform === "win32" ? "dohc-mcp.cmd" : "dohc-mcp");
 }

@@ -14,10 +14,7 @@ import {
   WorkspaceDaemonRequester,
 } from "../live/daemonLiveAdapter";
 import type { AgentAuthor } from "../versioned/versionedWireContract";
-import {
-  WORKSPACE_METHOD,
-  decodeWorkspaceResult,
-} from "../workspace/workspaceWireContract";
+import { WORKSPACE_METHOD, decodeWorkspaceResult } from "../workspace/workspaceWireContract";
 import type { Event, WorkspaceHandle } from "../protocol";
 import { YdocOpenTimedOutError } from "../ydoc/ydocLiveAdapter";
 import {
@@ -32,10 +29,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-  EngineDaemonUnavailableError,
-  type EngineDaemonClient,
-} from "./engineDaemonLifecycle";
+import { EngineDaemonUnavailableError, type EngineDaemonClient } from "./engineDaemonLifecycle";
 import { inEngineRun, insideEngineRun } from "./engineRunScope";
 
 export interface EngineWorkspace {
@@ -81,10 +75,7 @@ type StoreBusyRetryState = { deadline?: number; attempts: number };
 
 class InitialCaptureBindingChangedError extends Error {}
 
-function isInitialCaptureWake(
-  event: Event,
-  workspaceId: string,
-): boolean {
+function isInitialCaptureWake(event: Event, workspaceId: string): boolean {
   if (!INITIAL_CAPTURE_WAKE_EVENTS.has(event.name)) return false;
   if (typeof event.payload !== "object" || event.payload === null) return false;
   return (event.payload as { workspaceId?: unknown }).workspaceId === workspaceId;
@@ -318,10 +309,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
 }
 
 function requiresReconnect(error: unknown): boolean {
-  return (
-    error instanceof DaemonRefusalError &&
-    error.disposition === "afterReconnect"
-  );
+  return error instanceof DaemonRefusalError && error.disposition === "afterReconnect";
 }
 
 // The daemon's own "retry, but wait first". It raises this for
@@ -330,9 +318,7 @@ function requiresReconnect(error: unknown): boolean {
 // this file deadlines at 2 s — so the open ladder meets it routinely, and
 // must both wait and count it against the budget.
 function requiresBackoff(error: unknown): boolean {
-  return (
-    error instanceof DaemonRefusalError && error.disposition === "afterBackoff"
-  );
+  return error instanceof DaemonRefusalError && error.disposition === "afterBackoff";
 }
 
 function isTransportError(error: unknown): boolean {
@@ -459,8 +445,7 @@ export class EngineWorkspaceSessions {
     options: EngineWorkspaceSessionsOptions = {},
   ) {
     this.onOpened = options.onOpened;
-    this.transportRebindAttempts =
-      options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
+    this.transportRebindAttempts = options.transportRebindAttempts ?? TRANSPORT_REBIND_ATTEMPTS;
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? (() => performance.now());
     // `??` alone would accept 0, a negative, NaN or Infinity — an exported
@@ -471,9 +456,7 @@ export class EngineWorkspaceSessions {
     const deadline = options.workspaceOpenDeadlineMs;
     if (
       deadline !== undefined &&
-      (!Number.isInteger(deadline) ||
-        deadline <= 0 ||
-        deadline > MAX_TIMER_DELAY_MS)
+      (!Number.isInteger(deadline) || deadline <= 0 || deadline > MAX_TIMER_DELAY_MS)
     ) {
       // Integer, not merely finite: the protocol declares deadlineMs as uint32
       // and the Rust wire field is a u32, so 12.5 would ship an invalid envelope
@@ -507,15 +490,18 @@ export class EngineWorkspaceSessions {
     const workspaces: EngineWorkspace[] = [];
     for (const [key, entry] of this.entries) {
       if (entry.rootPath !== rootPath) continue;
-      workspaces.push(typeof key === "symbol"
-        ? { workspaceId: entry.workspaceId, rootPath, attachmentId: key }
-        : { workspaceId: entry.workspaceId, rootPath });
+      workspaces.push(
+        typeof key === "symbol"
+          ? { workspaceId: entry.workspaceId, rootPath, attachmentId: key }
+          : { workspaceId: entry.workspaceId, rootPath },
+      );
     }
     // oxlint-disable-next-line typescript/await-thenable -- await needed: some entries are promises
     await Promise.all(workspaces.map((workspace) => this.openInProgress(workspace)));
     for (const workspace of workspaces) {
       const binding = this.currentBinding(workspace);
-      if (binding?.localStateReady) return { current: () => this.currentBinding(workspace) === binding };
+      if (binding?.localStateReady)
+        return { current: () => this.currentBinding(workspace) === binding };
     }
     return null;
   }
@@ -528,9 +514,18 @@ export class EngineWorkspaceSessions {
   currentBinding(workspace: EngineWorkspace): EngineWorkspaceBinding | null {
     const key = this.sessionKey(workspace);
     const entry = this.entries.get(key);
-    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
-      entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
-      !entry.binding || entry.binding.client !== this.source.currentClient()) return null;
+    if (
+      !this.acceptingRuns ||
+      this.rebuildingWorkspaces.has(key) ||
+      !entry ||
+      entry.closing ||
+      entry.retiring ||
+      entry.workspaceId !== workspace.workspaceId ||
+      entry.rootPath !== workspace.rootPath ||
+      !entry.binding ||
+      entry.binding.client !== this.source.currentClient()
+    )
+      return null;
     return entry.binding;
   }
 
@@ -549,26 +544,51 @@ export class EngineWorkspaceSessions {
    * one does, a caller inside a run (engineRunScope) is given nothing to wait
    * on.
    */
-  openInProgress(workspace: EngineWorkspace, until = this.now() + 2 * this.workspaceOpenDeadlineMs): Promise<void> | null {
-    const key = this.sessionKey(workspace), entry = this.entries.get(key);
-    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry ||
+  openInProgress(
+    workspace: EngineWorkspace,
+    until = this.now() + 2 * this.workspaceOpenDeadlineMs,
+  ): Promise<void> | null {
+    const key = this.sessionKey(workspace),
+      entry = this.entries.get(key);
+    if (
+      !this.acceptingRuns ||
+      this.rebuildingWorkspaces.has(key) ||
+      !entry ||
       (!entry.opening && entry.openingRuns === 0 && !entry.reopening) ||
       (entry.closing && entry.activeRuns > 0 && insideEngineRun()) ||
-      entry.retiring || entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
-      (this.hasAvailableClient() && this.currentBinding(workspace)) || this.now() >= until) return null;
-    const attempt = entry.opening, deadlineMs = this.workspaceOpenDeadlineMs;
+      entry.retiring ||
+      entry.workspaceId !== workspace.workspaceId ||
+      entry.rootPath !== workspace.rootPath ||
+      (this.hasAvailableClient() && this.currentBinding(workspace)) ||
+      this.now() >= until
+    )
+      return null;
+    const attempt = entry.opening,
+      deadlineMs = this.workspaceOpenDeadlineMs;
     return new Promise<boolean>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const finish = (lookAgain: boolean) => { clearTimeout(timer); entry.openWaiters.delete(again); resolve(lookAgain); };
+      const finish = (lookAgain: boolean) => {
+        clearTimeout(timer);
+        entry.openWaiters.delete(again);
+        resolve(lookAgain);
+      };
       const again = () => finish(true);
       entry.openWaiters.add(again);
-      const wait = () => { clearTimeout(timer); timer = setTimeout(() => finish(false), Math.min(deadlineMs, until - this.now())); timer.unref?.(); };
+      const wait = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => finish(false), Math.min(deadlineMs, until - this.now()));
+        timer.unref?.();
+      };
       wait();
       if (!attempt) return;
       // The daemon request's own deadline starts with it, after preparation.
-      void attempt.requested.then(() => { if (entry.openWaiters.has(again)) wait(); });
+      void attempt.requested.then(() => {
+        if (entry.openWaiters.has(again)) wait();
+      });
       void attempt.settled.then(again);
-    }).then((lookAgain) => (lookAgain ? this.openInProgress(workspace, until) ?? undefined : undefined));
+    }).then((lookAgain) =>
+      lookAgain ? (this.openInProgress(workspace, until) ?? undefined) : undefined,
+    );
   }
 
   /** Uses an existing binding without opening or reconnecting a workspace. */
@@ -595,21 +615,13 @@ export class EngineWorkspaceSessions {
     let entry = await this.acquire(workspace);
     let acquired = true;
     try {
-      const maxAttempts = options.retryTransportErrors
-        ? this.transportRebindAttempts
-        : 2;
+      const maxAttempts = options.retryTransportErrors ? this.transportRebindAttempts : 2;
       let rebindStarted = false;
       let lastError: unknown;
       let initialCaptureDeadline: number | undefined;
       const storeBusy: StoreBusyRetryState = { attempts: 0 };
       for (let attempt = 1; attempt <= maxAttempts;) {
-        const binding = await this.openForRun(
-          workspace,
-          entry,
-          options,
-          rebindStarted,
-          storeBusy,
-        );
+        const binding = await this.openForRun(workspace, entry, options, rebindStarted, storeBusy);
         // The second door: the operation is daemon work this class does not
         // issue itself, and the rebind above can take the whole window with it.
         this.assertRegionLive(workspace.workspaceId);
@@ -636,8 +648,7 @@ export class EngineWorkspaceSessions {
               let current = false;
               try {
                 current =
-                  entry.binding === binding &&
-                  this.source.currentClient() === binding.client;
+                  entry.binding === binding && this.source.currentClient() === binding.client;
               } catch {
                 // A retired client cannot authorize another read.
               }
@@ -652,10 +663,7 @@ export class EngineWorkspaceSessions {
           const retryAfterReconnect = requiresReconnect(error);
           const retryAfterTransport =
             options.retryTransportErrors === true && isTransportError(error);
-          if (
-            (retryAfterReconnect || isTransportError(error)) &&
-            entry.binding === binding
-          ) {
+          if ((retryAfterReconnect || isTransportError(error)) && entry.binding === binding) {
             entry.binding = null;
           }
           // Store admission refuses before the transaction or mutation closure.
@@ -756,24 +764,31 @@ export class EngineWorkspaceSessions {
     try {
       // Capture wakes are advisory. At the bound, allow one final fenced
       // read; another capture refusal cannot start a new wait.
-      const exit = await Effect.runPromiseExit(Effect.raceFirst(
-        Effect.promise(() => wake),
-        Effect.as(Effect.sleep(deadline - started), "deadline" as const),
-      ), {
-        signal: AbortSignal.any([
-          this.shutdownController.signal,
-          bindingSignal,
-          ...(signal ? [signal] : []),
-        ]),
-      });
+      const exit = await Effect.runPromiseExit(
+        Effect.raceFirst(
+          Effect.promise(() => wake),
+          Effect.as(Effect.sleep(deadline - started), "deadline" as const),
+        ),
+        {
+          signal: AbortSignal.any([
+            this.shutdownController.signal,
+            bindingSignal,
+            ...(signal ? [signal] : []),
+          ]),
+        },
+      );
       if (exit._tag === "Failure") {
         if (!Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
         if (signal?.aborted || this.shuttingDown || entry.retiring) throw refusal;
         throw new InitialCaptureBindingChangedError();
       }
       const outcome = exit.value;
-      if (signal?.aborted || this.shuttingDown || entry.retiring ||
-          (outcome !== "deadline" && this.now() >= deadline)) {
+      if (
+        signal?.aborted ||
+        this.shuttingDown ||
+        entry.retiring ||
+        (outcome !== "deadline" && this.now() >= deadline)
+      ) {
         throw refusal;
       }
       if (outcome === "rebind") throw new InitialCaptureBindingChangedError();
@@ -809,12 +824,12 @@ export class EngineWorkspaceSessions {
    * internal `run`), and per-async-context so two concurrent tasks never
    * share one.
    */
-  async withRetryBudget<T>(budgetMs: number, task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    if (
-      !Number.isInteger(budgetMs) ||
-      budgetMs <= 0 ||
-      budgetMs > MAX_TIMER_DELAY_MS
-    ) {
+  async withRetryBudget<T>(
+    budgetMs: number,
+    task: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (!Number.isInteger(budgetMs) || budgetMs <= 0 || budgetMs > MAX_TIMER_DELAY_MS) {
       throw new TypeError(
         `withRetryBudget budgetMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(budgetMs)}.`,
       );
@@ -1059,9 +1074,10 @@ export class EngineWorkspaceSessions {
       await this.sleep(delayMs);
       return;
     }
-    const sleep = this.sleep === defaultSleep
-      ? Effect.sleep(delayMs)
-      : Effect.promise(() => this.sleep(delayMs));
+    const sleep =
+      this.sleep === defaultSleep
+        ? Effect.sleep(delayMs)
+        : Effect.promise(() => this.sleep(delayMs));
     const exit = await Effect.runPromiseExit(sleep, {
       signal: AbortSignal.any([
         ...(cancellable ? [this.shutdownController.signal] : []),
@@ -1073,10 +1089,7 @@ export class EngineWorkspaceSessions {
     }
   }
 
-  rememberCaptureAuthor(
-    workspace: AttachedEngineWorkspace,
-    author: AgentAuthor | null,
-  ): void {
+  rememberCaptureAuthor(workspace: AttachedEngineWorkspace, author: AgentAuthor | null): void {
     this.captureAuthors.set(this.sessionKey(workspace), author);
   }
 
@@ -1085,7 +1098,8 @@ export class EngineWorkspaceSessions {
   }
 
   beginRebuild(workspace: AttachedEngineWorkspace): void {
-    const key = this.sessionKey(workspace), entry = this.entries.get(key);
+    const key = this.sessionKey(workspace),
+      entry = this.entries.get(key);
     this.rebuildingWorkspaces.add(key);
     if (!entry) return;
     entry.reopening = false;
@@ -1102,10 +1116,18 @@ export class EngineWorkspaceSessions {
 
   /** Checks a retained binding without opening a workspace or acquiring a run. */
   assertCurrentBinding(workspace: EngineWorkspace, binding: EngineWorkspaceBinding): void {
-    const key = this.sessionKey(workspace), entry = this.entries.get(key);
-    if (!this.acceptingRuns || this.rebuildingWorkspaces.has(key) || !entry || entry.closing ||
-      entry.workspaceId !== workspace.workspaceId || entry.rootPath !== workspace.rootPath ||
-      entry.binding !== binding || binding.client !== this.source.currentClient()) {
+    const key = this.sessionKey(workspace),
+      entry = this.entries.get(key);
+    if (
+      !this.acceptingRuns ||
+      this.rebuildingWorkspaces.has(key) ||
+      !entry ||
+      entry.closing ||
+      entry.workspaceId !== workspace.workspaceId ||
+      entry.rootPath !== workspace.rootPath ||
+      entry.binding !== binding ||
+      binding.client !== this.source.currentClient()
+    ) {
       throw new Error("Rust engine workspace binding retired.");
     }
   }
@@ -1115,10 +1137,7 @@ export class EngineWorkspaceSessions {
     await this.closeWorkspaceEntry(this.sessionKey(workspace), false);
   }
 
-  private async closeWorkspaceEntry(
-    key: string | symbol,
-    retire: boolean,
-  ): Promise<void> {
+  private async closeWorkspaceEntry(key: string | symbol, retire: boolean): Promise<void> {
     for (;;) {
       const entry = this.entries.get(key);
       if (!entry) {
@@ -1298,9 +1317,7 @@ export class EngineWorkspaceSessions {
     rebindStarted: boolean,
     storeBusy: StoreBusyRetryState,
   ): Promise<EngineWorkspaceBinding> {
-    const maxAttempts = options.retryTransportErrors
-      ? this.transportRebindAttempts
-      : 2;
+    const maxAttempts = options.retryTransportErrors ? this.transportRebindAttempts : 2;
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts;) {
       try {
@@ -1367,8 +1384,12 @@ export class EngineWorkspaceSessions {
       if (this.shuttingDown && !entry.opened) throw new EngineWorkspaceShuttingDownError();
 
       let settle!: () => void, request!: () => void;
-      const settled = new Promise<void>((resolve) => { settle = resolve; });
-      const requested = new Promise<void>((resolve) => { request = resolve; });
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const requested = new Promise<void>((resolve) => {
+        request = resolve;
+      });
       const promise = this.openWithClient(client, workspace, request);
       entry.opening = { client, promise, settled, requested };
       this.wakeOpenWaiters(entry);
@@ -1398,9 +1419,7 @@ export class EngineWorkspaceSessions {
         // The client-churn ladder settles like every other ladder (#564,
         // codex): without these gates, churning generations held a caller
         // through six full opens — past its deadline and past quit.
-        const churn = new Error(
-          "Rust engine client changed while opening the workspace.",
-        );
+        const churn = new Error("Rust engine client changed while opening the workspace.");
         const next = await this.settleAttempt({
           workspaceId: workspace.workspaceId,
           attempt,
@@ -1411,9 +1430,7 @@ export class EngineWorkspaceSessions {
         if (next === "stop") {
           throw new EngineWorkspaceRebindError(
             workspace.workspaceId,
-            lastAttempt
-              ? new Error("Rust engine client changed on every open attempt.")
-              : churn,
+            lastAttempt ? new Error("Rust engine client changed on every open attempt.") : churn,
           );
         }
         continue;
@@ -1467,8 +1484,7 @@ export class EngineWorkspaceSessions {
     const requester = new WorkspaceDaemonRequester(client);
     const sessionKey = this.sessionKey(workspace);
     const hasCaptureAuthor = this.captureAuthors.has(sessionKey);
-    const shareMount =
-      workspace.shareMount === true || this.shareMounts.has(sessionKey);
+    const shareMount = workspace.shareMount === true || this.shareMounts.has(sessionKey);
     const captureDisabled = shareMount || workspace.captureMode === "none";
     const raw = await requester.request(
       WORKSPACE_METHOD.open,
@@ -1483,8 +1499,7 @@ export class EngineWorkspaceSessions {
         ...(shareMount ? { projectCollections: true } : {}),
         ...(!captureDisabled && hasCaptureAuthor
           ? {
-              captureAuthor:
-                this.captureAuthors.get(sessionKey) ?? null,
+              captureAuthor: this.captureAuthors.get(sessionKey) ?? null,
             }
           : {}),
       },
@@ -1506,12 +1521,22 @@ export class EngineWorkspaceSessions {
   // so a failed one is never reused.
   private async prepareWithinDeadline(workspace: EngineWorkspace): Promise<void> {
     const preparation = this.prepareWorkspace(workspace.rootPath);
-    const outcome = await Effect.runPromise(Effect.raceFirst(
-      Effect.promise(() => preparation.then(() => "settled" as const, () => "settled" as const)),
-      Effect.as(Effect.sleep(this.workspaceOpenDeadlineMs), "deadline" as const),
-    ));
+    const outcome = await Effect.runPromise(
+      Effect.raceFirst(
+        Effect.promise(() =>
+          preparation.then(
+            () => "settled" as const,
+            () => "settled" as const,
+          ),
+        ),
+        Effect.as(Effect.sleep(this.workspaceOpenDeadlineMs), "deadline" as const),
+      ),
+    );
     if (outcome === "deadline") {
-      throw new EngineWorkspaceFolderTimeoutError(workspace.workspaceId, this.workspaceOpenDeadlineMs);
+      throw new EngineWorkspaceFolderTimeoutError(
+        workspace.workspaceId,
+        this.workspaceOpenDeadlineMs,
+      );
     }
     await preparation;
   }
@@ -1523,9 +1548,7 @@ export class EngineWorkspaceSessions {
         const workspaceRoot = resolve(rootPath);
         const rootInfo = await lstat(workspaceRoot);
         if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
-          throw new Error(
-            `Rust engine workspace root must be a real directory: ${rootPath}.`,
-          );
+          throw new Error(`Rust engine workspace root must be a real directory: ${rootPath}.`);
         }
         const realRoot = await realpath(workspaceRoot);
         const dohcDirectory = join(workspaceRoot, ".dohc");
@@ -1578,11 +1601,7 @@ export class EngineWorkspaceSessions {
     }
     const resolvedDirectory = await realpath(directory);
     const escape = relative(realRoot, resolvedDirectory);
-    if (
-      escape === ".." ||
-      escape.startsWith(`..${sep}`) ||
-      isAbsolute(escape)
-    ) {
+    if (escape === ".." || escape.startsWith(`..${sep}`) || isAbsolute(escape)) {
       throw new Error(outsideWorkspaceRefusal(guard));
     }
   }

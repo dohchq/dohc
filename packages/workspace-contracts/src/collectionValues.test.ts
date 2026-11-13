@@ -15,11 +15,7 @@ import {
   collectionVersionError,
   FIELD_VALUE_REASON_CODES,
 } from "./collection";
-import {
-  isRecordId,
-  parseCollectionSchema,
-  validateFieldValue,
-} from "./collectionValues";
+import { isRecordId, parseCollectionSchema, validateFieldValue } from "./collectionValues";
 
 interface SchemaVector {
   name: string;
@@ -70,12 +66,8 @@ const optionLimitVectors = schemaLimitFixtureJson.optionVectors as SchemaOptionL
 
 describe("Collection reason-code contract", () => {
   it("matches the shared full reason-code set", () => {
-    expect(COLLECTION_SCHEMA_REASON_CODES).toEqual(
-      reasonCodeFixtureJson.schemaReasonCodes,
-    );
-    expect(FIELD_VALUE_REASON_CODES).toEqual(
-      reasonCodeFixtureJson.fieldValueReasonCodes,
-    );
+    expect(COLLECTION_SCHEMA_REASON_CODES).toEqual(reasonCodeFixtureJson.schemaReasonCodes);
+    expect(FIELD_VALUE_REASON_CODES).toEqual(reasonCodeFixtureJson.fieldValueReasonCodes);
   });
 });
 
@@ -86,10 +78,12 @@ describe("Collection schema contract vectors", () => {
     const newer = parseCollectionSchema(`version: 2\n${yaml}`);
     expect(newer.status).toBe("degraded");
     expect(newer.schema.fields).toEqual([]);
-    expect(collectionVersionError(newer.reasons, "tasks/collection.yaml"))
-      .toBe("tasks/collection.yaml uses a newer version. Update dohc to read this file.");
-    expect(collectionVersionError(newer.reasons, "tasks/collection.yaml", "sync service"))
-      .toBe("tasks/collection.yaml uses a newer version. Update the sync service to read this file.");
+    expect(collectionVersionError(newer.reasons, "tasks/collection.yaml")).toBe(
+      "tasks/collection.yaml uses a newer version. Update dohc to read this file.",
+    );
+    expect(collectionVersionError(newer.reasons, "tasks/collection.yaml", "sync service")).toBe(
+      "tasks/collection.yaml uses a newer version. Update the sync service to read this file.",
+    );
   });
   it.each(schemaVectors)("matches $name", ({ yaml, expected }) => {
     expect(() => parseCollectionSchema(yaml)).not.toThrow();
@@ -114,25 +108,27 @@ describe("Collection schema contract vectors", () => {
   });
 
   it("treats hostile YAML mapping keys as data without prototype inheritance", () => {
-    const parsed = parseCollectionSchema([
-      "__proto__:",
-      "  name: inherited-name",
-      "constructor: root-constructor",
-      "prototype: root-prototype",
-      "fields:",
-      "  Inherited type:",
-      "    __proto__:",
-      "      type: number",
-      "  Nested hostile:",
-      "    type: text",
-      "    __proto__: nested-proto",
-      "  __proto__:",
-      "    type: text",
-      "  constructor:",
-      "    type: text",
-      "  prototype:",
-      "    type: text",
-    ].join("\n"));
+    const parsed = parseCollectionSchema(
+      [
+        "__proto__:",
+        "  name: inherited-name",
+        "constructor: root-constructor",
+        "prototype: root-prototype",
+        "fields:",
+        "  Inherited type:",
+        "    __proto__:",
+        "      type: number",
+        "  Nested hostile:",
+        "    type: text",
+        "    __proto__: nested-proto",
+        "  __proto__:",
+        "    type: text",
+        "  constructor:",
+        "    type: text",
+        "  prototype:",
+        "    type: text",
+      ].join("\n"),
+    );
 
     expect(parsed.schema.name).toBeNull();
     expect(parsed.schema.fields).toEqual([
@@ -141,33 +137,37 @@ describe("Collection schema contract vectors", () => {
       { name: "constructor", type: "text" },
       { name: "prototype", type: "text" },
     ]);
-    expect(parsed.reasons).toEqual(expect.arrayContaining([
-      { code: "unknown-property", path: "/__proto__" },
-      { code: "unknown-property", path: "/constructor" },
-      { code: "unknown-property", path: "/prototype" },
-      { code: "missing-property", path: "/fields/Inherited type/type" },
-      { code: "unknown-property", path: "/fields/Nested hostile/__proto__" },
-    ]));
+    expect(parsed.reasons).toEqual(
+      expect.arrayContaining([
+        { code: "unknown-property", path: "/__proto__" },
+        { code: "unknown-property", path: "/constructor" },
+        { code: "unknown-property", path: "/prototype" },
+        { code: "missing-property", path: "/fields/Inherited type/type" },
+        { code: "unknown-property", path: "/fields/Nested hostile/__proto__" },
+      ]),
+    );
     expect(({} as { name?: unknown }).name).toBeUndefined();
   });
 
   it("drops each view reference that sorts, groups, or dates by a button", () => {
-    const parsed = parseCollectionSchema([
-      "fields:",
-      "  Due:",
-      "    type: date",
-      "  Mark paid:",
-      "    type: button",
-      "views:",
-      "  - name: Board",
-      "    kind: board",
-      "    groupBy: Mark paid",
-      "    visibleFields: [Mark paid]",
-      "  - name: Calendar",
-      "    kind: calendar",
-      "    dateField: Mark paid",
-      "    sort: [{ field: Due, direction: asc }, { field: Mark paid, direction: desc }]",
-    ].join("\n"));
+    const parsed = parseCollectionSchema(
+      [
+        "fields:",
+        "  Due:",
+        "    type: date",
+        "  Mark paid:",
+        "    type: button",
+        "views:",
+        "  - name: Board",
+        "    kind: board",
+        "    groupBy: Mark paid",
+        "    visibleFields: [Mark paid]",
+        "  - name: Calendar",
+        "    kind: calendar",
+        "    dateField: Mark paid",
+        "    sort: [{ field: Due, direction: asc }, { field: Mark paid, direction: desc }]",
+      ].join("\n"),
+    );
 
     expect(parsed.status).toBe("degraded");
     expect(parsed.reasons).toEqual([
@@ -175,85 +175,85 @@ describe("Collection schema contract vectors", () => {
       { code: "unsupported-field-reference", path: "/views/1/sort/1/field" },
       { code: "unsupported-field-reference", path: "/views/1/dateField" },
     ]);
-    expect(parsed.schema.views.map(({ groupBy, sort, visibleFields, dateField }) => ({
-      groupBy,
-      sort,
-      visibleFields,
-      dateField,
-    }))).toEqual([
+    expect(
+      parsed.schema.views.map(({ groupBy, sort, visibleFields, dateField }) => ({
+        groupBy,
+        sort,
+        visibleFields,
+        dateField,
+      })),
+    ).toEqual([
       { groupBy: null, sort: [], visibleFields: ["Mark paid"], dateField: null },
-      { groupBy: null, sort: [{ field: "Due", direction: "asc" }], visibleFields: null, dateField: null },
-    ]);
-  });
-
-  it.each(schemaLimitVectors)("matches $name", ({
-    itemCount,
-    expectedItemCount,
-    referencedFieldIndex,
-    expectedReasons,
-  }) => {
-    const fields = Array.from(
-      { length: itemCount },
-      (_, index) => `  field_${index}:\n    type: text`,
-    ).join("\n");
-    const views = Array.from(
-      { length: itemCount },
-      (_, index) =>
-        `  - name: View ${index}\n    kind: table${
-          index === 0 ? `\n    groupBy: field_${referencedFieldIndex}` : ""
-        }`,
-    ).join("\n");
-
-    const parsed = parseCollectionSchema(`fields:\n${fields}\nviews:\n${views}\n`);
-
-    expect(parsed.status).toBe("degraded");
-    expect(parsed.schema.fields).toHaveLength(expectedItemCount);
-    expect(parsed.schema.views).toHaveLength(expectedItemCount);
-    expect(parsed.schema.views[0]?.groupBy).toBeNull();
-    expect(parsed.reasons).toEqual(expectedReasons);
-  });
-
-  it.each(reasonLimitVectors)("matches $name", ({
-    itemCount,
-    expectedReasonCount,
-    expectedTerminalReason,
-  }) => {
-    const fields = Array.from(
-      { length: itemCount },
-      (_, index) => `  invalid_${index}: value`,
-    ).join("\n");
-
-    const parsed = parseCollectionSchema(`fields:\n${fields}\n`);
-
-    expect(parsed.status).toBe("degraded");
-    expect(parsed.schema.fields).toEqual([]);
-    expect(parsed.reasons).toHaveLength(expectedReasonCount);
-    expect(parsed.reasons.at(-1)).toEqual(expectedTerminalReason);
-  });
-
-  it.each(optionLimitVectors)("matches $name", ({
-    itemCount,
-    expectedItemCount,
-    expectedReasons,
-  }) => {
-    const options = Array.from(
-      { length: itemCount },
-      (_, index) => `option_${index}`,
-    );
-    const parsed = parseCollectionSchema(
-      `fields:\n  status:\n    type: select\n    options: ${JSON.stringify(options)}\n`,
-    );
-
-    expect(parsed.status).toBe("degraded");
-    expect(parsed.schema.fields).toEqual([
       {
-        name: "status",
-        type: "select",
-        options: options.slice(0, expectedItemCount),
+        groupBy: null,
+        sort: [{ field: "Due", direction: "asc" }],
+        visibleFields: null,
+        dateField: null,
       },
     ]);
-    expect(parsed.reasons).toEqual(expectedReasons);
   });
+
+  it.each(schemaLimitVectors)(
+    "matches $name",
+    ({ itemCount, expectedItemCount, referencedFieldIndex, expectedReasons }) => {
+      const fields = Array.from(
+        { length: itemCount },
+        (_, index) => `  field_${index}:\n    type: text`,
+      ).join("\n");
+      const views = Array.from(
+        { length: itemCount },
+        (_, index) =>
+          `  - name: View ${index}\n    kind: table${
+            index === 0 ? `\n    groupBy: field_${referencedFieldIndex}` : ""
+          }`,
+      ).join("\n");
+
+      const parsed = parseCollectionSchema(`fields:\n${fields}\nviews:\n${views}\n`);
+
+      expect(parsed.status).toBe("degraded");
+      expect(parsed.schema.fields).toHaveLength(expectedItemCount);
+      expect(parsed.schema.views).toHaveLength(expectedItemCount);
+      expect(parsed.schema.views[0]?.groupBy).toBeNull();
+      expect(parsed.reasons).toEqual(expectedReasons);
+    },
+  );
+
+  it.each(reasonLimitVectors)(
+    "matches $name",
+    ({ itemCount, expectedReasonCount, expectedTerminalReason }) => {
+      const fields = Array.from(
+        { length: itemCount },
+        (_, index) => `  invalid_${index}: value`,
+      ).join("\n");
+
+      const parsed = parseCollectionSchema(`fields:\n${fields}\n`);
+
+      expect(parsed.status).toBe("degraded");
+      expect(parsed.schema.fields).toEqual([]);
+      expect(parsed.reasons).toHaveLength(expectedReasonCount);
+      expect(parsed.reasons.at(-1)).toEqual(expectedTerminalReason);
+    },
+  );
+
+  it.each(optionLimitVectors)(
+    "matches $name",
+    ({ itemCount, expectedItemCount, expectedReasons }) => {
+      const options = Array.from({ length: itemCount }, (_, index) => `option_${index}`);
+      const parsed = parseCollectionSchema(
+        `fields:\n  status:\n    type: select\n    options: ${JSON.stringify(options)}\n`,
+      );
+
+      expect(parsed.status).toBe("degraded");
+      expect(parsed.schema.fields).toEqual([
+        {
+          name: "status",
+          type: "select",
+          options: options.slice(0, expectedItemCount),
+        },
+      ]);
+      expect(parsed.reasons).toEqual(expectedReasons);
+    },
+  );
 });
 
 describe("Field value contract vectors", () => {
@@ -270,12 +270,9 @@ describe("Field value contract vectors", () => {
     ["out-of-safe-range integer", 9_007_199_254_740_993n],
     ["out-of-safe-range integral float", 1e20],
   ])("accepts %s as a number-field value", (_name, value) => {
-    expect(
-      validateFieldValue(
-        { name: "estimate", type: "number" },
-        value,
-      ),
-    ).toEqual({ status: "valid" });
+    expect(validateFieldValue({ name: "estimate", type: "number" }, value)).toEqual({
+      status: "valid",
+    });
   });
 });
 

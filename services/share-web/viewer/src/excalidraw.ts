@@ -7,9 +7,7 @@ export interface PublicExcalidrawScene {
   };
 }
 
-export function parsePublicExcalidrawScene(
-  text: string,
-): PublicExcalidrawScene | null {
+export function parsePublicExcalidrawScene(text: string): PublicExcalidrawScene | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -30,7 +28,7 @@ export function parsePublicExcalidrawScene(
   const appState = asRecord(scene.appState);
   const viewBackgroundColor =
     typeof appState?.viewBackgroundColor === "string" &&
-      /^#[a-f0-9]{6}$/iu.test(appState.viewBackgroundColor)
+    /^#[a-f0-9]{6}$/iu.test(appState.viewBackgroundColor)
       ? appState.viewBackgroundColor
       : "#ffffff";
   return {

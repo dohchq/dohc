@@ -12,8 +12,25 @@ import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalesce
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
 import { loadStoredDrafts } from "./orphanedDraftStorage";
 import { deferred } from "../testing/deferred";
-import { CollectionFieldWriteHost, collectionWriteFailures, resetCollectionFieldWritesForTests, retainedCollectionFieldWritePaths } from "./collections/recordFieldWrites";
-import { DesktopWorkspaceShell, HOME_STATE, WORKSPACE, STORED_STATE, storedStateWithTabs, recordDocUpdate, makeBridge, renderShell, shellBootstrapProps, SHARE_VIEW, OTHER_WORKSPACE } from "./DesktopWorkspaceShell.testHarness";
+import {
+  CollectionFieldWriteHost,
+  collectionWriteFailures,
+  resetCollectionFieldWritesForTests,
+  retainedCollectionFieldWritePaths,
+} from "./collections/recordFieldWrites";
+import {
+  DesktopWorkspaceShell,
+  HOME_STATE,
+  WORKSPACE,
+  STORED_STATE,
+  storedStateWithTabs,
+  recordDocUpdate,
+  makeBridge,
+  renderShell,
+  shellBootstrapProps,
+  SHARE_VIEW,
+  OTHER_WORKSPACE,
+} from "./DesktopWorkspaceShell.testHarness";
 
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
 vi.mock("./shell/useWorkspaceListing", { spy: true });
@@ -93,19 +110,43 @@ describe("collection folders", () => {
   it("names a new record's file from its name, made safe and unique, and opens no tab for it", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const files: Array<{ path: string; kind: "file" }> = [];
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [...files], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [] }));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: [...files],
+      folders: ["tasks"],
+    }));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [
+        { path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] },
+      ],
+      unclaimedDatasetFolders: [],
+    }));
     bridge.getCollection.mockResolvedValue({
-      path: "tasks", objectId: "object-test", status: "valid", reasons: [], recordCount: 0,
-      schema: { name: "Tasks", description: null, fields: [{ name: "title", type: "text" }, { name: "notes", type: "text" }], views: [] },
+      path: "tasks",
+      objectId: "object-test",
+      status: "valid",
+      reasons: [],
+      recordCount: 0,
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [
+          { name: "title", type: "text" },
+          { name: "notes", type: "text" },
+        ],
+        views: [],
+      },
     });
     bridge.createCollectionRecord.mockImplementation(async (payload) => {
       files.push({ path: `${payload.collectionPath}/${payload.name}.md`, kind: "file" });
-      return { path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+      return {
+        path: `${payload.collectionPath}/${payload.name}.md`,
+        recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+      };
     });
     renderShell(bridge);
     const row = await waitFor(() => {
-      const row = screen.getAllByTestId("tree-row").find(entry => entry.dataset.path === "tasks");
+      const row = screen.getAllByTestId("tree-row").find((entry) => entry.dataset.path === "tasks");
       expect(row?.dataset.collection).toBe("true");
       return row!;
     });
@@ -113,7 +154,9 @@ describe("collection folders", () => {
     const editor = () => document.querySelector<HTMLInputElement>("[data-cell-editor] input");
     /** Saves the new row with Enter, with `title` typed in its first field, or `notes` in its second. */
     const saveRow = async (title: string | null, notes?: string) => {
-      fireEvent.click(await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }));
+      fireEvent.click(
+        await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }),
+      );
       await waitFor(() => expect(editor()).not.toBeNull());
       if (title !== null) fireEvent.change(editor()!, { target: { value: title } });
       if (notes === undefined) return fireEvent.keyDown(editor()!, { key: "Enter" });
@@ -126,10 +169,19 @@ describe("collection folders", () => {
     // Characters a file name cannot hold become spaces, as in a new page's name.
     await saveRow("Plan: Q4/Launch");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(1));
-    expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({ collectionPath: "tasks", name: "Plan Q4 Launch" });
+    expect(bridge.createCollectionRecord.mock.calls[0]![0]).toMatchObject({
+      collectionPath: "tasks",
+      name: "Plan Q4 Launch",
+    });
     // The listing has the first file by now, so the same name takes the next number.
     await waitFor(() => expect(bridge.listWorkspaceFiles.mock.results.length).toBeGreaterThan(1));
-    await waitFor(() => expect(screen.getAllByTestId("tree-row").some(entry => entry.dataset.path === "tasks/Plan Q4 Launch.md") || files.length === 1).toBe(true));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("tree-row")
+          .some((entry) => entry.dataset.path === "tasks/Plan Q4 Launch.md") || files.length === 1,
+      ).toBe(true),
+    );
     await saveRow("Plan: Q4/Launch");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Plan Q4 Launch 2");
@@ -137,27 +189,48 @@ describe("collection folders", () => {
     await saveRow(null, "Remember the milk");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
     expect(bridge.createCollectionRecord.mock.calls[2]![0].name).toBe("Untitled");
-    for (const name of ["Plan Q4 Launch", "Plan Q4 Launch 2", "Untitled"]) expect(screen.queryByTestId(editorTabTestId(`tasks/${name}.md`))).toBeNull();
+    for (const name of ["Plan Q4 Launch", "Plan Q4 Launch 2", "Untitled"])
+      expect(screen.queryByTestId(editorTabTestId(`tasks/${name}.md`))).toBeNull();
   });
 
   /** Opens the tasks Collection, whose records have a title, and answers what types a title in its new row and saves the row. */
   async function openTasksWithTitle(bridge: ReturnType<typeof makeBridge>, render: () => unknown) {
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
-    bridge.listCollections = vi.fn(async () => ({ collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [] }));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      visibility: { status: "ready" as const, rules: [] },
+      files: [],
+      folders: ["tasks"],
+    }));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [
+        { path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] },
+      ],
+      unclaimedDatasetFolders: [],
+    }));
     bridge.getCollection.mockResolvedValue({
-      path: "tasks", objectId: "object-test", status: "valid", reasons: [], recordCount: 0,
-      schema: { name: "Tasks", description: null, fields: [{ name: "title", type: "text" }], views: [] },
+      path: "tasks",
+      objectId: "object-test",
+      status: "valid",
+      reasons: [],
+      recordCount: 0,
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [{ name: "title", type: "text" }],
+        views: [],
+      },
     });
     render();
     const row = await waitFor(() => {
-      const row = screen.getAllByTestId("tree-row").find(entry => entry.dataset.path === "tasks");
+      const row = screen.getAllByTestId("tree-row").find((entry) => entry.dataset.path === "tasks");
       expect(row?.dataset.collection).toBe("true");
       return row!;
     });
     fireEvent.click(row);
     const editor = () => document.querySelector<HTMLInputElement>("[data-cell-editor] input");
     return async (title: string, leave: "Enter" | null) => {
-      fireEvent.click(await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }));
+      fireEvent.click(
+        await screen.findByTestId("collection-new-record", undefined, { timeout: 15_000 }),
+      );
       await waitFor(() => expect(editor()).not.toBeNull());
       fireEvent.change(editor()!, { target: { value: title } });
       // With no key, the title stays in its open editor: the row is still being typed.
@@ -167,8 +240,13 @@ describe("collection folders", () => {
   const otherWorkspaceShell = (bridge: ReturnType<typeof makeBridge>) => (
     <>
       <CollectionFieldWriteHost />
-      <DesktopWorkspaceShell key={OTHER_WORKSPACE.workspaceId} workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
-        {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+      <DesktopWorkspaceShell
+        key={OTHER_WORKSPACE.workspaceId}
+        workspace={OTHER_WORKSPACE}
+        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
     </>
   );
 
@@ -177,9 +255,21 @@ describe("collection folders", () => {
     const bridge = makeBridge(Promise.resolve(null));
     // The first record's file is made and the record is not finished. The others are made. The listing shows none of their files yet.
     bridge.createCollectionRecord
-      .mockResolvedValueOnce({ kind: "partial", created: ["tasks/Milk.md"], failedStage: "index", reason: "index unavailable",
-        retry: { mode: "resume", recordId: "rec_abcdefghijklmnopqrstuvwxyz", instruction: "Try again to finish this record." } })
-      .mockImplementation(async (payload) => ({ path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_bcdefghijklmnopqrstuvwxyza" }));
+      .mockResolvedValueOnce({
+        kind: "partial",
+        created: ["tasks/Milk.md"],
+        failedStage: "index",
+        reason: "index unavailable",
+        retry: {
+          mode: "resume",
+          recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+          instruction: "Try again to finish this record.",
+        },
+      })
+      .mockImplementation(async (payload) => ({
+        path: `${payload.collectionPath}/${payload.name}.md`,
+        recordId: "rec_bcdefghijklmnopqrstuvwxyza",
+      }));
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
     await typeRow("Milk", "Enter");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(1));
@@ -187,7 +277,9 @@ describe("collection folders", () => {
     await typeRow("Milk", "Enter");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     expect(bridge.createCollectionRecord.mock.calls[1]![0].name).toBe("Milk 2");
-    await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toContain("tasks/Milk 2.md"));
+    await waitFor(() =>
+      expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toContain("tasks/Milk 2.md"),
+    );
     await typeRow("Milk", "Enter");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
     expect(bridge.createCollectionRecord.mock.calls[2]![0].name).toBe("Milk 3");
@@ -200,13 +292,24 @@ describe("collection folders", () => {
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
     // The creation succeeds, and the listing that follows it does not.
     bridge.createCollectionRecord.mockImplementationOnce(async (payload) => {
-      bridge.listWorkspaceFiles = vi.fn(async () => { throw new Error("The listing is not ready."); });
-      return { path: `${payload.collectionPath}/${payload.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+      bridge.listWorkspaceFiles = vi.fn(async () => {
+        throw new Error("The listing is not ready.");
+      });
+      return {
+        path: `${payload.collectionPath}/${payload.name}.md`,
+        recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+      };
     });
     await typeRow("Milk", "Enter");
     // The record exists, so its title is written, or kept with its Try again, and nothing says it could not be created.
-    await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]));
-    await waitFor(() => expect(screen.getByTestId("workspace-shell-error").textContent).toContain("Could not refresh workspace files."));
+    await waitFor(() =>
+      expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "Could not refresh workspace files.",
+      ),
+    );
     expect(document.querySelector("[data-new-record-status]")).toBeNull();
     expect(screen.queryByText(/could not create this record/)).toBeNull();
     // Nothing offers a second file for it.
@@ -217,8 +320,13 @@ describe("collection folders", () => {
   it("gives two new rows named alike and saved back to back a file each, and writes each row's title to its own file", async () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));
-    const answers = [deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>(), deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>()];
-    bridge.createCollectionRecord.mockImplementationOnce(() => answers[0]!.promise).mockImplementationOnce(() => answers[1]!.promise);
+    const answers = [
+      deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>(),
+      deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>(),
+    ];
+    bridge.createCollectionRecord
+      .mockImplementationOnce(() => answers[0]!.promise)
+      .mockImplementationOnce(() => answers[1]!.promise);
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
     await typeRow("Acme", "Enter");
     // The next key is typed in the next row, with no wait for the first creation.
@@ -227,12 +335,24 @@ describe("collection folders", () => {
     fireEvent.keyDown(editor, { key: "Enter" });
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     // Both creations are out. The first holds its file's name until it ends, so the second took the next one.
-    expect(bridge.createCollectionRecord.mock.calls.map(([payload]) => payload.name)).toEqual(["Acme", "acme 2"]);
+    expect(bridge.createCollectionRecord.mock.calls.map(([payload]) => payload.name)).toEqual([
+      "Acme",
+      "acme 2",
+    ]);
     // They answer out of order.
-    await act(async () => answers[1]!.resolve({ path: "tasks/acme 2.md", recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb" }));
-    await act(async () => answers[0]!.resolve({ path: "tasks/Acme.md", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" }));
+    await act(async () =>
+      answers[1]!.resolve({ path: "tasks/acme 2.md", recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb" }),
+    );
+    await act(async () =>
+      answers[0]!.resolve({ path: "tasks/Acme.md", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+    );
     // Each title is with the field writes of its own file.
-    await waitFor(() => expect([...retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)].sort()).toEqual(["tasks/Acme.md", "tasks/acme 2.md"]));
+    await waitFor(() =>
+      expect([...retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)].sort()).toEqual([
+        "tasks/Acme.md",
+        "tasks/acme 2.md",
+      ]),
+    );
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/could not create this record/)).toBeNull();
     resetCollectionFieldWritesForTests();
@@ -243,14 +363,25 @@ describe("collection folders", () => {
     const bridge = makeBridge(Promise.resolve(null));
     const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
     bridge.createCollectionRecord
-      .mockResolvedValueOnce({ kind: "partial", created: ["tasks/Milk.md"], failedStage: "index", reason: "index unavailable",
-        retry: { mode: "resume", recordId, instruction: "Try again to finish this record." } })
+      .mockResolvedValueOnce({
+        kind: "partial",
+        created: ["tasks/Milk.md"],
+        failedStage: "index",
+        reason: "index unavailable",
+        retry: { mode: "resume", recordId, instruction: "Try again to finish this record." },
+      })
       .mockRejectedValueOnce(new Error("tasks/Milk.md already exists. Choose another record name."))
-      .mockRejectedValueOnce(new Error("The shared file session changed. Open the Collection again."));
+      .mockRejectedValueOnce(
+        new Error("The shared file session changed. Open the Collection again."),
+      );
     const typeRow = await openTasksWithTitle(bridge, () => renderShell(bridge));
     await typeRow("Milk", "Enter");
     const notice = () => screen.getByTestId("workspace-shell-error");
-    await waitFor(() => expect(notice().textContent).toContain("dohc created the record file but could not finish the record."));
+    await waitFor(() =>
+      expect(notice().textContent).toContain(
+        "dohc created the record file but could not finish the record.",
+      ),
+    );
     // No row holds the record. The notice has what was typed, and its Try again is the resume of that record.
     expect(notice().textContent).toContain("You typed: title: Milk");
     expect(document.querySelector("[data-new-record-status]")).toBeNull();
@@ -259,17 +390,28 @@ describe("collection folders", () => {
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(notice().textContent).toContain("already exists"));
     // The words still say the record's file exists, so nobody takes the record for one that was never made.
-    expect(notice().textContent).toContain("dohc created the record file but could not finish the record.");
+    expect(notice().textContent).toContain(
+      "dohc created the record file but could not finish the record.",
+    );
     expect(notice().textContent).not.toContain("could not create this record");
     expect(notice().textContent).toContain("You typed: title: Milk");
     // The row on screen is the next one, with nothing typed: Enter in it starts no creation beside the unfinished one.
-    fireEvent.keyDown(document.querySelector<HTMLInputElement>("[data-cell-editor] input")!, { key: "Enter" });
+    fireEvent.keyDown(document.querySelector<HTMLInputElement>("[data-cell-editor] input")!, {
+      key: "Enter",
+    });
     expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2);
     // Its one retry is the same resume, for the same record, however often that fails.
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(notice().textContent).toContain("The shared file session changed."));
-    expect(bridge.createCollectionRecord.mock.calls.slice(1).map(([payload]) => [payload.name, payload.recordId])).toEqual([["Milk", recordId], ["Milk", recordId]]);
+    expect(
+      bridge.createCollectionRecord.mock.calls
+        .slice(1)
+        .map(([payload]) => [payload.name, payload.recordId]),
+    ).toEqual([
+      ["Milk", recordId],
+      ["Milk", recordId],
+    ]);
     resetCollectionFieldWritesForTests();
   });
 
@@ -277,14 +419,26 @@ describe("collection folders", () => {
     resetCollectionFieldWritesForTests();
     const bridge = makeBridge(Promise.resolve(null));
     let view!: ReturnType<typeof renderShell>;
-    const typeRow = await openTasksWithTitle(bridge, () => { view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]); });
+    const typeRow = await openTasksWithTitle(bridge, () => {
+      view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    });
     const listing = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
     // The record's file is kept on this computer as a draft the relay refused, and the listing that follows waits.
-    const refused = { path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz", delivery: "refused" as const, reason: "The owner's server did not accept this record." };
+    const refused = {
+      path: "tasks/Milk.md",
+      recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+      delivery: "refused" as const,
+      reason: "The owner's server did not accept this record.",
+    };
     bridge.createCollectionRecord.mockImplementationOnce(async () => {
       let first = true;
       bridge.listWorkspaceFiles = vi.fn(async () => {
-        if (!first) return { visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] };
+        if (!first)
+          return {
+            visibility: { status: "ready" as const, rules: [] },
+            files: [],
+            folders: ["tasks"],
+          };
         first = false;
         return listing.promise;
       });
@@ -294,11 +448,27 @@ describe("collection folders", () => {
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
     // The root mounts a new shell for the workspace switched to, and only then does the listing answer.
     view.rerender(otherWorkspaceShell(bridge));
-    await act(async () => listing.resolve({ visibility: { status: "ready" as const, rules: [] }, files: [], folders: ["tasks"] }));
+    await act(async () =>
+      listing.resolve({
+        visibility: { status: "ready" as const, rules: [] },
+        files: [],
+        folders: ["tasks"],
+      }),
+    );
     // The refusal still reaches what kept the row: its own workspace's list has it, with why and what was typed.
-    await waitFor(() => expect(collectionWriteFailures().map((failure) => [failure.workspaceId, failure.collectionPath, failure.change.field, failure.change.value]))
-      .toEqual([[WORKSPACE.workspaceId, "tasks", "New record", { title: "Milk" }]]));
-    expect(collectionWriteFailures()[0]!.message).toContain("The owner's server did not accept this record.");
+    await waitFor(() =>
+      expect(
+        collectionWriteFailures().map((failure) => [
+          failure.workspaceId,
+          failure.collectionPath,
+          failure.change.field,
+          failure.change.value,
+        ]),
+      ).toEqual([[WORKSPACE.workspaceId, "tasks", "New record", { title: "Milk" }]]),
+    );
+    expect(collectionWriteFailures()[0]!.message).toContain(
+      "The owner's server did not accept this record.",
+    );
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
     resetCollectionFieldWritesForTests();
   });
@@ -309,19 +479,30 @@ describe("collection folders", () => {
     const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
     bridge.createCollectionRecord.mockImplementationOnce(() => pending.promise);
     let view!: ReturnType<typeof renderShell>;
-    const typeRow = await openTasksWithTitle(bridge, () => { view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]); });
+    const typeRow = await openTasksWithTitle(bridge, () => {
+      view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+    });
     await typeRow("Milk", "Enter");
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
     // The same shell takes the other workspace before main answers that it made the record.
     view.rerender(
       <>
         <CollectionFieldWriteHost />
-        <DesktopWorkspaceShell workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+        <DesktopWorkspaceShell
+          workspace={OTHER_WORKSPACE}
+          workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
       </>,
     );
-    await act(async () => pending.resolve({ path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz" }));
+    await act(async () =>
+      pending.resolve({ path: "tasks/Milk.md", recordId: "rec_abcdefghijklmnopqrstuvwxyz" }),
+    );
     // The title is with the field writes of the workspace the record was made in, as a cell edit made before the switch is.
-    await waitFor(() => expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]));
+    await waitFor(() =>
+      expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]),
+    );
     expect(retainedCollectionFieldWritePaths(OTHER_WORKSPACE.workspaceId)).toEqual([]);
     // Nothing of that record is painted in the workspace the window shows now.
     expect(screen.queryByTestId(editorTabTestId("tasks/Milk.md"))).toBeNull();
@@ -332,31 +513,52 @@ describe("collection folders", () => {
   it.each([
     ["was still being typed", false],
     ["was being created, and main refused it", true],
-  ] as const)("keeps a new row that %s when the window switched workspaces, in the list of unsaved changes of its own workspace", async (_when, sending) => {
-    resetCollectionFieldWritesForTests();
-    const bridge = makeBridge(Promise.resolve(null));
-    const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
-    bridge.createCollectionRecord.mockImplementation(() => pending.promise);
-    let view!: ReturnType<typeof renderShell>;
-    const typeRow = await openTasksWithTitle(bridge, () => { view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]); });
-    await typeRow("Milk", sending ? "Enter" : null);
-    if (sending) await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
-    // The root mounts a new shell for the workspace switched to.
-    view.rerender(otherWorkspaceShell(bridge));
-    if (sending) await act(async () => pending.reject(new Error("Record creation stopped because this window changed workspaces.")));
-    // The row could not be created at all. The list that outlives the shell keeps it, with its Collection and what was typed.
-    await waitFor(() => expect(collectionWriteFailures().map((failure) => [failure.workspaceId, failure.collectionPath, failure.change.field, failure.change.value]))
-      .toEqual([[WORKSPACE.workspaceId, "tasks", "New record", { title: "Milk" }]]));
-    const kept = await screen.findByTestId("collection-write-failure");
-    expect(kept.textContent).toContain("New record in tasks");
-    expect(kept.textContent).toContain("dohc did not create this record.");
-    expect(within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value).toContain('"title": "Milk"');
-    // A row never sent asks main for nothing once the window shows another workspace.
-    expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(sending ? 1 : 0);
-    // Nothing of it is painted in the workspace the window shows now.
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    resetCollectionFieldWritesForTests();
-  });
+  ] as const)(
+    "keeps a new row that %s when the window switched workspaces, in the list of unsaved changes of its own workspace",
+    async (_when, sending) => {
+      resetCollectionFieldWritesForTests();
+      const bridge = makeBridge(Promise.resolve(null));
+      const pending = deferred<Awaited<ReturnType<typeof bridge.createCollectionRecord>>>();
+      bridge.createCollectionRecord.mockImplementation(() => pending.promise);
+      let view!: ReturnType<typeof renderShell>;
+      const typeRow = await openTasksWithTitle(bridge, () => {
+        view = renderShell(bridge, WORKSPACE, [WORKSPACE, OTHER_WORKSPACE]);
+      });
+      await typeRow("Milk", sending ? "Enter" : null);
+      if (sending)
+        await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledOnce());
+      // The root mounts a new shell for the workspace switched to.
+      view.rerender(otherWorkspaceShell(bridge));
+      if (sending)
+        await act(async () =>
+          pending.reject(
+            new Error("Record creation stopped because this window changed workspaces."),
+          ),
+        );
+      // The row could not be created at all. The list that outlives the shell keeps it, with its Collection and what was typed.
+      await waitFor(() =>
+        expect(
+          collectionWriteFailures().map((failure) => [
+            failure.workspaceId,
+            failure.collectionPath,
+            failure.change.field,
+            failure.change.value,
+          ]),
+        ).toEqual([[WORKSPACE.workspaceId, "tasks", "New record", { title: "Milk" }]]),
+      );
+      const kept = await screen.findByTestId("collection-write-failure");
+      expect(kept.textContent).toContain("New record in tasks");
+      expect(kept.textContent).toContain("dohc did not create this record.");
+      expect(
+        within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value,
+      ).toContain('"title": "Milk"');
+      // A row never sent asks main for nothing once the window shows another workspace.
+      expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(sending ? 1 : 0);
+      // Nothing of it is painted in the workspace the window shows now.
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+      resetCollectionFieldWritesForTests();
+    },
+  );
 
   // The queue behind cell edits must outlive the page: the shell renders only
   // a group's ACTIVE tab, so opening a file unmounts CollectionPage. An edit
@@ -364,7 +566,8 @@ describe("collection folders", () => {
   it("keeps a queued record edit when a file opens while the first save is pending", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      visibility: { status: "ready" as const, rules: [] },
       files: [
         { path: "tasks/one.md", kind: "file" as const },
         { path: "tasks/two.md", kind: "file" as const },
@@ -373,7 +576,10 @@ describe("collection folders", () => {
       folders: ["tasks"],
     }));
     bridge.listCollections = vi.fn(async () => ({
-      collections: [{ path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] }], unclaimedDatasetFolders: [],
+      collections: [
+        { path: "tasks", objectId: "object-test", status: "valid" as const, reasons: [] },
+      ],
+      unclaimedDatasetFolders: [],
     }));
     bridge.getCollection = vi.fn(async () => ({
       path: "tasks",
@@ -421,23 +627,17 @@ describe("collection folders", () => {
     }));
     const sessionsByPath = new Map<string, string>();
     const updatesBySession = new Map<string, Uint8Array[]>();
-    const saveStateListeners = new Set<
-      (event: EngineYDocSaveStateEvent) => void
-    >();
-    const openEngineYDocSession = vi.fn(
-      async (payload: { path: string; sessionId: string }) => {
-        // Record files get live sessions; notes.md stays a plain editor.
-        if (!payload.path.startsWith("tasks/")) return { available: false };
-        sessionsByPath.set(payload.path, payload.sessionId);
-        return {
-          available: true,
-          initialUpdate: recordDocUpdate(
-            payload.path === "tasks/one.md" ? "rec-1" : "rec-2",
-          ),
-          lineageGeneration: 1,
-        };
-      },
-    );
+    const saveStateListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
+    const openEngineYDocSession = vi.fn(async (payload: { path: string; sessionId: string }) => {
+      // Record files get live sessions; notes.md stays a plain editor.
+      if (!payload.path.startsWith("tasks/")) return { available: false };
+      sessionsByPath.set(payload.path, payload.sessionId);
+      return {
+        available: true,
+        initialUpdate: recordDocUpdate(payload.path === "tasks/one.md" ? "rec-1" : "rec-2"),
+        lineageGeneration: 1,
+      };
+    });
     const applyEngineYDocUpdate = vi.fn(
       async (payload: { sessionId: string; update: Uint8Array }) => {
         const applied = updatesBySession.get(payload.sessionId) ?? [];
@@ -454,12 +654,10 @@ describe("collection folders", () => {
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn(
-        (listener: (event: EngineYDocSaveStateEvent) => void) => {
-          saveStateListeners.add(listener);
-          return () => saveStateListeners.delete(listener);
-        },
-      ),
+      onEngineYDocSaveState: vi.fn((listener: (event: EngineYDocSaveStateEvent) => void) => {
+        saveStateListeners.add(listener);
+        return () => saveStateListeners.delete(listener);
+      }),
     });
     renderShell(bridge);
 
@@ -472,11 +670,7 @@ describe("collection folders", () => {
     });
     await user.click(row);
     const collectionPage = within(await screen.findByTestId("collection-page"));
-    const checkboxes = await collectionPage.findAllByRole(
-      "checkbox",
-      {},
-      { timeout: 15_000 },
-    );
+    const checkboxes = await collectionPage.findAllByRole("checkbox", {}, { timeout: 15_000 });
     expect(checkboxes).toHaveLength(2);
 
     // First edit: the record's session opens and the update is delivered, but
@@ -498,23 +692,26 @@ describe("collection folders", () => {
       .find((entry) => entry.dataset.path === "notes.md")!;
     await user.click(fileRow);
     await screen.findByTestId("tab-notes.md");
-    await waitFor(() =>
-      expect(screen.queryByTestId("collection-page")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("collection-page")).toBeNull());
 
     // The pending head settles only now, after the page is gone.
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, workspaceId: WORKSPACE.workspaceId, path: "tasks/one.md", state: { kind: "saved-here" }, seq: 1 });
+        listener({
+          sessionId,
+          workspaceId: WORKSPACE.workspaceId,
+          path: "tasks/one.md",
+          state: { kind: "saved-here" },
+          seq: 1,
+        });
       }
     });
 
     // The second accepted edit still reaches its record's live document.
     await waitFor(() => expect(sessionsByPath.has("tasks/two.md")).toBe(true));
     await waitFor(() => {
-      const updates =
-        updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];
+      const updates = updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];
       const probe = new Y.Doc();
       for (const update of updates) Y.applyUpdate(probe, update);
       expect(probe.getMap("frontmatter").get("done")).toBe(true);
@@ -533,7 +730,14 @@ describe("collection folders", () => {
     // The palette renders and lists something, so the misses below are the
     // gate working, not the palette failing to open.
     await within(palette).findByText("New editor group right");
-    for (const label of ["New file", "New file…", "New drawing", "New folder", "New collection", "Import files"]) {
+    for (const label of [
+      "New file",
+      "New file…",
+      "New drawing",
+      "New folder",
+      "New collection",
+      "Import files",
+    ]) {
       expect(within(palette).queryByText(label)).toBeNull();
     }
     await user.keyboard("{Escape}");
@@ -548,17 +752,24 @@ describe("collection folders", () => {
     expect(bridge.importWorkspaceFiles).not.toHaveBeenCalled();
     // The Collection dialog stays hidden without Edit, so a New collection the
     // menu let through would open only once a registry update grants Edit.
-    const editShare: Workspace = { ...SHARE_VIEW, shareView: { ...SHARE_VIEW.shareView!, access: "edit" } };
+    const editShare: Workspace = {
+      ...SHARE_VIEW,
+      shareView: { ...SHARE_VIEW.shareView!, access: "edit" },
+    };
     view.rerender(
       <>
         <CollectionFieldWriteHost />
-        <DesktopWorkspaceShell workspace={editShare} workspaces={[editShare]} {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+        <DesktopWorkspaceShell
+          workspace={editShare}
+          workspaces={[editShare]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
       </>,
     );
     await act(async () => {});
     expect(screen.queryByTestId("new-collection-dialog")).toBeNull();
   });
-
 });
 
 describe("content search", () => {
@@ -645,8 +856,13 @@ describe("settings entry points", () => {
     view.rerender(
       <>
         <CollectionFieldWriteHost />
-        <DesktopWorkspaceShell key={OTHER_WORKSPACE.workspaceId} workspace={OTHER_WORKSPACE} workspaces={[WORKSPACE, OTHER_WORKSPACE]}
-          {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />
+        <DesktopWorkspaceShell
+          key={OTHER_WORKSPACE.workspaceId}
+          workspace={OTHER_WORKSPACE}
+          workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
       </>,
     );
     await screen.findByTestId("activity-settings");
@@ -686,7 +902,11 @@ describe("customize", () => {
     bridge.listSites.mockResolvedValue({ sites: [{ ...SITE, root: "trip", title: "Trip" }] });
     bridge.listWorkspaceFiles.mockResolvedValue({
       visibility: { status: "ready", rules: [] },
-      files: [{ path: "notes.md", kind: "file" }, { path: "trip/README.md", kind: "file" }, { path: "trip/index.html", kind: "file" }],
+      files: [
+        { path: "notes.md", kind: "file" },
+        { path: "trip/README.md", kind: "file" },
+        { path: "trip/index.html", kind: "file" },
+      ],
       folders: ["trip"],
     });
     renderShell(bridge);
@@ -700,47 +920,88 @@ describe("customize", () => {
 });
 
 describe("workbench render cost", () => {
-  it.each(["policy path", "path-less batch"])("withholds visibility through a %s refresh and rejects a pre-event answer", async mode => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-    const visibility = () => vi.mocked(useWorkspaceListing).mock.results.at(-1)!.value.visibility.status;
-    await waitFor(() => expect(visibility()).toBe("ready"));
-    await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
-    const old = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
-    const fresh = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
-    const initial = await bridge.listWorkspaceFiles({ workspaceId: WORKSPACE.workspaceId });
-    bridge.listWorkspaceFiles.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
-    vi.useFakeTimers();
-    try {
-      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["notes.md"] }));
-      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
-      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId,
-        ...(mode === "policy path" ? { paths: [".dohc/visibility.toml"], pathSetChanged: false } : {}) }));
-      expect(visibility()).toBe("unavailable");
-      await act(async () => { old.resolve(initial); });
-      expect(visibility()).toBe("unavailable");
-      await act(async () => { await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS); });
-      await act(async () => { fresh.resolve(initial); });
-      expect(visibility()).toBe("ready");
-    } finally { vi.useRealTimers(); }
-  });
+  it.each(["policy path", "path-less batch"])(
+    "withholds visibility through a %s refresh and rejects a pre-event answer",
+    async (mode) => {
+      const bridge = makeBridge(Promise.resolve(null));
+      renderShell(bridge);
+      const visibility = () =>
+        vi.mocked(useWorkspaceListing).mock.results.at(-1)!.value.visibility.status;
+      await waitFor(() => expect(visibility()).toBe("ready"));
+      await waitFor(() => expect(bridge.workspaceActivitySubscriberCount()).toBe(2));
+      const old = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+      const fresh = deferred<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();
+      const initial = await bridge.listWorkspaceFiles({ workspaceId: WORKSPACE.workspaceId });
+      bridge.listWorkspaceFiles.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+      vi.useFakeTimers();
+      try {
+        act(() =>
+          bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId, paths: ["notes.md"] }),
+        );
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+        });
+        act(() =>
+          bridge.emitWorkspaceActivity({
+            workspaceId: WORKSPACE.workspaceId,
+            ...(mode === "policy path"
+              ? { paths: [".dohc/visibility.toml"], pathSetChanged: false }
+              : {}),
+          }),
+        );
+        expect(visibility()).toBe("unavailable");
+        await act(async () => {
+          old.resolve(initial);
+        });
+        expect(visibility()).toBe("unavailable");
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(WORKSPACE_ACTIVITY_REFRESH_DELAY_MS);
+        });
+        await act(async () => {
+          fresh.resolve(initial);
+        });
+        expect(visibility()).toBe("ready");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 describe("a chat page archive refused for live editing", () => {
   const PAGE = "Bookmarks/Chats/Team-update--thread-team.md";
   const TITLE = `dohc can't archive "${PAGE}" while it has live editing on`;
   const bookmark = {
-    bookmarkId: "bookmark-team", targetKind: "thread" as const, targetId: "thread-team", threadId: "thread-team",
-    mode: "live" as const, destinationPath: PAGE, state: "active" as const, projectionState: "ready" as const,
-    generation: 1, createdAtMs: 1, updatedAtMs: 1,
+    bookmarkId: "bookmark-team",
+    targetKind: "thread" as const,
+    targetId: "thread-team",
+    threadId: "thread-team",
+    mode: "live" as const,
+    destinationPath: PAGE,
+    state: "active" as const,
+    projectionState: "ready" as const,
+    generation: 1,
+    createdAtMs: 1,
+    updatedAtMs: 1,
   };
   function chatsBridge() {
     const bridge = Object.assign(
       makeBridge(Promise.resolve({ ...storedStateWithTabs([], null), activeView: "chats" })),
       {
         listChatChannels: vi.fn(async () => ({
-          channels: [{ id: "channel-team", name: "team", slug: "team", kind: "channel" as const,
-            createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "channel-team" }],
+          channels: [
+            {
+              id: "channel-team",
+              name: "team",
+              slug: "team",
+              kind: "channel" as const,
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              threadCount: 1,
+              unreadCount: 0,
+              wireId: "channel-team",
+            },
+          ],
           fileThreads: [],
         })),
         listChatChannelShares: vi.fn(async () => ({
@@ -749,25 +1010,53 @@ describe("a chat page archive refused for live editing", () => {
           relay: { state: "answered" as const, granted: [], received: [], removed: [] },
         })),
         listChannelThreads: vi.fn(async () => ({
-          threads: [{
-            id: "thread-team", title: "Team update", createdAtMs: 1, updatedAtMs: 1, channelId: "channel-team",
-            messageCount: 1, lastReadSequence: 1, unreadCount: 0,
-            openingMessage: { presentation: { group: "fixture", hue: null, self: false }, id: "message-team",
-              authorKind: "human" as const, authorDisplayName: "Alice", bodySnippet: "A settled update",
-              createdAtMs: 1, reactions: [] },
-          }],
+          threads: [
+            {
+              id: "thread-team",
+              title: "Team update",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              channelId: "channel-team",
+              messageCount: 1,
+              lastReadSequence: 1,
+              unreadCount: 0,
+              openingMessage: {
+                presentation: { group: "fixture", hue: null, self: false },
+                id: "message-team",
+                authorKind: "human" as const,
+                authorDisplayName: "Alice",
+                bodySnippet: "A settled update",
+                createdAtMs: 1,
+                reactions: [],
+              },
+            },
+          ],
           viewerAuthorId: "you",
         })),
         listChatBookmarks: vi.fn(async () => ({ bookmarks: [bookmark] })),
-        archiveChatBookmark: vi.fn(async (_input: { workspaceId: string; bookmarkId: string }) =>
-          ({ bookmark: { ...bookmark, state: "archived" as const } })),
+        archiveChatBookmark: vi.fn(async (_input: { workspaceId: string; bookmarkId: string }) => ({
+          bookmark: { ...bookmark, state: "archived" as const },
+        })),
       },
     );
-    bridge.archiveChatBookmark.mockRejectedValueOnce(Object.assign(new Error([TITLE,
-      "In Live documents, stop live editing for this page, then archive it again."].join(String.fromCharCode(10))), { name: "LivePageOwnedError" }));
-    bridge.listOwnerLiveDocuments = vi.fn(async () => ({ nextCursor: null,
-      documents: [{ path: "other.md", objectId: "object-other", status: "ready" as const, canResume: false },
-        { path: PAGE, objectId: "object-page", status: "ready" as const, canResume: false }] }));
+    bridge.archiveChatBookmark.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          [
+            TITLE,
+            "In Live documents, stop live editing for this page, then archive it again.",
+          ].join(String.fromCharCode(10)),
+        ),
+        { name: "LivePageOwnedError" },
+      ),
+    );
+    bridge.listOwnerLiveDocuments = vi.fn(async () => ({
+      nextCursor: null,
+      documents: [
+        { path: "other.md", objectId: "object-other", status: "ready" as const, canResume: false },
+        { path: PAGE, objectId: "object-page", status: "ready" as const, canResume: false },
+      ],
+    }));
     return bridge;
   }
   async function refuse(user: ReturnType<typeof userEvent.setup>) {
@@ -794,10 +1083,16 @@ describe("a chat page archive refused for live editing", () => {
     await user.click(within(toast).getByRole("button", { name: "Open Live documents" }));
     const dialog = await screen.findByTestId("live-documents-dialog");
     await within(dialog).findByRole("button", { name: `Stop live editing for ${PAGE}` });
-    expect(within(dialog).getByTestId(`live-document-row-${PAGE}`).getAttribute("aria-current")).toBe("true");
+    expect(
+      within(dialog).getByTestId(`live-document-row-${PAGE}`).getAttribute("aria-current"),
+    ).toBe("true");
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByTestId("live-documents-dialog")).toBeNull());
-    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await user.click(
+      within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
     await waitFor(() => expect(bridge.archiveChatBookmark).toHaveBeenCalledTimes(2));
     await expectNoRefusal(user);
   });

@@ -40,18 +40,23 @@ describe("launch path failure renderer readiness", () => {
     expectNoListeners(window);
   });
 
-  it.each(["loaded", "stopped", "closed", "failed", "destroyed", "render-process-gone"])("settles and removes listeners when %s", async (outcome) => {
-    const window = fixture();
-    const ready = whenRendererReady(window);
-    if (outcome === "loaded") window.webContents.emit("did-finish-load");
-    // Asked after did-finish-load, while the main frame still counts as loading.
-    if (outcome === "stopped") window.webContents.emit("did-stop-loading");
-    if (outcome === "closed") window.emit("closed");
-    if (outcome === "destroyed" || outcome === "render-process-gone") window.webContents.emit(outcome);
-    if (outcome === "failed") window.webContents.emit("did-fail-load", {}, -2, "failed", "", true);
-    expect(await ready).toBe(outcome === "loaded" || outcome === "stopped");
-    expectNoListeners(window);
-  });
+  it.each(["loaded", "stopped", "closed", "failed", "destroyed", "render-process-gone"])(
+    "settles and removes listeners when %s",
+    async (outcome) => {
+      const window = fixture();
+      const ready = whenRendererReady(window);
+      if (outcome === "loaded") window.webContents.emit("did-finish-load");
+      // Asked after did-finish-load, while the main frame still counts as loading.
+      if (outcome === "stopped") window.webContents.emit("did-stop-loading");
+      if (outcome === "closed") window.emit("closed");
+      if (outcome === "destroyed" || outcome === "render-process-gone")
+        window.webContents.emit(outcome);
+      if (outcome === "failed")
+        window.webContents.emit("did-fail-load", {}, -2, "failed", "", true);
+      expect(await ready).toBe(outcome === "loaded" || outcome === "stopped");
+      expectNoListeners(window);
+    },
+  );
 
   it("waits for the replacement navigation after an aborted load and ignores subframes", async () => {
     const window = fixture();
@@ -71,7 +76,11 @@ describe("launch path failure target context", () => {
     window.webContents.getURL.mockReturnValue("file:///dohc/index.html");
     window.webContents.isLoadingMainFrame.mockReturnValue(false);
     let session = { workspaceId: "original" };
-    const target = captureOpenPathFailureTarget(window, { isLive: () => true, currentSession: () => session, admittedCount: () => 1 });
+    const target = captureOpenPathFailureTarget(window, {
+      isLive: () => true,
+      currentSession: () => session,
+      admittedCount: () => 1,
+    });
     expect(target.isCurrent()).toBe(true);
     session = { workspaceId: "opened" };
     expect(target.isCurrent()).toBe(false);
@@ -85,7 +94,9 @@ describe("launch path failure target context", () => {
     let session: { workspaceId: string } | undefined;
     let admitted = 0;
     const target = captureOpenPathFailureTarget(window, {
-      isLive: () => true, currentSession: () => session, admittedCount: () => admitted,
+      isLive: () => true,
+      currentSession: () => session,
+      admittedCount: () => admitted,
     });
     expect(target.isCurrent(null)).toBe(true);
     // The starting window opens the first workspace it lists while the
@@ -98,18 +109,23 @@ describe("launch path failure target context", () => {
     expect(target.isCurrent(null)).toBe(false);
   });
 
-  it.each(["closed", "contents-destroyed", "crashed", "untracked"])("rejects a %s target even after its own successful open", (state) => {
-    const window = fixture();
-    window.webContents.getURL.mockReturnValue("file:///dohc/index.html");
-    window.webContents.isLoadingMainFrame.mockReturnValue(false);
-    let live = true;
-    const target = captureOpenPathFailureTarget(window, {
-      isLive: () => live, currentSession: () => ({ workspaceId: "opened" }), admittedCount: () => 1,
-    });
-    if (state === "closed") window.isDestroyed.mockReturnValue(true);
-    if (state === "contents-destroyed") window.webContents.isDestroyed.mockReturnValue(true);
-    if (state === "crashed") window.webContents.isCrashed.mockReturnValue(true);
-    if (state === "untracked") live = false;
-    expect(target.isCurrent({ workspaceId: "opened" })).toBe(false);
-  });
+  it.each(["closed", "contents-destroyed", "crashed", "untracked"])(
+    "rejects a %s target even after its own successful open",
+    (state) => {
+      const window = fixture();
+      window.webContents.getURL.mockReturnValue("file:///dohc/index.html");
+      window.webContents.isLoadingMainFrame.mockReturnValue(false);
+      let live = true;
+      const target = captureOpenPathFailureTarget(window, {
+        isLive: () => live,
+        currentSession: () => ({ workspaceId: "opened" }),
+        admittedCount: () => 1,
+      });
+      if (state === "closed") window.isDestroyed.mockReturnValue(true);
+      if (state === "contents-destroyed") window.webContents.isDestroyed.mockReturnValue(true);
+      if (state === "crashed") window.webContents.isCrashed.mockReturnValue(true);
+      if (state === "untracked") live = false;
+      expect(target.isCurrent({ workspaceId: "opened" })).toBe(false);
+    },
+  );
 });

@@ -2,16 +2,27 @@ import { recoverPublicLinkUrl } from "./linkSecurity";
 import { createReceivedIdentity } from "./receivedIdentity";
 import { readCurrentShareGrant } from "./storage/currentShareGrant";
 import { RelayShareCopyResult } from "@dohc/workspace-contracts/share-copy";
-import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
-import {parseWorkspaceId, readJsonObject} from "./requestInputs";
+import { normalizeShareLabel } from "@dohc/security-contract/share-labels";
+import { parseWorkspaceId, readJsonObject } from "./requestInputs";
 import { jsonResponse, TokenBucketLimiter } from "@dohc/service-http";
-import type {PublicEditRelease} from "@dohc/security-contract";
+import type { PublicEditRelease } from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
 import { cursorCodec } from "./requestInputs";
-import { resolveReceivedShareAuthority, selectorTargetsBlockedChannel, type AuthorizedShareAction } from "./shareAuthorization";
+import {
+  resolveReceivedShareAuthority,
+  selectorTargetsBlockedChannel,
+  type AuthorizedShareAction,
+} from "./shareAuthorization";
 import { effectiveShareSelector, fileSideOf, parseStoredAnyShareSelectorJson } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
-import type { SyncRelayGrantedInventoryCursor, SyncRelayReceivedInventoryCursor, SyncRelayIndependentGrantInventoryCursor, SyncRelayLinkInventoryCursor, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
+import type {
+  SyncRelayGrantedInventoryCursor,
+  SyncRelayReceivedInventoryCursor,
+  SyncRelayIndependentGrantInventoryCursor,
+  SyncRelayLinkInventoryCursor,
+  SyncRelayShareWithGrantRow,
+  SyncRelayStorage,
+} from "./storage";
 
 export type ShareInventoryRoute =
   | { route: "share-copy"; workspaceId: string; shareId: string; grantId: string }
@@ -20,7 +31,8 @@ export type ShareInventoryRoute =
   | { route: "share"; shareId: string };
 
 export function createShareInventoryRoutes(
-  storage: Pick<SyncRelayStorage,
+  storage: Pick<
+    SyncRelayStorage,
     | "listSharesGrantedBy"
     | "listSharesGrantedPage"
     | "listSharesReceivedBy"
@@ -41,7 +53,11 @@ export function createShareInventoryRoutes(
   nowMs: () => number,
   claimPendingShares: (userId: string) => Promise<void>,
   lookupUserEmail: ((userId: string) => Promise<string | null> | string | null) | undefined,
-  requireShareAction: (shareId: string, actorUserId: string, action: "read") => AuthorizedShareAction,
+  requireShareAction: (
+    shareId: string,
+    actorUserId: string,
+    action: "read",
+  ) => AuthorizedShareAction,
   grantedShareSummary: ReturnType<typeof createShareSummaries>["grantedShareSummary"],
   receivedShareSummary: ReturnType<typeof createShareSummaries>["receivedShareSummary"],
   independentGrantSummary: ReturnType<typeof createShareSummaries>["independentGrantSummary"],
@@ -54,21 +70,49 @@ export function createShareInventoryRoutes(
   linkKey?: string | Uint8Array,
   shareWebOrigin?: string,
 ) {
-  async function receivedSummaries(rows: readonly SyncRelayShareWithGrantRow[], actorUserId: string) {
-    const receivedLookups = await Promise.all(rows.map(async fallback => {
-      const granterEmail = lookupUserEmail ? await lookupUserEmail(fallback.share.granterUserId) : null;
-      const sharerName = await senderLabel?.(fallback.share.granterUserId, granterEmail) ?? granterEmail;
-      return { fallback, granterEmail, sharerName };
-    }));
+  async function receivedSummaries(
+    rows: readonly SyncRelayShareWithGrantRow[],
+    actorUserId: string,
+  ) {
+    const receivedLookups = await Promise.all(
+      rows.map(async (fallback) => {
+        const granterEmail = lookupUserEmail
+          ? await lookupUserEmail(fallback.share.granterUserId)
+          : null;
+        const sharerName =
+          (await senderLabel?.(fallback.share.granterUserId, granterEmail)) ?? granterEmail;
+        return { fallback, granterEmail, sharerName };
+      }),
+    );
     return receivedLookups.flatMap(({ fallback, granterEmail, sharerName }) => {
-      const effective = resolveReceivedShareAuthority({ storage, actorUserId, shareId: fallback.share.shareId });
-      if (effective.ok) return [receivedShareSummary({ share: effective.share, grant: effective.grant }, granterEmail,
-        effective.genericChatWritable, sharerName)];
+      const effective = resolveReceivedShareAuthority({
+        storage,
+        actorUserId,
+        shareId: fallback.share.shareId,
+      });
+      if (effective.ok)
+        return [
+          receivedShareSummary(
+            { share: effective.share, grant: effective.grant },
+            granterEmail,
+            effective.genericChatWritable,
+            sharerName,
+          ),
+        ];
       const currentFallback = effective.fallback;
       if (!currentFallback) return [];
       const selector = parseStoredAnyShareSelectorJson(currentFallback.share.selectorJson);
-      return selector && selectorTargetsBlockedChannel(storage, currentFallback.share.workspaceId, selector)
-        ? [] : [receivedShareSummary(currentFallback, granterEmail, effective.genericChatWritable, sharerName)];
+      return selector &&
+        selectorTargetsBlockedChannel(storage, currentFallback.share.workspaceId, selector)
+        ? []
+        : [
+            receivedShareSummary(
+              currentFallback,
+              granterEmail,
+              effective.genericChatWritable,
+              sharerName,
+            ),
+          ];
     });
   }
   async function respondToShareInventory(
@@ -80,38 +124,65 @@ export function createShareInventoryRoutes(
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const share = storage.getShare(route.shareId);
       const grant = storage.getShareGrant(route.grantId);
-      if (!share || share.workspaceId !== route.workspaceId || share.granterUserId !== actor.userId ||
-          !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId) || !grant || grant.shareId !== share.shareId ||
-          (grant.principalKind !== "user" && grant.principalKind !== "email")) throw notFound();
-      const coordinates = { workspaceId: share.workspaceId, shareId: share.shareId, grantId: grant.grantId };
+      if (
+        !share ||
+        share.workspaceId !== route.workspaceId ||
+        share.granterUserId !== actor.userId ||
+        !storage.workspaceIsOwnedBy(route.workspaceId, actor.userId) ||
+        !grant ||
+        grant.shareId !== share.shareId ||
+        (grant.principalKind !== "user" && grant.principalKind !== "email")
+      )
+        throw notFound();
+      const coordinates = {
+        workspaceId: share.workspaceId,
+        shareId: share.shareId,
+        grantId: grant.grantId,
+      };
       const ended = readCurrentShareGrant(storage, { grantId: grant.grantId }) === null;
       const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
-      if (!ended && (!selector || !effectiveShareSelector(selector, grant.access))) throw notFound();
-      const result = ended ? { ...coordinates, status: "ended" as const } : {
-        ...coordinates, status: "active" as const,
-        ...(selector && grant.parentGrantId === null ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access) : {}),
-      };
-      return jsonResponse(RelayShareCopyResult.parse(result), 200, { "cache-control": "private, no-store" });
+      if (!ended && (!selector || !effectiveShareSelector(selector, grant.access)))
+        throw notFound();
+      const result = ended
+        ? { ...coordinates, status: "ended" as const }
+        : {
+            ...coordinates,
+            status: "active" as const,
+            ...(selector && grant.parentGrantId === null
+              ? namedBrowserInvitation(share.workspaceId, grant.grantId, selector, grant.access)
+              : {}),
+          };
+      return jsonResponse(RelayShareCopyResult.parse(result), 200, {
+        "cache-control": "private, no-store",
+      });
     }
     if (route.route === "share-access") {
       if (request.method !== "GET") throw relayError("method_not_allowed");
-      if (!accessRateLimiter.allow(actor.userId, nowMs())) throw relayError("share_access_rate_limited");
+      if (!accessRateLimiter.allow(actor.userId, nowMs()))
+        throw relayError("share_access_rate_limited");
       const authorized = requireShareAction(route.shareId, actor.userId, "read");
-      return jsonResponse({ status: "current", access: fileSideOf(authorized.effectiveSelector)?.access ?? "view" },
-        200, { "cache-control": "private, no-store" });
+      return jsonResponse(
+        { status: "current", access: fileSideOf(authorized.effectiveSelector)?.access ?? "view" },
+        200,
+        { "cache-control": "private, no-store" },
+      );
     }
     if (route.route === "shares-list" && request.method === "GET") {
       const url = new URL(request.url);
-      if (url.searchParams.getAll("workspaceId").length > 1 || url.searchParams.getAll("cursor").length > 1 ||
-          url.searchParams.getAll("received").length > 1) {
+      if (
+        url.searchParams.getAll("workspaceId").length > 1 ||
+        url.searchParams.getAll("cursor").length > 1 ||
+        url.searchParams.getAll("received").length > 1
+      ) {
         throw badRequest("inventory coordinates are invalid");
       }
       if (url.searchParams.has("received")) {
-        if (url.searchParams.get("received") !== "true" || url.searchParams.has("workspaceId")) throw badRequest("received inventory coordinates are invalid");
+        if (url.searchParams.get("received") !== "true" || url.searchParams.has("workspaceId"))
+          throw badRequest("received inventory coordinates are invalid");
         const cursor = receivedInventoryCursor.decode(url.searchParams.get("cursor"));
         await claimPendingShares(actor.userId);
         const page = storage.listReceivedShareIdsPage(actor.userId, cursor);
-        const active = page.shareIds.flatMap(shareId => {
+        const active = page.shareIds.flatMap((shareId) => {
           const share = storage.getShare(shareId);
           const grant = storage.listActiveShareGrantsForRecipient(shareId, actor.userId)[0];
           return share && grant ? [{ share, grant }] : [];
@@ -119,9 +190,16 @@ export function createShareInventoryRoutes(
         const received = await receivedSummaries(active, actor.userId);
         // Re-read removals after asynchronous serialization; a grant can end during a page.
         const pageIds = new Set(page.shareIds);
-        const removed = storage.listRemovedSharesForRecipient(actor.userId).filter(row => pageIds.has(row.shareId));
-        return jsonResponse({ ok: true, received, removed,
-          ...(page.nextCursor ? { nextCursor: receivedInventoryCursor.encode(page.nextCursor) } : {}),
+        const removed = storage
+          .listRemovedSharesForRecipient(actor.userId)
+          .filter((row) => pageIds.has(row.shareId));
+        return jsonResponse({
+          ok: true,
+          received,
+          removed,
+          ...(page.nextCursor
+            ? { nextCursor: receivedInventoryCursor.encode(page.nextCursor) }
+            : {}),
         });
       }
       if (url.searchParams.has("workspaceId")) {
@@ -130,13 +208,22 @@ export function createShareInventoryRoutes(
         const cursor = grantedInventoryCursor.decode(url.searchParams.get("cursor"));
         const page = storage.listSharesGrantedPage(actor.userId, workspaceId, cursor);
         const granterEmail = lookupUserEmail ? await lookupUserEmail(actor.userId) : null;
-        const granted = await Promise.all(page.granted.map(row => grantedShareSummary(row, { granterEmail })));
+        const granted = await Promise.all(
+          page.granted.map((row) => grantedShareSummary(row, { granterEmail })),
+        );
         if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
-        return jsonResponse({ok: true, granterUserId: actor.userId, granterEmail, granted,
-          ...(page.nextCursor ? {nextCursor: grantedInventoryCursor.encode(page.nextCursor)} : {}),
+        return jsonResponse({
+          ok: true,
+          granterUserId: actor.userId,
+          granterEmail,
+          granted,
+          ...(page.nextCursor
+            ? { nextCursor: grantedInventoryCursor.encode(page.nextCursor) }
+            : {}),
         });
       }
-      if (url.searchParams.has("cursor")) throw badRequest("workspaceId is required for granted pages");
+      if (url.searchParams.has("cursor"))
+        throw badRequest("workspaceId is required for granted pages");
       await claimPendingShares(actor.userId);
       const granted = await Promise.all(
         storage
@@ -152,18 +239,37 @@ export function createShareInventoryRoutes(
         if (rows) rows.push(row);
         else receivedByShare.set(row.share.shareId, [row]);
       }
-      const received = await receivedSummaries([...receivedByShare.values()].map(rows => rows[0]!), actor.userId);
-      return jsonResponse({ ok: true, granted, received, removed: storage.listRemovedSharesForRecipient(actor.userId) });
+      const received = await receivedSummaries(
+        [...receivedByShare.values()].map((rows) => rows[0]!),
+        actor.userId,
+      );
+      return jsonResponse({
+        ok: true,
+        granted,
+        received,
+        removed: storage.listRemovedSharesForRecipient(actor.userId),
+      });
     }
     if (route.route === "shares-list") throw relayError("method_not_allowed");
 
     if (route.route === "share" && request.method === "PUT") {
       const input = await readJsonObject(request);
       const share = storage.getShare(route.shareId);
-      if (!share || share.granterUserId !== actor.userId || !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) || !storage.shareHasActiveGrants(share.shareId)) throw notFound();
-      if (Object.keys(input).sort().join() !== "subjectName") throw badRequest("Share labels require subjectName.");
-      storage.setShareLabels(share.shareId, {subjectName: normalizeShareLabel(input.subjectName)}, nowMs());
-      return jsonResponse({ok: true});
+      if (
+        !share ||
+        share.granterUserId !== actor.userId ||
+        !storage.workspaceIsOwnedBy(share.workspaceId, actor.userId) ||
+        !storage.shareHasActiveGrants(share.shareId)
+      )
+        throw notFound();
+      if (Object.keys(input).sort().join() !== "subjectName")
+        throw badRequest("Share labels require subjectName.");
+      storage.setShareLabels(
+        share.shareId,
+        { subjectName: normalizeShareLabel(input.subjectName) },
+        nowMs(),
+      );
+      return jsonResponse({ ok: true });
     }
     if (route.route === "share" && request.method === "GET") {
       await claimPendingShares(actor.userId);
@@ -171,20 +277,27 @@ export function createShareInventoryRoutes(
       const granterEmail = lookupUserEmail
         ? await lookupUserEmail(initial.share.granterUserId)
         : null;
-      const sharerName = await senderLabel?.(initial.share.granterUserId, granterEmail) ?? granterEmail;
+      const sharerName =
+        (await senderLabel?.(initial.share.granterUserId, granterEmail)) ?? granterEmail;
       const authorized = resolveReceivedShareAuthority({
         storage,
         actorUserId: actor.userId,
         shareId: route.shareId,
       });
-      if (!authorized.ok) { requireShareAction(route.shareId, actor.userId, "read"); throw notFound(); }
+      if (!authorized.ok) {
+        requireShareAction(route.shareId, actor.userId, "read");
+        throw notFound();
+      }
       const summary = receivedShareSummary(
         { share: authorized.share, grant: authorized.grant },
         granterEmail,
         authorized.genericChatWritable,
         sharerName,
       );
-      const receivedSource = createReceivedIdentity(linkKey).source(["user", actor.userId], authorized.share.workspaceId);
+      const receivedSource = createReceivedIdentity(linkKey).source(
+        ["user", actor.userId],
+        authorized.share.workspaceId,
+      );
       return jsonResponse({ ok: true, ...summary, ...(receivedSource ? { receivedSource } : {}) });
     }
     throw relayError("method_not_allowed");
@@ -203,63 +316,77 @@ export function createShareInventoryRoutes(
     ) {
       throw badRequest("cursor is invalid");
     }
-    const linkCursor = linkInventoryCursor.decode(
-      url.searchParams.get("cursor"),
-    );
+    const linkCursor = linkInventoryCursor.decode(url.searchParams.get("cursor"));
     const independentGrantCursor = independentGrantInventoryCursor.decode(
       url.searchParams.get("independentGrantCursor"),
     );
     const grantIds = [...new Set(url.searchParams.getAll("historyGrantId"))];
     const userIds = [...new Set(url.searchParams.getAll("historyUserId"))];
     if (grantIds.length || userIds.length) {
-      if (url.searchParams.getAll("historyGrantId").length + url.searchParams.getAll("historyUserId").length > 200 || [...grantIds, ...userIds].some(id => id.length === 0 || id.length > 256)
-        || linkCursor || independentGrantCursor) throw badRequest("History lookup ids are invalid");
+      if (
+        url.searchParams.getAll("historyGrantId").length +
+          url.searchParams.getAll("historyUserId").length >
+          200 ||
+        [...grantIds, ...userIds].some((id) => id.length === 0 || id.length > 256) ||
+        linkCursor ||
+        independentGrantCursor
+      )
+        throw badRequest("History lookup ids are invalid");
       const accounts = storage.lookupHistoryAccounts(workspaceId, grantIds, userIds);
-      const emails = accounts.length ? await lookupUserEmails?.([...new Set(accounts.map(account => account.recipientUserId))]) : undefined;
+      const emails = accounts.length
+        ? await lookupUserEmails?.([...new Set(accounts.map((account) => account.recipientUserId))])
+        : undefined;
       if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
-      return jsonResponse({ ok: true, holders: accounts.map(account => ({ ...account, recipientEmail: emails?.get(account.recipientUserId) ?? null })) });
+      return jsonResponse({
+        ok: true,
+        holders: accounts.map((account) => ({
+          ...account,
+          recipientEmail: emails?.get(account.recipientUserId) ?? null,
+        })),
+      });
     }
-    const page = storage.listLinkGrantsByWorkspace(
-      workspaceId,
-      linkCursor,
-    );
+    const page = storage.listLinkGrantsByWorkspace(workspaceId, linkCursor);
     const independentGrantPage = storage.listActiveIndependentShareGrants({
       workspaceId: workspaceId,
       shareIds: page.links.map((row) => row.share.shareId),
-      ...(independentGrantCursor
-        ? { cursor: independentGrantCursor }
-        : {}),
+      ...(independentGrantCursor ? { cursor: independentGrantCursor } : {}),
     });
     const [links, independentGrants] = await Promise.all([
       independentGrantCursor
         ? []
-        : Promise.all(page.links.map(async row => ({
-            ...await linkInventorySummary(row),
-            url: recoverPublicLinkUrl(row.grant, storage.getCurrentLinkCredential(row.grant.grantId), linkKey, shareWebOrigin),
-          }))),
-      Promise.all(
-        independentGrantPage.grants.map(independentGrantSummary),
-      ),
+        : Promise.all(
+            page.links.map(async (row) => ({
+              ...(await linkInventorySummary(row)),
+              url: recoverPublicLinkUrl(
+                row.grant,
+                storage.getCurrentLinkCredential(row.grant.grantId),
+                linkKey,
+                shareWebOrigin,
+              ),
+            })),
+          ),
+      Promise.all(independentGrantPage.grants.map(independentGrantSummary)),
     ]);
     if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
-    return jsonResponse({
-      ok: true,
-      links,
-      independentGrants,
-      supportedLinkAccess: publicEditRelease ? ["view", "comment", "edit"] : ["view", "comment"],
-      ...(independentGrantPage.nextCursor
-        ? {
-            nextIndependentGrantCursor:
-              independentGrantInventoryCursor.encode(
+    return jsonResponse(
+      {
+        ok: true,
+        links,
+        independentGrants,
+        supportedLinkAccess: publicEditRelease ? ["view", "comment", "edit"] : ["view", "comment"],
+        ...(independentGrantPage.nextCursor
+          ? {
+              nextIndependentGrantCursor: independentGrantInventoryCursor.encode(
                 independentGrantPage.nextCursor,
               ),
-          }
-        : {}),
-      ...(page.nextCursor
-        ? { nextCursor: linkInventoryCursor.encode(page.nextCursor) }
-        : {}),
-    // Each row carries its live link, so no cache keeps the page.
-    }, 200, { "cache-control": "private, no-store" });
+            }
+          : {}),
+        ...(page.nextCursor ? { nextCursor: linkInventoryCursor.encode(page.nextCursor) } : {}),
+        // Each row carries its live link, so no cache keeps the page.
+      },
+      200,
+      { "cache-control": "private, no-store" },
+    );
   }
 
   return { respondToShareInventory, respondToWorkspaceLinkInventory };
@@ -274,6 +401,12 @@ const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInv
   "independentGrantCursor",
 );
 
-const grantedInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>({grantId: "id"}, "cursor");
+const grantedInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>(
+  { grantId: "id" },
+  "cursor",
+);
 
-const receivedInventoryCursor = cursorCodec<SyncRelayReceivedInventoryCursor>({ shareId: "id" }, "cursor");
+const receivedInventoryCursor = cursorCodec<SyncRelayReceivedInventoryCursor>(
+  { shareId: "id" },
+  "cursor",
+);

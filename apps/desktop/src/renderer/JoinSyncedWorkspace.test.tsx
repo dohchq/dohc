@@ -76,10 +76,18 @@ describe("JoinSyncedWorkspace", () => {
     const passphrase = await screen.findByLabelText("Protected-file passphrase");
     expect(passphrase).toBe(screen.getByTestId("join-sync-passphrase"));
     await waitFor(() => expect(document.activeElement).toBe(passphrase));
-    expectFieldError(passphrase, "join-sync-passphrase-error", "Enter the protected-file passphrase.");
+    expectFieldError(
+      passphrase,
+      "join-sync-passphrase-error",
+      "Enter the protected-file passphrase.",
+    );
     expect(screen.queryByTestId("join-error")).toBeNull();
-    expect(screen.getByTestId("join-used-folder").textContent).toBe("Files stay in /home/sam/dohc/notes.");
-    expect(screen.getByTestId("join-choose-folder").textContent).toContain("Choose another empty folder");
+    expect(screen.getByTestId("join-used-folder").textContent).toBe(
+      "Files stay in /home/sam/dohc/notes.",
+    );
+    expect(screen.getByTestId("join-choose-folder").textContent).toContain(
+      "Choose another empty folder",
+    );
 
     await user.type(passphrase, "shared protected-files passphrase");
     expect(passphrase.getAttribute("aria-invalid")).toBeNull();
@@ -107,18 +115,13 @@ describe("JoinSyncedWorkspace", () => {
   it("drops the protected-file passphrase when the workspace code changes", async () => {
     const user = userEvent.setup();
     bridgeMock.cloudJoinWorkspace
-      .mockRejectedValueOnce(
-        new Error("Passphrase required to unlock synced secrets."),
-      )
+      .mockRejectedValueOnce(new Error("Passphrase required to unlock synced secrets."))
       .mockResolvedValueOnce({ workspace: JOINED });
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
     await fillJoinForm(user);
 
     await user.click(screen.getByTestId("join-workspace-start"));
-    await user.type(
-      await screen.findByTestId("join-sync-passphrase"),
-      "workspace A passphrase",
-    );
+    await user.type(await screen.findByTestId("join-sync-passphrase"), "workspace A passphrase");
 
     const code = screen.getByTestId("join-sync-code");
     await user.clear(code);
@@ -212,9 +215,7 @@ describe("JoinSyncedWorkspace", () => {
     });
 
     render(<JoinSyncedWorkspace onWorkspaceReady={() => {}} onBack={() => {}} />);
-    expect(
-      await screen.findByText(/connect your server first, then enter the code/i),
-    ).toBeTruthy();
+    expect(await screen.findByText(/connect your server first, then enter the code/i)).toBeTruthy();
 
     await user.click(await screen.findByTestId("cloud-connect-start"));
     // CloudLogin polls every 3s; the completion callback re-checks the gate.

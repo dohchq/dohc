@@ -94,20 +94,23 @@ describe("CloudLogin", () => {
   it.each([
     ["off this machine", "http://dohc.example.test", false],
     ["off this machine under the e2e switch", "http://dohc.example.test", true],
-  ])("asks for https when the address is plain http %s", async (_where, address, insecureLoopback) => {
-    bridgeMock.insecureLoopbackServersForTests = insecureLoopback;
-    render(<CloudLogin />);
-    await screen.findByTestId("cloud-server-url");
-    fireEvent.change(screen.getByTestId("cloud-server-url"), {
-      target: { value: address },
-    });
-    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+  ])(
+    "asks for https when the address is plain http %s",
+    async (_where, address, insecureLoopback) => {
+      bridgeMock.insecureLoopbackServersForTests = insecureLoopback;
+      render(<CloudLogin />);
+      await screen.findByTestId("cloud-server-url");
+      fireEvent.change(screen.getByTestId("cloud-server-url"), {
+        target: { value: address },
+      });
+      fireEvent.click(screen.getByTestId("cloud-connect-start"));
 
-    expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
-      "Enter an HTTPS server address.",
-    );
-    expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
-  });
+      expect(screen.getByTestId("cloud-connection-error").textContent).toBe(
+        "Enter an HTTPS server address.",
+      );
+      expect(bridgeMock.cloudLoginStart).not.toHaveBeenCalled();
+    },
+  );
 
   it("uses a plain http loopback server under the e2e switch", async () => {
     bridgeMock.insecureLoopbackServersForTests = true;
@@ -136,7 +139,11 @@ describe("CloudLogin", () => {
     });
 
     const panel = (initialServerUrl: string) => (
-      <CloudLogin onConnected={onConnected} onConnectionError={() => undefined} initialServerUrl={initialServerUrl} />
+      <CloudLogin
+        onConnected={onConnected}
+        onConnectionError={() => undefined}
+        initialServerUrl={initialServerUrl}
+      />
     );
     const { rerender } = render(panel(""));
     await act(async () => {});
@@ -165,15 +172,11 @@ describe("CloudLogin", () => {
     render(<CloudLogin />);
     fireEvent.click(await screen.findByTestId("cloud-disconnect"));
 
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "offline",
-    );
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("offline");
     expect(screen.getByTestId("cloud-connected")).toBeTruthy();
     // The same button is the retry once the check has answered.
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("cloud-disconnect") as HTMLButtonElement).disabled,
-      ).toBe(false),
+      expect((screen.getByTestId("cloud-disconnect") as HTMLButtonElement).disabled).toBe(false),
     );
   });
 
@@ -210,7 +213,9 @@ describe("CloudLogin", () => {
     await act(async () => {});
     await act(async () => {});
 
-    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://dohc.example.test" });
+    expect(bridgeMock.cloudLoginStart).toHaveBeenCalledWith({
+      serverUrl: "https://dohc.example.test",
+    });
     expect(screen.getByTestId("cloud-user-code").textContent).toBe("ABCD");
     expect(screen.queryByTestId("cloud-server-url")).toBeNull();
     expect(screen.queryByTestId("cloud-connected")).toBeNull();
@@ -228,8 +233,16 @@ describe("CloudLogin", () => {
   // offers Sign in again there, never an address to change, and a notice's
   // Try again starts at the same server.
   it.each([
-    ["the start fails", () => bridgeMock.cloudLoginStart.mockRejectedValueOnce(new Error("offline")), null],
-    ["the browser denies it", () => bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "denied" }), "The request was denied in the browser."],
+    [
+      "the start fails",
+      () => bridgeMock.cloudLoginStart.mockRejectedValueOnce(new Error("offline")),
+      null,
+    ],
+    [
+      "the browser denies it",
+      () => bridgeMock.cloudLoginPoll.mockResolvedValueOnce({ status: "denied" }),
+      "The request was denied in the browser.",
+    ],
   ] as const)("signs in again at the same server after %s", async (_, arrange, refusal) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const onConnectionError = vi.fn();
@@ -243,9 +256,12 @@ describe("CloudLogin", () => {
 
     const renew = await screen.findByTestId("cloud-renew");
     expect(screen.queryByTestId("cloud-server-url")).toBeNull();
-    expect(within(renew).getByTestId("cloud-renew-server").textContent).toBe("https://dohc.example.test");
+    expect(within(renew).getByTestId("cloud-renew-server").textContent).toBe(
+      "https://dohc.example.test",
+    );
     expect(screen.queryByTestId("cloud-login-refused")?.textContent ?? null).toBe(refusal);
-    for (const [report] of onConnectionError.mock.calls) expect(report.serverUrl).toBe("https://dohc.example.test");
+    for (const [report] of onConnectionError.mock.calls)
+      expect(report.serverUrl).toBe("https://dohc.example.test");
     fireEvent.click(within(renew).getByTestId("cloud-renew-start"));
     await waitFor(() => expect(bridgeMock.cloudLoginStart).toHaveBeenCalledTimes(2));
     for (const [request] of bridgeMock.cloudLoginStart.mock.calls) {
@@ -296,5 +312,4 @@ describe("CloudLogin", () => {
     // The host learns about the session the recheck found.
     expect(onConnected).toHaveBeenCalledTimes(1);
   });
-
 });

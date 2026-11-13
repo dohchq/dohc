@@ -17,7 +17,9 @@ function clock(start: number) {
 // jsdom runs no animations, so the test says what opacity the browser would
 // report for lines that are leaving.
 function painted(opacity: "0" | "1") {
-  vi.spyOn(window, "getComputedStyle").mockImplementation(() => ({ opacity }) as unknown as CSSStyleDeclaration);
+  vi.spyOn(window, "getComputedStyle").mockImplementation(
+    () => ({ opacity }) as unknown as CSSStyleDeclaration,
+  );
 }
 
 const waiting = (testId: string) => screen.getByTestId(testId).style.animation !== "none";
@@ -28,18 +30,34 @@ describe("SkeletonRows", () => {
   it("shows at once when it takes over, in the same slot, from lines that were showing", () => {
     const time = clock(10_000);
     painted("1");
-    const { rerender } = render(<SkeletonSlot><SkeletonRows inSlot key="fallback" label="Loading apps..." /></SkeletonSlot>);
+    const { rerender } = render(
+      <SkeletonSlot>
+        <SkeletonRows inSlot key="fallback" label="Loading apps..." />
+      </SkeletonSlot>,
+    );
     time.now += 200;
-    rerender(<SkeletonSlot><SkeletonRows inSlot key="view" label="Loading apps…" testId="view" /></SkeletonSlot>);
+    rerender(
+      <SkeletonSlot>
+        <SkeletonRows inSlot key="view" label="Loading apps…" testId="view" />
+      </SkeletonSlot>,
+    );
     expect(waiting("view")).toBe(false);
   });
 
   it("keeps the wait when the lines it replaces were still blank", () => {
     const time = clock(20_000);
     painted("0");
-    const { rerender } = render(<SkeletonSlot><SkeletonRows inSlot key="fallback" label="Loading…" /></SkeletonSlot>);
+    const { rerender } = render(
+      <SkeletonSlot>
+        <SkeletonRows inSlot key="fallback" label="Loading…" />
+      </SkeletonSlot>,
+    );
     time.now += 200;
-    rerender(<SkeletonSlot><SkeletonRows inSlot key="view" label="Loading…" testId="view" /></SkeletonSlot>);
+    rerender(
+      <SkeletonSlot>
+        <SkeletonRows inSlot key="view" label="Loading…" testId="view" />
+      </SkeletonSlot>,
+    );
     expect(waiting("view")).toBe(true);
   });
 
@@ -48,9 +66,19 @@ describe("SkeletonRows", () => {
   it("keeps the wait for lines nested in the slot that do not stand in its place", () => {
     const time = clock(25_000);
     painted("1");
-    const { rerender } = render(<SkeletonSlot><SkeletonRows inSlot key="view" label="Loading Chats..." /></SkeletonSlot>);
+    const { rerender } = render(
+      <SkeletonSlot>
+        <SkeletonRows inSlot key="view" label="Loading Chats..." />
+      </SkeletonSlot>,
+    );
     time.now += 200;
-    rerender(<SkeletonSlot><div><SkeletonRows key="messages" label="Loading..." testId="nested" /></div></SkeletonSlot>);
+    rerender(
+      <SkeletonSlot>
+        <div>
+          <SkeletonRows key="messages" label="Loading..." testId="nested" />
+        </div>
+      </SkeletonSlot>,
+    );
     expect(waiting("nested")).toBe(true);
   });
 
@@ -58,24 +86,28 @@ describe("SkeletonRows", () => {
   it("keeps the wait for lines in another place, or in no slot", () => {
     const time = clock(30_000);
     painted("1");
-    const { rerender } = render(<>
-      <SkeletonSlot><SkeletonRows inSlot key="a" label="Loading apps…" /></SkeletonSlot>
-      <SkeletonSlot>{null}</SkeletonSlot>
-      <SkeletonRows key="c" label="Loading…" />
-    </>);
+    const { rerender } = render(
+      <>
+        <SkeletonSlot>
+          <SkeletonRows inSlot key="a" label="Loading apps…" />
+        </SkeletonSlot>
+        <SkeletonSlot>{null}</SkeletonSlot>
+        <SkeletonRows key="c" label="Loading…" />
+      </>,
+    );
     time.now += 200;
-    rerender(<>
-      <SkeletonSlot>{null}</SkeletonSlot>
-      <SkeletonSlot><SkeletonRows inSlot key="b" label="Loading Chats..." testId="other-slot" /></SkeletonSlot>
-      <SkeletonRows key="d" label="Loading…" testId="no-slot" />
-    </>);
+    rerender(
+      <>
+        <SkeletonSlot>{null}</SkeletonSlot>
+        <SkeletonSlot>
+          <SkeletonRows inSlot key="b" label="Loading Chats..." testId="other-slot" />
+        </SkeletonSlot>
+        <SkeletonRows key="d" label="Loading…" testId="no-slot" />
+      </>,
+    );
     expect(waiting("other-slot")).toBe(true);
     expect(waiting("no-slot")).toBe(true);
   });
-
-
-
-
 
   // The wait is what keeps a quick load from flashing, and it lives in the
   // stylesheet, so a change there must fail here. Reduced motion shortens

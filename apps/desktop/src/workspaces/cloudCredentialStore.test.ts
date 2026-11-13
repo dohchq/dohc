@@ -51,7 +51,10 @@ describe("cloud credential store", () => {
     const store = createCloudCredentialStore({ dir, cipher: fakeCipher });
     await store.save(credentials);
     const data = JSON.parse(await readFile(credentialFile(), "utf8"));
-    await writeFile(credentialFile(), JSON.stringify({ ...data, serverName: "Research server", networkAccess: "unknown" }));
+    await writeFile(
+      credentialFile(),
+      JSON.stringify({ ...data, serverName: "Research server", networkAccess: "unknown" }),
+    );
     expect(await store.load()).toEqual(credentials);
   });
 
@@ -62,7 +65,9 @@ describe("cloud credential store", () => {
     await store.save(credentials);
     await store.saveDeletedAccounts(deleted);
     await store.clear();
-    expect(await createCloudCredentialStore({ dir, cipher: fakeCipher }).loadDeletedAccounts()).toEqual(deleted);
+    expect(
+      await createCloudCredentialStore({ dir, cipher: fakeCipher }).loadDeletedAccounts(),
+    ).toEqual(deleted);
 
     await writeFile(join(dir, "dohc-cloud-deleted.json"), "{not json");
     expect(await store.loadDeletedAccounts()).toEqual([]);
@@ -100,7 +105,9 @@ describe("cloud credential store", () => {
     // A packaged app, an ordinary run, and Windows or Linux tests still seal the token.
     expect(mayUseKeychain({ isPackaged: true, platform: "darwin", env: test })).toBe(true);
     expect(mayUseKeychain({ isPackaged: false, platform: "darwin", env: {} })).toBe(true);
-    expect(mayUseKeychain({ isPackaged: false, platform: "darwin", env: { DOHC_DESKTOP_TEST: "0" } })).toBe(true);
+    expect(
+      mayUseKeychain({ isPackaged: false, platform: "darwin", env: { DOHC_DESKTOP_TEST: "0" } }),
+    ).toBe(true);
     expect(mayUseKeychain({ isPackaged: false, platform: "win32", env: test })).toBe(true);
     expect(mayUseKeychain({ isPackaged: false, platform: "linux", env: test })).toBe(true);
   });

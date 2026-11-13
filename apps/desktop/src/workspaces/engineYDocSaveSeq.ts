@@ -30,10 +30,7 @@ export function noteLocalEdit(state: EngineYDocSaveSeqState, seq: number): void 
  * A settle announced itself. Everything journaled up to now is what it is
  * guaranteed to carry, so that is the seq it may later vouch for.
  */
-export function noteSettleStart(
-  state: EngineYDocSaveSeqState,
-  token: number,
-): number {
+export function noteSettleStart(state: EngineYDocSaveSeqState, token: number): number {
   state.inFlight.set(token, state.dirtySeq);
   return state.dirtySeq;
 }
@@ -46,10 +43,7 @@ export function noteSettleStart(
  * 0 claims nothing, so the renderer keeps showing unsaved work — the safe
  * direction for an indicator whose whole job is to not lie.
  */
-export function noteSettleOutcome(
-  state: EngineYDocSaveSeqState,
-  token: number,
-): number {
+export function noteSettleOutcome(state: EngineYDocSaveSeqState, token: number): number {
   const seq = state.inFlight.get(token);
   if (seq === undefined) return 0;
   state.inFlight.delete(token);

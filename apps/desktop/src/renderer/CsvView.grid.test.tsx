@@ -7,7 +7,10 @@ import { CsvView } from "./CsvView";
 import { documentVersionKey } from "./documentVersionKey";
 
 import { resetOrphanedDrafts } from "./orphanedDrafts";
-import { acquireSharedLocalDocument, resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
+import {
+  acquireSharedLocalDocument,
+  resetSharedLocalDocumentsForTests,
+} from "./sharedLocalDocument";
 
 // Each row's gutter, by row number, every time a row renders.
 const gutterRenders = vi.hoisted(() => [] as Array<number | undefined>);
@@ -28,7 +31,9 @@ const buffers: Array<ReturnType<typeof acquireSharedLocalDocument>["buffer"]> = 
 
 // A CSV as FileInspector hands it to its view.
 function csvFile(body: string) {
-  const { buffer, release } = acquireSharedLocalDocument(documentVersionKey("ws-1", "funnel.csv", undefined));
+  const { buffer, release } = acquireSharedLocalDocument(
+    documentVersionKey("ws-1", "funnel.csv", undefined),
+  );
   releases.push(release);
   buffers.push(buffer);
   const contentReadTicket = buffer.beginRead();
@@ -80,7 +85,9 @@ describe("CSV view while typing", () => {
     expect(widthText(0)).toBe("stageSigned up");
 
     await user.type(screen.getByLabelText("Row 1 column 1"), " the pricing page");
-    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe("Visited the pricing page");
+    expect((screen.getByLabelText("Row 1 column 1") as HTMLInputElement).value).toBe(
+      "Visited the pricing page",
+    );
     expect(widthText(0)).toBe("stageSigned up");
 
     await user.type(screen.getByLabelText("Header column 1"), " name");
@@ -89,5 +96,4 @@ describe("CSV view while typing", () => {
     expect(widthText(0)).toBe("stage nameVisited the pricing page");
     expect(widthText(1)).toBe("count4820");
   });
-
 });

@@ -22,7 +22,11 @@ import {
 afterEach(closeTestStorages);
 
 function makeHandler(storage: SyncRelayStorage, presence: PresenceHub): SyncRelayHandler {
-  return testHandler(storage, { presence, nowMs: () => Date.now(), lookupUserDisplayName: id => id === "owner" ? "Owner" : "Guest" });
+  return testHandler(storage, {
+    presence,
+    nowMs: () => Date.now(),
+    lookupUserDisplayName: (id) => (id === "owner" ? "Owner" : "Guest"),
+  });
 }
 
 function post(userId: string, path: string, body: unknown): Request {
@@ -88,7 +92,9 @@ describe("presence transport (workspace-owned)", () => {
     );
     expect((second.peers as unknown[]).length).toBe(2);
     // Immediate long-poll read reflects both.
-    const read = await json(await h(req("owner", "/sync/w/presence?topic=general&since=0&hold=0", { method: "GET" })));
+    const read = await json(
+      await h(req("owner", "/sync/w/presence?topic=general&since=0&hold=0", { method: "GET" })),
+    );
     expect((read.peers as unknown[]).length).toBe(2);
     // Phone leaves.
     const afterLeave = await json(
@@ -129,7 +135,9 @@ describe("presence transport (workspace-owned)", () => {
     const h = makeHandler(storage, new PresenceHub());
     await claimWorkspace(h, "owner", "w");
     await h(post("owner", "/sync/w/presence?topic=A", { clientId: "c", state: {} }));
-    const b = await json(await h(req("owner", "/sync/w/presence?topic=B&since=0&hold=0", { method: "GET" })));
+    const b = await json(
+      await h(req("owner", "/sync/w/presence?topic=B&since=0&hold=0", { method: "GET" })),
+    );
     expect((b.peers as unknown[]).length).toBe(0);
   });
 
@@ -199,7 +207,12 @@ describe("presence is never journaled (ephemeral invariant)", () => {
     const presence = new PresenceHub();
     const h = makeHandler(storage, presence);
     await claimWorkspace(h, "owner", "w");
-    await h(post("owner", "/sync/w/presence?topic=general", { clientId: "c", state: { state: "typing" } }));
+    await h(
+      post("owner", "/sync/w/presence?topic=general", {
+        clientId: "c",
+        state: { state: "typing" },
+      }),
+    );
 
     // The durable log for this workspace has NO presence rows (no rows at all
     // — a claim does not append ops).
@@ -237,17 +250,28 @@ describe("presence over a share (cross-user, gated)", () => {
     const shareId = await shareFile(h);
 
     // Owner publishes presence on the shared doc via the workspace route.
-    await h(post("owner", "/sync/w/presence?topic=notes/a.md", { clientId: "o", state: { displayName: "Owner" } }));
+    await h(
+      post("owner", "/sync/w/presence?topic=notes/a.md", {
+        clientId: "o",
+        state: { displayName: "Owner" },
+      }),
+    );
     // Guest publishes via the SHARE route — same underlying scope.
     const guestView = await json(
       await h(
-        post("guest", `/sync/shares/${shareId}/presence?topic=${encodeURIComponent("notes/a.md")}`, {
-          clientId: "g",
-          state: { displayName: "Guest" },
-        }),
+        post(
+          "guest",
+          `/sync/shares/${shareId}/presence?topic=${encodeURIComponent("notes/a.md")}`,
+          {
+            clientId: "g",
+            state: { displayName: "Guest" },
+          },
+        ),
       ),
     );
-    const names = (guestView.peers as Array<Record<string, unknown>>).map((p) => p.displayName).sort();
+    const names = (guestView.peers as Array<Record<string, unknown>>)
+      .map((p) => p.displayName)
+      .sort();
     expect(names).toEqual(["Guest", "Owner"]);
   });
 
@@ -269,9 +293,13 @@ describe("presence over a share (cross-user, gated)", () => {
     const h = makeHandler(storage, new PresenceHub());
     const shareId = await shareFile(h);
     const r = await h(
-      post("stranger", `/sync/shares/${shareId}/presence?topic=${encodeURIComponent("notes/a.md")}`, {
-        clientId: "g",
-      }),
+      post(
+        "stranger",
+        `/sync/shares/${shareId}/presence?topic=${encodeURIComponent("notes/a.md")}`,
+        {
+          clientId: "g",
+        },
+      ),
     );
     expect(r.status).toBe(404);
   });
@@ -284,15 +312,28 @@ describe("presence over a share (cross-user, gated)", () => {
     const topic = encodeURIComponent("notes/a.md");
 
     // Guest joins and reads the current version.
-    await h(post("guest", `/sync/shares/${shareId}/presence?topic=${topic}`, { clientId: "g", state: {} }));
+    await h(
+      post("guest", `/sync/shares/${shareId}/presence?topic=${topic}`, {
+        clientId: "g",
+        state: {},
+      }),
+    );
     const seed = await json(
-      await h(req("guest", `/sync/shares/${shareId}/presence?topic=${topic}&since=0&hold=0`, { method: "GET" })),
+      await h(
+        req("guest", `/sync/shares/${shareId}/presence?topic=${topic}&since=0&hold=0`, {
+          method: "GET",
+        }),
+      ),
     );
     // Guest parks a long-poll at the current version (authorized at park time).
     const parked = h(
-      req("guest", `/sync/shares/${shareId}/presence?topic=${topic}&since=${seed.version}&hold=10000`, {
-        method: "GET",
-      }),
+      req(
+        "guest",
+        `/sync/shares/${shareId}/presence?topic=${topic}&since=${seed.version}&hold=10000`,
+        {
+          method: "GET",
+        },
+      ),
     );
     await waitForWaiters(presence, 1);
     expect(presence.stats().waiters).toBe(1);
@@ -322,73 +363,128 @@ describe("presence over a share (cross-user, gated)", () => {
   });
 });
 
-
 describe("reserved agent presence", () => {
-  it.each(["group", "version"] as const)("refuses a %s recipient's reserved ID without changing owner or peer hints", async (kind) => {
-    const storage = await testStorage();
-    const presence = new PresenceHub();
-    const h = makeHandler(storage, presence);
-    try {
-      resetOpSeq();
-      await claimWorkspace(h, "owner", "w");
-      const op = chatChannelCreate("chat:agent", { type: "both", purpose: "", folderPath: "team" });
-      expect((await h(post("owner", "/sync/w/log", {
-        originId: "owner-origin", ops: [logOp(op.opKind, op.payload)],
-      }))).status).toBe(200);
-      const topic = kind === "group" ? "chat:agent" : "team/a.md";
-      const shares: string[] = [];
-      for (const recipientUserId of ["recipient", "observer"]) {
-        const created = await h(post("owner", "/sync/w/shares", {
-          recipientUserId,
-          ...(kind === "group" ? { channelWireId: "chat:agent", paths: ["team"] } : { paths: [], versionId: "main" }),
-          access: kind === "group" ? "read-write" : "edit",
-        }));
-        expect(created.status).toBe(200);
-        shares.push((await json(created)).shareId as string);
-      }
-      const ownerPublish = await h(post("owner", "/sync/w/presence?topic=" + topic, {
-        clientId: "agent:w", state: { agent: true, activity: "working" },
-      }));
-      expect(ownerPublish.status).toBe(200);
-      const before = await json(ownerPublish);
-      expect(before.peers).toEqual([expect.objectContaining({
-        isSelf: true, state: { agent: true, activity: "working" },
-      })]);
-      // The topic itself admits the recipient. Its ordinary client still works.
-      expect((await h(post("recipient", "/sync/shares/" + shares[0] + "/presence?topic=" + topic, {
-        clientId: "recipient-device", state: {},
-      }))).status).toBe(200);
-      for (const body of [
-        { clientId: "agent:w", state: { agent: true, activity: "idle", userId: "owner" } },
-        { clientId: "agent:w", leave: true },
-      ]) {
-        const spoof = await h(post("recipient", "/sync/shares/" + shares[0] + "/presence?topic=" + topic, body));
-        expect(spoof.status).toBe(404);
-      }
-      for (const [user, path] of [
-        ["owner", "/sync/w/presence?topic=" + topic + "&since=0&hold=0"],
-        ["observer", "/sync/shares/" + shares[1] + "/presence?topic=" + topic + "&since=0&hold=0"],
-      ]) {
-        const snapshot = await json(await h(req(user!, path!, { method: "GET" })));
-        const hints = (snapshot.peers as Array<Record<string, unknown>>)
-          .filter(p => (p.state as { agent?: unknown } | null)?.agent === true);
-        expect(hints).toEqual([expect.objectContaining({
-          state: { agent: true, activity: "working" },
-          isSelf: user === "owner",
-          sessionToken: expect.any(String),
-        })]);
-        expect(hints[0]).not.toHaveProperty("clientId");
-        if (user === "owner") expect(hints[0]!.sessionToken).toBe(
-          (before.peers as Array<Record<string, unknown>>)[0]!.sessionToken,
+  it.each(["group", "version"] as const)(
+    "refuses a %s recipient's reserved ID without changing owner or peer hints",
+    async (kind) => {
+      const storage = await testStorage();
+      const presence = new PresenceHub();
+      const h = makeHandler(storage, presence);
+      try {
+        resetOpSeq();
+        await claimWorkspace(h, "owner", "w");
+        const op = chatChannelCreate("chat:agent", {
+          type: "both",
+          purpose: "",
+          folderPath: "team",
+        });
+        expect(
+          (
+            await h(
+              post("owner", "/sync/w/log", {
+                originId: "owner-origin",
+                ops: [logOp(op.opKind, op.payload)],
+              }),
+            )
+          ).status,
+        ).toBe(200);
+        const topic = kind === "group" ? "chat:agent" : "team/a.md";
+        const shares: string[] = [];
+        for (const recipientUserId of ["recipient", "observer"]) {
+          const created = await h(
+            post("owner", "/sync/w/shares", {
+              recipientUserId,
+              ...(kind === "group"
+                ? { channelWireId: "chat:agent", paths: ["team"] }
+                : { paths: [], versionId: "main" }),
+              access: kind === "group" ? "read-write" : "edit",
+            }),
+          );
+          expect(created.status).toBe(200);
+          shares.push((await json(created)).shareId as string);
+        }
+        const ownerPublish = await h(
+          post("owner", "/sync/w/presence?topic=" + topic, {
+            clientId: "agent:w",
+            state: { agent: true, activity: "working" },
+          }),
         );
+        expect(ownerPublish.status).toBe(200);
+        const before = await json(ownerPublish);
+        expect(before.peers).toEqual([
+          expect.objectContaining({
+            isSelf: true,
+            state: { agent: true, activity: "working" },
+          }),
+        ]);
+        // The topic itself admits the recipient. Its ordinary client still works.
+        expect(
+          (
+            await h(
+              post("recipient", "/sync/shares/" + shares[0] + "/presence?topic=" + topic, {
+                clientId: "recipient-device",
+                state: {},
+              }),
+            )
+          ).status,
+        ).toBe(200);
+        for (const body of [
+          { clientId: "agent:w", state: { agent: true, activity: "idle", userId: "owner" } },
+          { clientId: "agent:w", leave: true },
+        ]) {
+          const spoof = await h(
+            post("recipient", "/sync/shares/" + shares[0] + "/presence?topic=" + topic, body),
+          );
+          expect(spoof.status).toBe(404);
+        }
+        for (const [user, path] of [
+          ["owner", "/sync/w/presence?topic=" + topic + "&since=0&hold=0"],
+          [
+            "observer",
+            "/sync/shares/" + shares[1] + "/presence?topic=" + topic + "&since=0&hold=0",
+          ],
+        ]) {
+          const snapshot = await json(await h(req(user!, path!, { method: "GET" })));
+          const hints = (snapshot.peers as Array<Record<string, unknown>>).filter(
+            (p) => (p.state as { agent?: unknown } | null)?.agent === true,
+          );
+          expect(hints).toEqual([
+            expect.objectContaining({
+              state: { agent: true, activity: "working" },
+              isSelf: user === "owner",
+              sessionToken: expect.any(String),
+            }),
+          ]);
+          expect(hints[0]).not.toHaveProperty("clientId");
+          if (user === "owner")
+            expect(hints[0]!.sessionToken).toBe(
+              (before.peers as Array<Record<string, unknown>>)[0]!.sessionToken,
+            );
+        }
+        expect(
+          (
+            await h(
+              post("owner", "/sync/w/presence?topic=" + topic, {
+                clientId: "agent:foreign-workspace",
+                state: { agent: true, activity: "idle" },
+              }),
+            )
+          ).status,
+        ).toBe(404);
+        expect(
+          (
+            await h(
+              post("owner", "/sync/w/presence?topic=" + topic, {
+                clientId: "agent:w",
+                leave: true,
+              }),
+            )
+          ).status,
+        ).toBe(200);
+        expect(presence.stats().entries).toBe(1);
+      } finally {
+        presence.dispose();
       }
-      expect((await h(post("owner", "/sync/w/presence?topic=" + topic, {
-        clientId: "agent:foreign-workspace", state: { agent: true, activity: "idle" },
-      }))).status).toBe(404);
-      expect((await h(post("owner", "/sync/w/presence?topic=" + topic, {
-        clientId: "agent:w", leave: true,
-      }))).status).toBe(200);
-      expect(presence.stats().entries).toBe(1);
-    } finally { presence.dispose(); }
-  });
+    },
+  );
 });

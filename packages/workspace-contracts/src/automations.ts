@@ -300,7 +300,12 @@ type AutomationStep =
    * Sets fields on the triggering record, or on the record or records bound
    * to `records` by an earlier add-record or find step.
    */
-  | { kind: "set"; values: AutomationFieldValue[]; records: string | null; operation: string | null }
+  | {
+      kind: "set";
+      values: AutomationFieldValue[];
+      records: string | null;
+      operation: string | null;
+    }
   /** `collection` is null for this Collection. */
   | {
       kind: "add-record";
@@ -309,7 +314,13 @@ type AutomationStep =
       as: string | null;
       operation: string | null;
     }
-  | { kind: "find"; condition: string; collection: string | null; as: string; operation: string | null }
+  | {
+      kind: "find";
+      condition: string;
+      collection: string | null;
+      as: string;
+      operation: string | null;
+    }
   /** Runs the dataset action named `operation` with `input` as its input. */
   | { kind: "invoke"; collection: string | null; operation: string; input: AutomationInputValue[] }
   | { kind: "if"; if: string; do: AutomationStep[]; otherwise: AutomationStep[] }
@@ -619,7 +630,10 @@ function readReference(value: unknown, path: string, issues: Issues): string | n
 
 function readOperationName(value: unknown, path: string, issues: Issues): string | null {
   const text = readReference(value, path, issues);
-  if (text !== null && (!OPERATION_NAME_PATTERN.test(text) || text.split(".").some((part) => RESERVED_KEYS.has(part)))) {
+  if (
+    text !== null &&
+    (!OPERATION_NAME_PATTERN.test(text) || text.split(".").some((part) => RESERVED_KEYS.has(part)))
+  ) {
     issues.push({ code: "invalid-operation-name", path });
     return null;
   }
@@ -728,7 +742,10 @@ function readPeople(value: unknown, path: string, issues: Issues): AutomationVal
   items.forEach((item, index) => {
     const itemPath = pointer(path, index);
     if (typeof item !== "string" || item.trim().length === 0) {
-      issues.push({ code: typeof item === "string" ? "empty-value" : "expected-text", path: itemPath });
+      issues.push({
+        code: typeof item === "string" ? "empty-value" : "expected-text",
+        path: itemPath,
+      });
       return;
     }
     const person = readValue(item, itemPath, issues);
@@ -899,7 +916,9 @@ function readSchedule(
   const daysPath = pointer(path, "days");
   if (frequency === "week") {
     const days =
-      rawDays === undefined ? ["mon" as const] : readDays(rawDays, daysPath, AUTOMATION_WEEKDAYS, issues);
+      rawDays === undefined
+        ? ["mon" as const]
+        : readDays(rawDays, daysPath, AUTOMATION_WEEKDAYS, issues);
     return days === null ? null : { kind: "schedule", every: frequency, at, days, timezone };
   }
   if (frequency === "month") {
@@ -929,7 +948,9 @@ function readTrigger(value: unknown, path: string, issues: Issues): AutomationTr
     }
     case "field-changed": {
       const field = readReference(argument, argumentPath, issues);
-      const to = entries.has("to") ? readValue(entries.get("to"), pointer(path, "to"), issues) : null;
+      const to = entries.has("to")
+        ? readValue(entries.get("to"), pointer(path, "to"), issues)
+        : null;
       return field === null ? null : { kind, field, to, table };
     }
     case "starts-matching": {
@@ -957,9 +978,7 @@ function readTrigger(value: unknown, path: string, issues: Issues): AutomationTr
 
 function isBindingName(value: unknown): value is string {
   return (
-    typeof value === "string" &&
-    BINDING_NAME_PATTERN.test(value) &&
-    !RESERVED_NAMES.has(value)
+    typeof value === "string" && BINDING_NAME_PATTERN.test(value) && !RESERVED_NAMES.has(value)
   );
 }
 
@@ -1039,7 +1058,12 @@ function readStep(
       }
       const operationName = operation();
       if (values === null) return null;
-      return { kind, values, records: typeof records === "string" ? records : null, operation: operationName };
+      return {
+        kind,
+        values,
+        records: typeof records === "string" ? records : null,
+        operation: operationName,
+      };
     }
     case "add-record": {
       const values = readFieldValues(argument, argumentPath, issues);
@@ -1051,9 +1075,17 @@ function readStep(
     case "find": {
       const condition = readCondition(argument, argumentPath, issues);
       const collection = readPath(entries.get("collection"), option("collection"), issues);
-      const as = bindName(required(entries, "as", path, issues), option("as"), "records", scope, context);
+      const as = bindName(
+        required(entries, "as", path, issues),
+        option("as"),
+        "records",
+        scope,
+        context,
+      );
       const operationName = operation();
-      return condition === null || as === null ? null : { kind, condition, collection, as, operation: operationName };
+      return condition === null || as === null
+        ? null
+        : { kind, condition, collection, as, operation: operationName };
     }
     case "invoke": {
       const name = readOperationName(argument, argumentPath, issues);
@@ -1067,7 +1099,13 @@ function readStep(
         return null;
       }
       const condition = readCondition(argument, argumentPath, issues);
-      const branch = readSteps(required(entries, "do", path, issues), option("do"), context, scope, ifDepth + 1);
+      const branch = readSteps(
+        required(entries, "do", path, issues),
+        option("do"),
+        context,
+        scope,
+        ifDepth + 1,
+      );
       const otherwise = entries.has("otherwise")
         ? readSteps(entries.get("otherwise"), option("otherwise"), context, scope, ifDepth + 1)
         : [];
@@ -1082,12 +1120,20 @@ function readStep(
     }
     case "post": {
       const text = readTemplate(argument, argumentPath, issues);
-      const group = readReference(required(entries, "group", path, issues), option("group"), issues);
+      const group = readReference(
+        required(entries, "group", path, issues),
+        option("group"),
+        issues,
+      );
       return text === null || group === null ? null : { kind, text, group };
     }
     case "wake-agent": {
       const text = readTemplate(argument, argumentPath, issues);
-      const person = readReference(required(entries, "person", path, issues), option("person"), issues);
+      const person = readReference(
+        required(entries, "person", path, issues),
+        option("person"),
+        issues,
+      );
       return text === null || person === null ? null : { kind, text, person };
     }
     case "run": {
@@ -1145,7 +1191,9 @@ function readAutomation(
 
   const rawWhen = required(entries, "when", path, issues);
   const when = rawWhen === undefined ? null : readTrigger(rawWhen, property("when"), issues);
-  const condition = entries.has("if") ? readCondition(entries.get("if"), property("if"), issues) : null;
+  const condition = entries.has("if")
+    ? readCondition(entries.get("if"), property("if"), issues)
+    : null;
   const context: StepContext = {
     issues,
     // An unreadable trigger already fails the automation, so do not guess
@@ -1154,7 +1202,13 @@ function readAutomation(
     stepCount: 0,
     boundNames: new Set(),
   };
-  const steps = readSteps(required(entries, "do", path, issues), property("do"), context, new Map(), 0);
+  const steps = readSteps(
+    required(entries, "do", path, issues),
+    property("do"),
+    context,
+    new Map(),
+    0,
+  );
 
   if (
     issues.length > 0 ||
@@ -1240,7 +1294,8 @@ type TemplateProblem = "invalid-template" | "optional-chain-needs-parentheses";
 // as in "record?.of / 2", as the start of a regular expression. The text
 // up to where parsing stopped holds that pattern when this is the cause.
 // A comment inside the pattern gives plain invalid-template.
-const OPTIONAL_PROPERTY_BEFORE_DIVISION = /\?\.\s*[\p{ID_Start}$_][\p{ID_Continue}$]*\s*\/(?![/*])/u;
+const OPTIONAL_PROPERTY_BEFORE_DIVISION =
+  /\?\.\s*[\p{ID_Start}$_][\p{ID_Continue}$]*\s*\/(?![/*])/u;
 
 function templateProblem(source: string, start: number, stop: number): TemplateProblem {
   return OPTIONAL_PROPERTY_BEFORE_DIVISION.test(source.slice(start, stop + 1))
@@ -1260,12 +1315,17 @@ function expressionEnd(source: string, start: number): number | TemplateProblem 
   try {
     end = parseExpressionAt(source, start, { ecmaVersion: "latest", preserveParens: true }).end;
   } catch (error) {
-    const stop = error instanceof SyntaxError && "pos" in error && typeof error.pos === "number" ? error.pos : start;
+    const stop =
+      error instanceof SyntaxError && "pos" in error && typeof error.pos === "number"
+        ? error.pos
+        : start;
     return templateProblem(source, start, stop);
   }
   try {
     const next = tokenizer(source.slice(end), { ecmaVersion: "latest" }).getToken();
-    return next.type === tokTypes.braceR ? end + next.start : templateProblem(source, start, end + next.start);
+    return next.type === tokTypes.braceR
+      ? end + next.start
+      : templateProblem(source, start, end + next.start);
   } catch {
     return "invalid-template";
   }
@@ -1330,7 +1390,9 @@ function fieldValuesYaml(values: readonly AutomationFieldValue[]): Map<string, u
 }
 
 function inputYaml(input: readonly AutomationInputValue[]): Map<string, unknown> | null {
-  return input.length === 0 ? null : new Map(input.map(({ key, value }) => [key, valueYaml(value)]));
+  return input.length === 0
+    ? null
+    : new Map(input.map(({ key, value }) => [key, valueYaml(value)]));
 }
 
 // A kind key and its argument, then the options that are not null.
@@ -1350,7 +1412,9 @@ function triggerYaml(trigger: AutomationTrigger): unknown {
   switch (trigger.kind) {
     case "record-added":
     case "record-removed":
-      return trigger.table === null ? trigger.kind : withOptions(trigger.kind, null, [["table", trigger.table]]);
+      return trigger.table === null
+        ? trigger.kind
+        : withOptions(trigger.kind, null, [["table", trigger.table]]);
     case "record-changed":
       return trigger.fields === null && trigger.table === null
         ? trigger.kind
@@ -1398,7 +1462,10 @@ function stepYaml(step: AutomationStep): Map<string, unknown> {
         ["operation", step.operation],
       ]);
     case "invoke":
-      return withOptions(step.kind, step.operation, [["collection", step.collection], ["input", inputYaml(step.input)]]);
+      return withOptions(step.kind, step.operation, [
+        ["collection", step.collection],
+        ["input", inputYaml(step.input)],
+      ]);
     case "if":
       return withOptions(step.kind, step.if, [
         ["do", step.do.map(stepYaml)],
@@ -1471,7 +1538,9 @@ function sameData(left: unknown, right: unknown): boolean {
     const keys = Object.keys(leftRecord);
     return (
       keys.length === Object.keys(rightRecord).length &&
-      keys.every((key) => Object.hasOwn(rightRecord, key) && sameData(leftRecord[key], rightRecord[key]))
+      keys.every(
+        (key) => Object.hasOwn(rightRecord, key) && sameData(leftRecord[key], rightRecord[key]),
+      )
     );
   }
   return Object.is(left, right);
@@ -1485,7 +1554,9 @@ function sameData(left: unknown, right: unknown): boolean {
  * would turn off. An invalid entry with a key written twice is refused with
  * its `duplicate-key` diagnostics, because YAML keeps only one of the values.
  */
-export function writeAutomationsFile(entries: readonly AutomationEntry[]): AutomationsFileWriteResult {
+export function writeAutomationsFile(
+  entries: readonly AutomationEntry[],
+): AutomationsFileWriteResult {
   const header = `version: ${AUTOMATIONS_FILE_VERSION}\nautomations:`;
   const items = entries.map((entry) =>
     indent(
@@ -1500,7 +1571,8 @@ export function writeAutomationsFile(entries: readonly AutomationEntry[]): Autom
   const text = items.length === 0 ? `${header} []\n` : `${header}\n${items.join("\n")}`;
 
   const loaded = loadAutomationList(text);
-  if (loaded.status === "unreadable") return { status: "refused", diagnostics: [loaded.diagnostic] };
+  if (loaded.status === "unreadable")
+    return { status: "refused", diagnostics: [loaded.diagnostic] };
   const reread = readEntries(loaded.list);
   const diagnostics = entries.flatMap((entry, index): AutomationDiagnostic[] => {
     const again = reread[index];

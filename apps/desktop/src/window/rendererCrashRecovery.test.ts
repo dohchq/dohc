@@ -7,10 +7,7 @@ import {
   isCleanRendererExit,
 } from "./rendererCrashRecovery";
 
-type GoneListener = (
-  event: unknown,
-  details: { reason: string; exitCode: number },
-) => void;
+type GoneListener = (event: unknown, details: { reason: string; exitCode: number }) => void;
 
 function fakeWebContents() {
   let listener: GoneListener | null = null;
@@ -89,9 +86,10 @@ describe("installRendererCrashRecovery", () => {
     const fake = fakeWebContents();
     let finishCleanup: (() => void) | undefined;
     const cleanup = vi.fn(
-      () => new Promise<void>((resolve) => {
-        finishCleanup = resolve;
-      }),
+      () =>
+        new Promise<void>((resolve) => {
+          finishCleanup = resolve;
+        }),
     );
     installRendererCrashRecovery(fake.contents, () => 1_000, cleanup);
 
@@ -105,9 +103,13 @@ describe("installRendererCrashRecovery", () => {
 
   it("still reloads when main-owned resource cleanup fails", async () => {
     const fake = fakeWebContents();
-    installRendererCrashRecovery(fake.contents, () => 1_000, async () => {
-      throw new Error("cleanup failed");
-    });
+    installRendererCrashRecovery(
+      fake.contents,
+      () => 1_000,
+      async () => {
+        throw new Error("cleanup failed");
+      },
+    );
 
     fake.crash("crashed");
     await vi.waitFor(() => expect(fake.reloads).toHaveLength(1));
@@ -162,11 +164,15 @@ describe("installRendererCrashRecovery", () => {
     let now = 0;
     const fake = fakeWebContents();
     const order: string[] = [];
-    const afterCrashLoop = vi.fn(() => { order.push("crash-loop"); });
+    const afterCrashLoop = vi.fn(() => {
+      order.push("crash-loop");
+    });
     installRendererCrashRecovery(
       fake.contents,
       () => (now += 1_000),
-      async () => { order.push("cleanup"); },
+      async () => {
+        order.push("cleanup");
+      },
       afterCrashLoop,
     );
 

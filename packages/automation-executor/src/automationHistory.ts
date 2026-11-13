@@ -16,7 +16,9 @@ export interface AutomationsFileHistory {
     moments: ReadonlyArray<{ id: string; protected: boolean }>;
     nextCursor: HistoryCursor | null;
   }>;
-  readMoment(momentId: string): Promise<{ protected: false; moment: AutomationHistoryMoment } | { protected: true } | null>;
+  readMoment(
+    momentId: string,
+  ): Promise<{ protected: false; moment: AutomationHistoryMoment } | { protected: true } | null>;
 }
 
 // How far back History is read for a change to one automation.
@@ -26,7 +28,11 @@ const HISTORY_MOMENTS = 1_000;
 function entryIn(text: string | undefined, id: string): AutomationEntry | null {
   const parsed = text === undefined ? null : parseAutomationsFile(text);
   if (parsed?.status !== "read") return null;
-  return parsed.entries.find((entry) => (entry.status === "valid" ? entry.automation.id : entry.id) === id) ?? null;
+  return (
+    parsed.entries.find(
+      (entry) => (entry.status === "valid" ? entry.automation.id : entry.id) === id,
+    ) ?? null
+  );
 }
 
 const isOn = (entry: AutomationEntry | null): boolean | null =>
@@ -40,7 +46,11 @@ const isOn = (entry: AutomationEntry | null): boolean | null =>
  * link's, whose holder is not a person dohc can notify. A public link names
  * nobody. A moment names one author only when all its authors agree.
  */
-type ChangeAuthor = { kind: "person"; userId: string } | { kind: "link" } | { kind: "dohc" } | { kind: "nobody" };
+type ChangeAuthor =
+  | { kind: "person"; userId: string }
+  | { kind: "link" }
+  | { kind: "dohc" }
+  | { kind: "nobody" };
 function authorOf(authors: MomentAuthor[] | undefined, ownerUserId: string): ChangeAuthor {
   const each = (authors ?? []).map((author) => entryAuthorOf(author, ownerUserId));
   const [first = entryAuthorOf(undefined, ownerUserId)] = each;
@@ -83,7 +93,9 @@ async function* entryChanges(
   let cursor: HistoryCursor | undefined;
   for (let read = 0; read < HISTORY_MOMENTS;) {
     const page = await history.listMoments({
-      objectId, limit: HISTORY_PAGE, ...(cursor === undefined ? {} : { cursor }),
+      objectId,
+      limit: HISTORY_PAGE,
+      ...(cursor === undefined ? {} : { cursor }),
     });
     for (const summary of page.moments) {
       read += 1;
@@ -133,11 +145,14 @@ export async function whoSwitchedOff(
     if (isOn(before) !== true || isOn(after) !== false) continue;
     if (author.kind !== "person" && author.kind !== "link") return null;
     const lastChangedBy = await lastPersonIn(changes);
-    return lastChangedBy === null ? null : {
-      switchedOffBy: author.kind === "person" ? { kind: "person", userId: author.userId } : { kind: "link" },
-      lastChangedBy,
-      contentHash: createHash("sha256").update(text).digest("hex"),
-    };
+    return lastChangedBy === null
+      ? null
+      : {
+          switchedOffBy:
+            author.kind === "person" ? { kind: "person", userId: author.userId } : { kind: "link" },
+          lastChangedBy,
+          contentHash: createHash("sha256").update(text).digest("hex"),
+        };
   }
   return null;
 }

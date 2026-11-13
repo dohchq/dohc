@@ -19,7 +19,9 @@ function stubAnimationFrames() {
     pending.set(id, callback);
     return id;
   });
-  const cancel = vi.fn((id: number) => { pending.delete(id); });
+  const cancel = vi.fn((id: number) => {
+    pending.delete(id);
+  });
   vi.stubGlobal("requestAnimationFrame", request);
   vi.stubGlobal("cancelAnimationFrame", cancel);
   return {
@@ -56,7 +58,10 @@ vi.mock("./About", async (importOriginal) => {
 // as the shell's are.
 const notices = { report: vi.fn(), clear: vi.fn() };
 const accessContext: AccessContext = {
-  facts: { cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true }, shareView: false },
+  facts: {
+    cloud: { connected: true, workspaceSynced: true, workspaceSyncConnected: true },
+    shareView: false,
+  },
   openSyncSettings: vi.fn(),
   connect: vi.fn(),
 };
@@ -65,10 +70,18 @@ type PanelProps = ComponentProps<typeof ProductionLinkedChatsPanel>;
 const links: PanelProps["links"] = { revision: 0, onOpenLink: vi.fn() };
 
 // The workspace shell provides the reaction store in production.
-function LinkedChatsPanel(props: Omit<PanelProps, "notices" | "accessContext" | "links"> & Partial<Pick<PanelProps, "notices">>) {
+function LinkedChatsPanel(
+  props: Omit<PanelProps, "notices" | "accessContext" | "links"> &
+    Partial<Pick<PanelProps, "notices">>,
+) {
   return (
     <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionLinkedChatsPanel notices={notices} accessContext={accessContext} links={links} {...props} />
+      <ProductionLinkedChatsPanel
+        notices={notices}
+        accessContext={accessContext}
+        links={links}
+        {...props}
+      />
     </ReactionStoreProvider>
   );
 }
@@ -106,9 +119,14 @@ beforeEach(() => {
   bridgeMock.markChatThreadRead.mockResolvedValue(undefined);
   // Access opens with the file. Only its owner has it.
   bridgeMock.getObjectAccess.mockImplementation(async (input: { ref: unknown }) => ({
-    ref: input.ref, rows: [], visibility: "visible", unknownReason: null,
+    ref: input.ref,
+    rows: [],
+    visibility: "visible",
+    unknownReason: null,
     coverage: { kind: "granted", complete: true, observation: "interval" },
-    checkedAtMs: 0, freshness: "fresh", nextCursor: null,
+    checkedAtMs: 0,
+    freshness: "fresh",
+    nextCursor: null,
   }));
   bridgeMock.requestAccessRefresh.mockResolvedValue(undefined);
   bridgeMock.listChatReactions.mockResolvedValue({
@@ -152,7 +170,12 @@ describe("LinkedChatsPanel startup", () => {
       <LinkedChatsPanel
         workspaceId="workspace-1"
         filePath="docs/plan.md"
-        history={{ revision: 0, paused: false, onOpenMoment: () => undefined, onOpenHistory: () => undefined }}
+        history={{
+          revision: 0,
+          paused: false,
+          onOpenMoment: () => undefined,
+          onOpenHistory: () => undefined,
+        }}
         onError={() => undefined}
       />,
     );
@@ -194,9 +217,24 @@ describe("LinkedChatsPanel startup", () => {
   it("neither reports nor clears when an old file's read fails after the switch", async () => {
     const forOld = deferred<never>();
     bridgeMock.listFileChats.mockImplementation(({ path }: { path: string }) =>
-      path === "docs/old.md" ? forOld.promise : Promise.resolve({ fileObjectId: "object-2", threads: [] }));
-    const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/old.md" onError={() => undefined} />);
-    view.rerender(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/new.md" onError={() => undefined} />);
+      path === "docs/old.md"
+        ? forOld.promise
+        : Promise.resolve({ fileObjectId: "object-2", threads: [] }),
+    );
+    const view = render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/old.md"
+        onError={() => undefined}
+      />,
+    );
+    view.rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/new.md"
+        onError={() => undefined}
+      />,
+    );
     await screen.findByTestId("about-chats-count");
     const clears = notices.clear.mock.calls.length;
     await act(async () => {
@@ -212,9 +250,7 @@ describe("LinkedChatsPanel startup", () => {
 // initialThread, cleared by onInitialThreadConsumed, with the panel swapped
 // out for the other panel tab's surface (full unmount) and back.
 function RailHarness() {
-  const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(
-    searchThread,
-  );
+  const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(searchThread);
   const [view, setView] = useState<"chats" | "history">("chats");
   return (
     <div>
@@ -224,9 +260,7 @@ function RailHarness() {
       <button type="button" onClick={() => setView("chats")}>
         show-chats
       </button>
-      <output data-testid="pending-initial-thread">
-        {searchChatThread ? "set" : "cleared"}
-      </output>
+      <output data-testid="pending-initial-thread">{searchChatThread ? "set" : "cleared"}</output>
       {view === "chats" ? (
         <LinkedChatsPanel
           workspaceId="workspace-1"
@@ -275,19 +309,23 @@ describe("LinkedChatsPanel initialThread consumption", () => {
       id: "thread-2",
       title: "Second discussion",
     };
-    bridgeMock.listChatMessages.mockImplementation(
-      async ({ threadId }: { threadId: string }) => ({
-        messages: threadId === searchThread.id
-          ? [{ presentation: { group: "fixture", hue: null, self: false },
-              id: "shared-message",
-              threadId,
-              authorKind: "human" as const,
-              authorDisplayName: "Sam",
-              body: "Old thread message",
-              createdAtMs: 1,
-            }]
+    bridgeMock.listChatMessages.mockImplementation(async ({ threadId }: { threadId: string }) => ({
+      messages:
+        threadId === searchThread.id
+          ? [
+              {
+                presentation: { group: "fixture", hue: null, self: false },
+                id: "shared-message",
+                threadId,
+                authorKind: "human" as const,
+                authorDisplayName: "Sam",
+                body: "Old thread message",
+                createdAtMs: 1,
+              },
+            ]
           : [
-              { presentation: { group: "fixture", hue: null, self: false },
+              {
+                presentation: { group: "fixture", hue: null, self: false },
                 id: "shared-message",
                 threadId,
                 authorKind: "human" as const,
@@ -295,7 +333,8 @@ describe("LinkedChatsPanel initialThread consumption", () => {
                 body: "Same id in the new DOM",
                 createdAtMs: 2,
               },
-              { presentation: { group: "fixture", hue: null, self: false },
+              {
+                presentation: { group: "fixture", hue: null, self: false },
                 id: "new-focus",
                 threadId,
                 authorKind: "human" as const,
@@ -304,13 +343,10 @@ describe("LinkedChatsPanel initialThread consumption", () => {
                 createdAtMs: 3,
               },
             ],
-      }),
-    );
+    }));
     const frames = stubAnimationFrames();
     const scrolledMessageIds: Array<string | null> = [];
-    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (
-      this: Element,
-    ) {
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (this: Element) {
       scrolledMessageIds.push(this.getAttribute("data-message-id"));
     });
 
@@ -352,7 +388,8 @@ describe("LinkedChatsPanel initialThread consumption", () => {
 // A search result opens its thread while this file's Chats are still being
 // read. The two reads answer to different owners, so neither drops the other.
 describe("LinkedChatsPanel thread and file reads", () => {
-  const message = { presentation: { group: "fixture", hue: null, self: false },
+  const message = {
+    presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: searchThread.id,
     authorKind: "human" as const,
@@ -366,7 +403,11 @@ describe("LinkedChatsPanel thread and file reads", () => {
     const messagesRead = deferred<unknown>();
     bridgeMock.listChatMessages.mockReturnValue(messagesRead.promise);
     const view = render(
-      <LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={() => undefined} />,
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
     );
     await waitFor(() => expect(notices.report).toHaveBeenCalledTimes(1));
     view.rerender(
@@ -400,17 +441,24 @@ describe("LinkedChatsPanel thread and file reads", () => {
 
   it("opens a saved message's chat again from Try again only while About shows that chat", async () => {
     const other = { ...searchThread, id: "thread-2", title: "Other" };
-    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [searchThread, other] });
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [searchThread, other],
+    });
     bridgeMock.listChatMessages.mockImplementation(async ({ threadId }: { threadId: string }) => ({
       messages: [{ ...message, id: `${threadId}-message`, threadId, body: `In ${threadId}` }],
     }));
     bridgeMock.sendChatMessage.mockResolvedValue({
-      message: { id: "m1", threadId: "thread-1" }, failure: "Error: The bookmark projection stopped.",
+      message: { id: "m1", threadId: "thread-1" },
+      failure: "Error: The bookmark projection stopped.",
     });
     const onError = vi.fn();
-    const view = render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />);
+    const view = render(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />,
+    );
     const reads = (threadId: string) =>
-      bridgeMock.listChatMessages.mock.calls.filter(([input]) => input.threadId === threadId).length;
+      bridgeMock.listChatMessages.mock.calls.filter(([input]) => input.threadId === threadId)
+        .length;
     const openThread = async (threadId: string) => {
       const open = await screen.findAllByTestId("linked-chat-open");
       await userEvent.click(open.find((button) => button.dataset.threadId === threadId)!);
@@ -491,7 +539,8 @@ describe("LinkedChatsPanel share level", () => {
   it("shows existing reactions but no picker when the share refuses writes", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
-        { presentation: { group: "fixture", hue: null, self: false },
+        {
+          presentation: { group: "fixture", hue: null, self: false },
           id: "message-1",
           threadId: "thread-1",
           authorKind: "human",
@@ -535,7 +584,8 @@ describe("LinkedChatsPanel share level", () => {
 // every Chats surface does under the shell: one write chain per cell, one
 // set of rows, and errors only for a panel still showing the thread.
 describe("LinkedChats reactions through the workspace store", () => {
-  const note = { presentation: { group: "fixture", hue: null, self: false },
+  const note = {
+    presentation: { group: "fixture", hue: null, self: false },
     id: "message-1",
     threadId: "thread-1",
     authorKind: "human" as const,
@@ -608,7 +658,10 @@ describe("LinkedChats reactions through the workspace store", () => {
       await writes[0]!.promise;
     });
     await waitFor(() => expect(writes).toHaveLength(2));
-    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.state)).toEqual(["added", "removed"]);
+    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.state)).toEqual([
+      "added",
+      "removed",
+    ]);
     expect(thumbsIn("first").getAttribute("aria-pressed")).toBe("false");
     await act(async () => {
       writes[1]!.resolve({});
@@ -620,7 +673,10 @@ describe("LinkedChats reactions through the workspace store", () => {
 
   it("does not paint another thread's pending reaction after switching threads", async () => {
     const otherThread = { ...searchThread, id: "thread-2", title: "Other" };
-    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [searchThread, otherThread] });
+    bridgeMock.listFileChats.mockResolvedValue({
+      fileObjectId: "object-1",
+      threads: [searchThread, otherThread],
+    });
     bridgeMock.listChatMessages.mockImplementation(async ({ threadId }: { threadId: string }) => ({
       messages: [{ ...note, threadId }],
     }));
@@ -641,7 +697,12 @@ describe("LinkedChats reactions through the workspace store", () => {
 
     await userEvent.click(screen.getByTestId("linked-chat-back"));
     await openThread("thread-2");
-    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", threadId: "thread-2" }));
+    await waitFor(() =>
+      expect(bridgeMock.listChatMessages).toHaveBeenLastCalledWith({
+        workspaceId: "workspace-1",
+        threadId: "thread-2",
+      }),
+    );
     await ready("panel");
     expect(thumbsIn("panel").getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryAllByTestId("linked-chat-reaction-pill")).toHaveLength(0);
@@ -649,11 +710,18 @@ describe("LinkedChats reactions through the workspace store", () => {
 });
 
 describe("LinkedChatsPanel comment on the file", () => {
-  const created: ChatThreadRecord = { id: "thread-new", title: "Tighten the intro", createdAtMs: 1, updatedAtMs: 1 };
+  const created: ChatThreadRecord = {
+    id: "thread-new",
+    title: "Tighten the intro",
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  };
 
   function renderPanel(onError = vi.fn()) {
     bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [] });
-    render(<LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />);
+    render(
+      <LinkedChatsPanel workspaceId="workspace-1" filePath="docs/plan.md" onError={onError} />,
+    );
     return onError;
   }
 
@@ -671,8 +739,16 @@ describe("LinkedChatsPanel comment on the file", () => {
     renderPanel();
     await writeComment("Tighten the intro\nIt runs long.");
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
-    expect(bridgeMock.createFileChat).toHaveBeenCalledWith({ workspaceId: "workspace-1", path: "docs/plan.md", title: "Tighten the intro" });
-    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({ workspaceId: "workspace-1", threadId: "thread-new", body: "Tighten the intro\nIt runs long." });
+    expect(bridgeMock.createFileChat).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      path: "docs/plan.md",
+      title: "Tighten the intro",
+    });
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      threadId: "thread-new",
+      body: "Tighten the intro\nIt runs long.",
+    });
   });
 
   it("keeps the words in the chat's composer when posting them fails", async () => {
@@ -681,19 +757,28 @@ describe("LinkedChatsPanel comment on the file", () => {
     const onError = renderPanel();
     await writeComment("Tighten the intro");
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
-    expect((screen.getByTestId("linked-chat-composer") as HTMLTextAreaElement).value).toBe("Tighten the intro");
+    expect((screen.getByTestId("linked-chat-composer") as HTMLTextAreaElement).value).toBe(
+      "Tighten the intro",
+    );
     expect(onError).toHaveBeenCalledOnce();
   });
 
   it("says a comment that posted was posted, and leaves its words out of the composer, when a later step fails", async () => {
     const failure = "Error: Chats stopped because this window changed workspaces.";
     bridgeMock.createFileChat.mockResolvedValue({ thread: created });
-    bridgeMock.sendChatMessage.mockResolvedValue({ message: { id: "m1", threadId: "thread-new" }, failure });
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: { id: "m1", threadId: "thread-new" },
+      failure,
+    });
     const onError = renderPanel();
     await writeComment("Tighten the intro");
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect((screen.getByTestId("linked-chat-composer") as HTMLTextAreaElement).value).toBe("");
-    expect(onError).toHaveBeenCalledExactlyOnceWith("Posted your comment. dohc could not show it yet.", failure, expect.any(Function));
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      "Posted your comment. dohc could not show it yet.",
+      failure,
+      expect.any(Function),
+    );
   });
 
   it("closes the composer on Escape without writing anything", async () => {

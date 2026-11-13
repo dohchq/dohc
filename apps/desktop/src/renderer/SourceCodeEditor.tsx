@@ -39,7 +39,6 @@ export type SourceCodePendingUndo = {
   undoText: string;
 };
 
-
 const CODEMIRROR_THEME = EditorView.theme({
   "&": {
     height: "100%",
@@ -202,7 +201,10 @@ export function SourceCodeEditor(props: {
               return false;
             },
             keydown(event) {
-              if (hasPrimaryModifier(event, window.dohcDesktop?.platform) && event.key.toLowerCase() === "s") {
+              if (
+                hasPrimaryModifier(event, window.dohcDesktop?.platform) &&
+                event.key.toLowerCase() === "s"
+              ) {
                 event.preventDefault();
                 onSaveRef.current();
                 return true;
@@ -244,9 +246,7 @@ export function SourceCodeEditor(props: {
     // the revision, rather than a text difference, is the authority boundary.
     applyingRemoteValue.current = true;
     view.dispatch({
-      ...(current === next
-        ? {}
-        : { changes: { from: 0, to: current.length, insert: next } }),
+      ...(current === next ? {} : { changes: { from: 0, to: current.length, insert: next } }),
       effects: historyCompartment.reconfigure([]),
       annotations: Transaction.addToHistory.of(false),
     });
@@ -303,9 +303,7 @@ export function SourceCodeEditor(props: {
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: languageCompartment.reconfigure(
-        codeMirrorLanguage(props.path, props.language),
-      ),
+      effects: languageCompartment.reconfigure(codeMirrorLanguage(props.path, props.language)),
     });
   }, [props.path, props.language, languageCompartment]);
 

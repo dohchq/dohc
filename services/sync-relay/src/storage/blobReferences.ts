@@ -94,7 +94,10 @@ export function referencedBlobShas(
     }
   } else if (opKind === "live.audit.settlement") {
     const audit = asRecord(record.record);
-    if (audit) {push(audit.markdownDigest);push(audit.acceptedStateBlobSha256);}
+    if (audit) {
+      push(audit.markdownDigest);
+      push(audit.acceptedStateBlobSha256);
+    }
   } else if (opKind === "live.audit.base") {
     const audit = asRecord(record.record);
     const checkpoint = audit ? asRecord(audit.checkpoint) : null;

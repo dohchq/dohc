@@ -21,9 +21,7 @@ export function AcceptDmDialog(props: {
   const [workspaceId, setWorkspaceId] = useState(defaultWorkspaceId);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const chosen = props.workspaces.find(
-    (workspace) => workspace.workspaceId === workspaceId,
-  );
+  const chosen = props.workspaces.find((workspace) => workspace.workspaceId === workspaceId);
   const title = props.request.granterEmail
     ? `Add your conversation with ${props.request.granterEmail} to a workspace`
     : "Add this conversation to a workspace";
@@ -54,10 +52,7 @@ export function AcceptDmDialog(props: {
         className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex flex-col gap-1">
-          <h2
-            id="chats-accept-dm-title"
-            className="m-0 text-sm font-semibold text-ink"
-          >
+          <h2 id="chats-accept-dm-title" className="m-0 text-sm font-semibold text-ink">
             {title}
           </h2>
           <p className="m-0 text-xs text-muted">
@@ -165,10 +160,7 @@ export function LeaveDmDialog(props: {
         className="dohc-elevated flex w-105 max-w-[80vw] flex-col gap-3 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex flex-col gap-1">
-          <h2
-            id="chats-leave-dm-title"
-            className="m-0 text-sm font-semibold text-ink"
-          >
+          <h2 id="chats-leave-dm-title" className="m-0 text-sm font-semibold text-ink">
             {`Leave your conversation with ${props.dm.peerLabel}?`}
           </h2>
           <p className="m-0 text-xs text-muted">

@@ -5,7 +5,11 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
-import type { ChatChannelType, ChatReportedAgent, ChatThreadLane } from "@dohc/workspace-contracts/engine";
+import type {
+  ChatChannelType,
+  ChatReportedAgent,
+  ChatThreadLane,
+} from "@dohc/workspace-contracts/engine";
 import { CHAT_WORK_STATUSES, type ChatWorkReport } from "@dohc/workspace-contracts/chat-work";
 
 export const CHATS_METHOD = {
@@ -121,8 +125,7 @@ export type ChatThreadReadState = typeof ChatThreadReadStateSchema.Type;
 export type ChatUnreadFileThread = typeof ChatUnreadFileThreadSchema.Type;
 export type ChatFollow = typeof ChatFollowSchema.Type;
 
-export type ChatChannelThreadSummary =
-  typeof ChatChannelThreadSummarySchema.Type;
+export type ChatChannelThreadSummary = typeof ChatChannelThreadSummarySchema.Type;
 export type ChatProjection = typeof ChatProjectionSchema.Type;
 export type ChatProjectionFileAccess =
   | (ChatsJsonObject & { kind: "allowed"; path: string })
@@ -280,7 +283,12 @@ type ChatReactionSetParams = ChatsJsonObject & {
   stageReceipt?: true;
 };
 type ChatThreadPageParams = ChatPageParams & { threadId: string };
-type ChatFileMentionsParams = ChatsJsonObject & { subject?: { path: string } | { objectId: string }; cursor?: string; scope: string; sharedChannelRowsUncovered: number };
+type ChatFileMentionsParams = ChatsJsonObject & {
+  subject?: { path: string } | { objectId: string };
+  cursor?: string;
+  scope: string;
+  sharedChannelRowsUncovered: number;
+};
 type ChatMentionsParams = ChatPageParams & {
   handle: string;
 };
@@ -427,13 +435,11 @@ type ChatDispatchFailParams = ChatsJsonObject & {
   nowMs?: number;
 };
 
-export type ChatRunMessagesPage =
-  ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListRunMessages];
+export type ChatRunMessagesPage = ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListRunMessages];
 type ChatThreadRunsPage = typeof RunRecordsPageSchema.Type;
 export type ChatRecoveriesPage =
   ChatsMethodResultMap[typeof CHATS_METHOD.dispatchListFailedRunRecoveries];
-export type ChatFeedPage =
-  ChatsMethodResultMap[typeof CHATS_METHOD.feedListPersonal];
+export type ChatFeedPage = ChatsMethodResultMap[typeof CHATS_METHOD.feedListPersonal];
 
 export type ChatsMethodParamsMap = {
   [CHATS_METHOD.channelCreate]: ChatChannelCreateParams;
@@ -465,7 +471,12 @@ export type ChatsMethodParamsMap = {
   [CHATS_METHOD.reactionSet]: ChatReactionSetParams;
   [CHATS_METHOD.reactionsList]: ChatThreadPageParams;
   [CHATS_METHOD.attachmentsListForThread]: ChatThreadPageParams;
-  [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {channelWireId:string;scope:string;sharedChannelRowsUncovered:number;cursor?:string};
+  [CHATS_METHOD.conversationLinks]: ChatsJsonObject & {
+    channelWireId: string;
+    scope: string;
+    sharedChannelRowsUncovered: number;
+    cursor?: string;
+  };
   [CHATS_METHOD.attachmentsListFileMentions]: ChatFileMentionsParams;
   [CHATS_METHOD.mentionsListForHandle]: ChatMentionsParams;
   [CHATS_METHOD.agentReadListRequestsPage]: ChatAgentRequestsPageParams;
@@ -512,7 +523,10 @@ export type ChatsMethodParamsMap = {
 
 export type ChatsMethodResultMap = {
   [M in ChatsMethod]: M extends typeof CHATS_METHOD.attachmentsListFileMentions
-    ? ChatFileMentionsPage : M extends typeof CHATS_METHOD.conversationLinks ? ChatLinksEnginePage : (typeof ChatsResultSchemas)[M]["Type"];
+    ? ChatFileMentionsPage
+    : M extends typeof CHATS_METHOD.conversationLinks
+      ? ChatLinksEnginePage
+      : (typeof ChatsResultSchemas)[M]["Type"];
 };
 
 function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
@@ -524,18 +538,12 @@ function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
     onExcessProperty: "error",
   })(value);
   if (Result.isFailure(decoded)) {
-    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
-      decoded.failure.issue,
-    ).issues[0];
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(decoded.failure.issue).issues[0];
     const path =
       issue?.path
-        ?.map((part) =>
-          typeof part === "number" ? `[${part}]` : `.${String(part)}`,
-        )
+        ?.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`))
         .join("") ?? "";
-    throw new ProtocolShapeError(
-      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
-    );
+    throw new ProtocolShapeError(`${label}${path}: ${issue?.message ?? decoded.failure.message}`);
   }
   return decoded.success;
 }
@@ -549,12 +557,7 @@ const MessageAuthorKindSchema = Schema.Literals(["human", "agent", "automation",
 const ReactorKindSchema = Schema.Literals(["human", "agent"]);
 const ChannelKindSchema = Schema.Literals(["channel", "dm", "agent"]);
 const ChannelTypeSchema = Schema.Literals(["posts", "chat", "both"]);
-const FollowTargetKindSchema = Schema.Literals([
-  "person",
-  "agent",
-  "channel",
-  "thread",
-]);
+const FollowTargetKindSchema = Schema.Literals(["person", "agent", "channel", "thread"]);
 const NextCursorFields = { nextCursor: NullableString } as const;
 
 // A link author names its link grant and link principal, and no other author does.
@@ -572,9 +575,19 @@ const ChatActorSchema = Schema.Union([
   }),
 ]);
 // A link message names no account, owner, actor key, origin or automation.
-const ACCOUNT_FIELDS = ["authorUserId", "authorOwnerDisplayName", "authorActorKey", "origin", "automation"] as const;
+const ACCOUNT_FIELDS = [
+  "authorUserId",
+  "authorOwnerDisplayName",
+  "authorActorKey",
+  "origin",
+  "automation",
+] as const;
 const noAccountOnLinkMessage = Schema.makeFilter(
-  (message: { author: { kind: string } } & Partial<Record<(typeof ACCOUNT_FIELDS)[number], unknown>>) =>
+  (
+    message: { author: { kind: string } } & Partial<
+      Record<(typeof ACCOUNT_FIELDS)[number], unknown>
+    >,
+  ) =>
     message.author.kind !== "link" ||
     ACCOUNT_FIELDS.every((field) => message[field] === undefined) ||
     "A link message names no account.",
@@ -1033,10 +1046,14 @@ const ChatsResultSchemas = {
     requests: Schema.mutable(Schema.Array(ChatAgentRequestSchema)),
   }),
   [CHATS_METHOD.agentReadListUnreadThreads]: pageSchema({
-    threads: Schema.mutable(Schema.Array(mutableStruct({
-      ...ChatThreadSchema.fields,
-      lastRead: mutableStruct({ createdAtMs: NonnegativeInt, messageId: Schema.String }),
-    }))),
+    threads: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          ...ChatThreadSchema.fields,
+          lastRead: mutableStruct({ createdAtMs: NonnegativeInt, messageId: Schema.String }),
+        }),
+      ),
+    ),
   }),
   [CHATS_METHOD.agentReadMarkThreadRead]: ChatAgentReadStateSchema,
   [CHATS_METHOD.followsSet]: ChatFollowSchema,
@@ -1066,9 +1083,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.bookmarkRetryFailed]: BookmarkTransitionSchema,
   [CHATS_METHOD.bookmarkMarkStale]: BookmarkTransitionSchema,
   [CHATS_METHOD.dispatchEnqueue]: mutableStruct({ enqueued: Schema.Boolean }),
-  [CHATS_METHOD.dispatchClaimNextPending]: Schema.NullOr(
-    ChatDispatchClaimSchema,
-  ),
+  [CHATS_METHOD.dispatchClaimNextPending]: Schema.NullOr(ChatDispatchClaimSchema),
   [CHATS_METHOD.dispatchListPending]: pageSchema({
     dispatches: Schema.mutable(Schema.Array(ChatDispatchSchema)),
   }),
@@ -1083,9 +1098,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchGetRunRecord]: Schema.NullOr(ChatRunSchema),
   [CHATS_METHOD.dispatchLatestRunForThread]: Schema.NullOr(ChatRunSchema),
   [CHATS_METHOD.dispatchIsThreadPaused]: Schema.Boolean,
-  [CHATS_METHOD.dispatchGetThreadPauseState]: Schema.NullOr(
-    ChatThreadPauseSchema,
-  ),
+  [CHATS_METHOD.dispatchGetThreadPauseState]: Schema.NullOr(ChatThreadPauseSchema),
   [CHATS_METHOD.dispatchRecentCount]: NonnegativeInt,
   [CHATS_METHOD.dispatchFailPendingForThread]: NonnegativeInt,
   [CHATS_METHOD.dispatchCoverDelivered]: NonnegativeInt,
@@ -1095,9 +1108,7 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchRequeueFailedTrigger]: Schema.Boolean,
   [CHATS_METHOD.dispatchListFailedRunRecoveries]: pageSchema({
     recoveries: Schema.mutable(
-      Schema.Array(
-        mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt }),
-      ),
+      Schema.Array(mutableStruct({ run: ChatRunSchema, attemptCount: NonnegativeInt })),
     ),
   }),
   [CHATS_METHOD.dispatchComplete]: mutableStruct({
@@ -1106,45 +1117,27 @@ const ChatsResultSchemas = {
   [CHATS_METHOD.dispatchFail]: mutableStruct({ failed: Schema.Literal(true) }),
 } as const;
 
-export function decodeChatThread(
-  value: JsonValue,
-  label = "chat thread",
-): ChatThread {
+export function decodeChatThread(value: JsonValue, label = "chat thread"): ChatThread {
   return decodeChatsSchema(ChatThreadSchema, value, label);
 }
 
-export function decodeChatAttachment(
-  value: JsonValue,
-  label = "chat attachment",
-): ChatAttachment {
+export function decodeChatAttachment(value: JsonValue, label = "chat attachment"): ChatAttachment {
   return decodeChatsSchema(ChatAttachmentSchema, value, label);
 }
 
-export function decodeChatMessage(
-  value: JsonValue,
-  label = "chat message",
-): ChatMessage {
+export function decodeChatMessage(value: JsonValue, label = "chat message"): ChatMessage {
   return decodeChatsSchema(ChatMessageSchema, value, label);
 }
 
-export function decodeChatDecision(
-  value: JsonValue,
-  label = "chat decision",
-): ChatDecision {
+export function decodeChatDecision(value: JsonValue, label = "chat decision"): ChatDecision {
   return decodeChatsSchema(ChatDecisionSchema, value, label);
 }
 
-export function decodeChatReaction(
-  value: JsonValue,
-  label = "chat reaction",
-): ChatReaction {
+export function decodeChatReaction(value: JsonValue, label = "chat reaction"): ChatReaction {
   return decodeChatsSchema(ChatReactionSchema, value, label);
 }
 
-function decodeRunRecordsForThread(
-  value: JsonValue,
-  label: string,
-): ChatThreadRunsPage {
+function decodeRunRecordsForThread(value: JsonValue, label: string): ChatThreadRunsPage {
   const decoded = decodeChatsSchema(RunRecordsPageSchema, value, label);
   const runs: Record<string, ChatRun> = Object.create(null);
   Object.assign(runs, decoded.runs);
@@ -1158,7 +1151,8 @@ export function decodeChatsResult<M extends ChatsMethod>(
   if (!Object.hasOwn(ChatsResultSchemas, method)) {
     throw new ProtocolShapeError(`Unsupported chats method: ${method}`);
   }
-  if (method === CHATS_METHOD.conversationLinks) return ChatLinksEnginePage.parse(value) as ChatsMethodResultMap[M];
+  if (method === CHATS_METHOD.conversationLinks)
+    return ChatLinksEnginePage.parse(value) as ChatsMethodResultMap[M];
   if (method === CHATS_METHOD.attachmentsListFileMentions) {
     return ChatFileMentionsPage.parse(value) as ChatsMethodResultMap[M];
   }

@@ -5,11 +5,7 @@ import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
-import {
-  filterProposedChangeForShare,
-  targetVersionId,
-  type ShareSelector,
-} from "./shareFilter";
+import { filterProposedChangeForShare, targetVersionId, type ShareSelector } from "./shareFilter";
 import { destinationPath, proposalBase, proposalMomentPayload } from "./recipientMoments";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import {
@@ -181,9 +177,7 @@ export function createProposalRoutes(
         if (!decision.allowed) throw relayError("share_op_rejected");
         const change = decision.change;
         const paths = new Set(
-          [change.basedOnPath, change.afterPath].filter(
-            (path): path is string => path !== null,
-          ),
+          [change.basedOnPath, change.afterPath].filter((path): path is string => path !== null),
         );
         for (const path of paths) {
           if (touchedPaths.has(path)) throw relayError("share_op_rejected");
@@ -249,12 +243,7 @@ export function createProposalRoutes(
         // The revoke race, closed exactly as the append route closes it: the
         // full gauntlet re-runs inside the write's own BEGIN IMMEDIATE, so a
         // revoke or a level narrowed mid-flight loses.
-        guard: shareActionGuard(
-          route.shareId,
-          actorUserId,
-          "propose",
-          share.workspaceId,
-        ),
+        guard: shareActionGuard(route.shareId, actorUserId, "propose", share.workspaceId),
       });
       return jsonResponse({
         ok: true,
@@ -271,11 +260,7 @@ export function createProposalRoutes(
     // same answer every level with nothing open gives.
     if (route.route === "share-proposals" && request.method === "GET") {
       await claimPendingShares(actorUserId);
-      const authorized = requireShareAction(
-        route.shareId,
-        actorUserId,
-        "list-own-proposals",
-      );
+      const authorized = requireShareAction(route.shareId, actorUserId, "list-own-proposals");
       const share = authorized.share;
       return jsonResponse({
         ok: true,
@@ -292,11 +277,7 @@ export function createProposalRoutes(
 
     if (route.route === "share-proposal-withdraw" && request.method === "POST") {
       await claimPendingShares(actorUserId);
-      const authorized = requireShareAction(
-        route.shareId,
-        actorUserId,
-        "withdraw-proposal",
-      );
+      const authorized = requireShareAction(route.shareId, actorUserId, "withdraw-proposal");
       const share = authorized.share;
       const proposal = storage.getShareProposal(route.proposalId);
       // A proposal of another share is the same generic 404 as one that
@@ -349,9 +330,7 @@ export function createProposalRoutes(
             ? await lookupUserEmail(proposal.proposedByUserId)
             : null,
           createdAtMs: proposal.createdAtMs,
-          ops: proposal.ops.map((op) =>
-            reviewOpRow(route.workspaceId, proposal.versionId, op),
-          ),
+          ops: proposal.ops.map((op) => reviewOpRow(route.workspaceId, proposal.versionId, op)),
         },
       });
     }
@@ -380,12 +359,16 @@ export function createProposalRoutes(
       // A proposal of another workspace is the same generic 404 the relay
       // gives for one that never existed.
       if (!proposal || proposal.workspaceId !== route.workspaceId) throw notFound();
-      if (proposal.state !== "open") throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
+      if (proposal.state !== "open")
+        throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
       if (route.decision === "decline") {
         // Decline never moves the changes. They stay marked declined and are
         // swept with the share; the recipient's own copy still has them.
         if (!storage.settleShareProposal(route.proposalId, "declined", nowMs())) {
-          throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
+          throw relayError(
+            "conflict",
+            "these changes were already accepted, declined, or withdrawn",
+          );
         }
         return jsonResponse({ ok: true, proposalId: route.proposalId, state: "declined" });
       }
@@ -439,10 +422,11 @@ export function createProposalRoutes(
         // batch rolls back.
         guard: () => {
           if (!storage.workspaceIsOwnedBy(route.workspaceId, actorUserId)) throw notFound();
-          if (
-            !storage.settleShareProposalInTransaction(route.proposalId, "accepted", nowMs())
-          ) {
-            throw relayError("conflict", "these changes were already accepted, declined, or withdrawn");
+          if (!storage.settleShareProposalInTransaction(route.proposalId, "accepted", nowMs())) {
+            throw relayError(
+              "conflict",
+              "these changes were already accepted, declined, or withdrawn",
+            );
           }
         },
       });

@@ -24,8 +24,7 @@ export interface QueryWorkspaceSearchDaemonInput {
 }
 
 function utf8ByteOffsetToUtf16(bytes: Buffer, byteOffset: number): number {
-  return bytes.subarray(0, Math.min(Math.max(byteOffset, 0), bytes.length))
-    .toString("utf8").length;
+  return bytes.subarray(0, Math.min(Math.max(byteOffset, 0), bytes.length)).toString("utf8").length;
 }
 
 function rendererSearchResult(result: SearchResult): SearchResult {
@@ -91,9 +90,7 @@ export async function queryWorkspaceSearchDaemon(
   }
 }
 
-export function createWorkspaceSearchDaemonQuery<
-  Workspace extends EngineWorkspace,
->(
+export function createWorkspaceSearchDaemonQuery<Workspace extends EngineWorkspace>(
   sessions: () => EngineWorkspaceSessions | null,
 ): (workspace: Workspace, input: WorkspaceSearchEngineInput) => Promise<SearchResult[] | null> {
   return async (workspace, input) => {

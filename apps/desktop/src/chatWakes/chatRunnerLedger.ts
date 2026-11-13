@@ -37,7 +37,10 @@ const same = (a: ChatRunnerLedgerEntry, b: ChatRunnerLedgerEntry) =>
   a.account === b.account && a.installId === b.installId && a.workspaceId === b.workspaceId;
 
 /** Every read, change, and write runs after the one before it settles. */
-export function createChatRunnerLedger(file: string, operations?: DurableFileOperations): ChatRunnerLedger {
+export function createChatRunnerLedger(
+  file: string,
+  operations?: DurableFileOperations,
+): ChatRunnerLedger {
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>): Promise<T> => {
     const result = queue.then(work);
@@ -46,15 +49,19 @@ export function createChatRunnerLedger(file: string, operations?: DurableFileOpe
   };
   const read = async (): Promise<ChatRunnerLedgerEntry[]> => {
     let text: string;
-    try { text = await readFile(file, "utf8"); }
-    catch (error) {
+    try {
+      text = await readFile(file, "utf8");
+    } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
       // An existing file it can't open, such as EACCES or EISDIR, needs the same repair as a damaged one.
       throw new ChatRunnerLedgerUnreadableError(error);
     }
     let value: unknown;
-    try { value = JSON.parse(text); }
-    catch { throw new ChatRunnerLedgerUnreadableError(); }
+    try {
+      value = JSON.parse(text);
+    } catch {
+      throw new ChatRunnerLedgerUnreadableError();
+    }
     const rows = z.array(ChatRunnerLedgerEntry).safeParse(value);
     if (!rows.success) throw new ChatRunnerLedgerUnreadableError();
     return rows.data;
@@ -65,13 +72,16 @@ export function createChatRunnerLedger(file: string, operations?: DurableFileOpe
   };
   return {
     list: () => serial(read),
-    add: (entry) => serial(async () => {
-      const rows = await read();
-      if (!rows.some((row) => same(row, entry))) await write([...rows, entry]);
-    }),
-    remove: (entry) => serial(async () => {
-      const rows = await read();
-      if (rows.some((row) => same(row, entry))) await write(rows.filter((row) => !same(row, entry)));
-    }),
+    add: (entry) =>
+      serial(async () => {
+        const rows = await read();
+        if (!rows.some((row) => same(row, entry))) await write([...rows, entry]);
+      }),
+    remove: (entry) =>
+      serial(async () => {
+        const rows = await read();
+        if (rows.some((row) => same(row, entry)))
+          await write(rows.filter((row) => !same(row, entry)));
+      }),
   };
 }

@@ -8,7 +8,10 @@ export type AddressCheck =
   | { readonly origin: string }
   | { readonly problem: "empty" | "insecure" | "invalid" };
 
-export function checkServerAddress(value: string, options: { readonly developmentServer: boolean }): AddressCheck {
+export function checkServerAddress(
+  value: string,
+  options: { readonly developmentServer: boolean },
+): AddressCheck {
   const typed = value.trim();
   if (!typed) return { problem: "empty" };
   if (typed.length > MAX_ADDRESS_LENGTH) return { problem: "invalid" };
@@ -20,9 +23,21 @@ export function checkServerAddress(value: string, options: { readonly developmen
   } catch {
     return { problem: "invalid" };
   }
-  if (url.protocol === "http:" && !(options.developmentServer && DEVELOPMENT_HOSTS.has(url.hostname))) return { problem: "insecure" };
+  if (
+    url.protocol === "http:" &&
+    !(options.developmentServer && DEVELOPMENT_HOSTS.has(url.hostname))
+  )
+    return { problem: "insecure" };
   if (url.protocol !== "https:" && url.protocol !== "http:") return { problem: "invalid" };
-  if (!url.hostname || url.username || url.password || url.search || url.hash || url.pathname !== "/") return { problem: "invalid" };
+  if (
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  )
+    return { problem: "invalid" };
   return { origin: url.origin };
 }
 

@@ -11,7 +11,9 @@ const mainEntry = join(repoRoot, "apps/desktop/dist/main/main.js");
 const packagedProfile = process.env.DOHC_SMOKE_USER_DATA_DIR;
 
 if (packagedProfile && (!isAbsolute(packagedProfile) || !process.env.DOHC_SMOKE_ELECTRON)) {
-  throw new Error("Packaged smoke requires an absolute isolated profile and a packaged executable.");
+  throw new Error(
+    "Packaged smoke requires an absolute isolated profile and a packaged executable.",
+  );
 }
 if (!packagedProfile && !existsSync(mainEntry)) {
   console.error(`Desktop build missing: ${mainEntry} — run pnpm build:desktop first.`);
@@ -63,7 +65,8 @@ let teardownTimer = null;
 let stoppedAfterQuit = false;
 // Each stream is matched on its own, so the other stream's output cannot split the line.
 const streams = { stdout: "", stderr: "" };
-const findQuitLine = () => QUIT_LINE.exec(streams.stdout)?.[0] ?? QUIT_LINE.exec(streams.stderr)?.[0];
+const findQuitLine = () =>
+  QUIT_LINE.exec(streams.stdout)?.[0] ?? QUIT_LINE.exec(streams.stderr)?.[0];
 
 const onOutput = (stream) => (chunk) => {
   stderr += String(chunk);
@@ -123,13 +126,19 @@ function judge() {
   const earlyExit = !sentTerm;
   const quitLine = findQuitLine();
   const finished = quitLine?.includes("finished") ?? false;
-  const badExit = !stoppedAfterQuit && ((code !== null && code !== 0) || (signal !== null && signal !== "SIGTERM"));
+  const badExit =
+    !stoppedAfterQuit &&
+    ((code !== null && code !== 0) || (signal !== null && signal !== "SIGTERM"));
   if (fatal.length > 0 || earlyExit || !finished || badExit) {
     console.error("Desktop smoke FAILED.");
     if (earlyExit) {
-      console.error(`  app exited early (code=${code}, signal=${signal}) before the ${SMOKE_DURATION_MS}ms window elapsed`);
+      console.error(
+        `  app exited early (code=${code}, signal=${signal}) before the ${SMOKE_DURATION_MS}ms window elapsed`,
+      );
     } else if (!quitLine) {
-      console.error(`  dohc did not finish its shutdown within ${QUIT_LINE_LIMIT_MS}ms of SIGTERM (code=${code}, signal=${signal})`);
+      console.error(
+        `  dohc did not finish its shutdown within ${QUIT_LINE_LIMIT_MS}ms of SIGTERM (code=${code}, signal=${signal})`,
+      );
     } else if (!finished) {
       console.error(`  ${quitLine}`);
     } else if (badExit) {
@@ -140,7 +149,10 @@ function judge() {
     console.error(stderr.slice(0, 4000));
     process.exit(1);
   }
-  if (stoppedAfterQuit) console.log(`${quitLine}. Electron was still exiting ${TEARDOWN_GRACE_MS}ms later, so the smoke stopped it.`);
+  if (stoppedAfterQuit)
+    console.log(
+      `${quitLine}. Electron was still exiting ${TEARDOWN_GRACE_MS}ms later, so the smoke stopped it.`,
+    );
   console.log("Desktop smoke passed: app ran with no fatal stderr output.");
   process.exit(0);
 }

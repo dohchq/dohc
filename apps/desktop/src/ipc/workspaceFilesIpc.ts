@@ -27,10 +27,7 @@ import {
   type ShareViewFileChangeOutcome,
 } from "../workspaces/shareViewFiles";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import {
-  shareMountRegistryIsPresent,
-  storedShareMounts,
-} from "../workspaces/shareViewFilesTarget";
+import { shareMountRegistryIsPresent, storedShareMounts } from "../workspaces/shareViewFilesTarget";
 import { refuseImportIntoShareProjection } from "../workspaces/shareMounts";
 import {
   mediaTypeForExtension,
@@ -74,9 +71,7 @@ export function createWorkspaceFilesIpc<
         properties: ("openFile" | "multiSelections")[];
       },
     ): Promise<{ canceled: boolean; filePaths: string[] }>;
-    showSaveDialog(
-      options: FileDialogOptions,
-    ): Promise<{ canceled: boolean; filePath?: string }>;
+    showSaveDialog(options: FileDialogOptions): Promise<{ canceled: boolean; filePath?: string }>;
   };
   shell: { openPath(path: string): Promise<string> };
   // Where and how a file from another person becomes the copy the OS opens.
@@ -93,11 +88,11 @@ export function createWorkspaceFilesIpc<
   workspaceFileListings: Pick<WorkspaceFileListingCache, "list">;
   workspaceFileMutations: WorkspaceFileMutationOwner<Event>;
   listOwnedWorkspaceFilesFor(workspace: Workspace): Promise<WorkspacePathListing>;
-  lookupOwnedWorkspaceFilesFor(workspace: Workspace, paths: readonly string[]): Promise<WorkspacePathListing>;
-  readOwnedWorkspaceTextFor(
+  lookupOwnedWorkspaceFilesFor(
     workspace: Workspace,
-    path: string,
-  ): Promise<ReadWorkspaceTextResult>;
+    paths: readonly string[],
+  ): Promise<WorkspacePathListing>;
+  readOwnedWorkspaceTextFor(workspace: Workspace, path: string): Promise<ReadWorkspaceTextResult>;
   assertWritableWorkspace(workspace: Workspace): void;
   shareViewFiles: Pick<ShareViewFiles, "list" | "read" | "change">;
   listWorkspaces(): Pick<RegistryEntry, "workspaceId" | "rootPath" | "shareView">[];
@@ -139,9 +134,7 @@ export function createWorkspaceFilesIpc<
       throw new Error(`${envName} must be a JSON array of absolute paths`);
     }
     if (!Array.isArray(parsed) || parsed.length > maxEntries) {
-      throw new Error(
-        `${envName} must be an array with at most ${maxEntries} paths`,
-      );
+      throw new Error(`${envName} must be an array with at most ${maxEntries} paths`);
     }
     const paths: string[] = [];
     for (const entry of parsed) {
@@ -172,15 +165,11 @@ export function createWorkspaceFilesIpc<
     if (input.relativePath !== undefined) {
       const validated = validateUserReadPath(input.relativePath, { platform: process.platform });
       if (!validated.ok) {
-        throw new Error(
-          `Invalid export path (${validated.reason}): ${input.relativePath}`,
-        );
+        throw new Error(`Invalid export path (${validated.reason}): ${input.relativePath}`);
       }
       selectedPath = validated.normalized;
       if (classifyEngineFilePathForRead(selectedPath, process.platform).kind === "secret") {
-        throw new Error(
-          `Secret files never leave the workspace in an export: ${selectedPath}`,
-        );
+        throw new Error(`Secret files never leave the workspace in an export: ${selectedPath}`);
       }
     }
     const selected = listed.files.filter(
@@ -208,10 +197,7 @@ export function createWorkspaceFilesIpc<
         throw new Error("Shared export read returned an invalid result.");
       }
       totalBytes += read.bytes.byteLength;
-      if (
-        entries.length >= MAX_ZIP_ENTRIES ||
-        totalBytes > MAX_ZIP_TOTAL_BYTES
-      ) {
+      if (entries.length >= MAX_ZIP_ENTRIES || totalBytes > MAX_ZIP_TOTAL_BYTES) {
         throw new Error(ZIP_TOO_LARGE_REFUSAL);
       }
       const archivePath =
@@ -222,8 +208,7 @@ export function createWorkspaceFilesIpc<
             : `${basename(selectedPath)}/${file.path.slice(selectedPath.length + 1)}`;
       entries.push({ path: archivePath, data: read.bytes });
     }
-    const name =
-      selectedPath === undefined ? input.rootName : basename(selectedPath);
+    const name = selectedPath === undefined ? input.rootName : basename(selectedPath);
     return {
       entries,
       baseName: name.replace(/\.[^.]+$/, "") || name,
@@ -277,28 +262,31 @@ export function createWorkspaceFilesIpc<
   return {
     listWorkspaceFiles: async (input, { operation }) => {
       const workspace = operation.workspace;
-      const listing = input.filePath !== undefined
-        ? await lookupOwnedWorkspaceFilesFor(workspace, [input.filePath])
-        : await workspaceFileListings.list({
-        workspaceId: workspace.workspaceId,
-        attachmentId: workspace.attachmentId,
-        allowCached: input.allowCached === true,
-        load: async () => await listOwnedWorkspaceFilesFor(workspace),
-      });
+      const listing =
+        input.filePath !== undefined
+          ? await lookupOwnedWorkspaceFilesFor(workspace, [input.filePath])
+          : await workspaceFileListings.list({
+              workspaceId: workspace.workspaceId,
+              attachmentId: workspace.attachmentId,
+              allowCached: input.allowCached === true,
+              load: async () => await listOwnedWorkspaceFilesFor(workspace),
+            });
       const visibility = await readWorkspaceListingVisibility(workspace);
       return ListWorkspaceFilesResult.parse({ ...listing, visibility });
     },
 
     createWorkspaceFile: (input, { event }) => workspaceFileMutations.createFile(event, input),
     createWorkspaceFolder: (input, { event }) => workspaceFileMutations.createFolder(event, input),
-    duplicateWorkspaceFile: (input, {event}) => workspaceFileMutations.duplicateFile(event, input),
+    duplicateWorkspaceFile: (input, { event }) =>
+      workspaceFileMutations.duplicateFile(event, input),
     moveWorkspacePath: (input, { event }) => workspaceFileMutations.movePath(event, input),
     deleteWorkspacePath: (input, { event }) => workspaceFileMutations.deletePath(event, input),
-    readHistoryOperation: (input, { event }) => workspaceFileMutations.readHistoryOperation(event, input),
-    undoHistoryOperation: (input, { event }) => workspaceFileMutations.undoHistoryOperation(event, input),
+    readHistoryOperation: (input, { event }) =>
+      workspaceFileMutations.readHistoryOperation(event, input),
+    undoHistoryOperation: (input, { event }) =>
+      workspaceFileMutations.undoHistoryOperation(event, input),
     exportWorkspaceZip: async (input, { event }) => {
-      const inactiveMessage =
-        "Export stopped because this window changed workspaces.";
+      const inactiveMessage = "Export stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(
         event.sender,
         input.workspaceId,
@@ -310,8 +298,7 @@ export function createWorkspaceFilesIpc<
         event.sender,
         workspaceReference,
         inactiveMessage,
-        (operation) =>
-          collectOwnedZipEntries(operation.workspace, input.relativePath),
+        (operation) => collectOwnedZipEntries(operation.workspace, input.relativePath),
       );
       // Test seam (DOHC_TEST_PICK_PATH precedent): native save dialogs cannot
       // be driven by Playwright. Read per-invoke so a spec can repoint it.
@@ -350,8 +337,7 @@ export function createWorkspaceFilesIpc<
     // (.html verbatim, .pdf via the hidden offscreen window) — see
     // documentPdfExport.ts for the "only one export in flight" guard.
     exportDocumentFile: async (input, { event }) => {
-      const inactiveMessage =
-        "Export stopped because this window changed workspaces.";
+      const inactiveMessage = "Export stopped because this window changed workspaces.";
       // workspaceId authorizes the caller (a real, currently-open workspace) —
       // the save target itself is intentionally outside any workspace, same as
       // exportWorkspaceZip above.
@@ -425,50 +411,47 @@ export function createWorkspaceFilesIpc<
         screenAgainstRoots: string[] | null,
       ) => {
         const workspace = operation.workspace;
-        return withStaleSensitiveWorkspaceOperation(
-          workspace.rootPath,
-          async (lease) => {
-            const currentWorkspace = operation.workspace;
-            const isShareView = shareViewIsPresent(currentWorkspace.shareView);
-            if (!isShareView) {
-              assertWritableWorkspace(currentWorkspace);
-              await refuseImportIntoShareProjection(
+        return withStaleSensitiveWorkspaceOperation(workspace.rootPath, async (lease) => {
+          const currentWorkspace = operation.workspace;
+          const isShareView = shareViewIsPresent(currentWorkspace.shareView);
+          if (!isShareView) {
+            assertWritableWorkspace(currentWorkspace);
+            await refuseImportIntoShareProjection(
+              workspace.rootPath,
+              input.targetDir,
+              storedShareMounts(currentWorkspace),
+              shareMountRegistryIsPresent(currentWorkspace),
+            );
+            if (screenAgainstRoots === null) {
+              const picked = await screenPickedPaths(absolutePaths);
+              return copyIntoWorkspace(
                 workspace.rootPath,
+                picked.usable,
                 input.targetDir,
-                storedShareMounts(currentWorkspace),
-                shareMountRegistryIsPresent(currentWorkspace),
-              );
-              if (screenAgainstRoots === null) {
-                const picked = await screenPickedPaths(absolutePaths);
-                return copyIntoWorkspace(
-                  workspace.rootPath,
-                  picked.usable,
-                  input.targetDir,
-                  picked.skips,
-                );
-              }
-              return importDroppedPaths(
-                workspace.rootPath,
-                absolutePaths,
-                screenAgainstRoots,
-                input.targetDir,
+                picked.skips,
               );
             }
-            return shareViewImportResult(
-              workspace.workspaceId,
-              await shareViewFiles.change(
-                lease,
-                { kind: "standalone", workspaceId: workspace.workspaceId },
-                {
-                  kind: "import",
-                  absolutePaths,
-                  screenAgainstRoots,
-                  targetDir: input.targetDir,
-                },
-              ),
+            return importDroppedPaths(
+              workspace.rootPath,
+              absolutePaths,
+              screenAgainstRoots,
+              input.targetDir,
             );
-          },
-        );
+          }
+          return shareViewImportResult(
+            workspace.workspaceId,
+            await shareViewFiles.change(
+              lease,
+              { kind: "standalone", workspaceId: workspace.workspaceId },
+              {
+                kind: "import",
+                absolutePaths,
+                screenAgainstRoots,
+                targetDir: input.targetDir,
+              },
+            ),
+          );
+        });
       };
       // OS drag-in path: renderer-supplied absolute paths (see the trust-delta
       // note on the payload) re-validated by the drag-in screen — regular
@@ -492,8 +475,7 @@ export function createWorkspaceFilesIpc<
             ),
         );
       }
-      const inactiveMessage =
-        "File import stopped because this window changed workspaces.";
+      const inactiveMessage = "File import stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(
         event.sender,
         input.workspaceId,
@@ -514,9 +496,7 @@ export function createWorkspaceFilesIpc<
         async (operation) =>
           result.canceled
             ? ImportWorkspaceFilesResult.parse({ imported: [], skipped: 0 })
-            : ImportWorkspaceFilesResult.parse(
-                await importInto(operation, result.filePaths, null),
-              ),
+            : ImportWorkspaceFilesResult.parse(await importInto(operation, result.filePaths, null)),
       );
     },
 
@@ -537,8 +517,7 @@ export function createWorkspaceFilesIpc<
     // pick, and the bytes are copied INTO the workspace by writeWorkspaceAsset,
     // which re-validates containment. The renderer never sees an absolute path.
     pickImageFiles: async (input, { event }) => {
-      const inactiveMessage =
-        "Image selection stopped because this window changed workspaces.";
+      const inactiveMessage = "Image selection stopped because this window changed workspaces.";
       const workspaceReference = await exactRendererWorkspaceReferences.capture(
         event.sender,
         input.workspaceId,
@@ -585,11 +564,7 @@ export function createWorkspaceFilesIpc<
               const info = await stat(path);
               // Oversize picks are refused the same quiet way paste refuses them:
               // skipped with a warning, never a thrown dialog in the user's face.
-              if (
-                !info.isFile() ||
-                info.size === 0 ||
-                info.size > WRITE_ASSET_MAX_BYTES
-              ) {
+              if (!info.isFile() || info.size === 0 || info.size > WRITE_ASSET_MAX_BYTES) {
                 console.warn(
                   `[desktop] skipping picked image "${path}" (${info.size} bytes; max ${WRITE_ASSET_MAX_BYTES}).`,
                 );
@@ -615,11 +590,11 @@ export function createWorkspaceFilesIpc<
       // remains fully denied; this is the only sanctioned external-open path.
       // A file from another person reaches the opener as a marked, read-only
       // copy.
-      await ensureOwnedProjectionCurrent(
+      await ensureOwnedProjectionCurrent(operation.workspace, input.relativePath);
+      const { realTarget, readOnlyCopy } = await externalOpen(
         operation.workspace,
         input.relativePath,
       );
-      const { realTarget, readOnlyCopy } = await externalOpen(operation.workspace, input.relativePath);
       const opened = readOnlyCopy ? await markedCopyOf(markedCopies, realTarget) : realTarget;
       operation.assertCurrent();
       const error = await shell.openPath(opened);
@@ -637,27 +612,45 @@ export function createWorkspaceFilesIpc<
   // Every file that isn't the person's own opens as a copy.
   async function externalOpen(workspace: Workspace, relativePath: string) {
     const { realTarget } = await resolveWorkspaceFile(workspace.rootPath, relativePath, "read");
-    return { realTarget, readOnlyCopy: await fileOrigin(workspace, listWorkspaces(), realTarget) !== "own" };
+    return {
+      realTarget,
+      readOnlyCopy: (await fileOrigin(workspace, listWorkspaces(), realTarget)) !== "own",
+    };
   }
 }
 
 export function registerWorkspaceHeadingsIpcHandlers<
-  Sender, Event extends { sender: Sender }, Workspace extends RegistryEntry,
+  Sender,
+  Event extends { sender: Sender },
+  Workspace extends RegistryEntry,
   Operation extends { workspace: Workspace },
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
-  withRendererWorkspaceOperation<Result>(sender: Sender, workspaceId: string, inactiveMessage: string,
-    work: (operation: Operation) => Result | Promise<Result>): Promise<Result>;
+  withRendererWorkspaceOperation<Result>(
+    sender: Sender,
+    workspaceId: string,
+    inactiveMessage: string,
+    work: (operation: Operation) => Result | Promise<Result>,
+  ): Promise<Result>;
   readOwnedWorkspaceTextFor(workspace: Workspace, path: string): Promise<ReadWorkspaceTextResult>;
 }): void {
   dependencies.registerHandler(CHANNELS.listWorkspaceHeadings, async (event, payload) => {
     dependencies.assertTrustedSender(event);
     const input = ListWorkspaceHeadingsPayload.parse(payload);
-    return dependencies.withRendererWorkspaceOperation(event.sender, input.workspaceId,
-      "Heading read stopped because this window changed workspaces.", async operation => {
-        const source = await dependencies.readOwnedWorkspaceTextFor(operation.workspace, input.path);
-        return ListWorkspaceHeadingsResult.parse({ headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)) });
-      });
+    return dependencies.withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Heading read stopped because this window changed workspaces.",
+      async (operation) => {
+        const source = await dependencies.readOwnedWorkspaceTextFor(
+          operation.workspace,
+          input.path,
+        );
+        return ListWorkspaceHeadingsResult.parse({
+          headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)),
+        });
+      },
+    );
   });
 }

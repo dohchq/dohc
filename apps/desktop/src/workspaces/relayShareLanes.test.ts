@@ -61,7 +61,11 @@ describe("relay share lanes", () => {
   it("sends a group grant to the chat manager too", () => {
     const lanes = pathShareLanes({
       granted: [pathRow("s-path"), groupRow("s-group")],
-      received: [pathRow("r-path"), groupRow("r-group"), { ...groupRow("r-damaged"), selector: null, damaged: true, selectorKind: "group" }],
+      received: [
+        pathRow("r-path"),
+        groupRow("r-group"),
+        { ...groupRow("r-damaged"), selector: null, damaged: true, selectorKind: "group" },
+      ],
     });
     expect(lanes.granted.map((row) => row.shareId)).toEqual(["s-path"]);
     expect(lanes.received.map((row) => row.shareId)).toEqual(["r-path"]);
@@ -94,12 +98,7 @@ describe("relay share lanes", () => {
   // The property the split owes: every granted row is listed by exactly one
   // manager, so none is left without a way to end it.
   it("leaves no granted row without a manager", () => {
-    const granted = [
-      pathRow("a"),
-      chatRow("b"),
-      damagedChatRow("c"),
-      damagedPathRow("d"),
-    ];
+    const granted = [pathRow("a"), chatRow("b"), damagedChatRow("c"), damagedPathRow("d")];
     const lanes = pathShareLanes({ granted });
     for (const row of granted) {
       const here = lanes.granted.some((kept) => kept.shareId === row.shareId);

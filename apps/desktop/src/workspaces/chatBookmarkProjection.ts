@@ -83,9 +83,7 @@ export function isChatBookmarkProjectionFor(text: string, bookmarkId: string): b
  * Authorization and message selection happen before this pure formatter is
  * called; it never resolves ids or reads hidden source state by itself.
  */
-export function formatChatBookmarkProjection(
-  input: ChatBookmarkProjectionInput,
-): string {
+export function formatChatBookmarkProjection(input: ChatBookmarkProjectionInput): string {
   const state = input.state ?? "current";
   if (input.mode === "snapshot" && input.snapshotAtMs === undefined) {
     throw new Error("Snapshot chat bookmarks require snapshotAtMs.");
@@ -99,24 +97,16 @@ export function formatChatBookmarkProjection(
     "dohc_type: chat-bookmark",
     `bookmark_id: ${yamlString(input.bookmarkId)}`,
     `source_thread_id: ${yamlString(input.threadId)}`,
-    ...(input.messageId
-      ? [`source_message_id: ${yamlString(input.messageId)}`]
-      : []),
-    ...(input.channelId
-      ? [`source_channel_id: ${yamlString(input.channelId)}`]
-      : []),
-    ...(input.sourceGrantId
-      ? [`source_grant_id: ${yamlString(input.sourceGrantId)}`]
-      : []),
+    ...(input.messageId ? [`source_message_id: ${yamlString(input.messageId)}`] : []),
+    ...(input.channelId ? [`source_channel_id: ${yamlString(input.channelId)}`] : []),
+    ...(input.sourceGrantId ? [`source_grant_id: ${yamlString(input.sourceGrantId)}`] : []),
     `projection_mode: ${input.mode}`,
     `projection_state: ${state}`,
     `last_updated: ${yamlString(iso(input.updatedAtMs))}`,
     ...(input.snapshotAtMs !== undefined
       ? [`snapshot_at: ${yamlString(iso(input.snapshotAtMs))}`]
       : []),
-    ...(input.staleAtMs !== undefined
-      ? [`stale_at: ${yamlString(iso(input.staleAtMs))}`]
-      : []),
+    ...(input.staleAtMs !== undefined ? [`stale_at: ${yamlString(iso(input.staleAtMs))}`] : []),
     "---",
     "",
   ];

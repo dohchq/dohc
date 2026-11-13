@@ -27,9 +27,7 @@ afterEach(async () => {
   await Promise.all(
     tempRoots
       .splice(0)
-      .map((root) =>
-        rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
-      ),
+      .map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })),
   );
 });
 
@@ -41,9 +39,10 @@ async function tempDir(): Promise<string> {
 
 describe("resolveSpawnCommand", () => {
   it("returns the input untouched off Windows", () => {
-    expect(
-      resolveSpawnCommand("npm", ["run", "dev"], { platform: "linux" }),
-    ).toEqual({ command: "npm", args: ["run", "dev"] });
+    expect(resolveSpawnCommand("npm", ["run", "dev"], { platform: "linux" })).toEqual({
+      command: "npm",
+      args: ["run", "dev"],
+    });
   });
 
   it("quotes every token on the cmd.exe line so metacharacters stay inert", () => {
@@ -109,9 +108,7 @@ describe("resolveSpawnCommand", () => {
       exists: (candidate) => candidate === "C:\\npm\\npm.CMD",
     });
     expect(resolved.command).toBe("cmd.exe");
-    expect(resolved.args[3]).toBe(
-      '""C:\\npm\\npm.CMD" "a&b" "c|d" "e<f" "g>h" "i^j""',
-    );
+    expect(resolved.args[3]).toBe('""C:\\npm\\npm.CMD" "a&b" "c|d" "e<f" "g>h" "i^j""');
   });
 
   it("doubles a trailing backslash run so it cannot escape the closing quote", () => {
@@ -123,9 +120,7 @@ describe("resolveSpawnCommand", () => {
     // CommandLineToArgvW parses 2n backslashes before a quote as n literal
     // backslashes; without doubling, \" would read as a literal quote and
     // swallow the argument boundary.
-    expect(resolved.args[3]).toBe(
-      '""C:\\npm\\npm.CMD" "C:\\site\\\\" "C:\\deep\\\\\\\\""',
-    );
+    expect(resolved.args[3]).toBe('""C:\\npm\\npm.CMD" "C:\\site\\\\" "C:\\deep\\\\\\\\""');
   });
 
   it("resolves relative path-segment commands against the spawn cwd, not the process cwd", () => {
@@ -168,7 +163,13 @@ describeWin32("real .cmd shim topology (win32)", () => {
       `@echo off\r\nnode "%~dp0echo-args.mjs" %*\r\nexit /b %errorlevel%\r\n`,
     );
 
-    const args = ["run", "dev", "--url=http://x/?a=1&b=2", "with space", "C:\\ends\\in\\backslash\\"];
+    const args = [
+      "run",
+      "dev",
+      "--url=http://x/?a=1&b=2",
+      "with space",
+      "C:\\ends\\in\\backslash\\",
+    ];
     const resolved = resolveSpawnCommand("fake", args, {
       env: { ...process.env, Path: dir },
     });
@@ -267,7 +268,9 @@ describe.runIf(process.platform === "win32")("the PowerShell process-table read"
     await expect(readProcessTableWithPowershell(50)).rejects.toThrow();
     expect(performance.now() - started).toBeLessThan(800);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    await expect(processDescendants(process.pid, () => readProcessTableWithPowershell(50))).resolves.toEqual([]);
+    await expect(
+      processDescendants(process.pid, () => readProcessTableWithPowershell(50)),
+    ).resolves.toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });

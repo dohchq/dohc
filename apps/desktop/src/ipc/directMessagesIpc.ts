@@ -3,29 +3,57 @@ import { createActorPresentationRequest } from "../workspaces/actorPresentation"
 import { join } from "node:path";
 import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import {
-  AcceptDmPayload, AcceptDmResult, DeclineDmPayload, RequestDmAgainPayload,
-  SyncDmsPayload, SyncDmsResult, StartDmPayload, StartDmResult, LeaveDmPayload,
+  AcceptDmPayload,
+  AcceptDmResult,
+  DeclineDmPayload,
+  RequestDmAgainPayload,
+  SyncDmsPayload,
+  SyncDmsResult,
+  StartDmPayload,
+  StartDmResult,
+  LeaveDmPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { chatMessageForIpc } from "./chatsIpc";
 import type { createChatScopeCapability } from "./chatScope";
 import {
-  dmChannelNameFor, grantDmRecipients, listDmRecords, matchDmChannelByRecipients,
-  parseDmRecipients, peekReceivedGrantKind,
-  type DmPeekResult, type DmRecordInfo, type ShareLogPage,
+  dmChannelNameFor,
+  grantDmRecipients,
+  listDmRecords,
+  matchDmChannelByRecipients,
+  parseDmRecipients,
+  peekReceivedGrantKind,
+  type DmPeekResult,
+  type DmRecordInfo,
+  type ShareLogPage,
 } from "../workspaces/dmChats";
 import { clearDeclinedDm, declineDm, readDeclinedDms } from "../workspaces/dmRequestStore";
 import {
-  classifyDmRequests, classifyDmRequestsWithFallback, type LastKnownDmRequestLanesCache,
-  isShareAcceptedInWorkspace, liveSharedChannelHoldersByShareId, liveSharedChannelHoldersByWireId,
-  markLeftInLastKnownLanes, withholdDmsInRequestLanes,
+  classifyDmRequests,
+  classifyDmRequestsWithFallback,
+  type LastKnownDmRequestLanesCache,
+  isShareAcceptedInWorkspace,
+  liveSharedChannelHoldersByShareId,
+  liveSharedChannelHoldersByWireId,
+  markLeftInLastKnownLanes,
+  withholdDmsInRequestLanes,
 } from "../workspaces/dmRequests";
-import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
-import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
+import {
+  credentialScopedOperation,
+  requireCredentials,
+} from "../workspaces/credentialScopedOperation";
+import {
+  resolveWorkspaceRelayAuthorId,
+  type ChatRelayIdentityTarget,
+} from "../workspaces/chatRelayIdentity";
 import { deriveChatActorKey } from "../workspaces/chatWrites";
 import { refuseChatFileLinks } from "../workspaces/chatFileLinkScope";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
+import {
+  relayApiFetch,
+  relayFetchWithTimeout,
+  RELAY_FETCH_TIMEOUT_MS,
+} from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { runningThread } from "@dohc/automation-executor/automation-chat";
 import type { RegistryEntry, JoinedSharedChannel } from "../workspaces/registryStore";
@@ -69,11 +97,17 @@ export function registerDirectMessagesIpcHandlers<
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
   withRendererWorkspaceOperation<Result>(
-    sender: Sender, workspaceId: string, message: string,
+    sender: Sender,
+    workspaceId: string,
+    message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
-  requireEngineCapture(workspace: RegistryEntry, feature: "Chats"): Promise<{
-    workspace: RegistryEntry; capture: WorkspaceEngineCapture;
+  requireEngineCapture(
+    workspace: RegistryEntry,
+    feature: "Chats",
+  ): Promise<{
+    workspace: RegistryEntry;
+    capture: WorkspaceEngineCapture;
   }>;
   assertWritableWorkspace(workspace: RegistryEntry): void;
   linkedChatStoreFor(workspace: RegistryEntry): DesktopLinkedChatStore;
@@ -81,22 +115,31 @@ export function registerDirectMessagesIpcHandlers<
   currentCredentials(): CloudCredentials | null;
   currentCredentialGeneration(): number;
   remoteForWorkspace(workspace: RegistryEntry): Promise<{
-    credentials: CloudCredentials; credentialGeneration: number;
+    credentials: CloudCredentials;
+    credentialGeneration: number;
   }>;
   relayShareJsonWithCredentials<Result>(
-    credentials: CloudCredentials, path: string, init?: RequestInit,
+    credentials: CloudCredentials,
+    path: string,
+    init?: RequestInit,
   ): Promise<Result>;
   normalizeServerUrl(url: string): string;
   listWorkspaces(): RegistryEntry[];
   stateDir(): string;
   peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
   syncRendererSharedChannelsForChatTarget(
-    operation: Operation, target?: ChatRelayIdentityTarget,
+    operation: Operation,
+    target?: ChatRelayIdentityTarget,
   ): Promise<SharedChannelPassOutcome>;
   assertShareNotHeldElsewhere(shareId: string, workspaceId: string, channelWireId?: string): void;
   reserveAndPullSharedChannelForWorkspace(input: {
-    operation: Operation; assertCurrent?: () => void; relay: SyncRelayConnection;
-    shareId: string; recipientUserId: string; relayUrl: string; serverUrl: string;
+    operation: Operation;
+    assertCurrent?: () => void;
+    relay: SyncRelayConnection;
+    shareId: string;
+    recipientUserId: string;
+    relayUrl: string;
+    serverUrl: string;
     preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel>;
   endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void>;
@@ -110,13 +153,29 @@ export function registerDirectMessagesIpcHandlers<
   chatDispatchService: { scanWorkspace(workspaceId: string): Promise<unknown> };
 }) {
   const {
-    registerHandler, assertTrustedSender, withRendererWorkspaceOperation, requireEngineCapture,
-    assertWritableWorkspace, linkedChatStoreFor, warmCredentialCache, currentCredentials,
-    currentCredentialGeneration, remoteForWorkspace, relayShareJsonWithCredentials,
-    normalizeServerUrl, listWorkspaces, stateDir, peekedReceivedGrantKinds,
-    syncRendererSharedChannelsForChatTarget, assertShareNotHeldElsewhere,
-    reserveAndPullSharedChannelForWorkspace, endWorkspaceJoinedChannel,
-    localUserDisplayName, localInstallationId, activity, chatDispatchService,
+    registerHandler,
+    assertTrustedSender,
+    withRendererWorkspaceOperation,
+    requireEngineCapture,
+    assertWritableWorkspace,
+    linkedChatStoreFor,
+    warmCredentialCache,
+    currentCredentials,
+    currentCredentialGeneration,
+    remoteForWorkspace,
+    relayShareJsonWithCredentials,
+    normalizeServerUrl,
+    listWorkspaces,
+    stateDir,
+    peekedReceivedGrantKinds,
+    syncRendererSharedChannelsForChatTarget,
+    assertShareNotHeldElsewhere,
+    reserveAndPullSharedChannelForWorkspace,
+    endWorkspaceJoinedChannel,
+    localUserDisplayName,
+    localInstallationId,
+    activity,
+    chatDispatchService,
   } = dependencies;
   const { resolveChatFileReferences } = dependencies.chatScope;
 
@@ -151,10 +210,7 @@ export function registerDirectMessagesIpcHandlers<
       input.workspaceId,
       "Chats stopped because this window changed workspaces.",
       async (operation) => {
-        const { workspace } = await requireEngineCapture(
-          operation.workspace,
-          "Chats",
-        );
+        const { workspace } = await requireEngineCapture(operation.workspace, "Chats");
         operation.assertCurrent();
         await warmCredentialCache();
         operation.assertCurrent();
@@ -169,9 +225,7 @@ export function registerDirectMessagesIpcHandlers<
           ? {
               baseUrl: normalizeServerUrl(syncCredentials.relayUrl),
               token: syncCredentials.token,
-              fetch: relayFetchWithTimeout(
-                RELAY_FETCH_TIMEOUT_MS,
-              ),
+              fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
             }
           : null;
         const store = linkedChatStoreFor(workspace);
@@ -179,58 +233,54 @@ export function registerDirectMessagesIpcHandlers<
         // The renderer holds its polls on a failed result instead of trying
         // again at once. One failing share does not count.
         let failed = false;
-        const { pending, declined } =
-          await classifyDmRequestsWithFallback({
-            workspaceId: workspace.workspaceId,
-            cache: operation.state.lastKnownDmRequestLanes,
-            // The cache belongs to this physical attachment. The credential
-            // generation guard also prevents an old account's in-flight
-            // classify from repopulating it after a session transition.
-            credentialGeneration: () => currentCredentialGeneration(),
-            classify: async () => {
-              if (!relay || !syncCredentials) {
-                throw new Error("DM sync is unavailable: not signed in.");
-              }
+        const { pending, declined } = await classifyDmRequestsWithFallback({
+          workspaceId: workspace.workspaceId,
+          cache: operation.state.lastKnownDmRequestLanes,
+          // The cache belongs to this physical attachment. The credential
+          // generation guard also prevents an old account's in-flight
+          // classify from repopulating it after a session transition.
+          credentialGeneration: () => currentCredentialGeneration(),
+          classify: async () => {
+            if (!relay || !syncCredentials) {
+              throw new Error("DM sync is unavailable: not signed in.");
+            }
+            assertCurrentDmSyncSession();
+            try {
+              const listing = await relayShareJsonWithCredentials<{
+                received?: Array<{
+                  shareId?: unknown;
+                  granterEmail?: unknown;
+                  selector?: { kind?: unknown; channelWireId?: unknown };
+                }>;
+              }>(syncCredentials, "/sync/shares");
               assertCurrentDmSyncSession();
-              try {
-                const listing = await relayShareJsonWithCredentials<{
-                  received?: Array<{
-                    shareId?: unknown;
-                    granterEmail?: unknown;
-                    selector?: { kind?: unknown; channelWireId?: unknown };
-                  }>;
-                }>(syncCredentials, "/sync/shares");
-                assertCurrentDmSyncSession();
-                // Re-derived on every call, not a snapshot taken once:
-                // classifyDmRequests calls this twice around its async peek.
-                return await classifyDmRequests({
-                  received: listing.received ?? [],
-                  kindCache: peekedReceivedGrantKinds,
-                  peekKind: async (shareId) => {
-                    assertCurrentDmSyncSession();
-                    const kind = await peekReceivedGrantKindForShare(
-                      relay,
-                      shareId,
-                    );
-                    assertCurrentDmSyncSession();
-                    return kind;
-                  },
-                  holdersByShareId: () => {
-                    assertCurrentDmSyncSession();
-                    return liveSharedChannelHoldersByShareId(listWorkspaces());
-                  },
-                  holdersByWireId: () => {
-                    assertCurrentDmSyncSession();
-                    return liveSharedChannelHoldersByWireId(listWorkspaces());
-                  },
-                  declinedShareIds: readDeclinedDms(dmRequestFile()),
-                });
-              } catch (error) {
-                failed = true;
-                throw error;
-              }
-            },
-          });
+              // Re-derived on every call, not a snapshot taken once:
+              // classifyDmRequests calls this twice around its async peek.
+              return await classifyDmRequests({
+                received: listing.received ?? [],
+                kindCache: peekedReceivedGrantKinds,
+                peekKind: async (shareId) => {
+                  assertCurrentDmSyncSession();
+                  const kind = await peekReceivedGrantKindForShare(relay, shareId);
+                  assertCurrentDmSyncSession();
+                  return kind;
+                },
+                holdersByShareId: () => {
+                  assertCurrentDmSyncSession();
+                  return liveSharedChannelHoldersByShareId(listWorkspaces());
+                },
+                holdersByWireId: () => {
+                  assertCurrentDmSyncSession();
+                  return liveSharedChannelHoldersByWireId(listWorkspaces());
+                },
+                declinedShareIds: readDeclinedDms(dmRequestFile()),
+              });
+            } catch (error) {
+              failed = true;
+              throw error;
+            }
+          },
+        });
         assertCurrentDmSyncSession();
         if (relay) {
           try {
@@ -238,9 +288,7 @@ export function registerDirectMessagesIpcHandlers<
             // DMs (and other shared channels) this bounded pass reaches.
             const outcome = await syncRendererSharedChannelsForChatTarget(
               operation,
-              input.openChannelId
-                ? { channelId: input.openChannelId }
-                : undefined,
+              input.openChannelId ? { channelId: input.openChannelId } : undefined,
             );
             assertCurrentDmSyncSession();
             if (outcome.failed) failed = true;
@@ -251,10 +299,7 @@ export function registerDirectMessagesIpcHandlers<
             // Offline degradation: the local DM list still serves and the next
             // pass retries.
             failed = true;
-            console.error(
-              `[desktop] DM sync failed for ${workspace.rootPath}:`,
-              error,
-            );
+            console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
           }
         }
         assertCurrentDmSyncSession();
@@ -264,17 +309,11 @@ export function registerDirectMessagesIpcHandlers<
           sharedChannels: operation.workspace.sharedChannels ?? [],
         });
         assertCurrentDmSyncSession();
-        const requestShareIds = new Set(
-          [...pending, ...declined].map((row) => row.shareId),
-        );
+        const requestShareIds = new Set([...pending, ...declined].map((row) => row.shareId));
         // Fresh, after classify resolves — not reused from before it, which
         // could be stale by the time the withhold decision needs it.
-        const holdersByShareId = liveSharedChannelHoldersByShareId(
-          listWorkspaces(),
-        );
-        const holdersByWireId = liveSharedChannelHoldersByWireId(
-          listWorkspaces(),
-        );
+        const holdersByShareId = liveSharedChannelHoldersByShareId(listWorkspaces());
+        const holdersByWireId = liveSharedChannelHoldersByWireId(listWorkspaces());
         return SyncDmsResult.parse({
           available: relay !== null,
           dms: withholdDmsInRequestLanes({
@@ -300,10 +339,7 @@ export function registerDirectMessagesIpcHandlers<
       input.workspaceId,
       "Accepting stopped because this window changed workspaces.",
       async (operation) => {
-        const { workspace } = await requireEngineCapture(
-          operation.workspace,
-          "Chats",
-        );
+        const { workspace } = await requireEngineCapture(operation.workspace, "Chats");
         operation.assertCurrent();
         if (shareViewIsPresent(workspace.shareView)) {
           throw new Error(
@@ -375,10 +411,7 @@ export function registerDirectMessagesIpcHandlers<
             // failure is not an accept failure; the local DM check below tells
             // whether enough data landed to open the conversation.
             if (
-              !isShareAcceptedInWorkspace(
-                operation.workspace.sharedChannels ?? [],
-                input.shareId,
-              )
+              !isShareAcceptedInWorkspace(operation.workspace.sharedChannels ?? [], input.shareId)
             ) {
               throw error;
             }
@@ -445,14 +478,10 @@ export function registerDirectMessagesIpcHandlers<
         operation.assertCurrent();
         // The leave is locally knowable without the relay. Keep this physical
         // attachment's fallback lanes consistent with the registry write.
-        markLeftInLastKnownLanes(
-          operation.state.lastKnownDmRequestLanes,
-          workspace.workspaceId,
-          {
-            shareId: input.shareId,
-            granterEmail: leftRow?.granterEmail ?? null,
-          },
-        );
+        markLeftInLastKnownLanes(operation.state.lastKnownDmRequestLanes, workspace.workspaceId, {
+          shareId: input.shareId,
+          granterEmail: leftRow?.granterEmail ?? null,
+        });
         return undefined;
       },
     );
@@ -475,41 +504,29 @@ export function registerDirectMessagesIpcHandlers<
         // physical root used by both the local engine and relay work.
         const workspace = operation.workspace;
         assertWritableWorkspace(workspace);
-        const { credentials, credentialGeneration } =
-          await remoteForWorkspace(workspace);
+        const { credentials, credentialGeneration } = await remoteForWorkspace(workspace);
         operation.assertCurrent();
-        const {
-          assertCurrent: assertCurrentDmSession,
-          run: awaitCurrentDmSession,
-        } = credentialScopedOperation({
-          assertCurrent: operation.assertCurrent,
-          capturedGeneration: credentialGeneration,
-          currentGeneration: () => currentCredentialGeneration(),
-        });
+        const { assertCurrent: assertCurrentDmSession, run: awaitCurrentDmSession } =
+          credentialScopedOperation({
+            assertCurrent: operation.assertCurrent,
+            capturedGeneration: credentialGeneration,
+            currentGeneration: () => currentCredentialGeneration(),
+          });
         const { capture } = await requireEngineCapture(workspace, "Chats");
         assertCurrentDmSession();
-        const authorUserId = resolveWorkspaceRelayAuthorId(
-          workspace,
-          credentials,
-        );
+        const authorUserId = resolveWorkspaceRelayAuthorId(workspace, credentials);
         if (!credentials.relayUrl || !authorUserId) {
           throw new Error("Sign in to your server to start a direct message.");
         }
         const recipients = parseDmRecipients(input.recipients);
         const selfEmail = credentials.email.toLowerCase();
         if (selfEmail && recipients.includes(selfEmail)) {
-          throw new Error(
-            "A direct message needs a recipient other than yourself.",
-          );
+          throw new Error("A direct message needs a recipient other than yourself.");
         }
         // Resolve mentions before creating/granting a DM so an invalid or stale
         // heading cannot leave behind a partially initialized conversation.
         const attachments = await awaitCurrentDmSession(() =>
-          resolveChatFileReferences(
-            workspace,
-            capture.fileObjectIdForPath,
-            input.fileReferences,
-          ),
+          resolveChatFileReferences(workspace, capture.fileObjectIdForPath, input.fileReferences),
         );
         const store = linkedChatStoreFor(workspace);
         // A DM's identity is its live grant recipient set, not its display
@@ -594,18 +611,14 @@ export function registerDirectMessagesIpcHandlers<
             assertCurrentDmSession();
             const created = await relayShareJsonWithCredentials<{
               shareId?: string;
-            }>(
-              credentials,
-              `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  recipientEmail: email,
-                  channelWireId: wireId,
-                  access: "read-write",
-                }),
-              },
-            );
+            }>(credentials, `/sync/${encodeURIComponent(workspace.workspaceId)}/shares`, {
+              method: "POST",
+              body: JSON.stringify({
+                recipientEmail: email,
+                channelWireId: wireId,
+                access: "read-write",
+              }),
+            });
             // The helper records this id before its next currentness check, so
             // retirement during POST still rolls the grant back.
             return typeof created.shareId === "string" ? created.shareId : null;
@@ -636,8 +649,11 @@ export function registerDirectMessagesIpcHandlers<
               displayName: localUserDisplayName(),
             };
             const authorActorKey = deriveChatActorKey({
-              credentials, installationId: localInstallationId(), workspaceId: workspace.workspaceId,
-              writer: { via: "renderer" }, displayName: author.displayName,
+              credentials,
+              installationId: localInstallationId(),
+              workspaceId: workspace.workspaceId,
+              writer: { via: "renderer" },
+              displayName: author.displayName,
             });
             return running
               ? store.sendMessage({
@@ -668,11 +684,9 @@ export function registerDirectMessagesIpcHandlers<
         assertCurrentDmSession();
         activity.queueCloudSync(workspace.workspaceId);
         assertCurrentDmSession();
-        void chatDispatchService
-          .scanWorkspace(workspace.workspaceId)
-          .catch((error) => {
-            console.error("[desktop] local chat dispatch scan:", error);
-          });
+        void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
+          console.error("[desktop] local chat dispatch scan:", error);
+        });
         assertCurrentDmSession();
         const dm = (
           await awaitCurrentDmSession(() =>
@@ -687,11 +701,20 @@ export function registerDirectMessagesIpcHandlers<
         return StartDmResult.parse({
           dm: dmRecordForIpc(dm),
           // A person's own message names no automation.
-          message: chatMessageForIpc(message, () => null, await createActorPresentationRequest({
-            agentColors: await agentColorsForPresentation(stateDir()),
-            readWorkspace: () => listWorkspaces().find(entry => entry.workspaceId === workspace.workspaceId) ?? null,
-            store, assertCurrent: assertCurrentDmSession, installationId: localInstallationId(), credentials: currentCredentials(),
-          })(message, message.threadId)),
+          message: chatMessageForIpc(
+            message,
+            () => null,
+            await createActorPresentationRequest({
+              agentColors: await agentColorsForPresentation(stateDir()),
+              readWorkspace: () =>
+                listWorkspaces().find((entry) => entry.workspaceId === workspace.workspaceId) ??
+                null,
+              store,
+              assertCurrent: assertCurrentDmSession,
+              installationId: localInstallationId(),
+              credentials: currentCredentials(),
+            })(message, message.threadId),
+          ),
         });
       },
     );

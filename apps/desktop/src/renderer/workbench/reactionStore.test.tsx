@@ -3,7 +3,12 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ChatReactionRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
-import { ReactionStoreProvider, createReactionStore, useReactions, type ReactionStore } from "./reactionStore";
+import {
+  ReactionStoreProvider,
+  createReactionStore,
+  useReactions,
+  type ReactionStore,
+} from "./reactionStore";
 
 const bridgeMock = {
   setChatReaction: vi.fn(),
@@ -32,7 +37,10 @@ const you = (overrides: Partial<ChatReactionRecord> = {}): ChatReactionRecord =>
   ...overrides,
 });
 const peer = you({ reactionId: "r-peer", authorId: "peer@x", authorDisplayName: "Peer" });
-const listing = (reactions: ChatReactionRecord[], viewerAuthorId = "you@x") => ({ reactions, viewerAuthorId });
+const listing = (reactions: ChatReactionRecord[], viewerAuthorId = "you@x") => ({
+  reactions,
+  viewerAuthorId,
+});
 type Listing = ReturnType<typeof listing>;
 
 // One controlled promise per call of the bridge method, in call order.
@@ -105,9 +113,11 @@ function setup(initial: ChatReactionRecord[] = [], workspaceId = "ws") {
       store.toggle({ threadId, ...cell, nextState, viewerAuthorId, onError: current.onError });
     },
     mineOn(emoji: string, messageId = "m1") {
-      return store.view("thread-1").reactions.some(
-        (row) => row.messageId === messageId && row.emoji === emoji && row.authorId === "you@x",
-      );
+      return store
+        .view("thread-1")
+        .reactions.some(
+          (row) => row.messageId === messageId && row.emoji === emoji && row.authorId === "you@x",
+        );
     },
   };
 }
@@ -166,7 +176,10 @@ describe("reaction store: one chain per cell", () => {
     await waitFor(() => expect(writes).toHaveLength(2));
     writes[1]!.resolve(undefined);
     await settled(h.store);
-    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.state)).toEqual(["added", "added"]);
+    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.state)).toEqual([
+      "added",
+      "added",
+    ]);
     expect(h.mineOn("👍")).toBe(true);
   });
 
@@ -201,8 +214,12 @@ describe("reaction store: one chain per cell", () => {
     other.toggle("added");
     // None waits for another: the same ids in another workspace are another cell.
     expect(writes).toHaveLength(4);
-    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.workspaceId))
-      .toEqual(["ws", "ws", "ws", "ws-next"]);
+    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.workspaceId)).toEqual([
+      "ws",
+      "ws",
+      "ws",
+      "ws-next",
+    ]);
     expect(h.store.view("thread-2")).toBe(untouched);
     expect(other.reactions.map((row) => row.emoji)).toEqual(["👍"]);
     for (const write of writes) write.resolve(undefined);
@@ -253,7 +270,9 @@ describe("reaction store: one confirmed state from every read", () => {
     const h = setup([you(), other]);
     const staleThread = h.beginRead();
     // Home read message m1 and found nothing; it says nothing about m2.
-    h.store.ingest([{ threadId: "thread-1", messageIds: ["m1"], reactions: [], ticket: h.store.ticket() }]);
+    h.store.ingest([
+      { threadId: "thread-1", messageIds: ["m1"], reactions: [], ticket: h.store.ticket() },
+    ]);
     expect(h.reactions).toEqual([other]);
     expect(h.store.view("thread-1", "m1").reactions).toEqual([]);
     expect(h.store.view("thread-1", "m2").reactions).toEqual([other]);
@@ -262,7 +281,9 @@ describe("reaction store: one confirmed state from every read", () => {
     staleThread([you(), fresher]);
     expect(h.reactions).toEqual([fresher]);
     // A preview with no opening message covers nothing.
-    h.store.ingest([{ threadId: "thread-1", messageIds: [], reactions: [], ticket: h.store.ticket() }]);
+    h.store.ingest([
+      { threadId: "thread-1", messageIds: [], reactions: [], ticket: h.store.ticket() },
+    ]);
     expect(h.reactions).toEqual([fresher]);
   });
 
@@ -272,8 +293,17 @@ describe("reaction store: one confirmed state from every read", () => {
     const list = deferred<Listing>();
     bridgeMock.setChatReaction.mockReturnValueOnce(write.promise);
     bridgeMock.listChatReactions.mockReturnValueOnce(list.promise);
-    store.ingest([{ threadId: "thread-1", messageIds: ["m1"], reactions: [], ticket: store.ticket() }]);
-    store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "added", viewerAuthorId: "", onError: vi.fn() });
+    store.ingest([
+      { threadId: "thread-1", messageIds: ["m1"], reactions: [], ticket: store.ticket() },
+    ]);
+    store.toggle({
+      threadId: "thread-1",
+      messageId: "m1",
+      emoji: "👍",
+      nextState: "added",
+      viewerAuthorId: "",
+      onError: vi.fn(),
+    });
     expect(bridgeMock.setChatReaction).toHaveBeenCalledOnce();
     expect(store.view("thread-1", "m1")).toEqual({ reactions: [], viewerAuthorId: "" });
     expect(store.pending("thread-1", "m1")).toBe(true);
@@ -310,7 +340,10 @@ describe("reaction store: visits and accounts", () => {
     const h = setup([mine]);
     const writes = controlled<undefined>(bridgeMock.setChatReaction);
     bridgeMock.listChatReactions.mockResolvedValue(
-      listing([you({ authorId: "you@normalized" }), { ...mine, authorId: "you@normalized" }], "you@normalized"),
+      listing(
+        [you({ authorId: "you@normalized" }), { ...mine, authorId: "you@normalized" }],
+        "you@normalized",
+      ),
     );
     h.toggle("added", { messageId: "m1", emoji: "👍" });
     h.toggle("removed", { messageId: "m2", emoji: "👍" });
@@ -321,7 +354,10 @@ describe("reaction store: visits and accounts", () => {
     // The remove is rejected: the row comes back under the new name, once.
     writes[1]!.reject(new TypeError("offline"));
     await waitFor(() => expect(h.onError).toHaveBeenCalledOnce());
-    expect(h.reactions).toEqual([you({ authorId: "you@normalized" }), { ...mine, authorId: "you@normalized" }]);
+    expect(h.reactions).toEqual([
+      you({ authorId: "you@normalized" }),
+      { ...mine, authorId: "you@normalized" },
+    ]);
   });
 
   // Main lists a local fallback's rows under the signed-in account, and under
@@ -340,7 +376,14 @@ describe("reaction store: visits and accounts", () => {
       const onError = vi.fn();
       const write = deferred<undefined>();
       bridgeMock.setChatReaction.mockReturnValueOnce(write.promise);
-      store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "removed", viewerAuthorId: account, onError });
+      store.toggle({
+        threadId: "thread-1",
+        messageId: "m1",
+        emoji: "👍",
+        nextState: "removed",
+        viewerAuthorId: account,
+        onError,
+      });
       expect(store.view("thread-1").reactions).toEqual([]);
       read([stored], fallback);
       return { store, read, write, onError };
@@ -360,9 +403,15 @@ describe("reaction store: visits and accounts", () => {
       function signedOut(sameCell: boolean) {
         const store = createReactionStore("ws");
         const local = you({ reactionId: "local-id", authorId: fallback });
-        const owned = you({ reactionId: "account-id", authorId: account, ...(sameCell ? {} : { messageId: "m2" }) });
+        const owned = you({
+          reactionId: "account-id",
+          authorId: account,
+          ...(sameCell ? {} : { messageId: "m2" }),
+        });
         const read = (reactions: ChatReactionRecord[], viewerAuthorId: string) =>
-          store.ingest([{ threadId: "thread-1", reactions, viewerAuthorId, ticket: store.ticket() }]);
+          store.ingest([
+            { threadId: "thread-1", reactions, viewerAuthorId, ticket: store.ticket() },
+          ]);
         read([local], fallback);
         read([{ ...local, authorId: account }, owned], account);
         return { store, read, local, owned };
@@ -371,12 +420,24 @@ describe("reaction store: visits and accounts", () => {
       it("keeps the account's row under the account after sign-out, on its own cell", () => {
         const { store, read, local, owned } = signedOut(false);
         read([local, owned], fallback);
-        expect(store.view("thread-1", "m2")).toEqual({ reactions: [owned], viewerAuthorId: fallback });
+        expect(store.view("thread-1", "m2")).toEqual({
+          reactions: [owned],
+          viewerAuthorId: fallback,
+        });
         bridgeMock.setChatReaction.mockReturnValueOnce(deferred<undefined>().promise);
-        store.toggle({ threadId: "thread-1", messageId: "m2", emoji: "👍", nextState: "added", viewerAuthorId: fallback, onError: vi.fn() });
-        expect(store.view("thread-1", "m2").reactions.map((row) => row.authorId)).toEqual([account, fallback]);
+        store.toggle({
+          threadId: "thread-1",
+          messageId: "m2",
+          emoji: "👍",
+          nextState: "added",
+          viewerAuthorId: fallback,
+          onError: vi.fn(),
+        });
+        expect(store.view("thread-1", "m2").reactions.map((row) => row.authorId)).toEqual([
+          account,
+          fallback,
+        ]);
       });
-
     });
   });
 
@@ -410,8 +471,12 @@ describe("reaction store: visits and accounts", () => {
     writes[1]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(1));
     // Before any read covers the accepted add, it paints under its own author.
-    expect(h.reactions.filter((row) => row.messageId === "m2").map((row) => row.authorId).sort())
-      .toEqual(["next-account", "you@x"]);
+    expect(
+      h.reactions
+        .filter((row) => row.messageId === "m2")
+        .map((row) => row.authorId)
+        .sort(),
+    ).toEqual(["next-account", "you@x"]);
     writes[0]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(2));
     // A concurrent change removed the old account's add before this later
@@ -455,7 +520,14 @@ describe("reaction store: session owner", () => {
 
   const add = (store: ReactionStore, nextState: "added" | "removed", onError = vi.fn()) =>
     act(() =>
-      store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState, viewerAuthorId: "you@x", onError }),
+      store.toggle({
+        threadId: "thread-1",
+        messageId: "m1",
+        emoji: "👍",
+        nextState,
+        viewerAuthorId: "you@x",
+        onError,
+      }),
     );
 
   it("retires a left workspace's store once its work settles, and keeps the open one", async () => {

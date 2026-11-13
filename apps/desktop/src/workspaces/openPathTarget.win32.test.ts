@@ -25,7 +25,9 @@ const canonical = new Map(Object.keys(entries).map((path) => [path.toLowerCase()
 
 function resolve(path: string) {
   return resolveOpenPathTarget(path, {
-    workspaces: [work], home, platform: "win32",
+    workspaces: [work],
+    home,
+    platform: "win32",
     fs: {
       // Windows realpath answers in the on-disk case.
       realPath: (candidate) => canonical.get(candidate.toLowerCase()) ?? null,
@@ -40,20 +42,37 @@ function resolve(path: string) {
 
 describe("resolveOpenPathTarget on Windows", () => {
   it("finds a file in a workspace registered in another letter case, with a forward-slash file path", () => {
-    expect(resolve("c:\\WORK\\notes\\A.md")).toEqual({ kind: "workspace", workspace: work, file: "Notes/a.md" });
+    expect(resolve("c:\\WORK\\notes\\A.md")).toEqual({
+      kind: "workspace",
+      workspace: work,
+      file: "Notes/a.md",
+    });
   });
 
   it("keeps another drive outside the workspace", () => {
-    expect(resolve("D:\\Work\\a.md")).toEqual({ kind: "folder", rootPath: "D:\\Work", hasManifest: false, file: "a.md" });
+    expect(resolve("D:\\Work\\a.md")).toEqual({
+      kind: "folder",
+      rootPath: "D:\\Work",
+      hasManifest: false,
+      file: "a.md",
+    });
   });
 
   it("names a new folder in its Windows form", () => {
-    expect(resolve("C:\\Users\\sam\\Downloads\\notes.md"))
-      .toEqual({ kind: "folder", rootPath: "C:\\Users\\sam\\Downloads", hasManifest: false, file: "notes.md" });
+    expect(resolve("C:\\Users\\sam\\Downloads\\notes.md")).toEqual({
+      kind: "folder",
+      rootPath: "C:\\Users\\sam\\Downloads",
+      hasManifest: false,
+      file: "notes.md",
+    });
   });
 
   it("refuses the home folder and a drive's top folder", () => {
-    expect(() => resolve("C:\\Users\\sam\\todo.txt")).toThrow("Your home folder cannot be a workspace.");
-    expect(() => resolve("c:\\todo.txt")).toThrow("The top folder of a disk cannot be a workspace.");
+    expect(() => resolve("C:\\Users\\sam\\todo.txt")).toThrow(
+      "Your home folder cannot be a workspace.",
+    );
+    expect(() => resolve("c:\\todo.txt")).toThrow(
+      "The top folder of a disk cannot be a workspace.",
+    );
   });
 });

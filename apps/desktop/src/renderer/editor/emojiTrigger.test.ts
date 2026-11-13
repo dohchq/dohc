@@ -1,119 +1,121 @@
 // @vitest-environment jsdom
-import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
-import { afterEach, describe, it, expect } from 'vitest'
-import { Editor, Extension } from '@tiptap/core'
-import { StarterKit } from '@tiptap/starter-kit'
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import { afterEach, describe, it, expect } from "vitest";
+import { Editor, Extension } from "@tiptap/core";
+import { StarterKit } from "@tiptap/starter-kit";
 import {
   detectEmojiAutocomplete,
   detectCompleteEmojiShortcode,
   lookupEmoji,
   makeEmojiPlugin,
   emojiPluginKey,
-} from './emojiTrigger'
-import { codeBlock, codeMarkText, doc, paragraph } from './testDocs'
+} from "./emojiTrigger";
+import { codeBlock, codeMarkText, doc, paragraph } from "./testDocs";
 
 // `:shortcode:` emoji trigger tests over real ProseMirror documents
 // (testDocs.ts). Cursor position convention (matches mentionTrigger.test.ts):
 // a block's text starts at pos 1, so `1 + text.length` puts the cursor
 // right after the full text (i.e. the whole string is "typed so far").
 
-describe('detectEmojiAutocomplete — :shortcode: picker trigger', () => {
-  it('does not open after just one query character', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph(':s')), 3)).toEqual({
+describe("detectEmojiAutocomplete — :shortcode: picker trigger", () => {
+  it("does not open after just one query character", () => {
+    expect(detectEmojiAutocomplete(doc(paragraph(":s")), 3)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
   it('opens once the query reaches two characters (e.g. ":sm")', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph(':sm')), 4)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph(":sm")), 4)).toEqual({
       active: true,
       from: 1,
-      query: 'sm',
-    })
-  })
+      query: "sm",
+    });
+  });
 
-  it('opens for an incomplete shortcode after whitespace', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph('see :smi')), 9)).toEqual({
+  it("opens for an incomplete shortcode after whitespace", () => {
+    expect(detectEmojiAutocomplete(doc(paragraph("see :smi")), 9)).toEqual({
       active: true,
       from: 5,
-      query: 'smi',
-    })
-  })
+      query: "smi",
+    });
+  });
 
   it('does not open mid-word / mid-timestamp (e.g. "12:30")', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph('12:30')), 6)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph("12:30")), 6)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
   it('does not open when ":" is preceded by other punctuation/text', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph('foo(:bar')), 9)).toEqual({
+    expect(detectEmojiAutocomplete(doc(paragraph("foo(:bar")), 9)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
-  it('does not open inside fenced code blocks', () => {
-    expect(detectEmojiAutocomplete(doc(codeBlock(':nope')), 6)).toEqual({
+  it("does not open inside fenced code blocks", () => {
+    expect(detectEmojiAutocomplete(doc(codeBlock(":nope")), 6)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
-  it('does not open inside inline code marks', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph(codeMarkText(':nope'))), 6)).toEqual({
+  it("does not open inside inline code marks", () => {
+    expect(detectEmojiAutocomplete(doc(paragraph(codeMarkText(":nope"))), 6)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
-  it('closes once a space follows the query (no longer trailing at cursor)', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph(':foo bar')), 9)).toEqual({
+  it("closes once a space follows the query (no longer trailing at cursor)", () => {
+    expect(detectEmojiAutocomplete(doc(paragraph(":foo bar")), 9)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
-  it('closes once the shortcode is closed with a second colon', () => {
-    expect(detectEmojiAutocomplete(doc(paragraph(':smile:')), 8)).toEqual({
+  it("closes once the shortcode is closed with a second colon", () => {
+    expect(detectEmojiAutocomplete(doc(paragraph(":smile:")), 8)).toEqual({
       active: false,
-    })
-  })
+    });
+  });
 
-  it('makeEmojiPlugin builds a ProseMirror plugin keyed by emojiPluginKey', () => {
-    const plugin = makeEmojiPlugin(() => {})
-    expect(plugin).toBeInstanceOf(Plugin)
-    expect(emojiPluginKey).toBeInstanceOf(PluginKey)
-    expect(plugin.spec.key).toBe(emojiPluginKey)
-  })
-})
+  it("makeEmojiPlugin builds a ProseMirror plugin keyed by emojiPluginKey", () => {
+    const plugin = makeEmojiPlugin(() => {});
+    expect(plugin).toBeInstanceOf(Plugin);
+    expect(emojiPluginKey).toBeInstanceOf(PluginKey);
+    expect(plugin.spec.key).toBe(emojiPluginKey);
+  });
+});
 
-describe('detectCompleteEmojiShortcode — immediate-insert trigger', () => {
-  it('detects a just-closed shortcode at the cursor', () => {
-    expect(detectCompleteEmojiShortcode(doc(paragraph(':smile:')), 8)).toEqual({
+describe("detectCompleteEmojiShortcode — immediate-insert trigger", () => {
+  it("detects a just-closed shortcode at the cursor", () => {
+    expect(detectCompleteEmojiShortcode(doc(paragraph(":smile:")), 8)).toEqual({
       from: 1,
       to: 8,
-      shortcode: 'smile',
-    })
-  })
+      shortcode: "smile",
+    });
+  });
 
-  it('detects a just-closed shortcode after whitespace', () => {
+  it("detects a just-closed shortcode after whitespace", () => {
     // "nice :fire: today" — the text node starts at pos 1, so the ":" at
     // text index 5 sits at absolute pos 6, and the cursor right after the
     // closing ":" (text index 11) sits at absolute pos 12.
-    expect(
-      detectCompleteEmojiShortcode(doc(paragraph('nice :fire: today')), 12),
-    ).toEqual({ from: 6, to: 12, shortcode: 'fire' })
-  })
+    expect(detectCompleteEmojiShortcode(doc(paragraph("nice :fire: today")), 12)).toEqual({
+      from: 6,
+      to: 12,
+      shortcode: "fire",
+    });
+  });
 
-  it('returns null while the shortcode is still open (no closing colon yet)', () => {
-    expect(detectCompleteEmojiShortcode(doc(paragraph(':smile')), 7)).toBeNull()
-  })
+  it("returns null while the shortcode is still open (no closing colon yet)", () => {
+    expect(detectCompleteEmojiShortcode(doc(paragraph(":smile")), 7)).toBeNull();
+  });
 
-  it('returns null for a single-character shortcode (below the 2-char minimum)', () => {
-    expect(detectCompleteEmojiShortcode(doc(paragraph(':s:')), 4)).toBeNull()
-  })
+  it("returns null for a single-character shortcode (below the 2-char minimum)", () => {
+    expect(detectCompleteEmojiShortcode(doc(paragraph(":s:")), 4)).toBeNull();
+  });
 
-  it('returns null inside fenced code blocks', () => {
-    expect(detectCompleteEmojiShortcode(doc(codeBlock(':smile:')), 8)).toBeNull()
-  })
-})
+  it("returns null inside fenced code blocks", () => {
+    expect(detectCompleteEmojiShortcode(doc(codeBlock(":smile:")), 8)).toBeNull();
+  });
+});
 
 // --- appendTransaction gating: the Slack-style auto-insert must fire only on
 // local typing that completes the shortcode, never on other doc-changing
@@ -121,78 +123,78 @@ describe('detectCompleteEmojiShortcode — immediate-insert trigger', () => {
 // cursor after a pre-existing literal `:shortcode:`. Uses a real editor so the
 // transactions carry real ReplaceSteps. ---
 
-describe('makeEmojiPlugin — appendTransaction auto-insert gating', () => {
-  const editors: Editor[] = []
-  const mounts: HTMLElement[] = []
+describe("makeEmojiPlugin — appendTransaction auto-insert gating", () => {
+  const editors: Editor[] = [];
+  const mounts: HTMLElement[] = [];
 
   afterEach(() => {
-    while (editors.length) editors.pop()?.destroy()
-    while (mounts.length) mounts.pop()?.remove()
-  })
+    while (editors.length) editors.pop()?.destroy();
+    while (mounts.length) mounts.pop()?.remove();
+  });
 
   function makeEditor(html: string): Editor {
-    const element = document.createElement('div')
-    document.body.appendChild(element)
-    mounts.push(element)
+    const element = document.createElement("div");
+    document.body.appendChild(element);
+    mounts.push(element);
     const emoji = Extension.create({
-      name: 'testEmoji',
+      name: "testEmoji",
       addProseMirrorPlugins() {
-        return [makeEmojiPlugin(() => {})]
+        return [makeEmojiPlugin(() => {})];
       },
-    })
+    });
     const editor = new Editor({
       element,
       extensions: [StarterKit.configure({ trailingNode: false }), emoji],
       content: html,
-    })
-    editors.push(editor)
-    return editor
+    });
+    editors.push(editor);
+    return editor;
   }
 
-  it('replaces the shortcode when the user types the closing colon at the cursor', () => {
-    const editor = makeEditor('<p>hi :smile</p>')
-    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)))
+  it("replaces the shortcode when the user types the closing colon at the cursor", () => {
+    const editor = makeEditor("<p>hi :smile</p>");
+    editor.view.dispatch(editor.state.tr.setSelection(TextSelection.atEnd(editor.state.doc)));
 
     // Type the final ':' — a real ReplaceStep inserting it at the cursor.
-    editor.view.dispatch(editor.state.tr.insertText(':'))
+    editor.view.dispatch(editor.state.tr.insertText(":"));
 
-    expect(editor.state.doc.textContent).toContain('😄')
-    expect(editor.state.doc.textContent).not.toContain(':smile:')
-  })
+    expect(editor.state.doc.textContent).toContain("😄");
+    expect(editor.state.doc.textContent).not.toContain(":smile:");
+  });
 
-  it('does not replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it', () => {
+  it("does not replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it", () => {
     // "hi :smile: yo" — the literal is intentionally left in prose.
-    const editor = makeEditor('<p>hi :smile: yo</p>')
+    const editor = makeEditor("<p>hi :smile: yo</p>");
 
     // Cursor sits right after the literal ':smile:' (absolute pos 11: para
     // start offset 1 + text index 10).
-    const cursor = 11
+    const cursor = 11;
     editor.view.dispatch(
       editor.state.tr.setSelection(TextSelection.create(editor.state.doc, cursor)),
-    )
+    );
 
     // A doc-changing transaction elsewhere (mimicking a remote/collab edit or
     // an edit further along) that keeps the collapsed cursor parked after the
     // literal. Pre-fix, any docChanged with the cursor after a complete
     // shortcode triggered the auto-insert; the step-gate now blocks it.
-    const endPos = editor.state.doc.content.size - 1
-    const tr = editor.state.tr.insertText('Z', endPos)
-    tr.setSelection(TextSelection.create(tr.doc, cursor))
-    editor.view.dispatch(tr)
+    const endPos = editor.state.doc.content.size - 1;
+    const tr = editor.state.tr.insertText("Z", endPos);
+    tr.setSelection(TextSelection.create(tr.doc, cursor));
+    editor.view.dispatch(tr);
 
-    expect(editor.state.doc.textContent).toContain(':smile:')
-    expect(editor.state.doc.textContent).not.toContain('😄')
-  })
-})
+    expect(editor.state.doc.textContent).toContain(":smile:");
+    expect(editor.state.doc.textContent).not.toContain("😄");
+  });
+});
 
-describe('lookupEmoji — shortcode -> entry resolution', () => {
-  it('resolves a known shortcode to its emoji character', () => {
-    expect(lookupEmoji('smile')?.emoji).toBe('😄')
-    expect(lookupEmoji('fire')?.emoji).toBe('🔥')
-    expect(lookupEmoji('thumbsup')?.emoji).toBe('👍')
-  })
+describe("lookupEmoji — shortcode -> entry resolution", () => {
+  it("resolves a known shortcode to its emoji character", () => {
+    expect(lookupEmoji("smile")?.emoji).toBe("😄");
+    expect(lookupEmoji("fire")?.emoji).toBe("🔥");
+    expect(lookupEmoji("thumbsup")?.emoji).toBe("👍");
+  });
 
-  it('returns undefined for an unknown shortcode', () => {
-    expect(lookupEmoji('definitely_not_a_real_shortcode')).toBeUndefined()
-  })
-})
+  it("returns undefined for an unknown shortcode", () => {
+    expect(lookupEmoji("definitely_not_a_real_shortcode")).toBeUndefined();
+  });
+});

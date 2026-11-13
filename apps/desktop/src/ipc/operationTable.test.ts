@@ -10,20 +10,23 @@ import {
 
 const table = {
   rename: {
-    capabilityId: "file.move", scope: "device",
+    capabilityId: "file.move",
+    scope: "device",
     channel: "desktop:test-rename",
     payload: z.object({ name: z.string().min(1) }),
     result: z.object({ renamed: z.string() }),
     guard: "trusted-sender",
   },
   forget: {
-    capabilityId: "notice.mark", scope: "device",
+    capabilityId: "notice.mark",
+    scope: "device",
     channel: "desktop:test-forget",
     payload: z.object({ name: z.string() }),
     guard: "trusted-sender",
   },
   readNote: {
-    capabilityId: "file.read", scope: "workspace",
+    capabilityId: "file.read",
+    scope: "workspace",
     channel: "desktop:test-read-note",
     payload: z.object({ workspaceId: z.string(), path: z.string() }),
     result: z.object({ text: z.string() }),
@@ -41,7 +44,9 @@ interface Event {
 }
 const attachment = Symbol("workspace-a");
 
-function harness(handlers: OperationHandlers<typeof table, Event, { workspace: { workspaceId: string } }>) {
+function harness(
+  handlers: OperationHandlers<typeof table, Event, { workspace: { workspaceId: string } }>,
+) {
   const listeners = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
   // Main's own guard over a fake physical workspace: the sender's session is
   // current while the window still shows the workspace it names.
@@ -93,7 +98,9 @@ function harness(handlers: OperationHandlers<typeof table, Event, { workspace: {
 
 function spies() {
   return {
-    rename: vi.fn<OperationHandlers<typeof table, Event>["rename"]>(({ name }) => ({ renamed: name })),
+    rename: vi.fn<OperationHandlers<typeof table, Event>["rename"]>(({ name }) => ({
+      renamed: name,
+    })),
     forget: vi.fn<OperationHandlers<typeof table, Event>["forget"]>(),
     readNote: vi.fn<OperationHandlers<typeof table, Event>["readNote"]>(() => ({ text: "note" })),
   };
@@ -102,15 +109,25 @@ function spies() {
 describe("operation registrar", () => {
   it("registers one listener per row under the row's channel", () => {
     const { listeners } = harness(spies());
-    expect([...listeners.keys()]).toEqual(["desktop:test-rename", "desktop:test-forget", "desktop:test-read-note"]);
+    expect([...listeners.keys()]).toEqual([
+      "desktop:test-rename",
+      "desktop:test-forget",
+      "desktop:test-read-note",
+    ]);
   });
 
   it("refuses an untrusted sender before parsing or running the handler", async () => {
     const handlers = spies();
     const { invoke } = harness(handlers);
-    await expect(invoke(table.rename.channel, null, { trusted: false })).rejects.toThrow("Untrusted IPC sender");
+    await expect(invoke(table.rename.channel, null, { trusted: false })).rejects.toThrow(
+      "Untrusted IPC sender",
+    );
     await expect(
-      invoke(table.readNote.channel, { workspaceId: "workspace-a", path: "a.md" }, { trusted: false }),
+      invoke(
+        table.readNote.channel,
+        { workspaceId: "workspace-a", path: "a.md" },
+        { trusted: false },
+      ),
     ).rejects.toThrow("Untrusted IPC sender");
     expect(handlers.rename).not.toHaveBeenCalled();
     expect(handlers.readNote).not.toHaveBeenCalled();
@@ -128,7 +145,9 @@ describe("operation registrar", () => {
   it("passes the parsed payload and the event, and replies with the parsed result", async () => {
     const handlers = spies();
     const { invoke } = harness(handlers);
-    await expect(invoke(table.rename.channel, { name: "draft", extra: true })).resolves.toEqual({ renamed: "draft" });
+    await expect(invoke(table.rename.channel, { name: "draft", extra: true })).resolves.toEqual({
+      renamed: "draft",
+    });
     expect(handlers.rename).toHaveBeenCalledExactlyOnceWith(
       { name: "draft" },
       { event: expect.objectContaining({ trusted: true }) },
@@ -154,12 +173,16 @@ describe("operation registrar", () => {
   it("runs an active-workspace row inside the sender's workspace operation", async () => {
     const handlers = spies();
     const { invoke } = harness(handlers);
-    await expect(invoke(table.readNote.channel, { workspaceId: "workspace-a", path: "a.md" })).resolves.toEqual({ text: "note" });
+    await expect(
+      invoke(table.readNote.channel, { workspaceId: "workspace-a", path: "a.md" }),
+    ).resolves.toEqual({ text: "note" });
     expect(handlers.readNote).toHaveBeenCalledExactlyOnceWith(
       { workspaceId: "workspace-a", path: "a.md" },
       {
         event: expect.objectContaining({ trusted: true }),
-        operation: expect.objectContaining({ workspace: { workspaceId: "workspace-a", attachmentId: attachment } }),
+        operation: expect.objectContaining({
+          workspace: { workspaceId: "workspace-a", attachmentId: attachment },
+        }),
       },
     );
   });
@@ -195,7 +218,9 @@ describe("operation bridge", () => {
   it("forwards each method's payload to its row's channel and returns main's reply", async () => {
     const invoke = vi.fn(async (channel: string) => ({ channel }));
     const bridge = operationBridge(table, invoke);
-    await expect(bridge.rename({ name: "draft" })).resolves.toEqual({ channel: "desktop:test-rename" });
+    await expect(bridge.rename({ name: "draft" })).resolves.toEqual({
+      channel: "desktop:test-rename",
+    });
     expect(invoke).toHaveBeenCalledExactlyOnceWith("desktop:test-rename", { name: "draft" });
     expect(Object.keys(bridge)).toEqual(["rename", "forget", "readNote"]);
   });

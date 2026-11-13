@@ -13,8 +13,11 @@ import { deferred } from "../testing/deferred";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  try { for (const close of cleanups.splice(0).reverse()) await close(); }
-  finally { vi.restoreAllMocks(); }
+  try {
+    for (const close of cleanups.splice(0).reverse()) await close();
+  } finally {
+    vi.restoreAllMocks();
+  }
 });
 
 async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
@@ -24,19 +27,33 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   const resourcesPath = join(root, "resources");
   const iconRoot = packaged ? resourcesPath : join(root, "build");
   await mkdir(iconRoot, { recursive: true });
-  const configure = (enabled: boolean) => replaceUserSettingsFile(stateRoot,
-    settingsWithAgent({ name: "Nova", enabled, launch: { command: "agent run" } }));
+  const configure = (enabled: boolean) =>
+    replaceUserSettingsFile(
+      stateRoot,
+      settingsWithAgent({ name: "Nova", enabled, launch: { command: "agent run" } }),
+    );
   await configure(true);
   const service = createChatDispatchService({
-    workspaceFor: () => null, listOpenWorkspaces: () => [], listSyncWorkspaces: () => [],
+    workspaceFor: () => null,
+    listOpenWorkspaces: () => [],
+    listSyncWorkspaces: () => [],
     assertMayStartAgent: async () => () => undefined,
     agentToolVersion: async () => null,
-    chatStoreFor: () => { throw new Error("No workspace should be opened"); },
-    startSelfTestThread: async () => { throw new Error("No self-test should start"); },
-    dispatchStoreFor: () => { throw new Error("No dispatch store should be opened"); },
-    readDispatchAgents: async () => listAgents((await readCachedUserSettingsFile(stateRoot)).settings),
+    chatStoreFor: () => {
+      throw new Error("No workspace should be opened");
+    },
+    startSelfTestThread: async () => {
+      throw new Error("No self-test should start");
+    },
+    dispatchStoreFor: () => {
+      throw new Error("No dispatch store should be opened");
+    },
+    readDispatchAgents: async () =>
+      listAgents((await readCachedUserSettingsFile(stateRoot)).settings),
     stateDir: () => stateRoot,
-    appRoot: () => root, isPackaged: () => packaged, queueSync: () => undefined,
+    appRoot: () => root,
+    isPackaged: () => packaged,
+    queueSync: () => undefined,
     onMessagePosted: () => undefined,
     setRunAttribution: () => undefined,
   });
@@ -45,18 +62,27 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   class Image {
     readonly setTemplateImage = vi.fn((_value: boolean) => undefined);
     constructor(readonly path: string) {}
-    isEmpty() { return !existsSync(this.path) || emptyPaths.has(this.path); }
+    isEmpty() {
+      return !existsSync(this.path) || emptyPaths.has(this.path);
+    }
   }
   const created: Tray[] = [];
   class Tray {
     menu: MenuItemConstructorOptions[] = [];
-    readonly setContextMenu = vi.fn((menu: MenuItemConstructorOptions[]) => { this.menu = menu; });
+    readonly setContextMenu = vi.fn((menu: MenuItemConstructorOptions[]) => {
+      this.menu = menu;
+    });
     readonly setToolTip = vi.fn((_text: string) => undefined);
     readonly setImage = vi.fn((_image: Image) => undefined);
     readonly destroy = vi.fn(() => undefined);
     readonly listeners = new Map<string, () => void>();
-    constructor(readonly image: Image) { created.push(this); }
-    on(event: "double-click", listener: () => void) { this.listeners.set(event, listener); return this; }
+    constructor(readonly image: Image) {
+      created.push(this);
+    }
+    on(event: "double-click", listener: () => void) {
+      this.listeners.set(event, listener);
+      return this;
+    }
   }
   const app = { isPackaged: packaged, getAppPath: () => root, quit: vi.fn() };
   const runtime = { platform, resourcesPath: resourcesPath as string | undefined };
@@ -71,28 +97,71 @@ async function harness(platform: NodeJS.Platform = "win32", packaged = false) {
   class Notice {
     readonly listeners = new Map<string, () => void>();
     readonly show = vi.fn(() => undefined);
-    constructor(readonly options: { title: string; body: string }) { notices.push(this); }
-    on(event: "click", listener: () => void) { this.listeners.set(event, listener); return this; }
+    constructor(readonly options: { title: string; body: string }) {
+      notices.push(this);
+    }
+    on(event: "click", listener: () => void) {
+      this.listeners.set(event, listener);
+      return this;
+    }
   }
   const linuxTrayShown = vi.fn(async () => false);
   let windowOpen = false;
   const owner = createDesktopTray({
-    app, process: runtime, moduleDirectory, Menu: { buildFromTemplate: buildMenu },
-    nativeImage: { createFromPath: createImage }, nativeTheme: theme, Tray, Notification: Notice, linuxTrayShown,
+    app,
+    process: runtime,
+    moduleDirectory,
+    Menu: { buildFromTemplate: buildMenu },
+    nativeImage: { createFromPath: createImage },
+    nativeTheme: theme,
+    Tray,
+    Notification: Notice,
+    linuxTrayShown,
     hasWindow: () => windowOpen,
-    readCachedUserSettingsFile: readSettings, stateDir: () => stateRoot,
-    chatDispatchService: service, showOrCreateMainWindow: showWindow,
+    readCachedUserSettingsFile: readSettings,
+    stateDir: () => stateRoot,
+    chatDispatchService: service,
+    showOrCreateMainWindow: showWindow,
     runningSchedules: () => schedules,
-    get appLifecycle() { if (!lifecycle) throw new Error("Lifecycle has not been constructed"); return lifecycle; },
+    get appLifecycle() {
+      if (!lifecycle) throw new Error("Lifecycle has not been constructed");
+      return lifecycle;
+    },
   });
   lifecycle = { isQuitting: () => false };
   return {
-    root, iconRoot, resourcesPath, stateRoot, created, service, app, runtime, theme,
-    owner, readSettings, createImage, emptyPaths, buildMenu, showWindow, configure, notices, linuxTrayShown,
-    asset: async (name: string) => { const path = join(iconRoot, name); await writeFile(path, "native image fixture"); return path; },
-    setLifecycle: (value: { isQuitting(): boolean }) => { lifecycle = value; },
-    setSchedules: (count: number) => { schedules = count; },
-    setWindowOpen: (open: boolean) => { windowOpen = open; },
+    root,
+    iconRoot,
+    resourcesPath,
+    stateRoot,
+    created,
+    service,
+    app,
+    runtime,
+    theme,
+    owner,
+    readSettings,
+    createImage,
+    emptyPaths,
+    buildMenu,
+    showWindow,
+    configure,
+    notices,
+    linuxTrayShown,
+    asset: async (name: string) => {
+      const path = join(iconRoot, name);
+      await writeFile(path, "native image fixture");
+      return path;
+    },
+    setLifecycle: (value: { isQuitting(): boolean }) => {
+      lifecycle = value;
+    },
+    setSchedules: (count: number) => {
+      schedules = count;
+    },
+    setWindowOpen: (open: boolean) => {
+      windowOpen = open;
+    },
     click: (index: number, checked = false) => {
       const item = created.at(-1)?.menu[index];
       if (!item?.click) throw new Error("Missing tray action");
@@ -147,7 +216,13 @@ describe("desktop tray owner", () => {
     h.setSchedules(1);
     await h.configure(true);
     await h.owner.refreshDispatchTray();
-    expect(tray.menu.map(({ label }) => label)).toEqual(["Open dohc", "Running 1 schedule", "Pause agent replies", undefined, "Quit dohc"]);
+    expect(tray.menu.map(({ label }) => label)).toEqual([
+      "Open dohc",
+      "Running 1 schedule",
+      "Pause agent replies",
+      undefined,
+      "Quit dohc",
+    ]);
     h.setSchedules(0);
     await h.configure(false);
     await expect(h.owner.refreshDispatchTray()).resolves.toBe(false);
@@ -179,10 +254,12 @@ describe("desktop tray owner", () => {
     await h.owner.refreshDispatchTray();
     await h.owner.noticeRunningInBackground();
     await h.owner.noticeRunningInBackground();
-    expect(h.notices.map(({ options }) => options)).toEqual([{
-      title: "dohc is still running",
-      body: "Agent replies are on. Running 2 schedules. To quit, open dohc and press Ctrl+Q.",
-    }]);
+    expect(h.notices.map(({ options }) => options)).toEqual([
+      {
+        title: "dohc is still running",
+        body: "Agent replies are on. Running 2 schedules. To quit, open dohc and press Ctrl+Q.",
+      },
+    ]);
     expect(h.notices[0]!.show).toHaveBeenCalledTimes(1);
     h.notices[0]!.listeners.get("click")!();
     expect(h.showWindow).toHaveBeenCalledTimes(1);
@@ -196,7 +273,9 @@ describe("desktop tray owner", () => {
     h.setSchedules(1);
     await h.owner.refreshDispatchTray();
     await h.owner.noticeRunningInBackground();
-    expect(h.notices[0]?.options.body).toBe("Running 1 schedule. To quit, open dohc and press Ctrl+Q.");
+    expect(h.notices[0]?.options.body).toBe(
+      "Running 1 schedule. To quit, open dohc and press Ctrl+Q.",
+    );
   });
 
   it("says agent replies are paused when they are", async () => {
@@ -205,7 +284,9 @@ describe("desktop tray owner", () => {
     await h.owner.refreshDispatchTray();
     h.service.setPaused(true);
     await h.owner.noticeRunningInBackground();
-    expect(h.notices[0]?.options.body).toBe("Agent replies are paused. To quit, open dohc and press Ctrl+Q.");
+    expect(h.notices[0]?.options.body).toBe(
+      "Agent replies are paused. To quit, open dohc and press Ctrl+Q.",
+    );
   });
 
   it("sends one notice when two closes overlap", async () => {
@@ -267,31 +348,37 @@ describe("desktop tray owner", () => {
     }
   });
 
-  it.each(["win32", "linux"] as const)("refreshes the existing %s tray from the live theme", async (platform) => {
-    const h = await harness(platform);
-    await h.asset("icon-light.png");
-    const dark = await h.asset("icon-dark.png");
-    await h.owner.refreshDispatchTray();
-    h.theme.shouldUseDarkColors = true;
-    h.owner.refreshTrayIcon();
-    expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(dark);
-    expect(h.created).toHaveLength(1);
-  });
+  it.each(["win32", "linux"] as const)(
+    "refreshes the existing %s tray from the live theme",
+    async (platform) => {
+      const h = await harness(platform);
+      await h.asset("icon-light.png");
+      const dark = await h.asset("icon-dark.png");
+      await h.owner.refreshDispatchTray();
+      h.theme.shouldUseDarkColors = true;
+      h.owner.refreshTrayIcon();
+      expect(h.created[0]!.setImage.mock.calls[0]?.[0].path).toBe(dark);
+      expect(h.created).toHaveLength(1);
+    },
+  );
 
-  it.each([false, true])("gives the macOS menu bar the template image whatever the theme (packaged: %s)", async (packaged) => {
-    const h = await harness("darwin", packaged);
-    await h.asset("icon-light.png");
-    await h.asset("icon-dark.png");
-    const template = await h.asset("trayTemplate.png");
-    await h.owner.refreshDispatchTray();
-    expect(h.created[0]!.image.path).toBe(template);
-    expect(h.created[0]!.image.setTemplateImage).toHaveBeenCalledWith(true);
-    h.theme.shouldUseDarkColors = true;
-    h.owner.refreshTrayIcon();
-    const refreshed = h.created[0]!.setImage.mock.calls[0]?.[0];
-    expect(refreshed?.path).toBe(template);
-    expect(refreshed?.setTemplateImage).toHaveBeenCalledWith(true);
-  });
+  it.each([false, true])(
+    "gives the macOS menu bar the template image whatever the theme (packaged: %s)",
+    async (packaged) => {
+      const h = await harness("darwin", packaged);
+      await h.asset("icon-light.png");
+      await h.asset("icon-dark.png");
+      const template = await h.asset("trayTemplate.png");
+      await h.owner.refreshDispatchTray();
+      expect(h.created[0]!.image.path).toBe(template);
+      expect(h.created[0]!.image.setTemplateImage).toHaveBeenCalledWith(true);
+      h.theme.shouldUseDarkColors = true;
+      h.owner.refreshTrayIcon();
+      const refreshed = h.created[0]!.setImage.mock.calls[0]?.[0];
+      expect(refreshed?.path).toBe(template);
+      expect(refreshed?.setTemplateImage).toHaveBeenCalledWith(true);
+    },
+  );
 
   it("refreshes the tray icon before a tray exists without creating one", async () => {
     const h = await harness();
@@ -336,26 +423,33 @@ describe("desktop tray owner", () => {
     expect(h.createImage.mock.calls).toEqual([[""], [join(h.root, "build/icon.png")]]);
   });
 
-  it.each([false, true])("checks the current lifecycle after a held settings read with an existing tray: %s", async (existing) => {
-    const h = await harness();
-    await h.asset("icon-light.png");
-    if (existing) await h.owner.refreshDispatchTray();
-    const reached = deferred<void>();
-    const release = deferred<void>();
-    h.readSettings.mockImplementation(async (path) => { reached.resolve(); await release.promise; return readCachedUserSettingsFile(path); });
-    const pending = h.owner.refreshDispatchTray();
-    try {
-      await reached.promise;
-      h.setLifecycle({ isQuitting: () => true });
+  it.each([false, true])(
+    "checks the current lifecycle after a held settings read with an existing tray: %s",
+    async (existing) => {
+      const h = await harness();
+      await h.asset("icon-light.png");
+      if (existing) await h.owner.refreshDispatchTray();
+      const reached = deferred<void>();
+      const release = deferred<void>();
+      h.readSettings.mockImplementation(async (path) => {
+        reached.resolve();
+        await release.promise;
+        return readCachedUserSettingsFile(path);
+      });
+      const pending = h.owner.refreshDispatchTray();
+      try {
+        await reached.promise;
+        h.setLifecycle({ isQuitting: () => true });
+        expect(h.created).toHaveLength(existing ? 1 : 0);
+      } finally {
+        release.resolve();
+        await Promise.allSettled([pending]);
+      }
+      await expect(pending).resolves.toBe(true);
       expect(h.created).toHaveLength(existing ? 1 : 0);
-    } finally {
-      release.resolve();
-      await Promise.allSettled([pending]);
-    }
-    await expect(pending).resolves.toBe(true);
-    expect(h.created).toHaveLength(existing ? 1 : 0);
-    if (existing) expect(h.created[0]!.destroy).toHaveBeenCalledTimes(1);
-  });
+      if (existing) expect(h.created[0]!.destroy).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("propagates a settings-read rejection while preserving the existing tray", async () => {
     const h = await harness();

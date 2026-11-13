@@ -4,9 +4,17 @@ import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
 import type { Agent } from "../settings/userSettings";
 import { deferred } from "../testing/deferred";
 import { ChatWakeBusyError, ChatWakeMissingError, type ChatWakeClient } from "./chatWakeClient";
-import { ChatRunnerLedgerUnreadableError, type ChatRunnerLedger, type ChatRunnerLedgerEntry } from "./chatRunnerLedger";
 import {
-  CHAT_RUNNER_CHECK_MS, CHAT_RUNNER_REFRESH_MS, CHAT_RUNNER_WITHDRAW_MS, createChatRunnerRoster, type ChatRunnerRosterDeps,
+  ChatRunnerLedgerUnreadableError,
+  type ChatRunnerLedger,
+  type ChatRunnerLedgerEntry,
+} from "./chatRunnerLedger";
+import {
+  CHAT_RUNNER_CHECK_MS,
+  CHAT_RUNNER_REFRESH_MS,
+  CHAT_RUNNER_WITHDRAW_MS,
+  createChatRunnerRoster,
+  type ChatRunnerRosterDeps,
 } from "./chatRunnerRoster";
 import { sleepUnlessAborted, type ChatWakeSession } from "./chatWakeLifetime";
 
@@ -14,8 +22,13 @@ import { sleepUnlessAborted, type ChatWakeSession } from "./chatWakeLifetime";
 // on a gate or its signal, never on time.
 
 type AgentRow = Pick<Agent, "id" | "name" | "enabled" | "launch">;
-const runner = (over: Partial<AgentRow> = {}): AgentRow =>
-  ({ id: "default", name: "Claude", enabled: true, launch: { command: "agent run" }, ...over });
+const runner = (over: Partial<AgentRow> = {}): AgentRow => ({
+  id: "default",
+  name: "Claude",
+  enabled: true,
+  launch: { command: "agent run" },
+  ...over,
+});
 
 function session(scope: string) {
   let current = true;
@@ -23,8 +36,12 @@ function session(scope: string) {
     account: { scope, userId: `user-${scope}`, installId: "mac" },
     relay: { baseUrl: "https://relay.test", token: `token-${scope}` },
     isCurrent: () => current,
-    unauthorized: vi.fn(() => { current = false; }),
-    end: () => { current = false; },
+    unauthorized: vi.fn(() => {
+      current = false;
+    }),
+    end: () => {
+      current = false;
+    },
   } satisfies ChatWakeSession & { end(): void };
   return value;
 }
@@ -68,22 +85,41 @@ function fakeServer() {
         inFlight -= 1;
       }
     },
-    waitWakes: async () => { throw new Error("The roster never reads wakes."); },
-    claimWake: async () => { throw new Error("The roster never claims."); },
-    confirmQueued: async () => { throw new Error("The roster never confirms."); },
+    waitWakes: async () => {
+      throw new Error("The roster never reads wakes.");
+    },
+    claimWake: async () => {
+      throw new Error("The roster never claims.");
+    },
+    confirmQueued: async () => {
+      throw new Error("The roster never confirms.");
+    },
   });
   return {
-    puts, putTimes, putSessions, putCurrent, rows, behaviors, client,
+    puts,
+    putTimes,
+    putSessions,
+    putCurrent,
+    rows,
+    behaviors,
+    client,
     mostInFlight: () => mostInFlight,
     /** Resolves once `count` PUTs have succeeded. */
-    untilDone: (count: number) => done >= count ? Promise.resolve()
-      : new Promise<void>((resolve) => { watchers.push({ at: count, resolve }); }),
+    untilDone: (count: number) =>
+      done >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            watchers.push({ at: count, resolve });
+          }),
     row: (scope: string, workspaceId: string) => rows.get(JSON.stringify([scope, workspaceId])),
     /** The next PUT waits until `release`, and resolves `entered` once it is in flight. */
     hold() {
       const entered = deferred<void>();
       const release = deferred<void>();
-      behaviors.push(async () => { entered.resolve(); await release.promise; });
+      behaviors.push(async () => {
+        entered.resolve();
+        await release.promise;
+      });
       return { entered, release };
     },
     /** The next PUT never answers: it ends only when its signal aborts. */
@@ -98,7 +134,9 @@ function fakeServer() {
       return entered;
     },
     refuse(error: Error) {
-      behaviors.push(async () => { throw error; });
+      behaviors.push(async () => {
+        throw error;
+      });
     },
   };
 }
@@ -147,20 +185,26 @@ function memoryLedger(rows: ChatRunnerLedgerEntry[] = []) {
 function heldSleeps() {
   const sleeps: Array<{ ms: number; signal: AbortSignal; release: () => void }> = [];
   const watchers: Array<{ at: number; resolve: () => void }> = [];
-  const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
-    signal.addEventListener("abort", () => resolve(), { once: true });
-    sleeps.push({ ms, signal, release: resolve });
-    for (const watcher of [...watchers]) {
-      if (sleeps.length < watcher.at) continue;
-      watchers.splice(watchers.indexOf(watcher), 1);
-      watcher.resolve();
-    }
-  });
+  const sleep = (ms: number, signal: AbortSignal) =>
+    new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+      sleeps.push({ ms, signal, release: resolve });
+      for (const watcher of [...watchers]) {
+        if (sleeps.length < watcher.at) continue;
+        watchers.splice(watchers.indexOf(watcher), 1);
+        watcher.resolve();
+      }
+    });
   return {
-    sleeps, sleep,
+    sleeps,
+    sleep,
     /** Resolves once `count` backoffs have started. */
-    until: (count: number) => sleeps.length >= count ? Promise.resolve()
-      : new Promise<void>((resolve) => { watchers.push({ at: count, resolve }); }),
+    until: (count: number) =>
+      sleeps.length >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            watchers.push({ at: count, resolve });
+          }),
   };
 }
 
@@ -177,9 +221,15 @@ function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
     agents: async () => agents,
     computerLabel: () => "Mac",
     // A retry waits until the roster stops, unless a test passes its own.
-    sleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
+    sleep: (_ms, signal) =>
+      new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
     // The hourly due check waits until the roster stops, unless a test passes its own.
-    refreshSleep: (_ms, signal) => new Promise<void>((resolve) => { signal.addEventListener("abort", () => resolve(), { once: true }); }),
+    refreshSleep: (_ms, signal) =>
+      new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
     nowMs: () => Date.now(),
     backoffMs: (failures) => 1_000 * failures,
     timeout: vi.fn(() => deadline.signal),
@@ -191,13 +241,23 @@ function setup(over: Partial<ChatRunnerRosterDeps> = {}) {
     ...over,
   };
   return {
-    server, ledger, owned, deps, deadline, roster: createChatRunnerRoster(deps),
-    setAgents: (next: AgentRow[]) => { agents = next; },
+    server,
+    ledger,
+    owned,
+    deps,
+    deadline,
+    roster: createChatRunnerRoster(deps),
+    setAgents: (next: AgentRow[]) => {
+      agents = next;
+    },
   };
 }
 
-const declared = (runners: ChatRunnerDeclaration["runners"]): ChatRunnerDeclaration =>
-  ({ installId: "mac", computerLabel: "Mac", runners });
+const declared = (runners: ChatRunnerDeclaration["runners"]): ChatRunnerDeclaration => ({
+  installId: "mac",
+  computerLabel: "Mac",
+  runners,
+});
 const CLAUDE_ON = [{ agentId: "default", displayName: "Claude", enabled: true }];
 const CLAUDE_OFF = [{ agentId: "default", displayName: "Claude", enabled: false }];
 
@@ -258,19 +318,23 @@ describe("publishing this computer's agents", () => {
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_OFF);
   });
 
-  it.each([["paused", ["ws1"]], ["removed", ["ws1"]]] as const)(
-    "withdraws its agents from a workspace %s here",
-    async (_how, left) => {
-      const r = setup();
-      const a = session("A");
-      await r.roster.reconcile(a);
-      r.owned.A = [...left];
-      await r.roster.reconcile(a);
-      expect(r.server.puts.at(-1)).toEqual({ scope: "A", workspaceId: "ws2", declaration: declared([]) });
-      expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
-      expect(r.ledger.state.rows).toEqual([{ account: "A", installId: "mac", workspaceId: "ws1" }]);
-    },
-  );
+  it.each([
+    ["paused", ["ws1"]],
+    ["removed", ["ws1"]],
+  ] as const)("withdraws its agents from a workspace %s here", async (_how, left) => {
+    const r = setup();
+    const a = session("A");
+    await r.roster.reconcile(a);
+    r.owned.A = [...left];
+    await r.roster.reconcile(a);
+    expect(r.server.puts.at(-1)).toEqual({
+      scope: "A",
+      workspaceId: "ws2",
+      declaration: declared([]),
+    });
+    expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
+    expect(r.ledger.state.rows).toEqual([{ account: "A", installId: "mac", workspaceId: "ws1" }]);
+  });
 
   it("is quiet when the server has no wake routes, and asks again on the next reconciliation", async () => {
     const r = setup();
@@ -302,7 +366,10 @@ describe("publishing this computer's agents", () => {
     expect(r.server.row("A", "ws1")).toEqual(CLAUDE_ON);
   });
 
-  it.each([["a new token for the same account", "A"], ["another account", "B"]] as const)(
+  it.each([
+    ["a new token for the same account", "A"],
+    ["another account", "B"],
+  ] as const)(
     "retries for %s even while an older session's backoff sleeps",
     async (_case, scope) => {
       const backoffs = heldSleeps();
@@ -325,7 +392,11 @@ describe("publishing this computer's agents", () => {
       backoffs.sleeps[0]!.release();
       backoffs.sleeps[1]!.release();
       await r.server.untilDone(1);
-      expect(r.server.puts.at(-1)).toEqual({ scope, workspaceId: "ws1", declaration: declared(CLAUDE_ON) });
+      expect(r.server.puts.at(-1)).toEqual({
+        scope,
+        workspaceId: "ws1",
+        declaration: declared(CLAUDE_ON),
+      });
       expect(r.deps.client).toHaveBeenLastCalledWith(next);
     },
   );
@@ -402,11 +473,16 @@ describe("publishing this computer's agents", () => {
     const r = setup();
     const a = session("A");
     await r.roster.reconcile(a);
-    const many = Array.from({ length: 65 }, (_, index) => runner({ id: `agent-${index}`, name: `Agent ${index}` }));
+    const many = Array.from({ length: 65 }, (_, index) =>
+      runner({ id: `agent-${index}`, name: `Agent ${index}` }),
+    );
     r.setAgents(many);
     await r.roster.reconcile(a);
     expect(r.deps.refused).toHaveBeenCalledTimes(2);
-    expect(r.deps.refused).toHaveBeenCalledWith("ws1", expect.objectContaining({ reason: "too-many-agents" }));
+    expect(r.deps.refused).toHaveBeenCalledWith(
+      "ws1",
+      expect.objectContaining({ reason: "too-many-agents" }),
+    );
     expect(r.server.row("A", "ws1")).toEqual([]);
     expect(r.server.row("A", "ws2")).toEqual([]);
     await r.roster.reconcile(a);
@@ -420,7 +496,11 @@ describe("publishing this computer's agents", () => {
   it("takes a refusal row back when its workspace stops syncing here", async () => {
     const r = setup();
     const a = session("A");
-    r.setAgents(Array.from({ length: 65 }, (_, index) => runner({ id: `agent-${index}`, name: `Agent ${index}` })));
+    r.setAgents(
+      Array.from({ length: 65 }, (_, index) =>
+        runner({ id: `agent-${index}`, name: `Agent ${index}` }),
+      ),
+    );
     await r.roster.reconcile(a);
     r.owned.A = ["ws1"];
     await r.roster.reconcile(a);
@@ -503,7 +583,11 @@ describe("withdrawing an account that left", () => {
     const r = setup();
     r.owned.A = ["ws1"];
     const a = session("A");
-    r.setAgents(Array.from({ length: 65 }, (_, index) => runner({ id: `agent-${index}`, name: `Agent ${index}` })));
+    r.setAgents(
+      Array.from({ length: 65 }, (_, index) =>
+        runner({ id: `agent-${index}`, name: `Agent ${index}` }),
+      ),
+    );
     await r.roster.reconcile(a);
     await r.roster.withdraw(a);
     expect(r.deps.accepted).toHaveBeenCalledExactlyOnceWith("ws1");
@@ -525,8 +609,12 @@ function countedSleep() {
       return sleepUnlessAborted(ms, signal);
     },
     /** Resolves once `count` waits have started, so their timers are on the clock. */
-    until: (count: number) => started >= count ? Promise.resolve()
-      : new Promise<void>((resolve) => { watchers.push({ at: count, resolve }); }),
+    until: (count: number) =>
+      started >= count
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            watchers.push({ at: count, resolve });
+          }),
   };
 }
 
@@ -577,9 +665,16 @@ describe("keeping the relay's lease", () => {
       await r.roster.reconcile(sessions.at(-1)!);
     }
     await r.server.untilDone(4);
-    expect(r.server.putTimes.map((at) => at - started)).toEqual([0, 24 * HOUR, 48 * HOUR, 72 * HOUR]);
+    expect(r.server.putTimes.map((at) => at - started)).toEqual([
+      0,
+      24 * HOUR,
+      48 * HOUR,
+      72 * HOUR,
+    ]);
     // By reference: the session replaced at 20 h renewed at 24 h, the next at 48 h, and so on.
-    expect(r.server.putSessions.map((each) => sessions.findIndex((made) => made === each))).toEqual([0, 1, 2, 3]);
+    expect(r.server.putSessions.map((each) => sessions.findIndex((made) => made === each))).toEqual(
+      [0, 1, 2, 3],
+    );
     expect(r.server.putCurrent).toEqual([true, true, true, true]);
     await r.roster.stop();
   });
@@ -679,7 +774,11 @@ describe("keeping the relay's lease", () => {
     await vi.advanceTimersByTimeAsync(CHAT_RUNNER_REFRESH_MS);
     // A's two declarations, A's two withdrawals, B's declaration, and B's renewal.
     await r.server.untilDone(6);
-    expect(r.server.puts.at(-1)).toEqual({ scope: "B", workspaceId: "ws9", declaration: declared(CLAUDE_ON) });
+    expect(r.server.puts.at(-1)).toEqual({
+      scope: "B",
+      workspaceId: "ws9",
+      declaration: declared(CLAUDE_ON),
+    });
     expect(r.server.puts.filter((put) => put.scope === "A")).toHaveLength(4);
     await r.roster.stop();
     expect(vi.getTimerCount()).toBe(0);

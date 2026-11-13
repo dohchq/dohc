@@ -87,10 +87,7 @@ export const BLOCKED_IMAGE_SRC = "";
 // Maps an image node's stored src to the URL the renderer should actually load:
 // workspace-relative → dohc-file://…; http(s) is passed through untouched; a
 // src that cannot be served safely → BLOCKED_IMAGE_SRC (no request at all).
-export function resolveWorkspaceImageSrc(
-  context: ImageSrcContext,
-  src: string,
-): string {
+export function resolveWorkspaceImageSrc(context: ImageSrcContext, src: string): string {
   if (!isWorkspaceRelativeSrc(src)) return src;
   const workspacePath = joinWorkspacePath(context.docPath, src.trim());
   // Containment: refuse to mint a privileged dohc-file:// URL for a path that

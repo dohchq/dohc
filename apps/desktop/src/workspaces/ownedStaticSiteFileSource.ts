@@ -11,10 +11,7 @@ export function createOwnedStaticSiteFileSource(input: {
   servedPaths: Iterable<string>;
   target: ShareViewFilesTarget;
   ownerRootPath: string;
-  read(
-    target: ShareViewFilesTarget,
-    path: string,
-  ): Promise<Uint8Array>;
+  read(target: ShareViewFilesTarget, path: string): Promise<Uint8Array>;
 }): StaticDirectoryFileSource {
   const ownerPaths = new Map(
     [...input.servedPaths].map((servedPath) => [
@@ -44,17 +41,14 @@ export interface PreparedStaticSitePreview {
 export async function prepareOwnedStaticSitePreview(input: {
   site: SitePackageInfo;
   sharedView: boolean;
-  resolveOwner(
-    path: string,
-  ): Promise<{ target: ShareViewFilesTarget; path: string } | null>;
+  resolveOwner(path: string): Promise<{ target: ShareViewFilesTarget; path: string } | null>;
   readOwner(target: ShareViewFilesTarget, path: string): Promise<Uint8Array>;
 }): Promise<PreparedStaticSitePreview> {
   const target = staticPreviewTargetForSite(input.site, {
     sharedView: input.sharedView,
   });
   const entry = target.entry ?? undefined;
-  const shared =
-    input.sharedView || input.site.authority.kind === "share";
+  const shared = input.sharedView || input.site.authority.kind === "share";
   if (!shared) return { root: target.root, ...(entry ? { entry } : {}) };
 
   if (!entry) {
@@ -64,15 +58,11 @@ export async function prepareOwnedStaticSitePreview(input: {
   }
   const ownerFiles = staticPreviewOwnerFiles(input.site, target);
   if (!ownerFiles.has(entry)) {
-    throw new Error(
-      "This shared app is missing its entry file. Ask the owner to share it again.",
-    );
+    throw new Error("This shared app is missing its entry file. Ask the owner to share it again.");
   }
   const ownerRoot = await input.resolveOwner(target.root);
   if (ownerRoot === null) {
-    throw new Error(
-      "This shared app changed before the preview started. Refresh the workspace.",
-    );
+    throw new Error("This shared app changed before the preview started. Refresh the workspace.");
   }
   return {
     root: target.root,

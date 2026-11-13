@@ -16,15 +16,26 @@ function sharedFiles(count: number): string {
 }
 
 export function shareNoticePaths(paths: readonly UnjournalableSharePath[]): string[] {
-  return [...new Set(paths.flatMap(entry => entry.owner === undefined
-    ? [entry.path]
-    : entry.reason === "local-collision" ? [entry.owner, entry.path] : [entry.path, entry.owner]))];
+  return [
+    ...new Set(
+      paths.flatMap((entry) =>
+        entry.owner === undefined
+          ? [entry.path]
+          : entry.reason === "local-collision"
+            ? [entry.owner, entry.path]
+            : [entry.path, entry.owner],
+      ),
+    ),
+  ];
 }
 
 // A Notices row's title. The row lists the paths under its text, so it
 // shows the text whole: each reason and next step.
-export function shareUnjournalableTitle(paths: readonly UnjournalableSharePath[], label: string): string {
-  return `dohc skipped ${sharedFiles(new Set(paths.map(entry => entry.path)).size)} from ${label}`;
+export function shareUnjournalableTitle(
+  paths: readonly UnjournalableSharePath[],
+  label: string,
+): string {
+  return `dohc skipped ${sharedFiles(new Set(paths.map((entry) => entry.path)).size)} from ${label}`;
 }
 
 export function shareUnjournalableNotice(paths: readonly UnjournalableSharePath[]): string {
@@ -40,7 +51,12 @@ export function shareUnjournalableRow(
   const lines = shareUnjournalableLines(paths);
   const text = (shown: readonly string[]) => {
     const rest = lines.length - shown.length;
-    return [...shown, ...(rest > 0 ? [`Details has ${rest === 1 ? "1 more reason" : `${rest} more reasons`}.`] : [])].join(" ");
+    return [
+      ...shown,
+      ...(rest > 0
+        ? [`Details has ${rest === 1 ? "1 more reason" : `${rest} more reasons`}.`]
+        : []),
+    ].join(" ");
   };
   const shown: string[] = [];
   for (const line of lines) {
@@ -49,15 +65,12 @@ export function shareUnjournalableRow(
   }
   return {
     message: text(shown),
-    details: lines.slice(shown.length).map(line => ["Reason", line] as const),
+    details: lines.slice(shown.length).map((line) => ["Reason", line] as const),
   };
 }
 
 function shareUnjournalableLines(paths: readonly UnjournalableSharePath[]): string[] {
-  const groups = new Map<
-    UnjournalableSharePath["reason"],
-    UnjournalableSharePath[]
-  >();
+  const groups = new Map<UnjournalableSharePath["reason"], UnjournalableSharePath[]>();
   for (const path of paths) {
     const group = groups.get(path.reason) ?? [];
     group.push(path);
@@ -80,9 +93,10 @@ function shareUnjournalableLines(paths: readonly UnjournalableSharePath[]): stri
     const files = sharedFiles(group.length);
     const one = group.length === 1;
     if (reason === "oversized-text" || reason === "oversized-binary") {
-      const limit = reason === "oversized-text"
-        ? `${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text`
-        : `${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary`;
+      const limit =
+        reason === "oversized-text"
+          ? `${formatSize(MAX_ENGINE_CAPTURE_TEXT_BYTES)} text`
+          : `${formatSize(MAX_ENGINE_CAPTURE_BINARY_BYTES)} binary`;
       lines.push(
         `dohc could not track changes in ${files}. ` +
           `${one ? "It is" : "They are"} larger than the ${limit} limit. ` +
@@ -101,7 +115,7 @@ function shareUnjournalableLines(paths: readonly UnjournalableSharePath[]): stri
           `Restore ${one ? "the file" : "the files"} or move ${one ? "the conflicting entry" : "the conflicting entries"}, then refresh.`,
       );
     } else if (reason === "local-collision") {
-      const yours = new Set(group.map(entry => entry.owner ?? entry.path)).size === 1;
+      const yours = new Set(group.map((entry) => entry.owner ?? entry.path)).size === 1;
       lines.push(
         `dohc could not receive ${files}. ` +
           `${yours ? "A file from this machine is in the way" : "Files from this machine are in the way"}. ` +

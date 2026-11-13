@@ -8,26 +8,79 @@ import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import { deferred } from "../../testing/deferred";
 import type { SettingsAgent } from "../workbench/agentChat";
 
-const general: ChatsNav = { level: "channel", channel: {
-  id: "general-id", name: "General", slug: "general", kind: "channel",
-  createdAtMs: 0, updatedAtMs: 0, threadCount: 0, unreadCount: 0,
-} };
-const agent: ChatsNav = { level: "channel", channel: { ...general.channel, id: "agent-id", name: "My agent", kind: "agent", agentId: "default" } };
-const scoutChat = { ...general.channel, id: "scout-chat", name: "Scout", kind: "agent" as const, agentId: "scout" };
-const NO_AGENTS: SettingsAgent[] = [];
-const AGENTS: SettingsAgent[] = [{ id: "default", name: "Nova", hue: "olive" }, { id: "scout", name: "Scout", hue: "teal" }];
-const dm: ChatsNav = { level: "dm", dm: {
-  channelId: "dm-id", channelWireId: "wire-id", name: "alice", peerLabel: "Alice",
-  threadId: "dm-thread", shareId: null, role: "owner", unreadCount: 0, connected: true,
-} };
-const draft: ChatsDrafts = {
-  composer: "Unsent reply", newThreadBody: "", dmRecipients: "", dmDraft: "",
-  replyTarget: null, resolveTargetMessageId: null, poll: null, newThreadPoll: null,
+const general: ChatsNav = {
+  level: "channel",
+  channel: {
+    id: "general-id",
+    name: "General",
+    slug: "general",
+    kind: "channel",
+    createdAtMs: 0,
+    updatedAtMs: 0,
+    threadCount: 0,
+    unreadCount: 0,
+  },
 };
-const thread: ChatsNav = { level: "thread", channel: general.channel, thread: {
-  id: "thread", channelId: general.channel.id, title: "Discussion", createdAtMs: 0,
-  updatedAtMs: 0, messageCount: 1, lastReadSequence: 0, unreadCount: 1,
-} };
+const agent: ChatsNav = {
+  level: "channel",
+  channel: {
+    ...general.channel,
+    id: "agent-id",
+    name: "My agent",
+    kind: "agent",
+    agentId: "default",
+  },
+};
+const scoutChat = {
+  ...general.channel,
+  id: "scout-chat",
+  name: "Scout",
+  kind: "agent" as const,
+  agentId: "scout",
+};
+const NO_AGENTS: SettingsAgent[] = [];
+const AGENTS: SettingsAgent[] = [
+  { id: "default", name: "Nova", hue: "olive" },
+  { id: "scout", name: "Scout", hue: "teal" },
+];
+const dm: ChatsNav = {
+  level: "dm",
+  dm: {
+    channelId: "dm-id",
+    channelWireId: "wire-id",
+    name: "alice",
+    peerLabel: "Alice",
+    threadId: "dm-thread",
+    shareId: null,
+    role: "owner",
+    unreadCount: 0,
+    connected: true,
+  },
+};
+const draft: ChatsDrafts = {
+  composer: "Unsent reply",
+  newThreadBody: "",
+  dmRecipients: "",
+  dmDraft: "",
+  replyTarget: null,
+  resolveTargetMessageId: null,
+  poll: null,
+  newThreadPoll: null,
+};
+const thread: ChatsNav = {
+  level: "thread",
+  channel: general.channel,
+  thread: {
+    id: "thread",
+    channelId: general.channel.id,
+    title: "Discussion",
+    createdAtMs: 0,
+    updatedAtMs: 0,
+    messageCount: 1,
+    lastReadSequence: 0,
+    unreadCount: 1,
+  },
+};
 
 // Hidden conversations ask for their unread counts; most tests ignore them.
 const UNREAD_BRIDGE = {
@@ -35,19 +88,36 @@ const UNREAD_BRIDGE = {
   onWorkspaceActivity: () => () => {},
 };
 
-beforeEach(() => vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {} }));
+beforeEach(() =>
+  vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {} }),
+);
 afterEach(() => vi.unstubAllGlobals());
 
 describe("chat editor tabs", () => {
   it("keeps one slow hidden restore across tab switches", async () => {
-    const pending = deferred<{ available: boolean; dms: typeof dm.dm[] }>();
+    const pending = deferred<{ available: boolean; dms: (typeof dm.dm)[] }>();
     const syncDms = vi.fn(() => pending.promise);
-    vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {}, syncDms });
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      syncDms,
+    });
     const path = chatEditorPath(dm);
     const home = chatEditorPath({ level: "feed" });
-    const { result, rerender } = renderHook(({ activePaths }) => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
-    }), { initialProps: { activePaths: [home] } });
+    const { result, rerender } = renderHook(
+      ({ activePaths }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [path, home],
+          activePaths,
+          enabled: true,
+        }),
+      { initialProps: { activePaths: [home] } },
+    );
     rerender({ activePaths: [path] });
     rerender({ activePaths: [home] });
     expect(syncDms).toHaveBeenCalledTimes(1);
@@ -57,12 +127,27 @@ describe("chat editor tabs", () => {
 
   it("does not retry failed hidden restores when the active tab changes", async () => {
     const syncDms = vi.fn().mockRejectedValue(new Error("offline"));
-    vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {}, syncDms });
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      syncDms,
+    });
     const path = chatEditorPath(dm);
     const home = chatEditorPath({ level: "feed" });
-    const { rerender } = renderHook(({ activePaths }) => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path, home], activePaths, enabled: true,
-    }), { initialProps: { activePaths: [home] } });
+    const { rerender } = renderHook(
+      ({ activePaths }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [path, home],
+          activePaths,
+          enabled: true,
+        }),
+      { initialProps: { activePaths: [home] } },
+    );
     await act(async () => {});
     rerender({ activePaths: [path] });
     rerender({ activePaths: [home] });
@@ -72,26 +157,59 @@ describe("chat editor tabs", () => {
   it("leaves active destinations to their mounted pages", () => {
     const syncDms = vi.fn();
     const listChatChannels = vi.fn();
-    vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {}, syncDms, listChatChannels });
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      syncDms,
+      listChatChannels,
+    });
     const paths = [chatEditorPath(dm), chatEditorPath(general)];
-    renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths, activePaths: paths, enabled: true,
-    }));
+    renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onNavigate: vi.fn(),
+        paths,
+        activePaths: paths,
+        enabled: true,
+      }),
+    );
     expect(syncDms).not.toHaveBeenCalled();
     expect(listChatChannels).not.toHaveBeenCalled();
   });
 
   it("purges account state while disabled and restores titles only after the session is ready", async () => {
-    let changeSession: (event: { sessionKey: string; phase: "changing" | "ready" }) => void = () => {};
-    const syncDms = vi.fn().mockResolvedValue({ available: true, dms: [{ ...dm.dm, peerLabel: "New account" }] });
+    let changeSession: (event: {
+      sessionKey: string;
+      phase: "changing" | "ready";
+    }) => void = () => {};
+    const syncDms = vi
+      .fn()
+      .mockResolvedValue({ available: true, dms: [{ ...dm.dm, peerLabel: "New account" }] });
     vi.stubGlobal("dohcDesktop", {
       ...UNREAD_BRIDGE,
-      onCloudSessionChanged: (listener: typeof changeSession) => { changeSession = listener; return () => {}; }, syncDms,
+      onCloudSessionChanged: (listener: typeof changeSession) => {
+        changeSession = listener;
+        return () => {};
+      },
+      syncDms,
     });
     const path = chatEditorPath(dm);
-    const { result, rerender } = renderHook(({ enabled }) => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled,
-    }), { initialProps: { enabled: false } });
+    const { result, rerender } = renderHook(
+      ({ enabled }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [path],
+          enabled,
+        }),
+      { initialProps: { enabled: false } },
+    );
     act(() => result.current.open(dm));
     const stale = result.current.get(path);
     act(() => stale.onDraftsChange(draft));
@@ -107,11 +225,26 @@ describe("chat editor tabs", () => {
   it("does not repeatedly hydrate missing chats when tabs change", async () => {
     const syncDms = vi.fn().mockResolvedValue({ available: true, dms: [] });
     const listChatChannels = vi.fn().mockResolvedValue({ channels: [], fileThreads: [] });
-    vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {}, syncDms, listChatChannels });
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      syncDms,
+      listChatChannels,
+    });
     const paths = [chatEditorPath(dm), chatEditorPath(general)];
-    const { result, rerender } = renderHook(({ paths }) => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths, enabled: true,
-    }), { initialProps: { paths } });
+    const { result, rerender } = renderHook(
+      ({ paths }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths,
+          enabled: true,
+        }),
+      { initialProps: { paths } },
+    );
     await act(async () => {});
     expect(result.current.get(paths[0]!).restoreAttempted).toBe(true);
     rerender({ paths: [...paths] });
@@ -123,10 +256,21 @@ describe("chat editor tabs", () => {
 
   it("only user commands cancel a pending navigation, not reports from another live editor", () => {
     const onNavigate = vi.fn();
-    const { result } = renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate, paths: [], enabled: false,
-    }));
-    act(() => { result.current.open(general); result.current.open(dm); });
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onNavigate,
+        paths: [],
+        enabled: false,
+      }),
+    );
+    act(() => {
+      result.current.open(general);
+      result.current.open(dm);
+    });
     onNavigate.mockClear();
     act(() => result.current.get(chatEditorPath(general)).onNavChange(thread));
     expect(onNavigate).not.toHaveBeenCalled();
@@ -135,19 +279,36 @@ describe("chat editor tabs", () => {
   });
 
   it("clears hidden DM drafts on account changes and ignores callbacks from the old editor", () => {
-    let changeSession: (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void = () => {};
+    let changeSession: (event: {
+      sessionKey: string | null;
+      phase: "changing" | "ready";
+    }) => void = () => {};
     vi.stubGlobal("dohcDesktop", {
       ...UNREAD_BRIDGE,
-      onCloudSessionChanged: (listener: typeof changeSession) => { changeSession = listener; return () => {}; },
+      onCloudSessionChanged: (listener: typeof changeSession) => {
+        changeSession = listener;
+        return () => {};
+      },
     });
-    const { result } = renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: true,
-    }));
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onNavigate: vi.fn(),
+        paths: [],
+        enabled: true,
+      }),
+    );
     act(() => result.current.open(dm));
     const old = result.current.get(chatEditorPath(dm));
     act(() => old.onDraftsChange(draft));
     act(() => changeSession({ sessionKey: "new-account", phase: "changing" }));
-    act(() => { old.onNavChange(dm); old.onDraftsChange(draft); });
+    act(() => {
+      old.onNavChange(dm);
+      old.onDraftsChange(draft);
+    });
     const current = result.current.get(chatEditorPath(dm));
     expect(current).not.toBe(old);
     expect(current.nav).toBeUndefined();
@@ -158,12 +319,23 @@ describe("chat editor tabs", () => {
 
   it("keeps Home, channels, agents and DMs independent and reuses a channel's current thread", () => {
     const onOpen = vi.fn();
-    const { result } = renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
-    }));
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen,
+        onNavigate: vi.fn(),
+        paths: [],
+        enabled: false,
+      }),
+    );
     act(() => result.current.open(general));
     const generalEditor = result.current.get(chatEditorPath(general));
-    act(() => { generalEditor.onNavChange(thread); generalEditor.onDraftsChange(draft); });
+    act(() => {
+      generalEditor.onNavChange(thread);
+      generalEditor.onDraftsChange(draft);
+    });
     act(() => {
       result.current.open({ level: "feed" });
       result.current.open(agent);
@@ -181,9 +353,17 @@ describe("chat editor tabs", () => {
   });
 
   it("repeats a message jump without discarding that conversation's draft", () => {
-    const { result } = renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
-    }));
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onNavigate: vi.fn(),
+        paths: [],
+        enabled: false,
+      }),
+    );
     act(() => result.current.open(thread));
     const editor = result.current.get(chatEditorPath(thread));
     act(() => editor.onDraftsChange(draft));
@@ -194,9 +374,17 @@ describe("chat editor tabs", () => {
   });
 
   it("takes a jump to a message in an open agent conversation, keeping its draft", () => {
-    const { result } = renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
-    }));
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        onNavigate: vi.fn(),
+        paths: [],
+        enabled: false,
+      }),
+    );
     act(() => result.current.open(agent));
     const editor = result.current.get(chatEditorPath(agent));
     act(() => editor.onDraftsChange(draft));
@@ -218,9 +406,17 @@ describe("chat editor tabs", () => {
 
   it("refreshes a focused DM's metadata while keeping its draft and message position", () => {
     const onOpen = vi.fn();
-    const { result } = renderHook(() => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents: NO_AGENTS, onOpen, onNavigate: vi.fn(), paths: [], enabled: false,
-    }));
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen,
+        onNavigate: vi.fn(),
+        paths: [],
+        enabled: false,
+      }),
+    );
     act(() => result.current.open({ ...dm, focusMessageId: "message" }));
     const editor = result.current.get(chatEditorPath(dm));
     act(() => editor.onDraftsChange(draft));
@@ -237,15 +433,32 @@ describe("chat editor tabs", () => {
   });
 
   it("drops callbacks and restored titles from a previous workspace", async () => {
-    const pending = deferred<{ channels: typeof general.channel[]; fileThreads: [] }>();
-    vi.stubGlobal("dohcDesktop", { ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {}, listChatChannels: vi.fn(() => pending.promise) });
+    const pending = deferred<{ channels: (typeof general.channel)[]; fileThreads: [] }>();
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      listChatChannels: vi.fn(() => pending.promise),
+    });
     const path = chatTabPath({ kind: "channel", id: general.channel.id });
-    const { result, rerender } = renderHook(({ workspaceId }) => useChatEditorTabs({
-      readRevision: 0, workspaceId, agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled: true,
-    }), { initialProps: { workspaceId: "first" } });
+    const { result, rerender } = renderHook(
+      ({ workspaceId }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId,
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [path],
+          enabled: true,
+        }),
+      { initialProps: { workspaceId: "first" } },
+    );
     const stale = result.current.get(path);
     rerender({ workspaceId: "second" });
-    act(() => { stale.onNavChange(agent); stale.onDraftsChange(draft); });
+    act(() => {
+      stale.onNavChange(agent);
+      stale.onDraftsChange(draft);
+    });
     expect(result.current.get(path).nav).toBeUndefined();
     expect(result.current.get(path).drafts).toBeUndefined();
     await act(async () => pending.resolve({ channels: [general.channel], fileThreads: [] }));
@@ -254,10 +467,24 @@ describe("chat editor tabs", () => {
     vi.unstubAllGlobals();
   });
   it("names each agent's chat tab and its thread after that agent, and follows a rename", () => {
-    const scoutThread: ChatsNav = { level: "thread", channel: scoutChat, thread: { ...thread.thread, id: "scout-thread", channelId: scoutChat.id } };
-    const { result, rerender } = renderHook(({ agents }) => useChatEditorTabs({
-      readRevision: 0, workspaceId: "workspace", agents, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [], enabled: false,
-    }), { initialProps: { agents: AGENTS } });
+    const scoutThread: ChatsNav = {
+      level: "thread",
+      channel: scoutChat,
+      thread: { ...thread.thread, id: "scout-thread", channelId: scoutChat.id },
+    };
+    const { result, rerender } = renderHook(
+      ({ agents }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId: "workspace",
+          agents,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [],
+          enabled: false,
+        }),
+      { initialProps: { agents: AGENTS } },
+    );
     act(() => {
       result.current.open(agent);
       result.current.open(scoutThread);
@@ -282,18 +509,44 @@ describe("chat editor tabs", () => {
     ];
     const listChatUnread = vi.fn(() => Promise.resolve({ chats }));
     vi.stubGlobal("dohcDesktop", {
-      onCloudSessionChanged: () => () => {}, syncDms: vi.fn(() => new Promise(() => {})),
-      listChatChannels: vi.fn(() => new Promise(() => {})), listChatUnread,
-      onWorkspaceActivity: (listener: typeof activity) => { activity = listener; return () => {}; },
+      onCloudSessionChanged: () => () => {},
+      syncDms: vi.fn(() => new Promise(() => {})),
+      listChatChannels: vi.fn(() => new Promise(() => {})),
+      listChatUnread,
+      onWorkspaceActivity: (listener: typeof activity) => {
+        activity = listener;
+        return () => {};
+      },
     });
-    const paths = [chatEditorPath(general), chatEditorPath(dm), chatEditorPath(agent), chatEditorPath({ level: "feed" })];
-    const { result, rerender } = renderHook(({ activePaths, readRevision }) => useChatEditorTabs({
-      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths, activePaths, enabled: true, readRevision,
-    }), { initialProps: { activePaths: [chatEditorPath(agent)], readRevision: 0 } });
+    const paths = [
+      chatEditorPath(general),
+      chatEditorPath(dm),
+      chatEditorPath(agent),
+      chatEditorPath({ level: "feed" }),
+    ];
+    const { result, rerender } = renderHook(
+      ({ activePaths, readRevision }) =>
+        useChatEditorTabs({
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths,
+          activePaths,
+          enabled: true,
+          readRevision,
+        }),
+      { initialProps: { activePaths: [chatEditorPath(agent)], readRevision: 0 } },
+    );
     // The open agent chat reads its own messages, so only the others count.
-    await waitFor(() => expect(result.current.unread).toEqual(new Map([
-      [chatEditorPath(general), 2], [chatEditorPath(dm), 1],
-    ])));
+    await waitFor(() =>
+      expect(result.current.unread).toEqual(
+        new Map([
+          [chatEditorPath(general), 2],
+          [chatEditorPath(dm), 1],
+        ]),
+      ),
+    );
 
     chats = [{ channelId: general.channel.id, unreadCount: 3 }];
     await act(async () => activity({ workspaceId: "elsewhere" }));
@@ -309,7 +562,9 @@ describe("chat editor tabs", () => {
   });
 
   it("keeps one unread read in flight and drops an answer for another workspace", async () => {
-    const answers: Array<ReturnType<typeof deferred<{ chats: { channelId: string; unreadCount: number }[] }>>> = [];
+    const answers: Array<
+      ReturnType<typeof deferred<{ chats: { channelId: string; unreadCount: number }[] }>>
+    > = [];
     let activity: (event: { workspaceId?: string }) => void = () => {};
     const listChatUnread = vi.fn(() => {
       const answer = deferred<{ chats: { channelId: string; unreadCount: number }[] }>();
@@ -317,19 +572,41 @@ describe("chat editor tabs", () => {
       return answer.promise;
     });
     vi.stubGlobal("dohcDesktop", {
-      onCloudSessionChanged: () => () => {}, listChatChannels: vi.fn(() => new Promise(() => {})), listChatUnread,
-      onWorkspaceActivity: (listener: typeof activity) => { activity = listener; return () => {}; },
+      onCloudSessionChanged: () => () => {},
+      listChatChannels: vi.fn(() => new Promise(() => {})),
+      listChatUnread,
+      onWorkspaceActivity: (listener: typeof activity) => {
+        activity = listener;
+        return () => {};
+      },
     });
     const path = chatEditorPath(general);
-    const { result, rerender } = renderHook(({ workspaceId }) => useChatEditorTabs({
-      readRevision: 0, workspaceId, agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [path], enabled: true,
-    }), { initialProps: { workspaceId: "first" } });
-    act(() => { activity({ workspaceId: "first" }); activity({ workspaceId: "first" }); });
+    const { result, rerender } = renderHook(
+      ({ workspaceId }) =>
+        useChatEditorTabs({
+          readRevision: 0,
+          workspaceId,
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [path],
+          enabled: true,
+        }),
+      { initialProps: { workspaceId: "first" } },
+    );
+    act(() => {
+      activity({ workspaceId: "first" });
+      activity({ workspaceId: "first" });
+    });
     expect(listChatUnread).toHaveBeenCalledTimes(1);
-    await act(async () => answers[0]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 1 }] }));
+    await act(async () =>
+      answers[0]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 1 }] }),
+    );
     // Both events while the first read was out make one more read.
     expect(listChatUnread).toHaveBeenCalledTimes(2);
-    await act(async () => answers[1]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 2 }] }));
+    await act(async () =>
+      answers[1]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 2 }] }),
+    );
     expect(result.current.unread.get(path)).toBe(2);
 
     // A workspace switch waits for the read in flight, then drops its answer.
@@ -337,33 +614,59 @@ describe("chat editor tabs", () => {
     rerender({ workspaceId: "second" });
     expect(answers).toHaveLength(3);
     expect(result.current.unread.size).toBe(0);
-    await act(async () => answers[2]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 7 }] }));
+    await act(async () =>
+      answers[2]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 7 }] }),
+    );
     expect(result.current.unread.size).toBe(0);
     expect(answers).toHaveLength(4);
-    await act(async () => answers[3]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 5 }] }));
+    await act(async () =>
+      answers[3]!.resolve({ chats: [{ channelId: general.channel.id, unreadCount: 5 }] }),
+    );
     expect(result.current.unread.get(path)).toBe(5);
   });
 
   it("keeps one unread read in flight while tabs and reads change, and answers for the latest tabs", async () => {
-    const answers: Array<ReturnType<typeof deferred<{ chats: { channelId: string; unreadCount: number }[] }>>> = [];
+    const answers: Array<
+      ReturnType<typeof deferred<{ chats: { channelId: string; unreadCount: number }[] }>>
+    > = [];
     const listChatUnread = vi.fn(() => {
       const answer = deferred<{ chats: { channelId: string; unreadCount: number }[] }>();
       answers.push(answer);
       return answer.promise;
     });
     vi.stubGlobal("dohcDesktop", {
-      ...UNREAD_BRIDGE, onCloudSessionChanged: () => () => {},
-      syncDms: vi.fn(() => new Promise(() => {})), listChatChannels: vi.fn(() => new Promise(() => {})), listChatUnread,
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      syncDms: vi.fn(() => new Promise(() => {})),
+      listChatChannels: vi.fn(() => new Promise(() => {})),
+      listChatUnread,
     });
-    const group = chatEditorPath(general), person = chatEditorPath(dm);
-    const { result, rerender } = renderHook(({ activePaths, readRevision }) => useChatEditorTabs({
-      workspaceId: "workspace", agents: NO_AGENTS, onOpen: vi.fn(), onNavigate: vi.fn(), paths: [group, person], activePaths, enabled: true, readRevision,
-    }), { initialProps: { activePaths: [person], readRevision: 0 } });
+    const group = chatEditorPath(general),
+      person = chatEditorPath(dm);
+    const { result, rerender } = renderHook(
+      ({ activePaths, readRevision }) =>
+        useChatEditorTabs({
+          workspaceId: "workspace",
+          agents: NO_AGENTS,
+          onOpen: vi.fn(),
+          onNavigate: vi.fn(),
+          paths: [group, person],
+          activePaths,
+          enabled: true,
+          readRevision,
+        }),
+      { initialProps: { activePaths: [person], readRevision: 0 } },
+    );
     rerender({ activePaths: [person], readRevision: 1 });
     rerender({ activePaths: [person], readRevision: 2 });
     rerender({ activePaths: [group], readRevision: 2 });
     expect(listChatUnread).toHaveBeenCalledTimes(1);
-    const both = { chats: [{ channelId: general.channel.id, unreadCount: 1 }, { channelId: dm.dm.channelId, unreadCount: 4 }] };
+    const both = {
+      chats: [
+        { channelId: general.channel.id, unreadCount: 1 },
+        { channelId: dm.dm.channelId, unreadCount: 4 },
+      ],
+    };
     await act(async () => answers[0]!.resolve(both));
     // The answer for tabs no longer shown is dropped; one more read serves the rest.
     expect(result.current.unread.size).toBe(0);

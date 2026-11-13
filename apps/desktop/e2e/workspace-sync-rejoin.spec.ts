@@ -3,16 +3,10 @@ import { DOCUMENT_END } from "./helpers/keys";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  DohcDesktopBridge,
-  SyncStatusResult,
-} from "../src/ipc/bridgeContract";
+import type { DohcDesktopBridge, SyncStatusResult } from "../src/ipc/bridgeContract";
 import { RelayFilePeer } from "../src/testing/relayFilePeer";
 import { createWorkspaceEngineCapture } from "../src/workspaces/workspaceEngineCapture";
-import {
-  loadSecretDataKey,
-  SECRET_KEY_RELATIVE_PATH,
-} from "../src/workspaces/workspaceDataKey";
+import { loadSecretDataKey, SECRET_KEY_RELATIVE_PATH } from "../src/workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "../src/workspaces/workspaceKeyEnvelopeEnrollment";
 import { waitForPathMoments } from "../src/workspaces/waitForPathMoments";
 import { openLiveDaemonWorkspace } from "./helpers/daemonSeed";
@@ -62,8 +56,7 @@ async function readSyncStatus(
   workspaceId: string,
 ): Promise<Pick<SyncStatusResult, "lastSyncedAtMs">> {
   return await page.evaluate(async (id) => {
-    const api = (window as unknown as { dohcDesktop?: SyncStatusBridge })
-      .dohcDesktop;
+    const api = (window as unknown as { dohcDesktop?: SyncStatusBridge }).dohcDesktop;
     if (!api) throw new Error("desktop bridge is unavailable");
     return await api.getSyncStatus({ workspaceId: id });
   }, workspaceId);
@@ -76,38 +69,26 @@ async function waitForLaterSync(
 ): Promise<void> {
   await page.waitForFunction(
     async ({ id, previousSyncAtMs }) => {
-      const api = (window as unknown as { dohcDesktop?: SyncStatusBridge })
-        .dohcDesktop;
+      const api = (window as unknown as { dohcDesktop?: SyncStatusBridge }).dohcDesktop;
       if (!api) return false;
       const status = await api.getSyncStatus({ workspaceId: id });
-      return (
-        status.lastSyncedAtMs !== null &&
-        status.lastSyncedAtMs > previousSyncAtMs
-      );
+      return status.lastSyncedAtMs !== null && status.lastSyncedAtMs > previousSyncAtMs;
     },
     { id: workspaceId, previousSyncAtMs },
     { timeout: 30_000 },
   );
 }
 
-async function workspaceIsRegistered(
-  page: Page,
-  workspaceId: string,
-): Promise<boolean> {
+async function workspaceIsRegistered(page: Page, workspaceId: string): Promise<boolean> {
   return await page.evaluate(async (id) => {
-    const api = (window as unknown as { dohcDesktop?: WorkspaceRegistryBridge })
-      .dohcDesktop;
+    const api = (window as unknown as { dohcDesktop?: WorkspaceRegistryBridge }).dohcDesktop;
     if (!api) throw new Error("desktop bridge is unavailable");
     const registry = await api.getWorkspaceRegistry();
     return registry.workspaces.some((workspace) => workspace.workspaceId === id);
   }, workspaceId);
 }
 
-async function pathMomentCount(
-  page: Page,
-  workspaceId: string,
-  path: string,
-): Promise<number> {
+async function pathMomentCount(page: Page, workspaceId: string, path: string): Promise<number> {
   const moments = await readHistoryMoments(page, workspaceId, path);
   if (moments === null) throw new Error("History is unavailable after the sync wait.");
   return moments.length;
@@ -133,11 +114,8 @@ test("offline edits reach the Electron conflict review and its resolution surviv
   const sourceRoot = join(temp.baseDir, "conflict-source");
   const relayDb = join(temp.baseDir, "conflict-relay", "relay.sqlite");
   let relay: SyncRelayHandle | null = null;
-  let sourceWorkspace: Awaited<
-    ReturnType<typeof openLiveDaemonWorkspace>
-  > | null = null;
-  let sourceCapture: ReturnType<typeof createWorkspaceEngineCapture> | null =
-    null;
+  let sourceWorkspace: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | null = null;
+  let sourceCapture: ReturnType<typeof createWorkspaceEngineCapture> | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
@@ -182,9 +160,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     });
     let page = desktop.page;
     await page.getByTestId("first-run-join-synced").click();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
@@ -210,15 +186,11 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     // edit, and the Electron app pushes its queued edit before it pulls.
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
     expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/sync-nudge.md", contents: "sync now\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/sync-nudge.md", contents: "sync now\n" }]);
 
-    await expect(page.getByTestId("sync-status")).toHaveAttribute(
-      "data-state",
-      "conflict",
-      { timeout: 90_000 },
-    );
+    await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict", {
+      timeout: 90_000,
+    });
     await page.getByTestId("notice-center-toggle").click();
     const notice = page.getByTestId("notice-sync-conflict");
     await expect(notice).toBeVisible();
@@ -227,14 +199,10 @@ test("offline edits reach the Electron conflict review and its resolution surviv
 
     const dialog = page.getByTestId("conflict-review-dialog");
     await expect(dialog).toBeVisible();
-    const card = dialog.locator(
-      `[data-testid="version-conflict"][data-conflict-path="${path}"]`,
-    );
+    const card = dialog.locator(`[data-testid="version-conflict"][data-conflict-path="${path}"]`);
     await expect(card).toBeVisible();
     await expect(card.getByText("On this machine", { exact: true })).toBeVisible();
-    await expect(
-      card.getByText("On your other machine", { exact: true }),
-    ).toBeVisible();
+    await expect(card.getByText("On your other machine", { exact: true })).toBeVisible();
     await expect(card).toContainText(appEdit.trim());
     await expect(card).toContainText(peerEdit.trim());
 
@@ -243,7 +211,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await sourceRelay.pull(apply => capture.runRelaySync(apply));
+          await sourceRelay.pull((apply) => capture.runRelaySync(apply));
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -262,7 +230,7 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await expect
       .poll(
         async () => {
-          await sourceRelay.pull(apply => capture.runRelaySync(apply));
+          await sourceRelay.pull((apply) => capture.runRelaySync(apply));
           return await capture.countOpenConflicts();
         },
         { timeout: 90_000, intervals: [500] },
@@ -283,22 +251,16 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     });
     page = desktop.page;
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(
-      workspaceId,
-    );
+    expect((await activeWorkspace(page, temp.rootPath)).workspaceId).toBe(workspaceId);
     expect(await readFile(join(temp.rootPath, path), "utf8")).toBe(peerEdit);
     const remaining = await page.evaluate(async (id) => {
-      const api = (window as unknown as { dohcDesktop?: DohcDesktopBridge })
-        .dohcDesktop;
+      const api = (window as unknown as { dohcDesktop?: DohcDesktopBridge }).dohcDesktop;
       if (!api) throw new Error("desktop bridge is unavailable");
       return await api.listWorkspaceVersionConflicts({ workspaceId: id });
     }, workspaceId);
     expect(remaining.conflicts).toEqual([]);
     expect(remaining.nextAfterConflictId).toBeNull();
-    await expect(page.getByTestId("sync-status")).not.toHaveAttribute(
-      "data-state",
-      "conflict",
-    );
+    await expect(page.getByTestId("sync-status")).not.toHaveAttribute("data-state", "conflict");
   } finally {
     await sourceCapture?.stop().catch(() => undefined);
     await sourceWorkspace?.close().catch(() => undefined);
@@ -332,10 +294,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
 
     // The remote peer seeds file history and a linked chat. The app must bring
     // all of this state over during the join.
-    const firstRoadmap = await remotePeer.writeText(
-      "notes/roadmap.md",
-      "# Roadmap\n\ndraft one\n",
-    );
+    const firstRoadmap = await remotePeer.writeText("notes/roadmap.md", "# Roadmap\n\ndraft one\n");
     await remotePeer.writeText(
       "notes/roadmap.md",
       "# Roadmap\n\nThe galaxy-brain milestone lands next.\n",
@@ -356,9 +315,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
       authorUserId: "e2e-user",
       body: "Let's settle the quasar sync cadence this week.",
     });
-    expect(relayAdoptedIdentity(relayDb, workspaceId)).toEqual(
-      establishedIdentity,
-    );
+    expect(relayAdoptedIdentity(relayDb, workspaceId)).toEqual(establishedIdentity);
 
     // Machine 2 is the app: fresh home (no workspaces), already signed in.
     await seedCloudCredentials(temp, {
@@ -371,15 +328,11 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
 
     await page.getByTestId("first-run-join-synced").click();
     await expect(page.getByTestId("join-synced-workspace")).toBeVisible();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     // The folder picker resolves to the spec's empty workspace dir
     // (DOHC_TEST_PICK_PATH).
     await page.getByTestId("join-choose-folder").click();
-    await expect(page.getByTestId("join-synced-workspace")).toContainText(
-      temp.rootPath,
-    );
+    await expect(page.getByTestId("join-synced-workspace")).toContainText(temp.rootPath);
     const joinStartedAt = Date.now();
     await page.getByTestId("join-workspace-start").click();
 
@@ -410,11 +363,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     await writeWorkspaceFiles(temp, [
       { path: "notes/join-local-sync-probe.md", contents: "local sync probe\n" },
     ]);
-    await waitForLaterSync(
-      page,
-      workspaceId,
-      syncBeforeLocalChange.lastSyncedAtMs,
-    );
+    await waitForLaterSync(page, workspaceId, syncBeforeLocalChange.lastSyncedAtMs);
 
     // The joining app must adopt the coordinate that the remote peer
     // established before its first pull: the relay log reads cleanly under
@@ -496,9 +445,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     await expect(page.getByTestId("linked-chat-thread")).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByTestId("linked-chat-message-body")).toContainText(
-      "quasar sync cadence",
-    );
+    await expect(page.getByTestId("linked-chat-message-body")).toContainText("quasar sync cadence");
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
@@ -514,19 +461,13 @@ test("protected join preserves a failed folder, then restores exact secret and b
   const passphrase = "correct horse battery staple";
   const secretPath = ".env";
   const binaryPath = "exact-bytes.bin";
-  const secretBytes = Buffer.from(
-    "ACCESS_TOKEN=galaxy-brain-secret\r\nEMPTY=\r\n",
-    "utf8",
-  );
+  const secretBytes = Buffer.from("ACCESS_TOKEN=galaxy-brain-secret\r\nEMPTY=\r\n", "utf8");
   const binaryBytes = Buffer.from([0x00, 0xff, 0x80, 0x0a, 0x7f, 0x42]);
   const sourceRoot = join(temp.baseDir, "protected-source");
   const retryRoot = join(temp.baseDir, "protected-retry");
   let relay: SyncRelayHandle | null = null;
-  let sourceWorkspace: Awaited<
-    ReturnType<typeof openLiveDaemonWorkspace>
-  > | null = null;
-  let sourceCapture: ReturnType<typeof createWorkspaceEngineCapture> | null =
-    null;
+  let sourceWorkspace: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | null = null;
+  let sourceCapture: ReturnType<typeof createWorkspaceEngineCapture> | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
@@ -593,20 +534,18 @@ test("protected join preserves a failed folder, then restores exact secret and b
     let page = desktop.page;
 
     await page.getByTestId("first-run-join-synced").click();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
 
     // The missing passphrase is discovered at the public IPC boundary. The
     // attempt preserves its manifest but releases its registry entry.
     await expect(page.getByTestId("join-sync-passphrase")).toBeFocused();
-    await expect(page.getByTestId("join-used-folder")).toHaveText(`Files stay in ${temp.rootPath}.`);
+    await expect(page.getByTestId("join-used-folder")).toHaveText(
+      `Files stay in ${temp.rootPath}.`,
+    );
     await expect(page.getByTestId("join-error")).toHaveCount(0);
-    await expect
-      .poll(async () => (await readdir(temp.rootPath)).sort())
-      .toContain(".dohc");
+    await expect.poll(async () => (await readdir(temp.rootPath)).sort()).toContain(".dohc");
     const retainedManifest = await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8");
     await expect.poll(() => workspaceIsRegistered(page, workspaceId)).toBe(false);
 
@@ -614,22 +553,16 @@ test("protected join preserves a failed folder, then restores exact secret and b
     // the envelope key was installed before the pull tried to decrypt .env.
     await page.getByTestId("join-sync-passphrase").fill(passphrase);
     await mkdir(retryRoot);
-    await desktop.app.evaluate((_electron, path) => { process.env.DOHC_TEST_PICK_PATH = path; }, retryRoot);
+    await desktop.app.evaluate((_electron, path) => {
+      process.env.DOHC_TEST_PICK_PATH = path;
+    }, retryRoot);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(
-      workspaceId,
-    );
-    await expect
-      .poll(() => fileMatches(join(retryRoot, secretPath), secretBytes))
-      .toBe(true);
-    await expect
-      .poll(() => fileMatches(join(retryRoot, binaryPath), binaryBytes))
-      .toBe(true);
-    expect(
-      (await readFile(join(retryRoot, SECRET_KEY_RELATIVE_PATH))).length,
-    ).toBeGreaterThan(0);
+    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(workspaceId);
+    await expect.poll(() => fileMatches(join(retryRoot, secretPath), secretBytes)).toBe(true);
+    await expect.poll(() => fileMatches(join(retryRoot, binaryPath), binaryBytes)).toBe(true);
+    expect((await readFile(join(retryRoot, SECRET_KEY_RELATIVE_PATH))).length).toBeGreaterThan(0);
 
     // Relaunch with the same profile and registry. The joined key and both
     // exact payloads must remain usable without another enrollment prompt.
@@ -638,16 +571,12 @@ test("protected join preserves a failed folder, then restores exact secret and b
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
     await waitForWorkspaceReady(page);
-    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(
-      workspaceId,
+    expect((await activeWorkspace(page, retryRoot)).workspaceId).toBe(workspaceId);
+    expect(await fileMatches(join(retryRoot, secretPath), secretBytes)).toBe(true);
+    expect(await fileMatches(join(retryRoot, binaryPath), binaryBytes)).toBe(true);
+    expect(await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8")).toBe(
+      retainedManifest,
     );
-    expect(await fileMatches(join(retryRoot, secretPath), secretBytes)).toBe(
-      true,
-    );
-    expect(await fileMatches(join(retryRoot, binaryPath), binaryBytes)).toBe(
-      true,
-    );
-    expect(await readFile(join(temp.rootPath, ".dohc", "manifest.json"), "utf8")).toBe(retainedManifest);
   } finally {
     await sourceCapture?.stop().catch(() => undefined);
     await sourceWorkspace?.close().catch(() => undefined);
@@ -722,9 +651,9 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     }, workspaceId);
     // The renderer already captured the failure message; assert on the whole
     // object so a refusal reports why instead of just `ok: false`.
-    expect(enableResult, `cloudEnableSync refused: ${JSON.stringify(enableResult)}`).toMatchObject(
-      { ok: true },
-    );
+    expect(enableResult, `cloudEnableSync refused: ${JSON.stringify(enableResult)}`).toMatchObject({
+      ok: true,
+    });
 
     // The workspace is now bound and pushing. A claimed bucket answers its log
     // with 200, while an unclaimed bucket answers 404. With the adopted
@@ -771,9 +700,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
     const outboundPath = "notes/after-enable.md";
     const outboundContents = "captured after sync was enabled\n";
-    await writeWorkspaceFiles(temp, [
-      { path: outboundPath, contents: outboundContents },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: outboundPath, contents: outboundContents }]);
     await waitForLaterSync(page, workspaceId, syncedBeforeWrite.lastSyncedAtMs);
 
     let outboundBlobSha: string | null = null;
@@ -842,9 +769,7 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
       { headers: { authorization: `Bearer ${TOKEN}` } },
     );
     expect(blobResponse.status).toBe(200);
-    expect(Buffer.from(await blobResponse.arrayBuffer()).toString("utf8")).toBe(
-      outboundContents,
-    );
+    expect(Buffer.from(await blobResponse.arrayBuffer()).toString("utf8")).toBe(outboundContents);
 
     // The app reflects a synced workspace (the sync-status surface is present,
     // not the local-only absence).
@@ -877,16 +802,13 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
   const temp = await createTempWorkspace();
   const workspaceId = `enable-open-doc-${pattern}`;
   const path = "notes/plan.md";
-  const readPlan = () =>
-    readFile(join(temp.rootPath, path), "utf8").catch(() => "");
+  const readPlan = () => readFile(join(temp.rootPath, path), "utf8").catch(() => "");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await writeWorkspaceFiles(temp, [
-      { path, contents: "# Plan\n\nLocal draft.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path, contents: "# Plan\n\nLocal draft.\n" }]);
     const relayDb = join(temp.baseDir, "relay", "relay.sqlite");
     relay = await spawnSyncRelay({ dbPath: relayDb });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
@@ -942,10 +864,7 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     if (pattern === "through") {
       const settled = () =>
         page.evaluate(() =>
-          Promise.race([
-            (window as unknown as EnableSyncWindow).enableSync,
-            Promise.resolve(null),
-          ]),
+          Promise.race([(window as unknown as EnableSyncWindow).enableSync, Promise.resolve(null)]),
         );
       const deadline = Date.now() + 120_000;
       let enabled: string | null = null;
@@ -961,9 +880,7 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     if (pattern === "pause") {
       // The first completed sync pass has swept every lineage no session
       // holds. Only then type again.
-      await expect
-        .poll(readSyncedAt(page, workspaceId), { timeout: 60_000 })
-        .not.toBeNull();
+      await expect.poll(readSyncedAt(page, workspaceId), { timeout: 60_000 }).not.toBeNull();
       // Enabling sync dropped the editor's engine session, and nothing has
       // reopened it, so the sweep claimed the lineage with no session holding
       // it. The words below must stay in the document under that claim.
@@ -987,21 +904,15 @@ async function typeWhileEnablingSync(pattern: TypingPattern): Promise<void> {
     const typed = ["Before sync.", ...words].join(" ");
     await expect(editor).toContainText(typed);
     await expect.poll(readPlan, { timeout: 60_000 }).toContain(typed);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      "saved",
-      { timeout: 30_000 },
-    );
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
+      timeout: 30_000,
+    });
     await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
-    expect(
-      await page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts")),
-    ).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("dohc-set-aside-drafts"))).toBeNull();
     expect(
       desktop.logs
         .filter((entry) =>
-          /lineage changed|quarantined|lineage handoff failed|ydoc-lineage-stale/.test(
-            entry.text,
-          ),
+          /lineage changed|quarantined|lineage handoff failed|ydoc-lineage-stale/.test(entry.text),
         )
         .map((entry) => entry.text.slice(0, 300)),
     ).toEqual([]);
@@ -1076,10 +987,7 @@ for (const pattern of ["through", "pause", "stop"] as const) {
 }
 
 type OpenDocumentSyncWindow = {
-  dohcDesktop: Pick<
-    DohcDesktopBridge,
-    "cloudEnableSync" | "onEngineYDocLineageReplacement"
-  >;
+  dohcDesktop: Pick<DohcDesktopBridge, "cloudEnableSync" | "onEngineYDocLineageReplacement">;
   lineageReplacements: number;
 };
 
@@ -1091,16 +999,13 @@ test("typing continues after enabling sync claims the open document", async () =
   const temp = await createTempWorkspace();
   const workspaceId = "enable-open-doc-e2e";
   const path = "notes/plan.md";
-  const readPlan = () =>
-    readFile(join(temp.rootPath, path), "utf8").catch(() => "");
+  const readPlan = () => readFile(join(temp.rootPath, path), "utf8").catch(() => "");
   let relay: SyncRelayHandle | null = null;
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await writeWorkspaceFiles(temp, [
-      { path, contents: "# Plan\n\nLocal draft.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path, contents: "# Plan\n\nLocal draft.\n" }]);
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
@@ -1147,9 +1052,7 @@ test("typing continues after enabling sync claims the open document", async () =
     // The first edit reopens the engine session. A claim on its own history
     // keeps the document, so a replacement is no longer required here.
     const replacements = () =>
-      page.evaluate(
-        () => (window as unknown as OpenDocumentSyncWindow).lineageReplacements,
-      );
+      page.evaluate(() => (window as unknown as OpenDocumentSyncWindow).lineageReplacements);
     expect(await replacements(), "the replacement arrived before any typing").toBe(0);
     // One input event, so the marker is one update that cannot be split
     // across the handoff.
@@ -1158,9 +1061,12 @@ test("typing continues after enabling sync claims the open document", async () =
     // The marker must reach disk or a stored set-aside draft. A draft must
     // still be offered if a replacement set the marker aside.
     const setAsideDrafts = () =>
-      page.evaluate(() => Object.keys(localStorage)
-        .filter(key => key.startsWith("dohc-set-aside-drafts:"))
-        .map(key => localStorage.getItem(key) ?? "").join("\n"));
+      page.evaluate(() =>
+        Object.keys(localStorage)
+          .filter((key) => key.startsWith("dohc-set-aside-drafts:"))
+          .map((key) => localStorage.getItem(key) ?? "")
+          .join("\n"),
+      );
     await expect
       .poll(async () => (await readPlan()) + (await setAsideDrafts()), {
         timeout: 30_000,
@@ -1197,10 +1103,11 @@ test("typing continues after enabling sync claims the open document", async () =
       const restarted = desktop.page;
       await openWorkspaceFromFirstRun(restarted, temp);
       expect(
-        await restarted.evaluate(
-          () => Object.keys(localStorage)
-            .filter(key => key.startsWith("dohc-set-aside-drafts:"))
-            .map(key => localStorage.getItem(key) ?? "").join("\n"),
+        await restarted.evaluate(() =>
+          Object.keys(localStorage)
+            .filter((key) => key.startsWith("dohc-set-aside-drafts:"))
+            .map((key) => localStorage.getItem(key) ?? "")
+            .join("\n"),
         ),
       ).toContain("pending-marker");
       await restarted.getByTestId("notice-center-toggle").click();

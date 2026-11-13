@@ -1,8 +1,5 @@
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
-import {
-  ListFileChatsResponse,
-  type ListFileChatsResult,
-} from "./bridgeContract";
+import { ListFileChatsResponse, type ListFileChatsResult } from "./bridgeContract";
 
 // Keep the daemon refusal typed until this boundary. Electron preserves the
 // returned code, while it would reduce a rejected invoke to message-only Error.

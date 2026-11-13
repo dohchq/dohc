@@ -3,10 +3,7 @@ import type { SitePackageInfo } from "../workspaces/sitePackage";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { SitePreviewResultBody } from "./sitePreviewIpc";
 import type { StaticSitePreview } from "../workspaces/siteRunner";
-import {
-  createStartSitePreviewHandler,
-  type StartSitePreviewDependencies,
-} from "./sitePreviewIpc";
+import { createStartSitePreviewHandler, type StartSitePreviewDependencies } from "./sitePreviewIpc";
 import { WorkspaceRestrictedError } from "../workspaces/workspaceTrust";
 
 interface TestSender {
@@ -48,13 +45,15 @@ function site(root = "site"): SitePackageInfo {
   };
 }
 
-function harness(input: {
-  catalogSite?: SitePackageInfo | null;
-  sharedView?: boolean;
-  activeWorkspaceId?: string;
-  // Whether this computer trusts the workspace. Trusted unless a test says.
-  trusted?: boolean;
-} = {}) {
+function harness(
+  input: {
+    catalogSite?: SitePackageInfo | null;
+    sharedView?: boolean;
+    activeWorkspaceId?: string;
+    // Whether this computer trusts the workspace. Trusted unless a test says.
+    trusted?: boolean;
+  } = {},
+) {
   const workspace: TestWorkspace = {
     workspaceId: "workspace-1",
     rootPath: "/workspace",
@@ -69,9 +68,7 @@ function harness(input: {
   };
   let sessionCurrent = true;
   const subjects: Array<{ subject: string; action: string }> = [];
-  const get = vi.fn(async () =>
-    input.catalogSite === undefined ? site() : input.catalogSite,
-  );
+  const get = vi.fn(async () => (input.catalogSite === undefined ? site() : input.catalogSite));
   const handle: StaticSitePreview = {
     url: "http://127.0.0.1:4173/",
     root: "/workspace/site",
@@ -91,11 +88,7 @@ function harness(input: {
   const assertMayRunAppCode = vi.fn(async (_workspace: TestWorkspace) => {
     if (!(input.trusted ?? true)) throw new WorkspaceRestrictedError();
   });
-  const dependencies: StartSitePreviewDependencies<
-    TestEvent,
-    TestSender,
-    TestWorkspace
-  > = {
+  const dependencies: StartSitePreviewDependencies<TestEvent, TestSender, TestWorkspace> = {
     authority: {
       requireTrustedSender(event) {
         if (!event.trusted) throw new Error("Untrusted renderer.");
@@ -106,9 +99,7 @@ function harness(input: {
         if (workspaceId !== workspace.workspaceId) {
           throw new Error("This workspace is not open. Open it again.");
         }
-        if (
-          (input.activeWorkspaceId ?? workspace.workspaceId) !== workspaceId
-        ) {
+        if ((input.activeWorkspaceId ?? workspace.workspaceId) !== workspaceId) {
           throw new Error(
             `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
           );
@@ -201,11 +192,7 @@ describe("start site preview IPC", () => {
       }),
     ).rejects.toThrow("Not a detected app: ancestor/stale-child");
 
-    expect(test.get).toHaveBeenCalledWith(
-      test.workspace,
-      "ancestor/stale-child",
-      "dev",
-    );
+    expect(test.get).toHaveBeenCalledWith(test.workspace, "ancestor/stale-child", "dev");
     expect(test.execute).not.toHaveBeenCalled();
   });
 
@@ -261,40 +248,56 @@ describe("start site preview IPC", () => {
       }),
     ).resolves.toMatchObject({ siteRoot: root, mode: "static" });
 
-    expect(test.execute).toHaveBeenCalledWith(
-      expect.objectContaining({ sharedView: true }),
-    );
+    expect(test.execute).toHaveBeenCalledWith(expect.objectContaining({ sharedView: true }));
     await test.lifecycle.stopAll();
   });
 
   describe("in Restricted Mode", () => {
     function scripted(): SitePackageInfo {
-      return { ...site(), kind: "package", scripts: { dev: "vite", build: "vite build" }, buildOutputs: ["site/dist"] };
+      return {
+        ...site(),
+        kind: "package",
+        scripts: { dev: "vite", build: "vite build" },
+        buildOutputs: ["site/dist"],
+      };
     }
     const start = (mode: "static" | "dev" | "build", restart = false) => ({
-      workspaceId: "workspace-1", siteRoot: "site", mode, holderId: "tab", restart,
+      workspaceId: "workspace-1",
+      siteRoot: "site",
+      mode,
+      holderId: "tab",
+      restart,
     });
 
-    it.each(["dev", "build"] as const)("refuses %s before execution and keeps the preview that shows", async (mode) => {
-      const test = harness({ catalogSite: scripted(), trusted: false });
-      await test.handler(test.event, start("static"));
-      expect(test.execute).toHaveBeenCalledTimes(1);
+    it.each(["dev", "build"] as const)(
+      "refuses %s before execution and keeps the preview that shows",
+      async (mode) => {
+        const test = harness({ catalogSite: scripted(), trusted: false });
+        await test.handler(test.event, start("static"));
+        expect(test.execute).toHaveBeenCalledTimes(1);
 
-      await expect(test.handler(test.event, start(mode, true))).rejects.toThrow(WorkspaceRestrictedError);
+        await expect(test.handler(test.event, start(mode, true))).rejects.toThrow(
+          WorkspaceRestrictedError,
+        );
 
-      expect(test.assertMayRunAppCode).toHaveBeenCalledWith(test.workspace);
-      expect(test.execute).toHaveBeenCalledTimes(1);
-      expect(test.handle.stop).not.toHaveBeenCalled();
-      await test.lifecycle.stopAll();
-    });
+        expect(test.assertMayRunAppCode).toHaveBeenCalledWith(test.workspace);
+        expect(test.execute).toHaveBeenCalledTimes(1);
+        expect(test.handle.stop).not.toHaveBeenCalled();
+        await test.lifecycle.stopAll();
+      },
+    );
 
     it("still serves the static preview, and a build output without a build script", async () => {
       const test = harness({
         catalogSite: { ...site(), scripts: {}, buildOutputs: ["site/dist"] },
         trusted: false,
       });
-      await expect(test.handler(test.event, start("static"))).resolves.toMatchObject({ mode: "static" });
-      await expect(test.handler(test.event, start("build", true))).resolves.toMatchObject({ mode: "build" });
+      await expect(test.handler(test.event, start("static"))).resolves.toMatchObject({
+        mode: "static",
+      });
+      await expect(test.handler(test.event, start("build", true))).resolves.toMatchObject({
+        mode: "build",
+      });
       expect(test.assertMayRunAppCode).not.toHaveBeenCalled();
       await test.lifecycle.stopAll();
     });
@@ -304,7 +307,9 @@ describe("start site preview IPC", () => {
         catalogSite: { ...site(), configuredScripts: { dev: "node server.js" } },
         trusted: false,
       });
-      await expect(test.handler(test.event, start("dev"))).rejects.toThrow(WorkspaceRestrictedError);
+      await expect(test.handler(test.event, start("dev"))).rejects.toThrow(
+        WorkspaceRestrictedError,
+      );
       expect(test.execute).not.toHaveBeenCalled();
     });
   });
@@ -331,9 +336,9 @@ describe("start site preview IPC", () => {
   it("rejects an untrusted sender before parsing", async () => {
     const test = harness();
 
-    await expect(
-      test.handler({ ...test.event, trusted: false }, null),
-    ).rejects.toThrow("Untrusted renderer.");
+    await expect(test.handler({ ...test.event, trusted: false }, null)).rejects.toThrow(
+      "Untrusted renderer.",
+    );
 
     expect(test.get).not.toHaveBeenCalled();
     expect(test.execute).not.toHaveBeenCalled();

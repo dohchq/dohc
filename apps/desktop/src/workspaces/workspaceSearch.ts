@@ -1,8 +1,4 @@
-import {
-  hasIgnoredSegment,
-  isSharedWithMePath,
-  validateUserReadPath,
-} from "@dohc/workspace-core";
+import { hasIgnoredSegment, isSharedWithMePath, validateUserReadPath } from "@dohc/workspace-core";
 // The engine path floor is a CROSS-PROCESS security contract, not engine
 // state: it has a deliberate Rust twin at crates/dohc-engine-files/src/policy.rs
 // so a relay and a desktop cannot disagree about which paths hold secrets.
@@ -45,9 +41,7 @@ export interface WorkspaceSearchRequest {
   excludeGlob?: string;
 }
 
-export function mountScopedIncludeGlob(
-  userGlob: string | undefined,
-): string | null {
+export function mountScopedIncludeGlob(userGlob: string | undefined): string | null {
   if (!userGlob || userGlob.trim().length === 0) return "shared-with-me/**";
   const glob = userGlob.trim();
   // Projection-targeting globs pass through with the PREFIX normalized to
@@ -185,7 +179,9 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   // Read-side validation: search is a read surface, so mounted shares
   // (shared-with-me/) are searchable; every other guard is identical to the
   // write validator.
-  const validated = validateUserReadPath(rawPath.replaceAll("\\", "/"), { platform: process.platform });
+  const validated = validateUserReadPath(rawPath.replaceAll("\\", "/"), {
+    platform: process.platform,
+  });
   if (!validated.ok) return [];
   // Defense-in-depth reserved/ignored segment backstop. The shared validator
   // rejects these today, and this stays near rg parsing because include globs
@@ -194,7 +190,8 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   // Secret-floor backstop: even if a user include glob out-votes the
   // CLI exclusions, a secret-classified path never crosses to the renderer.
   // Read-aware: a mounted shared-with-me/<label>/.env classifies secret too.
-  if (classifyEngineFilePathForRead(validated.normalized, process.platform).kind === "secret") return [];
+  if (classifyEngineFilePathForRead(validated.normalized, process.platform).kind === "secret")
+    return [];
   const submatches = Array.isArray(data.submatches) ? data.submatches : [];
   const line = rawLine.replace(/\r?\n$/, "");
   const lineBytes = Buffer.from(line, "utf8");
@@ -335,10 +332,7 @@ export function startRipgrepSearch(options: {
   };
 }
 
-async function settlesWithin(
-  settled: Promise<void>,
-  timeoutMs: number,
-): Promise<boolean> {
+async function settlesWithin(settled: Promise<void>, timeoutMs: number): Promise<boolean> {
   return await new Promise<boolean>((resolve) => {
     let finished = false;
     const finish = (didSettle: boolean): void => {
@@ -369,10 +363,7 @@ async function terminateSearch(search: {
 // webContents). Starting a new search for an owner kills its previous child
 // by handle; cancel/dispose do the same. Electron-free so the lifecycle is
 // unit-testable; main.ts adapts webContents ids and quit hooks onto it.
-export function createSearchRegistry(deps: {
-  rgPath: string;
-  start?: typeof startRipgrepSearch;
-}) {
+export function createSearchRegistry(deps: { rgPath: string; start?: typeof startRipgrepSearch }) {
   interface ActiveSearch {
     readonly attachmentId: symbol;
     readonly handle: SearchHandle;
@@ -383,10 +374,7 @@ export function createSearchRegistry(deps: {
   }
   const active = new Map<number, ActiveSearch>();
   const start = deps.start ?? startRipgrepSearch;
-  const stopActive = async (
-    ownerId: number,
-    search: ActiveSearch,
-  ): Promise<void> => {
+  const stopActive = async (ownerId: number, search: ActiveSearch): Promise<void> => {
     search.termination ??= (async () => {
       try {
         await terminateSearch({
@@ -453,10 +441,7 @@ export function createSearchRegistry(deps: {
       });
       const onAbort = (): void => {
         const current = active.get(ownerId);
-        if (
-          current?.handle !== handle ||
-          current.attachmentId !== attachmentId
-        ) {
+        if (current?.handle !== handle || current.attachmentId !== attachmentId) {
           return;
         }
         void stopActive(ownerId, current);
@@ -464,10 +449,7 @@ export function createSearchRegistry(deps: {
       signal.addEventListener("abort", onAbort, { once: true });
       let entry!: ActiveSearch;
       const terminationComplete = Promise.withResolvers<void>();
-      const settled = Promise.race([
-        handle.settled,
-        terminationComplete.promise,
-      ]).finally(() => {
+      const settled = Promise.race([handle.settled, terminationComplete.promise]).finally(() => {
         signal.removeEventListener("abort", onAbort);
         if (active.get(ownerId) === entry) active.delete(ownerId);
       });

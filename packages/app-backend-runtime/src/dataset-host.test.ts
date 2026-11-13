@@ -14,9 +14,13 @@ import { createDatasetHost, type DatasetHostOptions } from "./dataset-host.ts";
 import { createDatasetAttempts, assertDatasetAttemptsCommitted } from "./dataset-attempts.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
 const id = (number: number) => `00000000-0000-4000-8000-${String(number).padStart(12, "0")}`;
-const schemaSql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL);";
+const schemaSql =
+  "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL);";
 const operationSource = `globalThis.operations={
   create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?,?)',[ctx.requestId,input.value,'private']);return {accepted:true};},
   read(ctx){return ctx.db.query('SELECT id,value FROM items ORDER BY id');},
@@ -24,37 +28,123 @@ const operationSource = `globalThis.operations={
   privateRead(ctx){return ctx.db.query('SELECT * FROM items');}
 };`;
 const definition: DatasetDefinition = {
-  formatVersion: 1, datasetId: id(1), name: "Orders", schemaPath: "orders/schema.sql", operationsPath: "orders/operations.js",
-  tables: [{ tableId: id(2), name: "Items", sqlName: "items", primaryKey: "id", fields: [
-    { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
-    { fieldId: id(4), name: "Value", sqlColumn: "value", type: "text", required: true, unique: false },
-    { fieldId: id(5), name: "Secret", sqlColumn: "secret", type: "text", required: true, unique: false },
-  ] }],
+  formatVersion: 1,
+  datasetId: id(1),
+  name: "Orders",
+  schemaPath: "orders/schema.sql",
+  operationsPath: "orders/operations.js",
+  tables: [
+    {
+      tableId: id(2),
+      name: "Items",
+      sqlName: "items",
+      primaryKey: "id",
+      fields: [
+        { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+        {
+          fieldId: id(4),
+          name: "Value",
+          sqlColumn: "value",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+        {
+          fieldId: id(5),
+          name: "Secret",
+          sqlColumn: "secret",
+          type: "text",
+          required: true,
+          unique: false,
+        },
+      ],
+    },
+  ],
   operations: [
-    { operationId: id(6), name: "create", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)] },
-    { operationId: id(7), name: "read", label: "Read", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)] },
-    { operationId: id(8), name: "edit", label: "Edit", tableId: id(2), kind: "edit", access: "helper", readOnly: false, fieldIds: [id(4)] },
-    { operationId: id(9), name: "privateRead", label: "Private read", tableId: id(2), kind: "read", access: "owner", readOnly: true, fieldIds: [id(3), id(4), id(5)] },
+    {
+      operationId: id(6),
+      name: "create",
+      label: "Submit",
+      tableId: id(2),
+      kind: "create",
+      access: "link",
+      readOnly: false,
+      fieldIds: [id(4)],
+    },
+    {
+      operationId: id(7),
+      name: "read",
+      label: "Read",
+      tableId: id(2),
+      kind: "read",
+      access: "helper",
+      readOnly: true,
+      fieldIds: [id(3), id(4)],
+    },
+    {
+      operationId: id(8),
+      name: "edit",
+      label: "Edit",
+      tableId: id(2),
+      kind: "edit",
+      access: "helper",
+      readOnly: false,
+      fieldIds: [id(4)],
+    },
+    {
+      operationId: id(9),
+      name: "privateRead",
+      label: "Private read",
+      tableId: id(2),
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [id(3), id(4), id(5)],
+    },
   ],
 };
-const prepared = { revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource }), schemaSql, operationSource };
+const prepared = {
+  revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource }),
+  schemaSql,
+  operationSource,
+};
 const scope = { workspaceId: "workspace", datasetId: id(1) };
 
 it("rechecks a trusted automation's presser ceiling before commit and before an idempotent replay", async () => {
-  let allowed = true, revokeBeforeCommit = false;
+  let allowed = true,
+    revokeBeforeCommit = false;
   const f = await fixture({
     resolveAuthority(context) {
-      return context === "owner" ? { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }
-        : { principalKey: "automation", caller: { kind: "automation", automationId: "collection:source#button" }, chainDepth: 1,
-          authorizeOperation(datasetId, operationId) { if (!allowed || datasetId !== id(1) || operationId !== id(6)) throw Error("presser revoked"); } };
+      return context === "owner"
+        ? { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }
+        : {
+            principalKey: "automation",
+            caller: { kind: "automation", automationId: "collection:source#button" },
+            chainDepth: 1,
+            authorizeOperation(datasetId, operationId) {
+              if (!allowed || datasetId !== id(1) || operationId !== id(6))
+                throw Error("presser revoked");
+            },
+          };
     },
-    operationResources() { if (revokeBeforeCommit) allowed = false; return {}; },
+    operationResources() {
+      if (revokeBeforeCommit) allowed = false;
+      return {};
+    },
   });
   await f.activate();
-  const input = { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: "Button" }, idempotencyKey: "shared-press" };
+  const input = {
+    ...scope,
+    revision: 1,
+    revisionSha256: prepared.revision.revisionSha256,
+    operationId: id(6),
+    input: { value: "Button" },
+    idempotencyKey: "shared-press",
+  };
   revokeBeforeCommit = true;
   await expect(f.host.invoke("helper", input)).rejects.toThrow("presser revoked");
-  revokeBeforeCommit = false; allowed = true;
+  revokeBeforeCommit = false;
+  allowed = true;
   expect(await f.host.invoke("helper", input)).toMatchObject({ replayed: false });
   allowed = false;
   await expect(f.host.invoke("helper", input)).rejects.toThrow("presser revoked");
@@ -63,99 +153,243 @@ type Context = "owner" | "helper" | "friend";
 async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-dataset-host-"));
   const db = new DatabaseSync(join(directory, "host.sqlite"));
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE permissions(user TEXT PRIMARY KEY,active INTEGER); INSERT INTO permissions VALUES('owner',1),('helper',1),('friend',1); CREATE TABLE accounting(bytes INTEGER); INSERT INTO accounting VALUES(0); COMMIT;");
+  db.exec(
+    "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; BEGIN IMMEDIATE; CREATE TABLE permissions(user TEXT PRIMARY KEY,active INTEGER); INSERT INTO permissions VALUES('owner',1),('helper',1),('friend',1); CREATE TABLE accounting(bytes INTEGER); INSERT INTO accounting VALUES(0); COMMIT;",
+  );
   function transaction<T>(run: () => T): T {
     db.exec("BEGIN IMMEDIATE");
-    try { const result = run(); db.exec("COMMIT"); return result; } catch (error) { db.exec("ROLLBACK"); throw error; }
+    try {
+      const result = run();
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   }
   const journal = createDatasetJournal({ db, transaction });
-  const supervisor = await createDatasetSupervisor({ journal, directory: privateFolder(join(directory, "workers")) });
-  cleanups.push(async () => { await supervisor.close(); db.close(); await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 }); });
-  const host = createDatasetHost<Context>({ db, transaction, journal, supervisor,
+  const supervisor = await createDatasetSupervisor({
+    journal,
+    directory: privateFolder(join(directory, "workers")),
+  });
+  cleanups.push(async () => {
+    await supervisor.close();
+    db.close();
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  });
+  const host = createDatasetHost<Context>({
+    db,
+    transaction,
+    journal,
+    supervisor,
     resolveAuthority(context, request) {
-      if (request.workspaceId !== "workspace" || db.prepare("SELECT active FROM permissions WHERE user=?").get(context)?.active !== 1) throw new Error("revoked");
-      if (request.access.kind === "app" && request.access.appId !== "form") throw new Error("Wrong publication credential.");
-      return { principalKey: context, ...(request.access.kind === "app" ? { appId: "form" } : {}),
-        caller: context === "owner" ? { kind: "owner", userId: "owner" } : context === "helper"
-          ? { kind: "named", userId: "helper", grantId: "member", access: "view", helper: false }
-          : { kind: "link", principalId: "friend", grantId: "public-link" } };
+      if (
+        request.workspaceId !== "workspace" ||
+        db.prepare("SELECT active FROM permissions WHERE user=?").get(context)?.active !== 1
+      )
+        throw new Error("revoked");
+      if (request.access.kind === "app" && request.access.appId !== "form")
+        throw new Error("Wrong publication credential.");
+      return {
+        principalKey: context,
+        ...(request.access.kind === "app" ? { appId: "form" } : {}),
+        caller:
+          context === "owner"
+            ? { kind: "owner", userId: "owner" }
+            : context === "helper"
+              ? {
+                  kind: "named",
+                  userId: "helper",
+                  grantId: "member",
+                  access: "view",
+                  helper: false,
+                }
+              : { kind: "link", principalId: "friend", grantId: "public-link" },
+      };
     },
-    accountCreation(_context, allocation) { db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes); },
+    accountCreation(_context, allocation) {
+      db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);
+    },
     ...overrides,
   });
   const activate = () => host.activate("owner", { workspaceId: scope.workspaceId, ...prepared });
-  const binding = (operationIds = [id(6)]) => ({ kind: "dataset" as const, datasetId: id(1), revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds });
-  const invoke = (context: Context, operationId: string, input = {}, appId?: string) => host.invoke(context, { ...scope, revision: prepared.revision.revision, revisionSha256: prepared.revision.revisionSha256, operationId, input,
-    idempotencyKey: "request", ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
+  const binding = (operationIds = [id(6)]) => ({
+    kind: "dataset" as const,
+    datasetId: id(1),
+    revision: 1,
+    revisionSha256: prepared.revision.revisionSha256,
+    operationIds,
+  });
+  const invoke = (context: Context, operationId: string, input = {}, appId?: string) =>
+    host.invoke(context, {
+      ...scope,
+      revision: prepared.revision.revision,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey: "request",
+      ...(appId ? { access: { kind: "app" as const, appId } } : {}),
+    });
   return { host, db, journal, supervisor, activate, invoke, binding, transaction };
 }
 
 it("requires an archived Collection and current owner review of both data and affected apps before permanent deletion", async () => {
-  const f = await fixture(); await f.activate();
-  const first = f.host.deletePreview("owner",scope);
-  expect(() => f.host.deletePreview("helper",scope)).toThrow("You do not have access to this Collection.");
-  const request = {...scope,expected:first.cursor,reviewToken:first.reviewToken,acknowledge:true as const};
-  await expect(f.host.deleteDataset("owner",{...request,acknowledge:false as true})).rejects.toThrow("Review");
-  await expect(f.host.deleteDataset("helper",request)).rejects.toThrow("You do not have access to this Collection.");
-  f.host.setBinding("owner",{...scope,appId:"form",binding:f.binding()});
-  await expect(f.host.deleteDataset("owner",request)).rejects.toThrow("access changed");
-  const next = f.host.deletePreview("owner",{...scope,limit:1});
-  expect(next.apps).toMatchObject([{appId:"form"}]);
-  await f.invoke("owner",id(6),{value:"changed"});
-  await expect(f.host.deleteDataset("owner",{...request,expected:next.cursor,reviewToken:next.reviewToken})).rejects.toThrow("The Collection changed. Try again.");
-  const live = f.host.deletePreview("owner",scope);
-  await expect(f.host.deleteDataset("owner",{...request,expected:live.cursor,reviewToken:live.reviewToken})).rejects.toThrow("This Collection isn't archived. Archive it before you delete it permanently.");
-  expect(f.host.deletionStatus("owner",scope)).toEqual({deleted:false});
-  f.host.archiveDataset("owner",scope);
-  expect(f.host.keptDatasetIds("owner",{workspaceId:scope.workspaceId})).toEqual([scope.datasetId]);
-  expect(() => f.host.keptDatasetIds("helper",{workspaceId:scope.workspaceId})).toThrow("You do not have access to this Collection.");
-  const current = f.host.deletePreview("owner",scope);
-  await expect(f.host.deleteDataset("owner",{...request,expected:current.cursor,reviewToken:current.reviewToken})).resolves.toEqual({deleted:true,datasetId:scope.datasetId});
-  expect(f.host.list("owner",{workspaceId:scope.workspaceId,includeArchived:true}).datasets).toEqual([]);
-  expect(f.host.keptDatasetIds("owner",{workspaceId:scope.workspaceId})).toEqual([]);
-  for (const table of ["dohc_dataset_catalog","dohc_dataset_bindings","dohc_dataset_events","dohc_dataset_receipts","dohc_dataset_checkpoints","dohc_dataset_attempts","dohc_dataset_lifecycle"])
+  const f = await fixture();
+  await f.activate();
+  const first = f.host.deletePreview("owner", scope);
+  expect(() => f.host.deletePreview("helper", scope)).toThrow(
+    "You do not have access to this Collection.",
+  );
+  const request = {
+    ...scope,
+    expected: first.cursor,
+    reviewToken: first.reviewToken,
+    acknowledge: true as const,
+  };
+  await expect(
+    f.host.deleteDataset("owner", { ...request, acknowledge: false as true }),
+  ).rejects.toThrow("Review");
+  await expect(f.host.deleteDataset("helper", request)).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  await expect(f.host.deleteDataset("owner", request)).rejects.toThrow("access changed");
+  const next = f.host.deletePreview("owner", { ...scope, limit: 1 });
+  expect(next.apps).toMatchObject([{ appId: "form" }]);
+  await f.invoke("owner", id(6), { value: "changed" });
+  await expect(
+    f.host.deleteDataset("owner", {
+      ...request,
+      expected: next.cursor,
+      reviewToken: next.reviewToken,
+    }),
+  ).rejects.toThrow("The Collection changed. Try again.");
+  const live = f.host.deletePreview("owner", scope);
+  await expect(
+    f.host.deleteDataset("owner", {
+      ...request,
+      expected: live.cursor,
+      reviewToken: live.reviewToken,
+    }),
+  ).rejects.toThrow("This Collection isn't archived. Archive it before you delete it permanently.");
+  expect(f.host.deletionStatus("owner", scope)).toEqual({ deleted: false });
+  f.host.archiveDataset("owner", scope);
+  expect(f.host.keptDatasetIds("owner", { workspaceId: scope.workspaceId })).toEqual([
+    scope.datasetId,
+  ]);
+  expect(() => f.host.keptDatasetIds("helper", { workspaceId: scope.workspaceId })).toThrow(
+    "You do not have access to this Collection.",
+  );
+  const current = f.host.deletePreview("owner", scope);
+  await expect(
+    f.host.deleteDataset("owner", {
+      ...request,
+      expected: current.cursor,
+      reviewToken: current.reviewToken,
+    }),
+  ).resolves.toEqual({ deleted: true, datasetId: scope.datasetId });
+  expect(
+    f.host.list("owner", { workspaceId: scope.workspaceId, includeArchived: true }).datasets,
+  ).toEqual([]);
+  expect(f.host.keptDatasetIds("owner", { workspaceId: scope.workspaceId })).toEqual([]);
+  for (const table of [
+    "dohc_dataset_catalog",
+    "dohc_dataset_bindings",
+    "dohc_dataset_events",
+    "dohc_dataset_receipts",
+    "dohc_dataset_checkpoints",
+    "dohc_dataset_attempts",
+    "dohc_dataset_lifecycle",
+  ])
     expect(f.db.prepare(`SELECT count(*) n FROM ${table}`).get()!.n).toBe(0);
   expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_deletions").get()!.n).toBe(1);
   await expect(f.activate()).rejects.toThrow("deleted");
-  await expect(f.invoke("owner",id(6),{value:"changed"})).rejects.toThrow();
+  await expect(f.invoke("owner", id(6), { value: "changed" })).rejects.toThrow();
 });
 
 it("rolls permanent deletion and its tombstone back if private-resource cleanup fails", async () => {
-  const f = await fixture({deleteResources() { throw new Error("cleanup failed"); }}); await f.activate();
-  f.host.archiveDataset("owner",scope);
-  const preview = f.host.deletePreview("owner",scope);
-  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("cleanup failed");
-  expect(f.host.deletePreview("owner",scope).cursor).toEqual(preview.cursor);
+  const f = await fixture({
+    deleteResources() {
+      throw new Error("cleanup failed");
+    },
+  });
+  await f.activate();
+  f.host.archiveDataset("owner", scope);
+  const preview = f.host.deletePreview("owner", scope);
+  await expect(
+    f.host.deleteDataset("owner", {
+      ...scope,
+      expected: preview.cursor,
+      reviewToken: preview.reviewToken,
+      acknowledge: true,
+    }),
+  ).rejects.toThrow("cleanup failed");
+  expect(f.host.deletePreview("owner", scope).cursor).toEqual(preview.cursor);
   expect(f.db.prepare("SELECT count(*) n FROM dohc_dataset_deletions").get()!.n).toBe(0);
 });
 
 it("rejects deletion at a fenced former authority", async () => {
-  const f = await fixture(); await f.activate();
-  const preview = f.host.deletePreview("owner",scope);
-  f.journal.fence({expected:preview.cursor,authorize(){}});
-  expect(() => f.host.deletePreview("owner",scope)).toThrow("current host");
-  await expect(f.host.deleteDataset("owner",{...scope,expected:preview.cursor,reviewToken:preview.reviewToken,acknowledge:true})).rejects.toThrow("stopped accepting changes to this Collection");
+  const f = await fixture();
+  await f.activate();
+  const preview = f.host.deletePreview("owner", scope);
+  f.journal.fence({ expected: preview.cursor, authorize() {} });
+  expect(() => f.host.deletePreview("owner", scope)).toThrow("current host");
+  await expect(
+    f.host.deleteDataset("owner", {
+      ...scope,
+      expected: preview.cursor,
+      reviewToken: preview.reviewToken,
+      acknowledge: true,
+    }),
+  ).rejects.toThrow("stopped accepting changes to this Collection");
 });
 
 it("pages owner-only saved-operation metadata without receipts, payloads, or private results", async () => {
-  const f = await fixture(); await f.activate();
-  for (const key of ["secret-retry-1", "secret-retry-2", "secret-retry-3"]) await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: "private payload" }, idempotencyKey: key });
+  const f = await fixture();
+  await f.activate();
+  for (const key of ["secret-retry-1", "secret-retry-2", "secret-retry-3"])
+    await f.host.invoke("owner", {
+      ...scope,
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationId: id(6),
+      input: { value: "private payload" },
+      idempotencyKey: key,
+    });
   const first = f.host.history("owner", { ...scope, limit: 2 });
-  expect(first.entries.map(entry => entry.revision)).toEqual([3, 2]); expect(first.nextBeforeRevision).toBe(2);
-  expect(first.entries[0]).toMatchObject({ operation: "create", attachmentCount: 0, approvedRevisionHash: prepared.revision.revisionSha256 });
+  expect(first.entries.map((entry) => entry.revision)).toEqual([3, 2]);
+  expect(first.nextBeforeRevision).toBe(2);
+  expect(first.entries[0]).toMatchObject({
+    operation: "create",
+    attachmentCount: 0,
+    approvedRevisionHash: prepared.revision.revisionSha256,
+  });
   expect(first.entries[0]!.callerReference).toMatch(/^[a-f0-9]{64}$/);
-  expect(JSON.stringify(first)).not.toMatch(/secret-retry|private payload|resultJson|payloadSha256|idempotencyKey|proposalId/);
-  const second = f.host.history("owner", { ...scope, beforeRevision: first.nextBeforeRevision!, limit: 2 });
-  expect(second.entries.map(entry => entry.revision)).toEqual([1]); expect(second.nextBeforeRevision).toBeNull();
-  for (const caller of ["helper", "friend"] as const) expect(() => f.host.history(caller, scope)).toThrow("You do not have access to this Collection.");
+  expect(JSON.stringify(first)).not.toMatch(
+    /secret-retry|private payload|resultJson|payloadSha256|idempotencyKey|proposalId/,
+  );
+  const second = f.host.history("owner", {
+    ...scope,
+    beforeRevision: first.nextBeforeRevision!,
+    limit: 2,
+  });
+  expect(second.entries.map((entry) => entry.revision)).toEqual([1]);
+  expect(second.nextBeforeRevision).toBeNull();
+  for (const caller of ["helper", "friend"] as const)
+    expect(() => f.host.history(caller, scope)).toThrow(
+      "You do not have access to this Collection.",
+    );
   expect(() => f.host.history("owner", { ...scope, limit: 101 })).toThrow("Invalid");
-  expect(() => f.host.history("owner", { ...scope, datasetId: id(99) })).toThrow("You do not have access to this Collection.");
+  expect(() => f.host.history("owner", { ...scope, datasetId: id(99) })).toThrow(
+    "You do not have access to this Collection.",
+  );
 });
 it("recovers an explicitly reversible edit from durable history and refuses undo after a later edit", async () => {
   const f = await fixture();
   const reversible = structuredClone(definition);
-  reversible.operations.find(operation => operation.kind === "edit")!.reversible = true;
-  const sql = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL,version INTEGER NOT NULL);";
+  reversible.operations.find((operation) => operation.kind === "edit")!.reversible = true;
+  const sql =
+    "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL,version INTEGER NOT NULL);";
   const source = `globalThis.operations={
     create(ctx,input){ctx.db.execute('INSERT INTO items VALUES(?,?,?,1)',['record',input.value,'private']);return {id:'record',version:1};},
     edit(ctx,input){const row=ctx.db.query('SELECT value,version FROM items WHERE id=?',[input.id])[0];
@@ -163,63 +397,154 @@ it("recovers an explicitly reversible edit from durable history and refuses undo
       ctx.db.execute('UPDATE items SET value=?,version=version+1 WHERE id=?',[input.values['${id(4)}'],input.id]);
       return {id:input.id,version:row.version+1,priorValues:{'${id(4)}':row.value}};}
   };`;
-  const revision = describeDatasetRevision({ definition: reversible, revision: 1, schemaSql: sql, operationSource: source });
-  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: sql, operationSource: source });
-  const call = (operationId: string, input: import("./protocol.js").JsonValue, idempotencyKey: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey });
+  const revision = describeDatasetRevision({
+    definition: reversible,
+    revision: 1,
+    schemaSql: sql,
+    operationSource: source,
+  });
+  await f.host.activate("owner", {
+    workspaceId: scope.workspaceId,
+    revision,
+    schemaSql: sql,
+    operationSource: source,
+  });
+  const call = (
+    operationId: string,
+    input: import("./protocol.js").JsonValue,
+    idempotencyKey: string,
+  ) =>
+    f.host.invoke("owner", {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey,
+    });
   await call(id(6), { value: "Alice" }, "create");
   await call(id(8), { id: "record", expectedVersion: 1, values: { [id(4)]: "Alicia" } }, "edit");
-  const reopened = createDatasetHost({ db: f.db, transaction: f.transaction, journal: f.journal, supervisor: f.supervisor,
-    resolveAuthority() { return { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }; }, accountCreation() {} });
+  const reopened = createDatasetHost({
+    db: f.db,
+    transaction: f.transaction,
+    journal: f.journal,
+    supervisor: f.supervisor,
+    resolveAuthority() {
+      return { principalKey: "owner", caller: { kind: "owner", userId: "owner" } };
+    },
+    accountCreation() {},
+  });
   const history = reopened.history("owner", scope);
   expect(history.entries[1]!.undo).toBeUndefined();
   const undo = history.entries[0]!.undo!;
-  expect(undo).toMatchObject({ recordId: "record", expectedVersion: 2, fields: [{ fieldId: id(4), name: "Value", value: "Alice" }] });
+  expect(undo).toMatchObject({
+    recordId: "record",
+    expectedVersion: 2,
+    fields: [{ fieldId: id(4), name: "Value", value: "Alice" }],
+  });
   expect(JSON.stringify(undo)).not.toContain("private");
-  const input = { id: undo.recordId, expectedVersion: undo.expectedVersion, values: Object.fromEntries(undo.fields.map(field => [field.fieldId, field.value])) };
+  const input = {
+    id: undo.recordId,
+    expectedVersion: undo.expectedVersion,
+    values: Object.fromEntries(undo.fields.map((field) => [field.fieldId, field.value])),
+  };
   await call(undo.operationId, input, "undo");
-  await expect(call(undo.operationId, input, "stale-undo")).rejects.toMatchObject({ refusal: { code: "conflict" } });
+  await expect(call(undo.operationId, input, "stale-undo")).rejects.toMatchObject({
+    refusal: { code: "conflict" },
+  });
 });
 it("archives and restores the same records without releasing storage or reactivating a transferred host", async () => {
-  const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "retained" });
+  const f = await fixture();
+  await f.activate();
+  await f.invoke("owner", id(6), { value: "retained" });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
   const bytes = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
-  const capture = f.host.replicaCapture("owner",scope);
+  const capture = f.host.replicaCapture("owner", scope);
   expect(f.host.lifecycle("owner", scope).apps).toMatchObject([{ appId: "form" }]);
   expect(() => f.host.archiveDataset("helper", scope)).toThrow();
   f.host.archiveDataset("owner", scope);
-  expect(()=>f.host.replicaCapture("owner",scope)).toThrow("archived");
-  expect(()=>f.host.replicaPage("owner",{...scope,through:capture.head,after:capture.checkpoint.cursor})).toThrow("archived");
-  expect(()=>f.host.replicaBlob("owner",{...scope,record:capture.checkpoint,offset:0,length:100})).toThrow("archived");
+  expect(() => f.host.replicaCapture("owner", scope)).toThrow("archived");
+  expect(() =>
+    f.host.replicaPage("owner", {
+      ...scope,
+      through: capture.head,
+      after: capture.checkpoint.cursor,
+    }),
+  ).toThrow("archived");
+  expect(() =>
+    f.host.replicaBlob("owner", { ...scope, record: capture.checkpoint, offset: 0, length: 100 }),
+  ).toThrow("archived");
   expect(f.host.list("owner", { workspaceId: scope.workspaceId }).datasets).toEqual([]);
-  expect(f.host.list("owner", { workspaceId: scope.workspaceId, includeArchived: true }).datasets).toMatchObject([{ datasetId: scope.datasetId, archived: true }]);
-  expect(() => f.host.list("helper", { workspaceId: scope.workspaceId, includeArchived: true })).toThrow();
+  expect(
+    f.host.list("owner", { workspaceId: scope.workspaceId, includeArchived: true }).datasets,
+  ).toMatchObject([{ datasetId: scope.datasetId, archived: true }]);
+  expect(() =>
+    f.host.list("helper", { workspaceId: scope.workspaceId, includeArchived: true }),
+  ).toThrow();
   await expect(f.invoke("owner", id(7))).rejects.toThrow("archived");
   await expect(f.invoke("friend", id(6), { value: "denied" }, "form")).rejects.toThrow("archived");
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(bytes);
   f.host.restoreDataset("owner", scope);
-  expect(f.host.replicaCapture("owner",scope).head).toEqual(capture.head);
+  expect(f.host.replicaCapture("owner", scope).head).toEqual(capture.head);
   expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "retained" }]);
   f.host.archiveDataset("owner", scope);
   f.journal.fence({ expected: f.host.approvedArtifacts("owner", scope).cursor, authorize() {} });
-  expect(() => f.host.restoreDataset("owner", scope)).toThrow("stopped accepting changes to this Collection");
+  expect(() => f.host.restoreDataset("owner", scope)).toThrow(
+    "stopped accepting changes to this Collection",
+  );
 });
 
 it("keeps submission, data discovery, private reads, and source approval separate", async () => {
-  const f = await fixture(); await f.activate();
+  const f = await fixture();
+  await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(9)]) });
-  await expect(f.invoke("friend", id(9), {}, "form")).rejects.toThrow("You do not have access to this Collection.");
-  await expect(f.invoke("friend", id(6), { value: "hello" }, "another-form")).rejects.toThrow("Wrong publication");
-  expect(() => f.host.describe("friend", scope)).toThrow("You do not have access to this Collection.");
-  expect(f.host.list("friend", { workspaceId: "workspace" })).toEqual({ datasets: [], nextCursor: null });
-  expect(() => f.host.approvedArtifacts("helper", scope)).toThrow("You do not have access to this Collection.");
-  expect(() => f.host.setBinding("helper", { ...scope, appId: "form", binding: f.binding() })).toThrow("You do not have access to this Collection.");
-  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(9)], discover: true } })).toThrow("Owner-only");
-  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: { ...f.binding(), revisionSha256: "0".repeat(64) } })).toThrow();
+  await expect(f.invoke("friend", id(9), {}, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  await expect(f.invoke("friend", id(6), { value: "hello" }, "another-form")).rejects.toThrow(
+    "Wrong publication",
+  );
+  expect(() => f.host.describe("friend", scope)).toThrow(
+    "You do not have access to this Collection.",
+  );
+  expect(f.host.list("friend", { workspaceId: "workspace" })).toEqual({
+    datasets: [],
+    nextCursor: null,
+  });
+  expect(() => f.host.approvedArtifacts("helper", scope)).toThrow(
+    "You do not have access to this Collection.",
+  );
+  expect(() =>
+    f.host.setBinding("helper", { ...scope, appId: "form", binding: f.binding() }),
+  ).toThrow("You do not have access to this Collection.");
+  expect(() =>
+    f.host.setDataGrant("owner", {
+      ...scope,
+      principalKey: "helper",
+      grant: {
+        revision: 1,
+        revisionSha256: prepared.revision.revisionSha256,
+        operationIds: [id(9)],
+        discover: true,
+      },
+    }),
+  ).toThrow("Owner-only");
+  expect(() =>
+    f.host.setBinding("owner", {
+      ...scope,
+      appId: "form",
+      binding: { ...f.binding(), revisionSha256: "0".repeat(64) },
+    }),
+  ).toThrow();
 });
 
 it("rolls back catalog creation and quota when the final authority check fails", async () => {
   let f: Awaited<ReturnType<typeof fixture>>;
-  f = await fixture({ accountCreation() { f.db.prepare("UPDATE permissions SET active=0 WHERE user='owner'").run(); } });
+  f = await fixture({
+    accountCreation() {
+      f.db.prepare("UPDATE permissions SET active=0 WHERE user='owner'").run();
+    },
+  });
   await expect(f.activate()).rejects.toThrow("revoked");
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_catalog").get()!.n).toBe(0);
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM dohc_dataset_journals").get()!.n).toBe(0);
@@ -227,7 +552,8 @@ it("rolls back catalog creation and quota when the final authority check fails",
 });
 
 it("blocks queued operations and receipt disclosure after binding or data grant revocation", async () => {
-  const f = await fixture(); await f.activate();
+  const f = await fixture();
+  await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
   const first = f.invoke("friend", id(6), { value: "first" }, "form");
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
@@ -238,38 +564,111 @@ it("blocks queued operations and receipt disclosure after binding or data grant 
   expect((await f.invoke("friend", id(6), { value: "saved" }, "form")).replayed).toBe(true);
   await expect(f.invoke("friend", id(6), { value: "changed retry" }, "form")).rejects.toThrow();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
-  await expect(f.invoke("friend", id(6), { value: "saved" }, "form")).rejects.toThrow("You do not have access to this Collection.");
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  await expect(f.invoke("friend", id(6), { value: "saved" }, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
   const read = f.invoke("helper", id(7));
   f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
   await expect(read).rejects.toThrow("You do not have access to this Collection.");
 });
 
 it("intersects admin app operations with the explicit data grant and refuses stale views", async () => {
-  const f = await fixture(); await f.activate();
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7), id(8)]) });
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: false } });
+  const f = await fixture();
+  await f.activate();
+  f.host.setBinding("owner", {
+    ...scope,
+    appId: "form",
+    binding: f.binding([id(6), id(7), id(8)]),
+  });
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: false,
+    },
+  });
   await expect(f.invoke("helper", id(7), {}, "form")).resolves.toMatchObject({ result: [] });
-  await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow("You do not have access to this Collection.");
-  expect(() => f.host.describe("helper", scope)).toThrow("You do not have access to this Collection.");
-  await expect(f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: "0".repeat(64), operationId: id(6), input: {}, idempotencyKey: "request" })).rejects.toThrow("Its owner must approve this access again.");
+  await expect(f.invoke("helper", id(8), {}, "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
+  expect(() => f.host.describe("helper", scope)).toThrow(
+    "You do not have access to this Collection.",
+  );
+  await expect(
+    f.host.invoke("owner", {
+      ...scope,
+      revision: 1,
+      revisionSha256: "0".repeat(64),
+      operationId: id(6),
+      input: {},
+      idempotencyKey: "request",
+    }),
+  ).rejects.toThrow("Its owner must approve this access again.");
 });
 
 it("accounts binding and grant replacements by retained size and rolls back quota failures", async () => {
-  let f: Awaited<ReturnType<typeof fixture>>, refuse = false;
-  f = await fixture({ accountMetadata(_context, allocation) {
-    f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);
-    if (refuse) throw new Error("quota");
-  } });
-  await f.activate(); const initial = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
+  let f: Awaited<ReturnType<typeof fixture>>,
+    refuse = false;
+  f = await fixture({
+    accountMetadata(_context, allocation) {
+      f.db.prepare("UPDATE accounting SET bytes=bytes+?").run(allocation.bytes);
+      if (refuse) throw new Error("quota");
+    },
+  });
+  await f.activate();
+  const initial = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
   const populated = f.db.prepare("SELECT bytes FROM accounting").get()!.bytes;
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
   refuse = true;
-  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7), id(8)], discover: true } })).toThrow("quota");
-  expect(f.host.describe("helper", scope).operations.map(operation => operation.operationId)).toEqual([id(7)]);
+  expect(() =>
+    f.host.setDataGrant("owner", {
+      ...scope,
+      principalKey: "helper",
+      grant: {
+        revision: 1,
+        revisionSha256: prepared.revision.revisionSha256,
+        operationIds: [id(7), id(8)],
+        discover: true,
+      },
+    }),
+  ).toThrow("quota");
+  expect(
+    f.host.describe("helper", scope).operations.map((operation) => operation.operationId),
+  ).toEqual([id(7)]);
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(populated);
   refuse = false;
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
@@ -277,215 +676,664 @@ it("accounts binding and grant replacements by retained size and rolls back quot
   expect(f.db.prepare("SELECT bytes FROM accounting").get()!.bytes).toBe(initial);
 });
 
-it("exposes complete migration previews only to the current owner and commits the reviewed values",async()=>{
-  const f=await fixture();await f.activate();await f.invoke("owner",id(6),{value:"saved"});
-  const expected=f.host.approvedArtifacts("owner",scope).cursor;
-  const revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
-  const input={workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"UPDATE items SET value=lower(hex(randomblob(12)));"};
-  await expect(f.host.prepareMigration("helper",input)).rejects.toThrow();
-  const candidate=await f.host.prepareMigration("owner",input),request={...scope,candidateId:candidate.candidateId};
-  expect(()=>f.host.migrationPreviewPage("helper",request)).toThrow();
-  expect(f.host.migrationPreviewPage("owner",request)).toEqual(candidate.preview.firstPage);
-  expect((await f.invoke("owner",id(7))).result).toMatchObject([{value:"saved"}]);
-  const result=await f.host.approveMigration("owner",{...request,checkpointSha256:candidate.checkpointSha256});
+it("exposes complete migration previews only to the current owner and commits the reviewed values", async () => {
+  const f = await fixture();
+  await f.activate();
+  await f.invoke("owner", id(6), { value: "saved" });
+  const expected = f.host.approvedArtifacts("owner", scope).cursor;
+  const revision = describeDatasetRevision({ definition, revision: 2, schemaSql, operationSource });
+  const input = {
+    workspaceId: scope.workspaceId,
+    revision,
+    schemaSql,
+    operationSource,
+    expected,
+    migrationSql: "UPDATE items SET value=lower(hex(randomblob(12)));",
+  };
+  await expect(f.host.prepareMigration("helper", input)).rejects.toThrow();
+  const candidate = await f.host.prepareMigration("owner", input),
+    request = { ...scope, candidateId: candidate.candidateId };
+  expect(() => f.host.migrationPreviewPage("helper", request)).toThrow();
+  expect(f.host.migrationPreviewPage("owner", request)).toEqual(candidate.preview.firstPage);
+  expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "saved" }]);
+  const result = await f.host.approveMigration("owner", {
+    ...request,
+    checkpointSha256: candidate.checkpointSha256,
+  });
   expect(result.revision).toEqual(revision);
-  const rows=await f.host.invoke("owner",{...scope,revision:2,revisionSha256:revision.revisionSha256,operationId:id(9),input:{},idempotencyKey:"after"});
+  const rows = await f.host.invoke("owner", {
+    ...scope,
+    revision: 2,
+    revisionSha256: revision.revisionSha256,
+    operationId: id(9),
+    input: {},
+    idempotencyKey: "after",
+  });
   expect(rows.result).toEqual([candidate.preview.firstPage.changes[0]!.after]);
 });
-it("invalidates prepared migration authority after archive and restore",async()=>{
-  const f=await fixture();await f.activate();
-  const expected=f.host.approvedArtifacts("owner",scope).cursor,revision=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
-  const candidate=await f.host.prepareMigration("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource,expected,migrationSql:"SELECT 1;"});
-  f.host.archiveDataset("owner",scope);f.host.restoreDataset("owner",scope);
-  await expect(f.host.approveMigration("owner",{...scope,candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256})).rejects.toThrow("You do not have access to this Collection.");
+it("invalidates prepared migration authority after archive and restore", async () => {
+  const f = await fixture();
+  await f.activate();
+  const expected = f.host.approvedArtifacts("owner", scope).cursor,
+    revision = describeDatasetRevision({ definition, revision: 2, schemaSql, operationSource });
+  const candidate = await f.host.prepareMigration("owner", {
+    workspaceId: scope.workspaceId,
+    revision,
+    schemaSql,
+    operationSource,
+    expected,
+    migrationSql: "SELECT 1;",
+  });
+  f.host.archiveDataset("owner", scope);
+  f.host.restoreDataset("owner", scope);
+  await expect(
+    f.host.approveMigration("owner", {
+      ...scope,
+      candidateId: candidate.candidateId,
+      checkpointSha256: candidate.checkpointSha256,
+    }),
+  ).rejects.toThrow("You do not have access to this Collection.");
 });
 
-
 it("migrates records atomically and retains stale grants for explicit reapproval", async () => {
-  const f = await fixture(); await f.activate(); await f.invoke("owner", id(6), { value: "saved" });
+  const f = await fixture();
+  await f.activate();
+  await f.invoke("owner", id(6), { value: "saved" });
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding([id(6), id(7)]) });
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
   const expected = f.host.approvedArtifacts("owner", scope).cursor;
-  const nextDefinition = structuredClone(definition); nextDefinition.name = "Orders updated";
-  const nextSchema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '');";
-  const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql: nextSchema, operationSource });
-  const migrated = await f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql: nextSchema, operationSource, expected,
-    migrationSql: "ALTER TABLE items ADD COLUMN notes TEXT NOT NULL DEFAULT '';" });
+  const nextDefinition = structuredClone(definition);
+  nextDefinition.name = "Orders updated";
+  const nextSchema =
+    "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '');";
+  const revision = describeDatasetRevision({
+    definition: nextDefinition,
+    revision: 2,
+    schemaSql: nextSchema,
+    operationSource,
+  });
+  const migrated = await f.host.migrate("owner", {
+    workspaceId: "workspace",
+    revision,
+    schemaSql: nextSchema,
+    operationSource,
+    expected,
+    migrationSql: "ALTER TABLE items ADD COLUMN notes TEXT NOT NULL DEFAULT '';",
+  });
   expect(migrated.cursor.revision).toBe(expected.revision + 1);
   expect(f.host.approvedArtifacts("owner", scope).schemaSql).toBe(nextSchema);
-  expect(f.host.permissions("owner", scope).permissions.map(permission => permission.current)).toEqual([false, false]);
-  expect(() => f.host.permissions("helper", scope)).toThrow("You do not have access to this Collection.");
+  expect(
+    f.host.permissions("owner", scope).permissions.map((permission) => permission.current),
+  ).toEqual([false, false]);
+  expect(() => f.host.permissions("helper", scope)).toThrow(
+    "You do not have access to this Collection.",
+  );
   expect(f.host.list("helper", { workspaceId: "workspace" }).datasets).toEqual([]);
-  await expect(f.invoke("helper", id(7))).rejects.toThrow("Its owner must approve this access again.");
+  await expect(f.invoke("helper", id(7))).rejects.toThrow(
+    "Its owner must approve this access again.",
+  );
   await expect(f.invoke("friend", id(6), { value: "another" }, "form")).rejects.toThrow();
-  expect(() => f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } })).toThrow("Choose it again.");
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 2, revisionSha256: revision.revisionSha256, operationIds: [id(7)], discover: true } });
-  const result = await f.host.invoke("helper", { ...scope, revision: 2, revisionSha256: revision.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "read-new" });
+  expect(() =>
+    f.host.setDataGrant("owner", {
+      ...scope,
+      principalKey: "helper",
+      grant: {
+        revision: 1,
+        revisionSha256: prepared.revision.revisionSha256,
+        operationIds: [id(7)],
+        discover: true,
+      },
+    }),
+  ).toThrow("Choose it again.");
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 2,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
+  const result = await f.host.invoke("helper", {
+    ...scope,
+    revision: 2,
+    revisionSha256: revision.revisionSha256,
+    operationId: id(7),
+    input: {},
+    idempotencyKey: "read-new",
+  });
   expect(result.result).toMatchObject([{ value: "saved" }]);
-  expect(f.host.permissions("owner", { ...scope, limit: 1 })).toMatchObject({ nextCursor: "app:form" });
+  expect(f.host.permissions("owner", { ...scope, limit: 1 })).toMatchObject({
+    nextCursor: "app:form",
+  });
 });
 
 it("rolls back migration approval when accounting refuses and rejects a stale preview", async () => {
   const stageDeltas: number[] = [];
-  const f = await fixture({ accountCheckpointStage(_context, allocation) { stageDeltas.push(allocation.bytes); }, accountMigration() { throw new Error("final migration quota"); } }); await f.activate();
+  const f = await fixture({
+    accountCheckpointStage(_context, allocation) {
+      stageDeltas.push(allocation.bytes);
+    },
+    accountMigration() {
+      throw new Error("final migration quota");
+    },
+  });
+  await f.activate();
   const expected = f.host.approvedArtifacts("owner", scope).cursor;
   const nextDefinition = { ...definition, name: "Next" };
-  const revision = describeDatasetRevision({ definition: nextDefinition, revision: 2, schemaSql, operationSource });
-  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow("final migration quota");
+  const revision = describeDatasetRevision({
+    definition: nextDefinition,
+    revision: 2,
+    schemaSql,
+    operationSource,
+  });
+  await expect(
+    f.host.migrate("owner", {
+      workspaceId: "workspace",
+      revision,
+      schemaSql,
+      operationSource,
+      expected,
+      migrationSql: "SELECT 1;",
+    }),
+  ).rejects.toThrow("final migration quota");
   expect(stageDeltas.length).toBe(2);
   expect(stageDeltas[0]).toBeGreaterThan(0);
   expect(stageDeltas[1]).toBe(-stageDeltas[0]!);
   expect(f.host.approvedArtifacts("owner", scope).revision).toEqual(prepared.revision);
   await f.invoke("owner", id(6), { value: "new record" });
-  await expect(f.host.migrate("owner", { workspaceId: "workspace", revision, schemaSql, operationSource, expected, migrationSql: "SELECT 1;" })).rejects.toThrow();
+  await expect(
+    f.host.migrate("owner", {
+      workspaceId: "workspace",
+      revision,
+      schemaSql,
+      operationSource,
+      expected,
+      migrationSql: "SELECT 1;",
+    }),
+  ).rejects.toThrow();
   expect((await f.invoke("owner", id(7))).result).toMatchObject([{ value: "new record" }]);
 });
 
 it("commits app publication with its binding and rolls both back on failure", async () => {
-  const f = await fixture(); await f.activate();
+  const f = await fixture();
+  await f.activate();
   f.db.exec("CREATE TABLE publications(id TEXT PRIMARY KEY);");
-  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => {
-    f.db.prepare("INSERT INTO publications VALUES('form')").run(); throw new Error("publication failed");
-  })).toThrow("publication failed");
+  expect(() =>
+    f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => {
+      f.db.prepare("INSERT INTO publications VALUES('form')").run();
+      throw new Error("publication failed");
+    }),
+  ).toThrow("publication failed");
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(0);
   expect(f.host.permissions("owner", scope).permissions).toEqual([]);
-  expect(() => f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, async () => {})).toThrow("synchronous");
+  expect(() =>
+    f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, async () => {}),
+  ).toThrow("synchronous");
   expect(f.host.permissions("owner", scope).permissions).toEqual([]);
-  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => { f.db.prepare("INSERT INTO publications VALUES('form')").run(); });
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() }, () => {
+    f.db.prepare("INSERT INTO publications VALUES('form')").run();
+  });
   expect(f.db.prepare("SELECT COUNT(*) AS n FROM publications").get()!.n).toBe(1);
   expect(f.host.permissions("owner", scope).permissions).toHaveLength(1);
 });
 
 it("enforces a form's create-field subset before operation execution", async () => {
-  const source = operationSource.replace("input.value,'private'",`input.values['${id(4)}'],'private'`);
-  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource: source });
-  const f = await fixture();await f.host.activate("owner",{workspaceId:"workspace",revision,schemaSql,operationSource:source});
-  f.host.setBinding("owner",{...scope,appId:"form",binding:{...f.binding(),revisionSha256:revision.revisionSha256,createFields:[{operationId:id(6),fieldIds:[id(4)]}]}});
-  const invoke=(input:any)=>f.host.invoke("friend",{...scope,revision:1,revisionSha256:revision.revisionSha256,operationId:id(6),input,idempotencyKey:"form",access:{kind:"app",appId:"form"}});
-  for(const input of [{value:"bypass"},{values:{[id(4)]:"good",[id(5)]:"private"}},{values:{[id(4)]:"good"},sql:"bypass"},{values:[]}]) {
+  const source = operationSource.replace(
+    "input.value,'private'",
+    `input.values['${id(4)}'],'private'`,
+  );
+  const revision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql,
+    operationSource: source,
+  });
+  const f = await fixture();
+  await f.host.activate("owner", {
+    workspaceId: "workspace",
+    revision,
+    schemaSql,
+    operationSource: source,
+  });
+  f.host.setBinding("owner", {
+    ...scope,
+    appId: "form",
+    binding: {
+      ...f.binding(),
+      revisionSha256: revision.revisionSha256,
+      createFields: [{ operationId: id(6), fieldIds: [id(4)] }],
+    },
+  });
+  const invoke = (input: any) =>
+    f.host.invoke("friend", {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId: id(6),
+      input,
+      idempotencyKey: "form",
+      access: { kind: "app", appId: "form" },
+    });
+  for (const input of [
+    { value: "bypass" },
+    { values: { [id(4)]: "good", [id(5)]: "private" } },
+    { values: { [id(4)]: "good" }, sql: "bypass" },
+    { values: [] },
+  ]) {
     await expect(invoke(input)).rejects.toThrow("cannot submit those fields");
   }
-  expect(f.journal.head(scope,()=>{}).cursor.revision).toBe(0);
-  await expect(invoke({values:{[id(4)]:"allowed"}})).resolves.toMatchObject({result:{accepted:true},revision:1});
+  expect(f.journal.head(scope, () => {}).cursor.revision).toBe(0);
+  await expect(invoke({ values: { [id(4)]: "allowed" } })).resolves.toMatchObject({
+    result: { accepted: true },
+    revision: 1,
+  });
 });
 
-it("rechecks grants and data revision when a protected resource is read",async()=>{
-  const f=await fixture();await f.activate();
-  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:{revision:1,revisionSha256:prepared.revision.revisionSha256,operationIds:[id(7)],discover:true}});
-  const request={...scope,revision:1,revisionSha256:prepared.revision.revisionSha256,operationId:id(7),input:{},idempotencyKey:"file"};
-  let read=false;
-  const pending=f.host.readOperation("helper",request,()=>{read=true;return Buffer.from("file");});
-  f.host.setDataGrant("owner",{...scope,principalKey:"helper",grant:null});
-  await expect(pending).rejects.toThrow("You do not have access to this Collection.");expect(read).toBe(false);
-  await expect(f.host.readOperation("owner",request,()=>Buffer.from("file"))).resolves.toEqual(Buffer.from("file"));
-  await expect(f.host.readOperation("owner",request,async()=>{read=true;})).rejects.toThrow("synchronous");expect(read).toBe(false);
-  await expect(f.host.readOperation("owner",{...request,operationId:id(6)},()=>"file")).rejects.toThrow("only reads");
+it("rechecks grants and data revision when a protected resource is read", async () => {
+  const f = await fixture();
+  await f.activate();
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
+  const request = {
+    ...scope,
+    revision: 1,
+    revisionSha256: prepared.revision.revisionSha256,
+    operationId: id(7),
+    input: {},
+    idempotencyKey: "file",
+  };
+  let read = false;
+  const pending = f.host.readOperation("helper", request, () => {
+    read = true;
+    return Buffer.from("file");
+  });
+  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: null });
+  await expect(pending).rejects.toThrow("You do not have access to this Collection.");
+  expect(read).toBe(false);
+  await expect(f.host.readOperation("owner", request, () => Buffer.from("file"))).resolves.toEqual(
+    Buffer.from("file"),
+  );
+  await expect(
+    f.host.readOperation("owner", request, async () => {
+      read = true;
+    }),
+  ).rejects.toThrow("synchronous");
+  expect(read).toBe(false);
+  await expect(
+    f.host.readOperation("owner", { ...request, operationId: id(6) }, () => "file"),
+  ).rejects.toThrow("only reads");
 });
 
-it("refuses file disclosure when a committed row change removes visibility after the read result",async()=>{
-  const f=await fixture(),visibleSource=operationSource.replace("'SELECT id,value FROM items ORDER BY id'","'SELECT id,value FROM items WHERE value=? ORDER BY id',['visible']");
-  const revision=describeDatasetRevision({definition,revision:1,schemaSql,operationSource:visibleSource});
-  await f.host.activate("owner",{workspaceId:scope.workspaceId,revision,schemaSql,operationSource:visibleSource});
-  const base={...scope,revision:1,revisionSha256:revision.revisionSha256};
-  await f.host.invoke("owner",{...base,operationId:id(6),input:{value:"visible"},idempotencyKey:"create-visible"});
-  const invoke=f.host.invoke.bind(f.host);
-  f.host.invoke=async(context,input)=>{
-    const result=await invoke(context,input);
-    const record=(result.result as Array<{id:string}>)[0]!;
-    await invoke("owner",{...base,operationId:id(8),input:{id:record.id,value:"hidden"},idempotencyKey:"hide-before-disclosure"});
+it("refuses file disclosure when a committed row change removes visibility after the read result", async () => {
+  const f = await fixture(),
+    visibleSource = operationSource.replace(
+      "'SELECT id,value FROM items ORDER BY id'",
+      "'SELECT id,value FROM items WHERE value=? ORDER BY id',['visible']",
+    );
+  const revision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql,
+    operationSource: visibleSource,
+  });
+  await f.host.activate("owner", {
+    workspaceId: scope.workspaceId,
+    revision,
+    schemaSql,
+    operationSource: visibleSource,
+  });
+  const base = { ...scope, revision: 1, revisionSha256: revision.revisionSha256 };
+  await f.host.invoke("owner", {
+    ...base,
+    operationId: id(6),
+    input: { value: "visible" },
+    idempotencyKey: "create-visible",
+  });
+  const invoke = f.host.invoke.bind(f.host);
+  f.host.invoke = async (context, input) => {
+    const result = await invoke(context, input);
+    const record = (result.result as Array<{ id: string }>)[0]!;
+    await invoke("owner", {
+      ...base,
+      operationId: id(8),
+      input: { id: record.id, value: "hidden" },
+      idempotencyKey: "hide-before-disclosure",
+    });
     return result;
   };
-  let disclosed=false;
-  await expect(f.host.readOperation("owner",{...base,operationId:id(7),input:{},idempotencyKey:"read-visible"},()=>{disclosed=true;return "private receipt";})).rejects.toThrow("The Collection changed before dohc opened this file");
+  let disclosed = false;
+  await expect(
+    f.host.readOperation(
+      "owner",
+      { ...base, operationId: id(7), input: {}, idempotencyKey: "read-visible" },
+      () => {
+        disclosed = true;
+        return "private receipt";
+      },
+    ),
+  ).rejects.toThrow("The Collection changed before dohc opened this file");
   expect(disclosed).toBe(false);
-  expect((await invoke("owner",{...base,operationId:id(7),input:{},idempotencyKey:"check-hidden"})).result).toEqual([]);
+  expect(
+    (
+      await invoke("owner", {
+        ...base,
+        operationId: id(7),
+        input: {},
+        idempotencyKey: "check-hidden",
+      })
+    ).result,
+  ).toEqual([]);
 });
 
 it("lets only owners acknowledge an exact committed response without exposing participant retry secrets", async () => {
   let refunded = 0;
-  const f = await fixture({accountMetadata(_context, allocation) {refunded += allocation.bytes;}}); await f.activate();
-  f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const attemptScope = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
-  const pending = attempts.request(attemptScope, {action: "save", idempotencyKey: "request", input: {value: "private answer"}}, () => {});
+  const f = await fixture({
+    accountMetadata(_context, allocation) {
+      refunded += allocation.bytes;
+    },
+  });
+  await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  const attempts = createDatasetAttempts({ db: f.db, transaction: f.transaction, account() {} });
+  const attemptScope = {
+    ...scope,
+    appId: "form",
+    principalKey: "friend",
+    operationId: id(6),
+    revisionSha256: prepared.revision.revisionSha256,
+  };
+  const pending = attempts.request(
+    attemptScope,
+    { action: "save", idempotencyKey: "request", input: { value: "private answer" } },
+    () => {},
+  );
   const unconfirmed = f.host.pendingAttempts("owner", scope).entries[0]!;
-  expect(unconfirmed).toMatchObject({operation: "Submit", outcome: "unconfirmed", revision: null, recordedAtMs: null});
-  expect(() => f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true})).toThrow("unconfirmed");
-  await f.invoke("friend", id(6), {value: "private answer"}, "form");
+  expect(unconfirmed).toMatchObject({
+    operation: "Submit",
+    outcome: "unconfirmed",
+    revision: null,
+    recordedAtMs: null,
+  });
+  expect(() =>
+    f.host.reconcileAttempt("owner", {
+      ...scope,
+      reference: unconfirmed.reference,
+      acknowledge: true,
+    }),
+  ).toThrow("unconfirmed");
+  await f.invoke("friend", id(6), { value: "private answer" }, "form");
   const review = f.host.pendingAttempts("owner", scope);
-  expect(review.entries[0]).toMatchObject({reference: unconfirmed.reference, operation: "Submit", outcome: "committed", revision: 1, attachmentCount: 0});
+  expect(review.entries[0]).toMatchObject({
+    reference: unconfirmed.reference,
+    operation: "Submit",
+    outcome: "committed",
+    revision: 1,
+    attachmentCount: 0,
+  });
   expect(JSON.stringify(review)).not.toMatch(/private answer|friend|idempotency|principal|token/);
   for (const caller of ["friend", "helper"] as const) {
-    expect(() => f.host.pendingAttempts(caller, scope)).toThrow("You do not have access to this Collection.");
-    expect(() => f.host.reconcileAttempt(caller, {...scope, reference: unconfirmed.reference, acknowledge: true})).toThrow("You do not have access to this Collection.");
+    expect(() => f.host.pendingAttempts(caller, scope)).toThrow(
+      "You do not have access to this Collection.",
+    );
+    expect(() =>
+      f.host.reconcileAttempt(caller, {
+        ...scope,
+        reference: unconfirmed.reference,
+        acknowledge: true,
+      }),
+    ).toThrow("You do not have access to this Collection.");
   }
-  expect(() => f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: false as true})).toThrow("Review");
+  expect(() =>
+    f.host.reconcileAttempt("owner", {
+      ...scope,
+      reference: unconfirmed.reference,
+      acknowledge: false as true,
+    }),
+  ).toThrow("Review");
   const before = refunded;
-  expect(f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true})).toEqual({cleared: true});
+  expect(
+    f.host.reconcileAttempt("owner", {
+      ...scope,
+      reference: unconfirmed.reference,
+      acknowledge: true,
+    }),
+  ).toEqual({ cleared: true });
   expect(refunded).toBeLessThan(before);
-  expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual({attempt: null});
-  expect((await f.invoke("friend", id(6), {value: "private answer"}, "form")).replayed).toBe(true);
-  const next = attempts.request(attemptScope, {action: "save", idempotencyKey: "new", input: {value: "Next"}}, () => {});
-  f.host.reconcileAttempt("owner", {...scope, reference: unconfirmed.reference, acknowledge: true});
-  expect(attempts.request(attemptScope, {action: "get"}, () => {})).toEqual(next);
+  expect(attempts.request(attemptScope, { action: "get" }, () => {})).toEqual({ attempt: null });
+  expect((await f.invoke("friend", id(6), { value: "private answer" }, "form")).replayed).toBe(
+    true,
+  );
+  const next = attempts.request(
+    attemptScope,
+    { action: "save", idempotencyKey: "new", input: { value: "Next" } },
+    () => {},
+  );
+  f.host.reconcileAttempt("owner", {
+    ...scope,
+    reference: unconfirmed.reference,
+    acknowledge: true,
+  });
+  expect(attempts.request(attemptScope, { action: "get" }, () => {})).toEqual(next);
   expect(next.attempt!.token).not.toBe(pending.attempt!.token);
 });
 
 it("cancels an unconfirmed retry before queued execution and permanently refuses its key", async () => {
-  const f = await fixture(); await f.activate(); f.host.setBinding("owner", {...scope, appId: "form", binding: f.binding()});
-  const attempts = createDatasetAttempts({db: f.db, transaction: f.transaction, account() {}});
-  const selected = {...scope, appId: "form", principalKey: "friend", operationId: id(6), revisionSha256: prepared.revision.revisionSha256};
-  const saved = attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "cancelled"}}, () => {});
+  const f = await fixture();
+  await f.activate();
+  f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
+  const attempts = createDatasetAttempts({ db: f.db, transaction: f.transaction, account() {} });
+  const selected = {
+    ...scope,
+    appId: "form",
+    principalKey: "friend",
+    operationId: id(6),
+    revisionSha256: prepared.revision.revisionSha256,
+  };
+  const saved = attempts.request(
+    selected,
+    { action: "save", idempotencyKey: "request", input: { value: "cancelled" } },
+    () => {},
+  );
   const reference = f.host.pendingAttempts("owner", scope).entries[0]!.reference;
   expect(() => assertDatasetAttemptsCommitted(f.db, scope)).toThrow("unconfirmed");
-  for (const caller of ["helper", "friend"] as const) expect(() => f.host.cancelAttempt(caller, {...scope, reference, acknowledge: true})).toThrow("You do not have access to this Collection.");
-  expect(() => f.host.cancelAttempt("owner", {...scope, reference, acknowledge: false as true})).toThrow("Review");
-  const queued = f.invoke("friend", id(6), {value: "cancelled"}, "form");
-  expect(f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toEqual({cancelled: true});
+  for (const caller of ["helper", "friend"] as const)
+    expect(() => f.host.cancelAttempt(caller, { ...scope, reference, acknowledge: true })).toThrow(
+      "You do not have access to this Collection.",
+    );
+  expect(() =>
+    f.host.cancelAttempt("owner", { ...scope, reference, acknowledge: false as true }),
+  ).toThrow("Review");
+  const queued = f.invoke("friend", id(6), { value: "cancelled" }, "form");
+  expect(f.host.cancelAttempt("owner", { ...scope, reference, acknowledge: true })).toEqual({
+    cancelled: true,
+  });
   await expect(queued).rejects.toThrow("cancelled");
   expect(() => assertDatasetAttemptsCommitted(f.db, scope)).not.toThrow();
-  expect(f.host.cancelAttempt("owner", {...scope, reference, acknowledge: true})).toEqual({cancelled: true});
-  expect(attempts.request(selected, {action: "clear", token: saved.attempt!.token}, () => {})).toEqual({attempt: null});
-  expect(() => attempts.request(selected, {action: "save", idempotencyKey: "request", input: {value: "changed"}}, () => {})).toThrow("cancelled");
-  await expect(f.invoke("friend", id(6), {value: "changed"}, "form")).rejects.toThrow("cancelled");
+  expect(f.host.cancelAttempt("owner", { ...scope, reference, acknowledge: true })).toEqual({
+    cancelled: true,
+  });
+  expect(
+    attempts.request(selected, { action: "clear", token: saved.attempt!.token }, () => {}),
+  ).toEqual({ attempt: null });
+  expect(() =>
+    attempts.request(
+      selected,
+      { action: "save", idempotencyKey: "request", input: { value: "changed" } },
+      () => {},
+    ),
+  ).toThrow("cancelled");
+  await expect(f.invoke("friend", id(6), { value: "changed" }, "form")).rejects.toThrow(
+    "cancelled",
+  );
   expect((await f.invoke("owner", id(7))).result).toEqual([]);
-  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_receipts WHERE idempotency_key='request'").get()!.n).toBe(0);
-  attempts.request(selected, {action: "save", idempotencyKey: "new-key", input: {value: "new"}}, () => {});
-  await expect(f.host.invoke("friend", {...scope, access: {kind: "app", appId: "form"}, revision: 1, revisionSha256: selected.revisionSha256, operationId: id(6), input: {value: "new"}, idempotencyKey: "new-key"})).resolves.toMatchObject({replayed: false});
+  expect(
+    f.db
+      .prepare("SELECT COUNT(*) n FROM dohc_dataset_receipts WHERE idempotency_key='request'")
+      .get()!.n,
+  ).toBe(0);
+  attempts.request(
+    selected,
+    { action: "save", idempotencyKey: "new-key", input: { value: "new" } },
+    () => {},
+  );
+  await expect(
+    f.host.invoke("friend", {
+      ...scope,
+      access: { kind: "app", appId: "form" },
+      revision: 1,
+      revisionSha256: selected.revisionSha256,
+      operationId: id(6),
+      input: { value: "new" },
+      idempotencyKey: "new-key",
+    }),
+  ).resolves.toMatchObject({ replayed: false });
 });
 
 it("connects schema history to immutable source and reverses rules forward without losing newer records or restoring grants", async () => {
-  const f = await fixture(); await f.activate();
-  f.host.setDataGrant("owner", { ...scope, principalKey: "helper", grant: { revision: 1, revisionSha256: prepared.revision.revisionSha256, operationIds: [id(7)], discover: true } });
+  const f = await fixture();
+  await f.activate();
+  f.host.setDataGrant("owner", {
+    ...scope,
+    principalKey: "helper",
+    grant: {
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationIds: [id(7)],
+      discover: true,
+    },
+  });
   await f.invoke("owner", id(6), { value: "before" });
-  const source2 = operationSource.replace("return {accepted:true};", "return {accepted:true,updated:true};");
-  const revision2 = describeDatasetRevision({ definition, revision: 2, schemaSql, operationSource: source2 });
+  const source2 = operationSource.replace(
+    "return {accepted:true};",
+    "return {accepted:true,updated:true};",
+  );
+  const revision2 = describeDatasetRevision({
+    definition,
+    revision: 2,
+    schemaSql,
+    operationSource: source2,
+  });
   const expected = f.host.approvedArtifacts("owner", scope).cursor;
-  const change = await f.host.prepareMigration("owner", { workspaceId: scope.workspaceId, revision: revision2, schemaSql, operationSource: source2, expected, migrationSql: "SELECT 1;" });
-  await f.host.approveMigration("owner", { ...scope, candidateId: change.candidateId, checkpointSha256: change.checkpointSha256 });
-  await f.host.invoke("owner", { ...scope, revision: 2, revisionSha256: revision2.revisionSha256, operationId: id(6), input: { value: "later registration" }, idempotencyKey: "later" });
-  const saved = f.host.historyRevision("owner", { ...scope, revisionSha256: prepared.revision.revisionSha256 });
+  const change = await f.host.prepareMigration("owner", {
+    workspaceId: scope.workspaceId,
+    revision: revision2,
+    schemaSql,
+    operationSource: source2,
+    expected,
+    migrationSql: "SELECT 1;",
+  });
+  await f.host.approveMigration("owner", {
+    ...scope,
+    candidateId: change.candidateId,
+    checkpointSha256: change.checkpointSha256,
+  });
+  await f.host.invoke("owner", {
+    ...scope,
+    revision: 2,
+    revisionSha256: revision2.revisionSha256,
+    operationId: id(6),
+    input: { value: "later registration" },
+    idempotencyKey: "later",
+  });
+  const saved = f.host.historyRevision("owner", {
+    ...scope,
+    revisionSha256: prepared.revision.revisionSha256,
+  });
   expect(saved).toEqual(prepared);
-  for (const caller of ["helper", "friend"] as const) expect(() => f.host.historyRevision(caller, { ...scope, revisionSha256: prepared.revision.revisionSha256 })).toThrow("You do not have access to this Collection.");
-  expect(() => f.host.historyRevision("owner", { ...scope, datasetId: id(99), revisionSha256: prepared.revision.revisionSha256 })).toThrow();
+  for (const caller of ["helper", "friend"] as const)
+    expect(() =>
+      f.host.historyRevision(caller, {
+        ...scope,
+        revisionSha256: prepared.revision.revisionSha256,
+      }),
+    ).toThrow("You do not have access to this Collection.");
+  expect(() =>
+    f.host.historyRevision("owner", {
+      ...scope,
+      datasetId: id(99),
+      revisionSha256: prepared.revision.revisionSha256,
+    }),
+  ).toThrow();
   const grants = f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all();
-  const revision3 = describeDatasetRevision({ ...saved, definition: saved.revision.definition, revision: 3 });
-  const reverse = await f.host.prepareMigration("owner", { workspaceId: scope.workspaceId, ...saved, revision: revision3, expected: f.host.approvedArtifacts("owner", scope).cursor, migrationSql: "SELECT 1;" });
-  await f.host.approveMigration("owner", { ...scope, candidateId: reverse.candidateId, checkpointSha256: reverse.checkpointSha256 });
-  const rows = await f.host.invoke("owner", { ...scope, revision: 3, revisionSha256: revision3.revisionSha256, operationId: id(7), input: {}, idempotencyKey: "read-current" });
-  expect(rows.result).toEqual(expect.arrayContaining([expect.objectContaining({ value: "before" }), expect.objectContaining({ value: "later registration" })]));
+  const revision3 = describeDatasetRevision({
+    ...saved,
+    definition: saved.revision.definition,
+    revision: 3,
+  });
+  const reverse = await f.host.prepareMigration("owner", {
+    workspaceId: scope.workspaceId,
+    ...saved,
+    revision: revision3,
+    expected: f.host.approvedArtifacts("owner", scope).cursor,
+    migrationSql: "SELECT 1;",
+  });
+  await f.host.approveMigration("owner", {
+    ...scope,
+    candidateId: reverse.candidateId,
+    checkpointSha256: reverse.checkpointSha256,
+  });
+  const rows = await f.host.invoke("owner", {
+    ...scope,
+    revision: 3,
+    revisionSha256: revision3.revisionSha256,
+    operationId: id(7),
+    input: {},
+    idempotencyKey: "read-current",
+  });
+  expect(rows.result).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ value: "before" }),
+      expect.objectContaining({ value: "later registration" }),
+    ]),
+  );
   expect(f.db.prepare("SELECT * FROM dohc_dataset_data_grants").all()).toEqual(grants);
   const page = f.host.history("owner", { ...scope, limit: 2 });
-  expect(page.entries.map(row => row.revision)).toEqual([4, 3]);
-  expect(page.entries[0]).toMatchObject({ operation: "Fields and rules", callerReference: null, recordedAtMs: expect.any(Number),
-    schema: { previousRevisionHash: revision2.revisionSha256, revisionHash: revision3.revisionSha256 } });
-  const older = f.host.history("owner", { ...scope, beforeRevision: page.nextBeforeRevision!, limit: 2 });
-  expect(older.entries.map(row => row.revision)).toEqual([2, 1]);
-  expect(older.entries[0]!.schema).toMatchObject({ previousRevisionHash: prepared.revision.revisionSha256, revisionHash: revision2.revisionSha256 });
+  expect(page.entries.map((row) => row.revision)).toEqual([4, 3]);
+  expect(page.entries[0]).toMatchObject({
+    operation: "Fields and rules",
+    callerReference: null,
+    recordedAtMs: expect.any(Number),
+    schema: {
+      previousRevisionHash: revision2.revisionSha256,
+      revisionHash: revision3.revisionSha256,
+    },
+  });
+  const older = f.host.history("owner", {
+    ...scope,
+    beforeRevision: page.nextBeforeRevision!,
+    limit: 2,
+  });
+  expect(older.entries.map((row) => row.revision)).toEqual([2, 1]);
+  expect(older.entries[0]!.schema).toMatchObject({
+    previousRevisionHash: prepared.revision.revisionSha256,
+    revisionHash: revision2.revisionSha256,
+  });
   expect(JSON.stringify(page)).not.toContain("later registration");
-  f.db.prepare("UPDATE dohc_dataset_catalog_history SET artifacts_json=? WHERE revision=1").run(JSON.stringify({ schemaSql, operationSource: "tampered" }));
-  expect(() => f.host.historyRevision("owner", { ...scope, revisionSha256: prepared.revision.revisionSha256 })).toThrow();
-
+  f.db
+    .prepare("UPDATE dohc_dataset_catalog_history SET artifacts_json=? WHERE revision=1")
+    .run(JSON.stringify({ schemaSql, operationSource: "tampered" }));
+  expect(() =>
+    f.host.historyRevision("owner", { ...scope, revisionSha256: prepared.revision.revisionSha256 }),
+  ).toThrow();
 });
 
 async function linkReadFixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
@@ -495,25 +1343,84 @@ async function linkReadFixture(overrides: Partial<DatasetHostOptions<Context>> =
   const secret = generated.tables[0]!.fields[2]!;
   if (secret.type !== "button") secret.default = "private";
   generated.tables[0]!.fields.push(
-    { fieldId: id(10), name: "Tags", sqlColumn: "tags", type: "multi-select", options: ["New", "Done"], required: false, unique: false },
-    { fieldId: id(11), name: "Related", sqlColumn: "related", type: "relation", relation: { datasetId: id(1), tableId: id(20), fieldId: id(21), many: true }, required: false, unique: false },
-    { fieldId: id(12), name: "Count", sqlColumn: "count", type: "number", required: false, unique: false },
+    {
+      fieldId: id(10),
+      name: "Tags",
+      sqlColumn: "tags",
+      type: "multi-select",
+      options: ["New", "Done"],
+      required: false,
+      unique: false,
+    },
+    {
+      fieldId: id(11),
+      name: "Related",
+      sqlColumn: "related",
+      type: "relation",
+      relation: { datasetId: id(1), tableId: id(20), fieldId: id(21), many: true },
+      required: false,
+      unique: false,
+    },
+    {
+      fieldId: id(12),
+      name: "Count",
+      sqlColumn: "count",
+      type: "number",
+      required: false,
+      unique: false,
+    },
   );
-  generated.tables.push({ tableId: id(20), name: "Other", sqlName: "other", primaryKey: "id", fields: [
-    { fieldId: id(21), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
-    { fieldId: id(22), name: "Private", sqlColumn: "private", type: "text", required: true, unique: false },
-  ] });
+  generated.tables.push({
+    tableId: id(20),
+    name: "Other",
+    sqlName: "other",
+    primaryKey: "id",
+    fields: [
+      { fieldId: id(21), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+      {
+        fieldId: id(22),
+        name: "Private",
+        sqlColumn: "private",
+        type: "text",
+        required: true,
+        unique: false,
+      },
+    ],
+  });
   generated.operations[1]!.fieldIds.push(id(10), id(11), id(12));
   const source = generateDatasetOperations(generated);
-  const schema = "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL DEFAULT 'private',tags TEXT,related TEXT,count REAL,_record_version INTEGER NOT NULL DEFAULT 1); CREATE TABLE other(id TEXT PRIMARY KEY NOT NULL,private TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1);";
-  const revision = describeDatasetRevision({ definition: generated, revision: 1, schemaSql: schema, operationSource: source });
-  await f.host.activate("owner", { workspaceId: scope.workspaceId, revision, schemaSql: schema, operationSource: source });
-  const binding = { ...f.binding([id(6), id(7), id(8), id(9)]), revisionSha256: revision.revisionSha256 };
-  const approved = { ...binding, linkReads: [{ operationId: id(7), fieldIds: generated.operations[1]!.fieldIds }] };
-  const invoke = (context: Context, operationId: string, input: JsonValue = {}, app = true) => f.host.invoke(context, {
-    ...scope, revision: 1, revisionSha256: revision.revisionSha256, operationId, input, idempotencyKey: crypto.randomUUID(),
-    ...(app ? { access: { kind: "app" as const, appId: "form" } } : {}),
+  const schema =
+    "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,value TEXT NOT NULL,secret TEXT NOT NULL DEFAULT 'private',tags TEXT,related TEXT,count REAL,_record_version INTEGER NOT NULL DEFAULT 1); CREATE TABLE other(id TEXT PRIMARY KEY NOT NULL,private TEXT NOT NULL,_record_version INTEGER NOT NULL DEFAULT 1);";
+  const revision = describeDatasetRevision({
+    definition: generated,
+    revision: 1,
+    schemaSql: schema,
+    operationSource: source,
   });
+  await f.host.activate("owner", {
+    workspaceId: scope.workspaceId,
+    revision,
+    schemaSql: schema,
+    operationSource: source,
+  });
+  const binding = {
+    ...f.binding([id(6), id(7), id(8), id(9)]),
+    revisionSha256: revision.revisionSha256,
+  };
+  const approved = {
+    ...binding,
+    linkReads: [{ operationId: id(7), fieldIds: generated.operations[1]!.fieldIds }],
+  };
+  const invoke = (context: Context, operationId: string, input: JsonValue = {}, app = true) =>
+    f.host.invoke(context, {
+      ...scope,
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationId,
+      input,
+      idempotencyKey: crypto.randomUUID(),
+      ...(app ? { access: { kind: "app" as const, appId: "form" } } : {}),
+    });
   return { ...f, generated, revision, binding, approved, invoke };
 }
 it("reads approved fields for link and named recipients, preserves form creates, and withdraws access", async () => {
@@ -526,12 +1433,24 @@ it("reads approved fields for link and named recipients, preserves form creates,
     const result = await f.invoke(context, id(7));
     expect(result.result).toMatchObject({ rows: [{ values: { [id(4)]: "First" } }] });
     expect(JSON.stringify(result.result)).not.toContain("private");
-    for (const operation of [id(8), id(9)]) await expect(f.invoke(context, operation)).rejects.toThrow("access");
+    for (const operation of [id(8), id(9)])
+      await expect(f.invoke(context, operation)).rejects.toThrow("access");
   }
-  expect((await f.invoke("friend", id(7), { groupBy: id(4), limit: 8 })).result).toEqual({ groupBy: id(4), groups: ["First"], nextGroupCursor: null });
-  for (const [fieldId, value] of [[id(10), ["New"]], [id(11), ["related-record"]]] as const) {
+  expect((await f.invoke("friend", id(7), { groupBy: id(4), limit: 8 })).result).toEqual({
+    groupBy: id(4),
+    groups: ["First"],
+    nextGroupCursor: null,
+  });
+  for (const [fieldId, value] of [
+    [id(10), ["New"]],
+    [id(11), ["related-record"]],
+  ] as const) {
     const group = { fieldId, value: [...value] };
-    expect((await f.invoke("friend", id(7), { group })).result).toEqual({ rows: [], nextCursor: null, group });
+    expect((await f.invoke("friend", id(7), { group })).result).toEqual({
+      rows: [],
+      nextCursor: null,
+      group,
+    });
   }
   f.host.setBinding("owner", { ...scope, appId: "form", binding: null });
   await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
@@ -541,11 +1460,13 @@ it("confines approved reads to their own table after a full-table operation", as
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
   await f.invoke("owner", id(6), { values: { [id(4)]: "First" } }, false);
   const original = f.supervisor.invoke.bind(f.supervisor);
-  vi.spyOn(f.supervisor, "invoke").mockImplementation(input => {
+  vi.spyOn(f.supervisor, "invoke").mockImplementation((input) => {
     expect(input.tables).toEqual(["items"]);
     return original(input);
   });
-  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({ result: { rows: [{ values: { [id(4)]: "First" } }] } });
+  await expect(f.invoke("friend", id(7))).resolves.toMatchObject({
+    result: { rows: [{ values: { [id(4)]: "First" } }] },
+  });
 });
 
 it("refuses changed stored source even after the generated verdict is cached", async () => {
@@ -553,64 +1474,126 @@ it("refuses changed stored source even after the generated verdict is cached", a
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
   await f.invoke("friend", id(7));
   const saved = f.host.approvedArtifacts("owner", scope);
-  f.db.prepare("UPDATE dohc_dataset_catalog SET artifacts_json=?").run(JSON.stringify({ schemaSql: saved.schemaSql, operationSource: "tampered" }));
+  f.db
+    .prepare("UPDATE dohc_dataset_catalog SET artifacts_json=?")
+    .run(JSON.stringify({ schemaSql: saved.schemaSql, operationSource: "tampered" }));
   await expect(f.invoke("friend", id(7))).rejects.toThrow("access");
 });
-
 
 it("refuses executable source that differs from the verified generated artifact", async () => {
   const f = await linkReadFixture();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.approved });
-  f.db.prepare("UPDATE dohc_dataset_journals SET source=?").run("globalThis.operations={read(){return {rows:[],nextCursor:null}}};");
+  f.db
+    .prepare("UPDATE dohc_dataset_journals SET source=?")
+    .run("globalThis.operations={read(){return {rows:[],nextCursor:null}}};");
   await expect(f.invoke("friend", id(7))).rejects.toThrow("damaged");
 });
 
 it("attributes an owner's write to its agent at any depth from 0, through an app too, and grants the agent nothing", async () => {
-  let agent: { depth: number } | undefined, named = false;
-  const f = await fixture({ resolveAuthority: (_context, request) => ({ principalKey: "owner", ...(request.access.kind === "app" ? { appId: "form" } : {}),
-    caller: named ? { kind: "named", userId: "helper", grantId: "member", access: "view", helper: false } : { kind: "owner", userId: "owner" },
-    ...(agent ? { agent } : {}) }) });
+  let agent: { depth: number } | undefined,
+    named = false;
+  const f = await fixture({
+    resolveAuthority: (_context, request) => ({
+      principalKey: "owner",
+      ...(request.access.kind === "app" ? { appId: "form" } : {}),
+      caller: named
+        ? { kind: "named", userId: "helper", grantId: "member", access: "view", helper: false }
+        : { kind: "owner", userId: "owner" },
+      ...(agent ? { agent } : {}),
+    }),
+  });
   await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
-  f.host.automationClaims.subscribe(scope, { automationId: "watch", tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: "a".repeat(64) });
-  const invoke = (idempotencyKey: string, appId?: string) => f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256,
-    operationId: id(6), input: { value: idempotencyKey }, idempotencyKey, ...(appId ? { access: { kind: "app" as const, appId } } : {}) });
+  f.host.automationClaims.subscribe(scope, {
+    automationId: "watch",
+    tableId: id(2),
+    kinds: ["added"],
+    fieldIds: null,
+    definitionHash: "a".repeat(64),
+  });
+  const invoke = (idempotencyKey: string, appId?: string) =>
+    f.host.invoke("owner", {
+      ...scope,
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationId: id(6),
+      input: { value: idempotencyKey },
+      idempotencyKey,
+      ...(appId ? { access: { kind: "app" as const, appId } } : {}),
+    });
   agent = { depth: 0 };
   await invoke("direct");
-  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 0, actor: { kind: "agent", depth: 0 } });
+  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({
+    depth: 0,
+    actor: { kind: "agent", depth: 0 },
+  });
   agent = { depth: 2 };
   await invoke("app", "form");
-  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({ depth: 2, actor: { kind: "agent", depth: 2, appId: "form" } });
+  expect(f.host.automationClaims.next(scope.workspaceId)).toMatchObject({
+    depth: 2,
+    actor: { kind: "agent", depth: 2, appId: "form" },
+  });
   agent = { depth: 0 };
-  expect(() => f.host.archiveDataset("owner", scope)).toThrow("You do not have access to this Collection.");
+  expect(() => f.host.archiveDataset("owner", scope)).toThrow(
+    "You do not have access to this Collection.",
+  );
   for (const refused of [{ depth: -1 }, { depth: 65 }, { depth: 0.5 }]) {
     agent = refused;
     await expect(invoke("refused")).rejects.toThrow("You do not have access to this Collection.");
   }
-  agent = { depth: 0 }; named = true;
-  await expect(invoke("named", "form")).rejects.toThrow("You do not have access to this Collection.");
+  agent = { depth: 0 };
+  named = true;
+  await expect(invoke("named", "form")).rejects.toThrow(
+    "You do not have access to this Collection.",
+  );
   expect(f.host.automationClaims.next(scope.workspaceId)).toBeNull();
 });
 
 it("names the person a commit is made for from the host's context, never the owner key, and none for a link", async () => {
   type Caller = "owner" | "named" | "link" | "automation";
-  let caller: Caller = "owner", person: string | undefined, agent: { depth: number; agentId?: string } | undefined;
+  let caller: Caller = "owner",
+    person: string | undefined,
+    agent: { depth: number; agentId?: string } | undefined;
   const callers = {
     owner: { kind: "owner", userId: "owner-key" },
     named: { kind: "named", userId: "user-ana", grantId: "member", access: "edit", helper: false },
     link: { kind: "link", principalId: "visitor", grantId: "link" },
     automation: { kind: "automation", automationId: "collection:orders#stamp" },
   } as const;
-  const f = await fixture({ resolveAuthority: (_context, request) => ({ principalKey: caller, caller: callers[caller],
-    ...(request.access.kind === "app" ? { appId: "form" } : {}),
-    ...(caller === "automation" ? { chainDepth: 1 } : {}), ...(agent ? { agent } : {}), ...(person === undefined ? {} : { person }) }) });
+  const f = await fixture({
+    resolveAuthority: (_context, request) => ({
+      principalKey: caller,
+      caller: callers[caller],
+      ...(request.access.kind === "app" ? { appId: "form" } : {}),
+      ...(caller === "automation" ? { chainDepth: 1 } : {}),
+      ...(agent ? { agent } : {}),
+      ...(person === undefined ? {} : { person }),
+    }),
+  });
   await f.activate();
   f.host.setBinding("owner", { ...scope, appId: "form", binding: f.binding() });
-  f.host.automationClaims.subscribe(scope, { automationId: "watch", tableId: id(2), kinds: ["added"], fieldIds: null, definitionHash: "a".repeat(64) });
+  f.host.automationClaims.subscribe(scope, {
+    automationId: "watch",
+    tableId: id(2),
+    kinds: ["added"],
+    fieldIds: null,
+    definitionHash: "a".repeat(64),
+  });
   // A named person or a link writes through the app the owner shared.
   const commit = async (idempotencyKey: string) => {
-    const app = caller === "named" || caller === "link" ? { access: { kind: "app" as const, appId: "form" } } : {};
-    await f.host.invoke("owner", { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: idempotencyKey }, idempotencyKey, ...app });
+    const app =
+      caller === "named" || caller === "link"
+        ? { access: { kind: "app" as const, appId: "form" } }
+        : {};
+    await f.host.invoke("owner", {
+      ...scope,
+      revision: 1,
+      revisionSha256: prepared.revision.revisionSha256,
+      operationId: id(6),
+      input: { value: idempotencyKey },
+      idempotencyKey,
+      ...app,
+    });
     return f.host.automationClaims.next(scope.workspaceId)?.actor;
   };
   // The owner's own commit and its agent's name the person main gave, not the owner key.
@@ -620,13 +1603,24 @@ it("names the person a commit is made for from the host's context, never the own
   expect(await commit("agent")).toEqual({ kind: "agent", depth: 0, userId: "user-ice" });
   // An agent the person runs themselves names its id.
   agent = { depth: 0, agentId: "terminal" };
-  expect(await commit("agent-you-run")).toEqual({ kind: "agent", depth: 0, agentId: "terminal", userId: "user-ice" });
+  expect(await commit("agent-you-run")).toEqual({
+    kind: "agent",
+    depth: 0,
+    agentId: "terminal",
+    userId: "user-ice",
+  });
   agent = undefined;
   // An automation's commit names the person whose change started its run.
   caller = "automation";
-  expect(await commit("automation")).toEqual({ kind: "automation", automationId: "collection:orders#stamp", depth: 1, userId: "user-ice" });
+  expect(await commit("automation")).toEqual({
+    kind: "automation",
+    automationId: "collection:orders#stamp",
+    depth: 1,
+    userId: "user-ice",
+  });
   // With no person known, the owner's commit names nobody.
-  caller = "owner"; person = undefined;
+  caller = "owner";
+  person = undefined;
   expect(await commit("nobody")).toEqual({ kind: "owner" });
   // A named person is their own person, and a link names nobody: neither may name another.
   caller = "named";
@@ -634,18 +1628,36 @@ it("names the person a commit is made for from the host's context, never the own
   caller = "link";
   expect(await commit("link")).toEqual({ kind: "link", appId: "form" });
   for (const refused of ["named", "link"] as const) {
-    caller = refused; person = "user-ice";
-    await expect(commit(`claimed-${refused}`)).rejects.toThrow("You do not have access to this Collection.");
+    caller = refused;
+    person = "user-ice";
+    await expect(commit(`claimed-${refused}`)).rejects.toThrow(
+      "You do not have access to this Collection.",
+    );
   }
 });
 
 it("keeps a Collection still importing, and names only the asking workspace's Collections and imports", async () => {
-  const f = await fixture(); await f.activate();
-  const importing = f.db.prepare("INSERT INTO dohc_dataset_imports VALUES(?,?,?,?,?,NULL,'staging',?,?,NULL)");
+  const f = await fixture();
+  await f.activate();
+  const importing = f.db.prepare(
+    "INSERT INTO dohc_dataset_imports VALUES(?,?,?,?,?,NULL,'staging',?,?,NULL)",
+  );
   importing.run("import-here", "workspace", id(20), "0".repeat(64), "{}", "owner", 0);
   importing.run("import-elsewhere", "other-workspace", id(21), "0".repeat(64), "{}", "owner", 0);
-  const columns = f.db.prepare("SELECT name FROM pragma_table_info('dohc_dataset_catalog')").all().map(row => String(row.name));
-  f.db.prepare(`INSERT INTO dohc_dataset_catalog(${columns.join(",")}) SELECT ${columns.map(column => column === "workspace_id" ? "'other-workspace'" : column === "dataset_id" ? "?" : column).join(",")} FROM dohc_dataset_catalog WHERE workspace_id='workspace'`).run(id(22));
-  expect(f.host.keptDatasetIds("owner", { workspaceId: "workspace" }).sort()).toEqual([id(1), id(20)]);
-  expect(() => f.host.keptDatasetIds("owner", { workspaceId: "other-workspace" })).toThrow("revoked");
+  const columns = f.db
+    .prepare("SELECT name FROM pragma_table_info('dohc_dataset_catalog')")
+    .all()
+    .map((row) => String(row.name));
+  f.db
+    .prepare(
+      `INSERT INTO dohc_dataset_catalog(${columns.join(",")}) SELECT ${columns.map((column) => (column === "workspace_id" ? "'other-workspace'" : column === "dataset_id" ? "?" : column)).join(",")} FROM dohc_dataset_catalog WHERE workspace_id='workspace'`,
+    )
+    .run(id(22));
+  expect(f.host.keptDatasetIds("owner", { workspaceId: "workspace" }).sort()).toEqual([
+    id(1),
+    id(20),
+  ]);
+  expect(() => f.host.keptDatasetIds("owner", { workspaceId: "other-workspace" })).toThrow(
+    "revoked",
+  );
 });

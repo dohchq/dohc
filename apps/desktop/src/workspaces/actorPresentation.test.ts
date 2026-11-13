@@ -1,10 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
-import { createActorIssuer, deriveLocalActor, deriveRelayChatActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import {
+  createActorIssuer,
+  deriveLocalActor,
+  deriveRelayChatActor,
+  serializeActorKey,
+} from "@dohc/workspace-contracts/actor-identity";
 import { ACTOR_HUES, actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import type { ChatMessage, MomentAuthor } from "@dohc/workspace-contracts/engine";
 import type { RegistryEntry } from "./registryStore";
 import type { CloudCredentials } from "./cloudCredentialStore";
-import { agentKeyForGroup, chatLinkMessageForPresentation, chatActorForPresentation, createActorPresentationRequest, createHistoryPresentationRequest, forgetWorkspacePresentation, ownActorPresentation } from "./actorPresentation";
+import {
+  agentKeyForGroup,
+  chatLinkMessageForPresentation,
+  chatActorForPresentation,
+  createActorPresentationRequest,
+  createHistoryPresentationRequest,
+  forgetWorkspacePresentation,
+  ownActorPresentation,
+} from "./actorPresentation";
 
 // Count issuer construction while keeping its behavior.
 vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
@@ -13,57 +26,153 @@ vi.mock("@dohc/workspace-contracts/actor-identity", async (importOriginal) => {
 });
 
 const issuer = createActorIssuer("https://account.test");
-const credentials: CloudCredentials = { serverUrl: issuer, email: "alice@example.test", userId: "alice", token: "token", relayUrl: "https://relay.test" };
+const credentials: CloudCredentials = {
+  serverUrl: issuer,
+  email: "alice@example.test",
+  userId: "alice",
+  token: "token",
+  relayUrl: "https://relay.test",
+};
 const identity = { installationId: "device", account: { issuer, userId: "alice" } };
 const message = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
-  workspaceId: "w", id: "m", threadId: "t", author: { kind: "human", displayName: "Renamed" },
-  authorUserId: "alice", body: "Hi", createdAtMs: 0, attachments: [], ...overrides,
+  workspaceId: "w",
+  id: "m",
+  threadId: "t",
+  author: { kind: "human", displayName: "Renamed" },
+  authorUserId: "alice",
+  body: "Hi",
+  createdAtMs: 0,
+  attachments: [],
+  ...overrides,
 });
-function local(kind: "human" | "agent" | "automation", origin: "renderer" | "cli" | "automation" | "unknown" = "renderer", account: typeof identity.account | null = identity.account) {
-  const actor = deriveLocalActor({ identity: { ...identity, account }, workspaceId: "w", displayName: "Renamed", origin,
-    author: kind === "agent" ? { kind, claimedName: "handshake" } : kind === "automation" ? { kind, automationId: "job" } : { kind } });
-  return message({ author: { kind, displayName: "Renamed" }, authorActorKey: serializeActorKey(actor.key), ...(origin === "cli" ? { origin } : {}) });
+function local(
+  kind: "human" | "agent" | "automation",
+  origin: "renderer" | "cli" | "automation" | "unknown" = "renderer",
+  account: typeof identity.account | null = identity.account,
+) {
+  const actor = deriveLocalActor({
+    identity: { ...identity, account },
+    workspaceId: "w",
+    displayName: "Renamed",
+    origin,
+    author:
+      kind === "agent"
+        ? { kind, claimedName: "handshake" }
+        : kind === "automation"
+          ? { kind, automationId: "job" }
+          : { kind },
+  });
+  return message({
+    author: { kind, displayName: "Renamed" },
+    authorActorKey: serializeActorKey(actor.key),
+    ...(origin === "cli" ? { origin } : {}),
+  });
 }
 // Thread "shared" is in a joined shared channel; every other thread is the workspace's own.
-function request(remote = true, workspaceId = "w", agentColors: Record<string, "blue" | "rose"> = {}, shareView?: RegistryEntry["shareView"]) {
-  let workspace: RegistryEntry = { workspaceId, rootPath: "C:/w", kind: "personal", mode: "local-first", lastOpenedAt: 0,
-    sharedChannels: [{ shareId: "s", channelWireId: "wire-shared", access: "read-write", granterEmail: null,
-      relayUrl: "https://relay.test", recipientUserId: "alice", ...(remote ? { serverUrl: issuer } : {}) }],
-    ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}), ...(shareView ? { shareView } : {}) };
+function request(
+  remote = true,
+  workspaceId = "w",
+  agentColors: Record<string, "blue" | "rose"> = {},
+  shareView?: RegistryEntry["shareView"],
+) {
+  let workspace: RegistryEntry = {
+    workspaceId,
+    rootPath: "C:/w",
+    kind: "personal",
+    mode: "local-first",
+    lastOpenedAt: 0,
+    sharedChannels: [
+      {
+        shareId: "s",
+        channelWireId: "wire-shared",
+        access: "read-write",
+        granterEmail: null,
+        relayUrl: "https://relay.test",
+        recipientUserId: "alice",
+        ...(remote ? { serverUrl: issuer } : {}),
+      },
+    ],
+    ...(remote ? { remote: { serverUrl: issuer, ownerUserId: "alice" } } : {}),
+    ...(shareView ? { shareView } : {}),
+  };
   const store = {
     findThreadChannelId: vi.fn(async ({ threadId }: { threadId: string }) => threadId),
     getChannelWireId: vi.fn(async ({ channelId }: { channelId: string }) => `wire-${channelId}`),
   };
   const assertCurrent = vi.fn();
-  const present = createActorPresentationRequest({ agentColors: () => agentColors, readWorkspace: () => workspace, store, installationId: "device", credentials, assertCurrent });
-  return { present, store, assertCurrent, replace: () => { workspace = { ...workspace, lastOpenedAt: 1 }; } };
+  const present = createActorPresentationRequest({
+    agentColors: () => agentColors,
+    readWorkspace: () => workspace,
+    store,
+    installationId: "device",
+    credentials,
+    assertCurrent,
+  });
+  return {
+    present,
+    store,
+    assertCurrent,
+    replace: () => {
+      workspace = { ...workspace, lastOpenedAt: 1 };
+    },
+  };
 }
 describe("chat presentation admission", () => {
-  it.each([["", "teal"], ["alice", "rose"], ["A😀", "indigo"], ["é", "rust"]])("pins code-point hue %s", (value, hue) => {
+  it.each([
+    ["", "teal"],
+    ["alice", "rose"],
+    ["A😀", "indigo"],
+    ["é", "rust"],
+  ])("pins code-point hue %s", (value, hue) => {
     expect(ACTOR_HUES[actorHueSlot(value!)]).toBe(hue);
   });
   it.each([
-    [local("human"), "local", "renderer"], [local("human", "cli"), "owner-asserted", "cli"],
-    [local("agent"), "owner-asserted", "unknown"], [local("automation"), "owner-asserted", "automation"],
+    [local("human"), "local", "renderer"],
+    [local("human", "cli"), "owner-asserted", "cli"],
+    [local("agent"), "owner-asserted", "unknown"],
+    [local("automation"), "owner-asserted", "automation"],
     [message({ authorActorKey: '{"kind":"unknown"}' }), "unknown", "renderer"],
-    [message(), "relay-verified", "unknown"], [message({ origin: "cli" }), "owner-asserted", "cli"],
+    [message(), "relay-verified", "unknown"],
+    [message({ origin: "cli" }), "owner-asserted", "cli"],
     [message({ author: { kind: "agent", displayName: "claimed" } }), "owner-asserted", "unknown"],
     [message({ author: { kind: "automation", displayName: "job" } }), "owner-asserted", "unknown"],
   ] as const)("preserves admission assurance %#", (row, assurance, origin) => {
     expect(chatActorForPresentation(row, issuer)).toMatchObject({ assurance, origin });
   });
   it("keys an ingested agent post by its run's agent, else as the unnamed agent", () => {
-    expect(chatActorForPresentation(message({ author: { kind: "agent", displayName: "claimed" } }), issuer).key)
-      .toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
-    expect(chatActorForPresentation(message({ author: { kind: "agent", displayName: "claimed" }, authorAgentId: "default" }), issuer).key)
-      .toMatchObject({ kind: "agent", claimedName: "default" });
+    expect(
+      chatActorForPresentation(
+        message({ author: { kind: "agent", displayName: "claimed" } }),
+        issuer,
+      ).key,
+    ).toMatchObject({ kind: "agent", claimedName: "dohc-mcp" });
+    expect(
+      chatActorForPresentation(
+        message({ author: { kind: "agent", displayName: "claimed" }, authorAgentId: "default" }),
+        issuer,
+      ).key,
+    ).toMatchObject({ kind: "agent", claimedName: "default" });
   });
   it("keeps a connected agent that uses your agent's name out of that agent's group on another device", async () => {
     const r = request();
     // The posts as this device wrote them, with their keys, and as another device reads them.
-    const written = (claimedName: string) => message({ author: { kind: "agent", displayName: "Nova" }, authorActorKey: serializeActorKey(
-      deriveLocalActor({ identity, workspaceId: "w", displayName: "Nova", origin: "cli", author: { kind: "agent", claimedName } }).key) });
-    const yours = message({ author: { kind: "agent", displayName: "Nova" }, authorAgentId: "default" });
+    const written = (claimedName: string) =>
+      message({
+        author: { kind: "agent", displayName: "Nova" },
+        authorActorKey: serializeActorKey(
+          deriveLocalActor({
+            identity,
+            workspaceId: "w",
+            displayName: "Nova",
+            origin: "cli",
+            author: { kind: "agent", claimedName },
+          }).key,
+        ),
+      });
+    const yours = message({
+      author: { kind: "agent", displayName: "Nova" },
+      authorAgentId: "default",
+    });
     const connected = message({ author: { kind: "agent", displayName: "Nova" } });
     const group = async (row: Parameters<typeof r.present>[0]) => (await r.present(row, "t")).group;
     expect(await group(connected)).not.toBe(await group(yours));
@@ -72,16 +181,37 @@ describe("chat presentation admission", () => {
   });
   it("marks a connected agent's post and edit, and no run's post that names itself Claude", async () => {
     const r = request();
-    const written = (claimedName: string) => message({ author: { kind: "agent", displayName: "Claude" }, authorActorKey: serializeActorKey(
-      deriveLocalActor({ identity, workspaceId: "w", displayName: "Claude", origin: "cli", author: { kind: "agent", claimedName } }).key) });
-    for (const post of [message({ author: { kind: "agent", displayName: "Claude" } }), written("dohc-mcp")]) {
+    const written = (claimedName: string) =>
+      message({
+        author: { kind: "agent", displayName: "Claude" },
+        authorActorKey: serializeActorKey(
+          deriveLocalActor({
+            identity,
+            workspaceId: "w",
+            displayName: "Claude",
+            origin: "cli",
+            author: { kind: "agent", claimedName },
+          }).key,
+        ),
+      });
+    for (const post of [
+      message({ author: { kind: "agent", displayName: "Claude" } }),
+      written("dohc-mcp"),
+    ]) {
       expect(await r.present(post, "t")).toMatchObject({ connected: true });
     }
-    for (const post of [message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" }), written("claude"),
-      message({ author: { kind: "human", displayName: "Claude" } })]) {
+    for (const post of [
+      message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" }),
+      written("claude"),
+      message({ author: { kind: "human", displayName: "Claude" } }),
+    ]) {
       expect(await r.present(post, "t")).not.toHaveProperty("connected");
     }
-    const [edit, runEdit] = createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined })([
+    const [edit, runEdit] = createHistoryPresentationRequest({
+      source: "received",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+    })([
       { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "alice" },
       { kind: "agent", agentId: "claude", onBehalfOf: "alice" },
     ]);
@@ -91,14 +221,28 @@ describe("chat presentation admission", () => {
   it("marks every agent post from a share with the plug and no kind, and a received edit by its agent id", async () => {
     // A share serves no run id, so an agent post through one could be a run's or a
     // connected agent's. A received file share gives no issuer, so its posts have no key.
-    const shareView = { shareId: "received", granterEmail: null, genericChatWritable: false, grantedSelector: { paths: ["notes"], versionId: null, access: "view" as const } };
-    const shares = [[request(false, "w", {}, shareView), "t"], [request(), "shared"]] as const;
+    const shareView = {
+      shareId: "received",
+      granterEmail: null,
+      genericChatWritable: false,
+      grantedSelector: { paths: ["notes"], versionId: null, access: "view" as const },
+    };
+    const shares = [
+      [request(false, "w", {}, shareView), "t"],
+      [request(), "shared"],
+    ] as const;
     const post = message({ author: { kind: "agent", displayName: "Claude" } });
-    const runPost = message({ author: { kind: "agent", displayName: "Claude" }, authorAgentId: "claude" });
+    const runPost = message({
+      author: { kind: "agent", displayName: "Claude" },
+      authorAgentId: "claude",
+    });
     expect(chatActorForPresentation(post, null).key.kind).toBe("unknown");
     for (const [r, thread] of shares) {
-      for (const row of [post, runPost]) expect(await r.present(row, thread)).toMatchObject({ connected: "unknown" });
-      expect(await r.present(message({ author: { kind: "human", displayName: "Claude" } }), thread)).not.toHaveProperty("connected");
+      for (const row of [post, runPost])
+        expect(await r.present(row, thread)).toMatchObject({ connected: "unknown" });
+      expect(
+        await r.present(message({ author: { kind: "human", displayName: "Claude" } }), thread),
+      ).not.toHaveProperty("connected");
     }
     // This device's own agent posts in a joined channel keep the key it wrote.
     expect(await shares[1][0].present(local("agent"), "shared")).not.toHaveProperty("connected");
@@ -106,36 +250,61 @@ describe("chat presentation admission", () => {
     expect(await shares[1][0].present(post, "t")).toMatchObject({ connected: true });
     expect(await shares[1][0].present(runPost, "t")).not.toHaveProperty("connected");
     // A received edit names its agent's id, so it keeps its kind with no key.
-    const [edit, runEdit] = createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined })([
+    const [edit, runEdit] = createHistoryPresentationRequest({
+      source: "received",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+    })([
       { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "local:device" },
       { kind: "agent", agentId: "claude", onBehalfOf: "local:device" },
     ]);
     expect(edit).toMatchObject({ connected: true });
     expect(runEdit).not.toHaveProperty("connected");
   });
-  it.each(["alice", "bob"])("keys a Links entry as its chat post from another device, for account %s", async (authorUserId) => {
-    const r = request();
-    const group = async (row: Parameters<typeof r.present>[0]) => (await r.present(row, "t")).group;
-    const post = (authorAgentId?: string) => message({ author: { kind: "agent", displayName: "Nova" }, authorUserId,
-      ...(authorAgentId === undefined ? {} : { authorAgentId }) });
-    const entry = (authorAgentId?: string) => chatLinkMessageForPresentation({
-      authorKind: "agent", authorDisplayName: "Nova", authorUserId, ...(authorAgentId === undefined ? {} : { authorAgentId }),
-    });
-    expect(await group(entry("default"))).toBe(await group(post("default")));
-    expect(await group(entry())).toBe(await group(post()));
-    expect(await group(entry())).not.toBe(await group(post("default")));
-  });
+  it.each(["alice", "bob"])(
+    "keys a Links entry as its chat post from another device, for account %s",
+    async (authorUserId) => {
+      const r = request();
+      const group = async (row: Parameters<typeof r.present>[0]) =>
+        (await r.present(row, "t")).group;
+      const post = (authorAgentId?: string) =>
+        message({
+          author: { kind: "agent", displayName: "Nova" },
+          authorUserId,
+          ...(authorAgentId === undefined ? {} : { authorAgentId }),
+        });
+      const entry = (authorAgentId?: string) =>
+        chatLinkMessageForPresentation({
+          authorKind: "agent",
+          authorDisplayName: "Nova",
+          authorUserId,
+          ...(authorAgentId === undefined ? {} : { authorAgentId }),
+        });
+      expect(await group(entry("default"))).toBe(await group(post("default")));
+      expect(await group(entry())).toBe(await group(post()));
+      expect(await group(entry())).not.toBe(await group(post("default")));
+    },
+  );
   it("keeps another person's connected agents in one group, apart from their agent with the same name", async () => {
-    const bob = (displayName: string, authorAgentId?: string) => message({ author: { kind: "agent", displayName }, authorUserId: "bob",
-      ...(authorAgentId === undefined ? {} : { authorAgentId }) });
+    const bob = (displayName: string, authorAgentId?: string) =>
+      message({
+        author: { kind: "agent", displayName },
+        authorUserId: "bob",
+        ...(authorAgentId === undefined ? {} : { authorAgentId }),
+      });
     const first = await request().present(bob("Nova", "nova"), "t");
     // A color chosen for Bob's agent Nova stays with that agent.
     const r = request(true, "w", { [agentKeyForGroup("w", first.group)]: "rose" });
     const run = await r.present(bob("Nova", "nova"), "t");
-    const connected = [await r.present(bob("Nova"), "t"), await r.present(bob("Scout"), "t"), await r.present(bob("Helper"), "t")];
+    const connected = [
+      await r.present(bob("Nova"), "t"),
+      await r.present(bob("Scout"), "t"),
+      await r.present(bob("Helper"), "t"),
+    ];
     expect(run).toEqual({ group: first.group, hue: "rose", self: false });
     expect(connected[0]!.group).not.toBe(run.group);
-    for (const post of connected) expect(post).toEqual({ group: connected[0]!.group, hue: null, self: false, connected: true });
+    for (const post of connected)
+      expect(post).toEqual({ group: connected[0]!.group, hue: null, self: false, connected: true });
   });
   it("keeps a missing key unknown despite current credentials and author id", async () => {
     const r = request(false);
@@ -144,13 +313,20 @@ describe("chat presentation admission", () => {
   });
   it("retries a registry write during the first lookup", async () => {
     const r = request();
-    r.store.findThreadChannelId.mockImplementationOnce(async () => { r.replace(); return "channel"; });
+    r.store.findThreadChannelId.mockImplementationOnce(async () => {
+      r.replace();
+      return "channel";
+    });
     expect(await r.present(message(), "t")).toMatchObject({ hue: "rose", self: true });
     expect(r.store.findThreadChannelId).toHaveBeenCalledTimes(2);
   });
   it("memoizes resolution once per thread, including simultaneous rows", async () => {
     const r = request();
-    await Promise.all([r.present(message(), "t"), r.present(message(), "t"), r.present(message(), "other")]);
+    await Promise.all([
+      r.present(message(), "t"),
+      r.present(message(), "t"),
+      r.present(message(), "other"),
+    ]);
     expect(r.store.findThreadChannelId).toHaveBeenCalledTimes(2);
     expect(r.assertCurrent).toHaveBeenCalled();
   });
@@ -159,20 +335,43 @@ describe("chat presentation admission", () => {
     const installation = await r.present(local("human", "renderer", null), "t");
     const account = await r.present(local("human"), "t");
     expect(installation.group).not.toBe(account.group);
-    expect(installation.self).toBe(true); expect(account.self).toBe(true);
+    expect(installation.self).toBe(true);
+    expect(account.self).toBe(true);
     expect(await r.present(local("agent"), "t")).toMatchObject({ hue: null, self: true });
-    expect(await r.present(local("agent", "renderer", null), "t")).toMatchObject({ hue: null, self: true });
+    expect(await r.present(local("agent", "renderer", null), "t")).toMatchObject({
+      hue: null,
+      self: true,
+    });
     expect(await r.present(local("automation"), "t")).toMatchObject({ hue: null, self: false });
-    expect(await r.present(message({ authorUserId: "someone" }), "t")).toMatchObject({ self: false });
-    const foreign = local("human", "renderer", { issuer: createActorIssuer("https://other.test"), userId: "alice" });
+    expect(await r.present(message({ authorUserId: "someone" }), "t")).toMatchObject({
+      self: false,
+    });
+    const foreign = local("human", "renderer", {
+      issuer: createActorIssuer("https://other.test"),
+      userId: "alice",
+    });
     expect(await r.present(foreign, "t")).toMatchObject({ self: false });
-    expect((await r.present(message({ author: { kind: "human", displayName: "A different label" } }), "t")).group).toBe(account.group);
+    expect(
+      (
+        await r.present(
+          message({ author: { kind: "human", displayName: "A different label" } }),
+          "t",
+        )
+      ).group,
+    ).toBe(account.group);
   });
   it("names the agent only on your agent's message from one of its runs", async () => {
     const r = request();
-    expect(await r.present({ ...local("agent"), authorAgentId: "codex" }, "t")).toMatchObject({ self: true, agentId: "codex" });
+    expect(await r.present({ ...local("agent"), authorAgentId: "codex" }, "t")).toMatchObject({
+      self: true,
+      agentId: "codex",
+    });
     expect(await r.present(local("agent"), "t")).not.toHaveProperty("agentId");
-    const theirs = message({ author: { kind: "agent", displayName: "Codex" }, authorUserId: "someone", authorAgentId: "codex" });
+    const theirs = message({
+      author: { kind: "agent", displayName: "Codex" },
+      authorUserId: "someone",
+      authorAgentId: "codex",
+    });
     const token = await r.present(theirs, "t");
     expect(token.self).toBe(false);
     expect(token).not.toHaveProperty("agentId");
@@ -184,35 +383,62 @@ describe("chat presentation admission", () => {
     expect(own.hue).toBe(row.hue);
     expect(own.self).toBe(true);
   });
-  it.each(["https://account.test?query=1", "https://account.test#fragment", "invalid"])("falls back to the installation hue for malformed account URL %s", (serverUrl) => {
-    expect(ownActorPresentation("device", { ...credentials, serverUrl })).toEqual(ownActorPresentation("device", null));
-  });
+  it.each(["https://account.test?query=1", "https://account.test#fragment", "invalid"])(
+    "falls back to the installation hue for malformed account URL %s",
+    (serverUrl) => {
+      expect(ownActorPresentation("device", { ...credentials, serverUrl })).toEqual(
+        ownActorPresentation("device", null),
+      );
+    },
+  );
   it("retains no unknown-author entries while keeping visible groups stable", async () => {
     const workspaceId = "unknown-churn";
     const r = request(false, workspaceId);
-    const alice = message({ authorUserId: "alice", author: { kind: "human", displayName: "Alice" } });
+    const alice = message({
+      authorUserId: "alice",
+      author: { kind: "human", displayName: "Alice" },
+    });
     const first = await r.present(alice, "t");
     const set = vi.spyOn(Map.prototype, "set");
     try {
       for (let i = 0; i < 2000; i++) {
-        await r.present(message({ authorUserId: String(i), author: { kind: "human", displayName: "Label " + i } }), "t");
+        await r.present(
+          message({
+            authorUserId: String(i),
+            author: { kind: "human", displayName: "Label " + i },
+          }),
+          "t",
+        );
       }
-      expect(set.mock.calls.filter(([key]) => typeof key === "string" && key.startsWith('["unknown",'))).toHaveLength(0);
-    } finally { set.mockRestore(); }
+      expect(
+        set.mock.calls.filter(([key]) => typeof key === "string" && key.startsWith('["unknown",')),
+      ).toHaveLength(0);
+    } finally {
+      set.mockRestore();
+    }
     expect(await request(false, workspaceId).present(alice, "t")).toEqual(first);
     expect((await r.present(alice, "other-thread")).group).not.toBe(first.group);
-    expect((await request(false, "other-workspace").present(alice, "t")).group).not.toBe(first.group);
+    expect((await request(false, "other-workspace").present(alice, "t")).group).not.toBe(
+      first.group,
+    );
     forgetWorkspacePresentation(workspaceId);
     expect((await request(false, workspaceId).present(alice, "t")).group).not.toBe(first.group);
   });
   it("groups unknowns by author id and visible name", async () => {
     const r = request(false);
-    const alice = message({ authorUserId: undefined, author: { kind: "human", displayName: "Alice" } });
+    const alice = message({
+      authorUserId: undefined,
+      author: { kind: "human", displayName: "Alice" },
+    });
     const first = await r.present(alice, "t");
     expect(await r.present(alice, "t")).toEqual(first);
-    expect((await r.present({ ...alice, author: { kind: "human", displayName: "Bob" } }, "t")).group).not.toBe(first.group);
+    expect(
+      (await r.present({ ...alice, author: { kind: "human", displayName: "Bob" } }, "t")).group,
+    ).not.toBe(first.group);
     expect((await r.present({ ...alice, authorUserId: "other" }, "t")).group).not.toBe(first.group);
-    expect((await r.present({ ...alice, authorActorKey: '{"kind":"unknown"}' }, "t")).group).toBe(first.group);
+    expect((await r.present({ ...alice, authorActorKey: '{"kind":"unknown"}' }, "t")).group).toBe(
+      first.group,
+    );
   });
   it("scopes groups to a workspace and releases them on close", async () => {
     const first = request(true, "group-first");
@@ -226,18 +452,26 @@ describe("chat presentation admission", () => {
   });
   it("never hashes a human into olive", async () => {
     const r = request();
-    for (let i = 0; i < 100; i++) expect((await r.present(message({ authorUserId: String(i) }), "t")).hue).not.toBe("olive");
+    for (let i = 0; i < 100; i++)
+      expect((await r.present(message({ authorUserId: String(i) }), "t")).hue).not.toBe("olive");
   });
   it("rejects a retired operation rather than retrying it", async () => {
-    const r = request(); r.assertCurrent.mockImplementation(() => { throw new Error("retired"); });
+    const r = request();
+    r.assertCurrent.mockImplementation(() => {
+      throw new Error("retired");
+    });
     await expect(r.present(message(), "t")).rejects.toThrow("retired");
   });
   it("tells link holders apart by their link principal, never by an account, and never as you", async () => {
     const r = request();
     const link = (principalId: string, displayName = "Guest"): ChatMessage =>
-      message({ author: { kind: "link", displayName, grantId: "grant-1", principalId }, authorUserId: undefined });
+      message({
+        author: { kind: "link", displayName, grantId: "grant-1", principalId },
+        authorUserId: undefined,
+      });
     expect(chatActorForPresentation(link("p1"), issuer)).toMatchObject({
-      key: { kind: "link", grantId: "grant-1", principalId: "p1" }, assurance: "relay-verified",
+      key: { kind: "link", grantId: "grant-1", principalId: "p1" },
+      assurance: "relay-verified",
     });
     const first = await r.present(link("p1"), "t");
     expect(first).toMatchObject({ hue: null, self: false });
@@ -248,25 +482,60 @@ describe("chat presentation admission", () => {
     // A link holder named after you, on your account's server, is still not you.
     expect(await r.present(link("p3", "alice"), "t")).toMatchObject({ self: false });
     expect((await r.present(message(), "t")).group).not.toBe(first.group);
-    const entry = { authorKind: "link" as const, authorDisplayName: "Guest", linkGrantId: "grant-1", linkPrincipalId: "p1" };
+    const entry = {
+      authorKind: "link" as const,
+      authorDisplayName: "Guest",
+      linkGrantId: "grant-1",
+      linkPrincipalId: "p1",
+    };
     expect((await r.present(chatLinkMessageForPresentation(entry), "t")).group).toBe(first.group);
   });
 });
 
 describe("History presentation", () => {
-  const history = (serverUrl: string | undefined = issuer) => createHistoryPresentationRequest({
-    source: "own-store", workspaceId: "w", assertCurrent: () => undefined, serverUrl, synced: serverUrl !== undefined, installationId: "device", credentials,
+  const history = (serverUrl: string | undefined = issuer) =>
+    createHistoryPresentationRequest({
+      source: "own-store",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+      serverUrl,
+      synced: serverUrl !== undefined,
+      installationId: "device",
+      credentials,
+    });
+  const received = () =>
+    createHistoryPresentationRequest({
+      source: "received",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+    });
+  const named = (userId: string): MomentAuthor => ({
+    kind: "named",
+    userId,
+    grantId: "grant",
+    grantGeneration: 1,
   });
-  const received = () => createHistoryPresentationRequest({ source: "received", workspaceId: "w", assertCurrent: () => undefined });
-  const named = (userId: string): MomentAuthor => ({ kind: "named", userId, grantId: "grant", grantGeneration: 1 });
-  const agent = (agentId: string, onBehalfOf = "alice"): MomentAuthor => ({ kind: "agent", agentId, onBehalfOf });
+  const agent = (agentId: string, onBehalfOf = "alice"): MomentAuthor => ({
+    kind: "agent",
+    agentId,
+    onBehalfOf,
+  });
 
   it("matches chat's token for the same account, the same installation, and a person you shared with", async () => {
     const chat = request();
-    const [account, installation, sam] = history()([{ kind: "human", humanId: "alice" }, { kind: "human", humanId: "device" }, named("sam")]);
+    const [account, installation, sam] = history()([
+      { kind: "human", humanId: "alice" },
+      { kind: "human", humanId: "device" },
+      named("sam"),
+    ]);
     expect(account).toEqual(await chat.present(local("human"), "t"));
     expect(installation).toEqual(await chat.present(local("human", "renderer", null), "t"));
-    expect(sam).toEqual(await chat.present(message({ authorUserId: "sam", author: { kind: "human", displayName: "Sam" } }), "t"));
+    expect(sam).toEqual(
+      await chat.present(
+        message({ authorUserId: "sam", author: { kind: "human", displayName: "Sam" } }),
+        "t",
+      ),
+    );
     // Installation and account self stay apart.
     expect(account!.group).not.toBe(installation!.group);
     expect([account!.self, installation!.self, sam!.self]).toEqual([true, true, false]);
@@ -275,34 +544,73 @@ describe("History presentation", () => {
 
   it("gives a local agent its chat group only when the claimed name matches", async () => {
     const chat = await request().present(local("agent"), "t");
-    const [same, renamed, signedOut] = history()([agent("handshake"), agent("dohc-chat-runner"), agent("handshake", "device")]);
+    const [same, renamed, signedOut] = history()([
+      agent("handshake"),
+      agent("dohc-chat-runner"),
+      agent("handshake", "device"),
+    ]);
     expect(same).toEqual(chat);
     expect(renamed!.group).not.toBe(chat.group);
     expect(signedOut).toEqual(await request().present(local("agent", "renderer", null), "t"));
-    for (const token of [same, renamed, signedOut]) expect(token).toMatchObject({ hue: null, self: true });
+    for (const token of [same, renamed, signedOut])
+      expect(token).toMatchObject({ hue: null, self: true });
   });
 
   it("keeps one token per author, in order, with hues for people only", () => {
     const tokens = history()([
-      named("sam"), agent("handshake"), { kind: "human", humanId: "alice" }, { kind: "human", humanId: "someone-else" },
+      named("sam"),
+      agent("handshake"),
+      { kind: "human", humanId: "alice" },
+      { kind: "human", humanId: "someone-else" },
       { kind: "automation", automationId: "collection:Tasks#stamp", onBehalfOf: "alice", depth: 1 },
       { kind: "link", grantId: "grant", grantGeneration: 1, principalId: "holder" },
       { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
       { kind: "public", principalId: "public_x", grantId: "grant" },
-      { kind: "unattributed" }, agent("Pat", "someone-else"),
+      { kind: "unattributed" },
+      agent("Pat", "someone-else"),
     ]);
-    expect(tokens.map(token => token.hue)).toEqual([
-      ACTOR_HUES[actorHueSlot("sam")], null, "rose", ACTOR_HUES[actorHueSlot("someone-else")], null, null, null, null, null, null,
+    expect(tokens.map((token) => token.hue)).toEqual([
+      ACTOR_HUES[actorHueSlot("sam")],
+      null,
+      "rose",
+      ACTOR_HUES[actorHueSlot("someone-else")],
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
     ]);
-    expect(tokens.map(token => token.self)).toEqual([false, true, true, false, false, false, false, false, false, false]);
+    expect(tokens.map((token) => token.self)).toEqual([
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
     expect(tokens[8]!.group).toMatch(/^unknown:/);
     // The token names nobody.
     expect(JSON.stringify(tokens)).not.toMatch(/alice|device|sam|someone|grant|holder|public|Pat/);
   });
 
-  it.each([["no server", true], ["invalid", false], ["https://account.test?query=1", false]] as const)("leaves named authors neutral for %s", (serverUrl, mine) => {
-    const [sam, person] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-      serverUrl: serverUrl === "no server" ? undefined : serverUrl, synced: serverUrl !== "no server", installationId: "device", credentials,
+  it.each([
+    ["no server", true],
+    ["invalid", false],
+    ["https://account.test?query=1", false],
+  ] as const)("leaves named authors neutral for %s", (serverUrl, mine) => {
+    const [sam, person] = createHistoryPresentationRequest({
+      source: "own-store",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+      serverUrl: serverUrl === "no server" ? undefined : serverUrl,
+      synced: serverUrl !== "no server",
+      installationId: "device",
+      credentials,
     })([named("sam"), { kind: "human", humanId: "alice" }]);
     expect(sam).toMatchObject({ hue: null, self: false });
     expect(sam!.group).toMatch(/^unknown:/);
@@ -312,19 +620,34 @@ describe("History presentation", () => {
 
   it("does not take a person on the workspace's server for you because your account elsewhere has their user id", () => {
     const [person, agentOf, installation, sam] = history("https://other.test")([
-      { kind: "human", humanId: "alice" }, agent("handshake"), { kind: "human", humanId: "device" }, named("alice"),
+      { kind: "human", humanId: "alice" },
+      agent("handshake"),
+      { kind: "human", humanId: "device" },
+      named("alice"),
     ]);
     expect(person).toMatchObject({ hue: "rose", self: false });
     expect(agentOf).toMatchObject({ hue: null, self: false });
     expect(installation!.self).toBe(true);
     expect(sam).toMatchObject({ hue: "rose", self: false });
     // The same id on your own server is you.
-    expect(history("https://account.test/")([{ kind: "human", humanId: "alice" }])[0]!.self).toBe(true);
+    expect(history("https://account.test/")([{ kind: "human", humanId: "alice" }])[0]!.self).toBe(
+      true,
+    );
   });
 
   it("does not take an account for you in a folder that synced and has no remote now", () => {
-    const [person, installation] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-      serverUrl: undefined, synced: true, installationId: "device", credentials })([{ kind: "human", humanId: "alice" }, { kind: "human", humanId: "device" }]);
+    const [person, installation] = createHistoryPresentationRequest({
+      source: "own-store",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+      serverUrl: undefined,
+      synced: true,
+      installationId: "device",
+      credentials,
+    })([
+      { kind: "human", humanId: "alice" },
+      { kind: "human", humanId: "device" },
+    ]);
     expect(person).toMatchObject({ hue: "rose", self: false });
     expect(installation!.self).toBe(true);
   });
@@ -334,7 +657,9 @@ describe("History presentation", () => {
     const present = history("https://named.test/");
     present(Array.from({ length: 50 }, (_, index) => named(`u${index}`)));
     present([named("sam")]);
-    expect(vi.mocked(createActorIssuer).mock.calls.filter(([url]) => url === "https://named.test/")).toHaveLength(1);
+    expect(
+      vi.mocked(createActorIssuer).mock.calls.filter(([url]) => url === "https://named.test/"),
+    ).toHaveLength(1);
     // The other construction is the current account's.
     expect(createActorIssuer).toHaveBeenCalledTimes(2);
   });
@@ -342,93 +667,170 @@ describe("History presentation", () => {
   it("never resolves an issuer or self for received History", () => {
     vi.mocked(createActorIssuer).mockClear();
     const tokens = received()([
-      named("alice"), { kind: "human", humanId: "alice" }, { kind: "human", humanId: "device" },
-      { kind: "human", humanId: "local:device" }, agent("handshake"),
+      named("alice"),
+      { kind: "human", humanId: "alice" },
+      { kind: "human", humanId: "device" },
+      { kind: "human", humanId: "local:device" },
+      agent("handshake"),
     ]);
     expect(createActorIssuer).not.toHaveBeenCalled();
-    expect(tokens.map(token => token.self)).toEqual([false, false, false, false, false]);
-    expect(tokens.map(token => token.hue)).toEqual([null, "rose", ACTOR_HUES[actorHueSlot("device")], null, null]);
+    expect(tokens.map((token) => token.self)).toEqual([false, false, false, false, false]);
+    expect(tokens.map((token) => token.hue)).toEqual([
+      null,
+      "rose",
+      ACTOR_HUES[actorHueSlot("device")],
+      null,
+      null,
+    ]);
     expect(tokens[0]!.group).toMatch(/^unknown:/);
     expect(tokens[3]!.group).toMatch(/^unknown:/);
   });
 
   it("checks the workspace before drawing a group", () => {
-    const present = createHistoryPresentationRequest({ source: "received", workspaceId: "closing", assertCurrent: () => { throw new Error("closed"); } });
+    const present = createHistoryPresentationRequest({
+      source: "received",
+      workspaceId: "closing",
+      assertCurrent: () => {
+        throw new Error("closed");
+      },
+    });
     expect(() => present([named("sam")])).toThrow("closed");
   });
 });
-
 
 describe("personal agent hues", () => {
   it("colours chat and History by the full agent key, with no effect on other owners or people", async () => {
     const chosen = local("agent");
     const human = local("human");
     const automation = local("automation");
-    const colors = { [chosen.authorActorKey!]: "blue", [human.authorActorKey!]: "blue",
-      [automation.authorActorKey!]: "rose", malformed: "rose" } as const;
+    const colors = {
+      [chosen.authorActorKey!]: "blue",
+      [human.authorActorKey!]: "blue",
+      [automation.authorActorKey!]: "rose",
+      malformed: "rose",
+    } as const;
     const chat = request(true, "w", colors);
     const token = await chat.present(chosen, "t");
     expect(token.hue).toBe("blue");
-    const history = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-      serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => colors });
-    expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]).toEqual(token);
+    const history = createHistoryPresentationRequest({
+      source: "own-store",
+      workspaceId: "w",
+      assertCurrent: () => undefined,
+      serverUrl: issuer,
+      synced: true,
+      installationId: "device",
+      credentials,
+      agentColors: () => colors,
+    });
+    expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]).toEqual(
+      token,
+    );
     const foreign = local("agent", "renderer", { issuer, userId: "sam" });
     expect(await chat.present(foreign, "t")).toMatchObject({ hue: null, self: false });
     expect(await chat.present(human, "t")).toMatchObject({ hue: "rose" });
     expect(await chat.present(automation, "t")).toMatchObject({ hue: null });
-    expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "sam" }])[0]?.hue).toBeNull();
+    expect(
+      history([{ kind: "agent", agentId: "handshake", onBehalfOf: "sam" }])[0]?.hue,
+    ).toBeNull();
     expect(history([{ kind: "automation", automationId: "job", depth: 0 }])[0]?.hue).toBeNull();
     expect((await request(true, "w", { malformed: "blue" }).present(chosen, "t")).hue).toBeNull();
   });
 });
 
-
 it("matches dispatch's unnamed run and CLI reply claims on the current base", async () => {
   const { UNNAMED_AGENT_ID } = await import("@dohc/workspace-contracts/engine");
   expect(UNNAMED_AGENT_ID).toBe("dohc-mcp");
-  const key = serializeActorKey(deriveLocalActor({ identity, workspaceId: "w", author: { kind: "agent" },
-    displayName: "Agent", origin: "cli" }).key);
+  const key = serializeActorKey(
+    deriveLocalActor({
+      identity,
+      workspaceId: "w",
+      author: { kind: "agent" },
+      displayName: "Agent",
+      origin: "cli",
+    }).key,
+  );
   const colors = { [key]: "blue" } as const;
-  const chat = await request(true, "w", colors).present(message({ author: { kind: "agent", displayName: "Agent" }, authorActorKey: key }), "t");
-  const [history] = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-    serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => colors })([
-    { kind: "agent", agentId: UNNAMED_AGENT_ID, onBehalfOf: "alice" },
-  ]);
+  const chat = await request(true, "w", colors).present(
+    message({ author: { kind: "agent", displayName: "Agent" }, authorActorKey: key }),
+    "t",
+  );
+  const [history] = createHistoryPresentationRequest({
+    source: "own-store",
+    workspaceId: "w",
+    assertCurrent: () => undefined,
+    serverUrl: issuer,
+    synced: true,
+    installationId: "device",
+    credentials,
+    agentColors: () => colors,
+  })([{ kind: "agent", agentId: UNNAMED_AGENT_ID, onBehalfOf: "alice" }]);
   expect(history).toEqual(chat);
   expect(history?.hue).toBe("blue");
 });
 
-
 it("resolves an in-flight chat and an unread History page against current settings", async () => {
   const row = local("agent");
   let choices: Record<string, "rose" | "blue"> = { [row.authorActorKey!]: "rose" };
-  const chat = createActorPresentationRequest({ readWorkspace: () => ({ workspaceId: "w", rootPath: "C:/w", kind: "personal", mode: "local-first" }),
-    store: { findThreadChannelId: async () => null, getChannelWireId: async () => null }, installationId: "device", credentials,
-    agentColors: () => choices });
-  const history = createHistoryPresentationRequest({ source: "own-store", workspaceId: "w", assertCurrent: () => undefined,
-    serverUrl: issuer, synced: true, installationId: "device", credentials, agentColors: () => choices });
+  const chat = createActorPresentationRequest({
+    readWorkspace: () => ({
+      workspaceId: "w",
+      rootPath: "C:/w",
+      kind: "personal",
+      mode: "local-first",
+    }),
+    store: { findThreadChannelId: async () => null, getChannelWireId: async () => null },
+    installationId: "device",
+    credentials,
+    agentColors: () => choices,
+  });
+  const history = createHistoryPresentationRequest({
+    source: "own-store",
+    workspaceId: "w",
+    assertCurrent: () => undefined,
+    serverUrl: issuer,
+    synced: true,
+    installationId: "device",
+    credentials,
+    agentColors: () => choices,
+  });
   const pending = chat(row, "thread");
   choices = { [row.authorActorKey!]: "blue" };
   expect((await pending).hue).toBe("blue");
-  expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBe("blue");
+  expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBe(
+    "blue",
+  );
   choices = {};
-  expect(history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue).toBeNull();
+  expect(
+    history([{ kind: "agent", agentId: "handshake", onBehalfOf: "alice" }])[0]?.hue,
+  ).toBeNull();
 });
 
-it.each(["human", "agent", "automation"] as const)("Links and Chat share %s keys and presentation across origins", async kind => {
-  const claim = kind === "agent" ? { kind, claimedName: "teammate-agent" } : { kind };
-  const input = { issuer, authorUserId: "sam", displayName: "teammate-agent", ...claim };
-  const key = serializeActorKey(deriveRelayChatActor(input).key);
-  for (const origin of ["renderer", "cli", "automation", "unknown"] as const) {
-    expect(serializeActorKey(deriveRelayChatActor({ ...input, origin }).key)).toBe(key);
-    expect(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null, origin }).key))
-      .toBe(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null }).key));
-  }
-  const cli = message({ author: { kind, displayName: input.displayName }, authorUserId: input.authorUserId, origin: "cli" });
-  const link = chatLinkMessageForPresentation({
-    authorKind: kind, authorDisplayName: input.displayName, authorUserId: input.authorUserId,
-  });
-  expect(chatActorForPresentation(link, issuer).key).toEqual(chatActorForPresentation(cli, issuer).key);
-  const present = request(true, "links-origin-" + kind).present;
-  expect(await present(link, "t")).toEqual(await present(cli, "t"));
-});
+it.each(["human", "agent", "automation"] as const)(
+  "Links and Chat share %s keys and presentation across origins",
+  async (kind) => {
+    const claim = kind === "agent" ? { kind, claimedName: "teammate-agent" } : { kind };
+    const input = { issuer, authorUserId: "sam", displayName: "teammate-agent", ...claim };
+    const key = serializeActorKey(deriveRelayChatActor(input).key);
+    for (const origin of ["renderer", "cli", "automation", "unknown"] as const) {
+      expect(serializeActorKey(deriveRelayChatActor({ ...input, origin }).key)).toBe(key);
+      expect(serializeActorKey(deriveRelayChatActor({ ...input, issuer: null, origin }).key)).toBe(
+        serializeActorKey(deriveRelayChatActor({ ...input, issuer: null }).key),
+      );
+    }
+    const cli = message({
+      author: { kind, displayName: input.displayName },
+      authorUserId: input.authorUserId,
+      origin: "cli",
+    });
+    const link = chatLinkMessageForPresentation({
+      authorKind: kind,
+      authorDisplayName: input.displayName,
+      authorUserId: input.authorUserId,
+    });
+    expect(chatActorForPresentation(link, issuer).key).toEqual(
+      chatActorForPresentation(cli, issuer).key,
+    );
+    const present = request(true, "links-origin-" + kind).present;
+    expect(await present(link, "t")).toEqual(await present(cli, "t"));
+  },
+);

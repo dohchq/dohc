@@ -38,18 +38,13 @@ describe("what a share's skipped ops say", () => {
   // The grant excluded the op. The share is the cause, and the person who
   // shared it is the one who can change that.
   it("names the share and its granter for a boundary refusal", () => {
-    const [line, ...rest] = shareSkipNoticeLines(
-      { ops: [boundary], more: 0 },
-      "granter@dohc.test",
-    );
+    const [line, ...rest] = shareSkipNoticeLines({ ops: [boundary], more: 0 }, "granter@dohc.test");
     expect(rest).toEqual([]);
     expect(line?.kind).toBe("boundary");
     expect(
       line?.text,
       "a boundary refusal that stops naming the share hides the one cause the reader can act on",
-    ).toBe(
-      "dohc skipped 1 update outside what this share covers. Ask granter@dohc.test.",
-    );
+    ).toBe("dohc skipped 1 update outside what this share covers. Ask granter@dohc.test.");
   });
 
   // The relay sent an envelope the engine could not read. The selector may
@@ -127,24 +122,15 @@ describe("what a share's skipped ops say", () => {
   });
 
   it("names no granter for a size refusal when the share has none", () => {
-    const [line, ...rest] = shareSkipNoticeLines(
-      { ops: [oversized], more: 0 },
-      null,
-    );
-    expect(
-      rest,
-      "the size refusal is counted twice, once as unappliable",
-    ).toEqual([]);
+    const [line, ...rest] = shareSkipNoticeLines({ ops: [oversized], more: 0 }, null);
+    expect(rest, "the size refusal is counted twice, once as unappliable").toEqual([]);
     expect(line?.text).toBe(
       "dohc skipped 1 update with files over the size limit. Ask the person who shared it to make them smaller and share them again.",
     );
   });
 
   it("says both when both happened", () => {
-    const lines = shareSkipNoticeLines(
-      { ops: [boundary, malformed], more: 0 },
-      null,
-    );
+    const lines = shareSkipNoticeLines({ ops: [boundary, malformed], more: 0 }, null);
     expect(lines.map((line) => line.kind)).toEqual(["boundary", "malformed"]);
     expect(lines[0]?.text).toContain("1 update outside what this share covers");
     expect(lines[1]?.text).toContain("couldn't apply 1 update");
@@ -167,9 +153,7 @@ describe("what a share's skipped ops say", () => {
     expect(overflow?.text).not.toContain("this share covers");
     expect(overflow?.text).not.toContain("granter@dohc.test");
     // The boundary line counts only what it can name.
-    expect(allBoundary[0]?.text).toContain(
-      "2 updates outside what this share covers",
-    );
+    expect(allBoundary[0]?.text).toContain("2 updates outside what this share covers");
 
     // The inverse: an actionable boundary refusal must not be buried in a
     // count the reader cannot act on.
@@ -177,10 +161,7 @@ describe("what a share's skipped ops say", () => {
       { ops: [malformed, malformed], more: 1 },
       "granter@dohc.test",
     );
-    expect(allMalformed.map((line) => line.kind)).toEqual([
-      "malformed",
-      "unknown",
-    ]);
+    expect(allMalformed.map((line) => line.kind)).toEqual(["malformed", "unknown"]);
     expect(
       allMalformed[1]?.text,
       "the overflow is reported as unappliable, hiding a boundary refusal the reader could act on",
@@ -198,13 +179,8 @@ describe("what a share's skipped ops say", () => {
   // The count is a true lower bound — it holds only ops the record can prove
   // distinct — so an incomplete count says so rather than reading exact.
   it("says the overflow is a lower bound when the count is incomplete", () => {
-    const lines = shareSkipNoticeLines(
-      { ops: [boundary], more: 4, inexact: true },
-      null,
-    );
-    expect(lines[1]?.text).toBe(
-      "dohc skipped at least 4 more updates from this share.",
-    );
+    const lines = shareSkipNoticeLines({ ops: [boundary], more: 4, inexact: true }, null);
+    expect(lines[1]?.text).toBe("dohc skipped at least 4 more updates from this share.");
     // The class line stays exact: it counts only what it holds.
     expect(lines[0]?.text).toContain("1 update outside what this share covers");
   });

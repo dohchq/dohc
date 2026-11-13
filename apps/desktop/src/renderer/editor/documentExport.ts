@@ -1,7 +1,7 @@
-import { escapeHtml } from '@dohc/workspace-core/html'
-import katex from 'katex'
-import { parseFrontmatter, displayFrontmatterValue } from '../markdown/frontmatter'
-import { markdownBodyToHtml } from './import-export'
+import { escapeHtml } from "@dohc/workspace-core/html";
+import katex from "katex";
+import { parseFrontmatter, displayFrontmatterValue } from "../markdown/frontmatter";
+import { markdownBodyToHtml } from "./import-export";
 // katexExport.css is KaTeX 0.17.0's `dist/katex.min.css` with every
 // `@font-face` block removed: the export must be a single self-contained file
 // with NO external assets, per above. Dropping the font files means the
@@ -13,16 +13,16 @@ import { markdownBodyToHtml } from './import-export'
 // bumped katex dist css if the dependency is upgraded. The `?raw` file bytes
 // ARE the exported stylesheet, so the css file carries no comment header and
 // no trailing newline: either would leak into every exported document.
-import KATEX_EXPORT_CSS from './katexExport.css?raw'
+import KATEX_EXPORT_CSS from "./katexExport.css?raw";
 
 // The document's display title: the `title` frontmatter key (same key
 // PageIdentity.tsx reads/writes), falling back to the filename stem —
 // the same Notion-style placeholder rule used everywhere else a title is
 // shown.
 export function resolveDocumentTitle(markdown: string, fallbackTitle: string): string {
-  const { meta } = parseFrontmatter(markdown)
-  const fromFrontmatter = displayFrontmatterValue(meta.title).trim()
-  return fromFrontmatter.length > 0 ? fromFrontmatter : fallbackTitle
+  const { meta } = parseFrontmatter(markdown);
+  const fromFrontmatter = displayFrontmatterValue(meta.title).trim();
+  return fromFrontmatter.length > 0 ? fromFrontmatter : fallbackTitle;
 }
 
 // Trimmed, self-contained, LIGHT-ONLY print theme: a warm-paper reading
@@ -152,90 +152,79 @@ const EXPORT_STYLE_CSS = `
   }
   .dohc-callout-body > *:first-child { margin-top: 0; }
   .dohc-callout-body > *:last-child { margin-bottom: 0; }
-`.trim()
+`.trim();
 
 function typesetMath(content: DocumentFragment): boolean {
-  let hasMath = false
+  let hasMath = false;
   const typeset = (el: Element, displayMode: boolean, delimiterLength: number) => {
-    hasMath = true
-    const raw = el.textContent ?? ''
-    const tex = raw.slice(delimiterLength, raw.length - delimiterLength)
+    hasMath = true;
+    const raw = el.textContent ?? "";
+    const tex = raw.slice(delimiterLength, raw.length - delimiterLength);
     try {
       // throwOnError:false already renders parse errors as visible red TeX
       // rather than throwing; the catch is a belt-and-braces guard that keeps
       // the lossless raw TeX instead of dropping content if KaTeX ever throws.
-      el.innerHTML = katex.renderToString(tex, { displayMode, throwOnError: false })
+      el.innerHTML = katex.renderToString(tex, { displayMode, throwOnError: false });
     } catch {
       // Leave the raw `$tex$` in place.
     }
-  }
-  content
-    .querySelectorAll('[data-dohc-math-inline]')
-    .forEach((el) => typeset(el, false, 1))
-  content
-    .querySelectorAll('[data-dohc-math-block]')
-    .forEach((el) => typeset(el, true, 2))
-  return hasMath
+  };
+  content.querySelectorAll("[data-dohc-math-inline]").forEach((el) => typeset(el, false, 1));
+  content.querySelectorAll("[data-dohc-math-block]").forEach((el) => typeset(el, true, 2));
+  return hasMath;
 }
 
 function isExportSafeImageSrc(src: string): boolean {
-  const trimmed = src.trim()
-  if (trimmed.length === 0) return false
+  const trimmed = src.trim();
+  if (trimmed.length === 0) return false;
   // Strip control chars/whitespace before sniffing, mirroring the sanitizer in
   // image-src.ts, so an obfuscated scheme ("java\nscript:") can't slip past.
-  const compact = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, '')
-  const scheme = /^[a-z][a-z\d+.-]*:/i.exec(compact)?.[0]
+  const compact = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, "");
+  const scheme = /^[a-z][a-z\d+.-]*:/i.exec(compact)?.[0];
   if (scheme) {
-    const protocol = scheme.slice(0, -1).toLowerCase()
-    return protocol === 'http' || protocol === 'https'
+    const protocol = scheme.slice(0, -1).toLowerCase();
+    return protocol === "http" || protocol === "https";
   }
   // Backslashes fold to '/' so a Windows-style `..\` traversal is caught too.
-  const forCheck = compact.replace(/\\/g, '/')
-  if (forCheck.startsWith('/')) return false
+  const forCheck = compact.replace(/\\/g, "/");
+  if (forCheck.startsWith("/")) return false;
   // Any `..` segment climbs above the exported file.
-  return !/(^|\/)\.\.(\/|$)/.test(forCheck)
+  return !/(^|\/)\.\.(\/|$)/.test(forCheck);
 }
 
 function containImages(content: DocumentFragment): void {
-  content.querySelectorAll('img').forEach((img) => {
-    if (!isExportSafeImageSrc(img.getAttribute('src') ?? '')) {
+  content.querySelectorAll("img").forEach((img) => {
+    if (!isExportSafeImageSrc(img.getAttribute("src") ?? "")) {
       // No src at all — not src="", which browsers re-request as the page's own
       // URL.
-      img.removeAttribute('src')
+      img.removeAttribute("src");
     }
-  })
+  });
 }
 
 // One DOM pass over the rendered body: typeset math, then contain image srcs.
 // Runs in the same DOM-bearing context markdownBodyToHtml already requires
 // (renderer / vitest jsdom), never in the main process.
 function prepareExportedBodyHtml(bodyHtml: string): {
-  html: string
-  hasMath: boolean
+  html: string;
+  hasMath: boolean;
 } {
-  const template = document.createElement('template')
-  template.innerHTML = bodyHtml
-  const hasMath = typesetMath(template.content)
-  containImages(template.content)
-  return { html: template.innerHTML, hasMath }
+  const template = document.createElement("template");
+  template.innerHTML = bodyHtml;
+  const hasMath = typesetMath(template.content);
+  containImages(template.content);
+  return { html: template.innerHTML, hasMath };
 }
 
 // Builds the full standalone HTML document. `markdown` is the whole document
 // source (frontmatter included, exactly what "Copy as Markdown" copies) —
 // frontmatter drives the title; everything after it is the rendered body.
-export function buildStandaloneDocumentHtml(
-  markdown: string,
-  fallbackTitle: string,
-): string {
-  const { body } = parseFrontmatter(markdown)
-  const title = resolveDocumentTitle(markdown, fallbackTitle)
-  const escapedTitle = escapeHtml(title)
-  const { html: bodyHtml, hasMath } = prepareExportedBodyHtml(
-    markdownBodyToHtml(body),
-  )
-  const style = hasMath
-    ? `${EXPORT_STYLE_CSS}\n${KATEX_EXPORT_CSS}`
-    : EXPORT_STYLE_CSS
+export function buildStandaloneDocumentHtml(markdown: string, fallbackTitle: string): string {
+  const { body } = parseFrontmatter(markdown);
+  const title = resolveDocumentTitle(markdown, fallbackTitle);
+  const escapedTitle = escapeHtml(title);
+  const { html: bodyHtml, hasMath } = prepareExportedBodyHtml(markdownBodyToHtml(body));
+  const style = hasMath ? `${EXPORT_STYLE_CSS}\n${KATEX_EXPORT_CSS}` : EXPORT_STYLE_CSS;
 
   return `<!doctype html>
 <html lang="en">
@@ -250,5 +239,5 @@ export function buildStandaloneDocumentHtml(
 ${bodyHtml}
 </body>
 </html>
-`
+`;
 }

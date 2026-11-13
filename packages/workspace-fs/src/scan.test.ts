@@ -50,8 +50,6 @@ describe("scanWorkspaceFiles", () => {
       "notes/today.md",
       "scripts/run.sh",
     ]);
-    expect(files.find((file) => file.path === "scripts/run.sh")?.mediaType).toBe(
-      "text/plain",
-    );
+    expect(files.find((file) => file.path === "scripts/run.sh")?.mediaType).toBe("text/plain");
   });
 });

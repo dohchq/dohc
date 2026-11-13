@@ -69,10 +69,15 @@ let recordedVectors: RecordedVector[] | undefined;
  * engine's tests decode the same bytes.
  */
 export function recordedYDoc(name: string): { doc: Y.Doc; markdown: string } {
-  recordedVectors ??= JSON.parse(readFileSync(new NodeURL(
-    "../../../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json",
-    import.meta.url,
-  ), "utf8")) as RecordedVector[];
+  recordedVectors ??= JSON.parse(
+    readFileSync(
+      new NodeURL(
+        "../../../../../crates/dohc-engine-collab/tests/live-bootstrap-fixtures/live-bootstrap.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as RecordedVector[];
   const vector = recordedVectors.find((candidate) => candidate.name === name);
   if (!vector) throw new Error(`live-bootstrap.json has no vector ${name}`);
   const doc = new Y.Doc();

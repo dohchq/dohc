@@ -2,10 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { PreferredName } from "./chatIdentity";
-import {
-  MAX_PREFERRED_NAME_LENGTH,
-  preferredNameFromInput,
-} from "./chatIdentityValues";
+import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "./chatIdentityValues";
 
 describe("chat identity", () => {
   const decodePreferredName = Schema.decodeUnknownResult(PreferredName);
@@ -22,13 +19,9 @@ describe("chat identity", () => {
     const empty = decodePreferredName(" ");
     expect(Result.isFailure(empty)).toBe(true);
     if (Result.isFailure(empty)) {
-      expect(empty.failure.message).toBe(
-        "Enter the name your agent should use.",
-      );
+      expect(empty.failure.message).toBe("Enter the name your agent should use.");
     }
-    expect(
-      Result.isSuccess(decodePreferredName("x".repeat(MAX_PREFERRED_NAME_LENGTH))),
-    ).toBe(true);
+    expect(Result.isSuccess(decodePreferredName("x".repeat(MAX_PREFERRED_NAME_LENGTH)))).toBe(true);
     const tooLong = decodePreferredName("x".repeat(MAX_PREFERRED_NAME_LENGTH + 1));
     expect(Result.isFailure(tooLong)).toBe(true);
     if (Result.isFailure(tooLong)) {
@@ -50,9 +43,7 @@ describe("chat identity", () => {
       const result = decodePreferredName(name);
       expect(Result.isFailure(result)).toBe(true);
       if (Result.isFailure(result)) {
-        expect(result.failure.message).toBe(
-          "Names cannot contain control characters.",
-        );
+        expect(result.failure.message).toBe("Names cannot contain control characters.");
       }
     }
     expect(() => preferredNameFromInput("x".repeat(MAX_PREFERRED_NAME_LENGTH + 1))).toThrow(
@@ -62,5 +53,4 @@ describe("chat identity", () => {
       "Names cannot contain control characters.",
     );
   });
-
 });

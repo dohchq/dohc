@@ -10,13 +10,22 @@ import {
   type RelayButtonInspection,
 } from "@dohc/workspace-contracts/relay";
 import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
-import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED, SHARED_BUTTON_HELD } from "@dohc/automation-executor/button-presser";
+import {
+  SHARED_BUTTON_DENIED,
+  SHARED_BUTTON_FIELD_CHANGED,
+  SHARED_BUTTON_MOVED,
+  SHARED_BUTTON_UNCHECKED,
+  SHARED_BUTTON_HELD,
+} from "@dohc/automation-executor/button-presser";
 import { computerInstallId } from "./automationHostRoutes";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { relayPathSegments } from "./requestInputs";
 import type { SyncRelayStorage } from "./storage";
-import { AUTOMATION_PRESS_LIST_LIMIT, AUTOMATION_PRESS_PRUNE_BATCH } from "./storage/automationPresses";
+import {
+  AUTOMATION_PRESS_LIST_LIMIT,
+  AUTOMATION_PRESS_PRUNE_BATCH,
+} from "./storage/automationPresses";
 
 // Button presses from shared views (ADR 0012). A recipient with a named Edit
 // grant on a Collection's folder posts a press; the workspace's automation
@@ -25,7 +34,17 @@ import { AUTOMATION_PRESS_LIST_LIMIT, AUTOMATION_PRESS_PRUNE_BATCH } from "./sto
 
 export type AutomationPressRoute =
   | { route: "share-automation-presses"; shareId: string }
-  | { route: "automation-presses"; workspaceId: string; action: "list" | "accept" | "settle" | "authority" | "inspection-authority" | "inspection-answer" };
+  | {
+      route: "automation-presses";
+      workspaceId: string;
+      action:
+        | "list"
+        | "accept"
+        | "settle"
+        | "authority"
+        | "inspection-authority"
+        | "inspection-answer";
+    };
 
 // A burst of 20 presses per grant, then one every three seconds: people
 // press buttons by hand.
@@ -80,12 +99,25 @@ export function isAutomationPressPath(path: string): boolean {
   }
   if (parts[0] !== "sync") return false;
   if (parts[1] === "shares") return parts.length === 4 && parts[3] === "automation-presses";
-  return parts[1] !== "notices" && parts[2] === "automation-presses" && parts.length >= 3 && parts.length <= 4;
+  return (
+    parts[1] !== "notices" &&
+    parts[2] === "automation-presses" &&
+    parts.length >= 3 &&
+    parts.length <= 4
+  );
 }
 
-export function parseAutomationPressAction(value: string | undefined): Extract<AutomationPressRoute, { route: "automation-presses" }>["action"] | null {
+export function parseAutomationPressAction(
+  value: string | undefined,
+): Extract<AutomationPressRoute, { route: "automation-presses" }>["action"] | null {
   if (value === undefined) return "list";
-  return value === "accept" || value === "settle" || value === "authority" || value === "inspection-authority" || value === "inspection-answer" ? value : null;
+  return value === "accept" ||
+    value === "settle" ||
+    value === "authority" ||
+    value === "inspection-authority" ||
+    value === "inspection-answer"
+    ? value
+    : null;
 }
 
 export function createAutomationPressRoutes(input: {
@@ -100,34 +132,93 @@ export function createAutomationPressRoutes(input: {
   const topic = (workspaceId: string) => `automation-presses:${workspaceId}`;
 
   /** `POST /sync/shares/:shareId/automation-presses`: a recipient presses a shared Collection's button. */
-  async function respondToSharePress(request: Request, shareId: string, actorUserId: string): Promise<Response> {
+  async function respondToSharePress(
+    request: Request,
+    shareId: string,
+    actorUserId: string,
+  ): Promise<Response> {
     if (request.method !== "POST") throw relayError("method_not_allowed");
     await input.claimPendingShares(actorUserId);
     const authorized = namedCollectionEditGrant(storage, shareId, actorUserId);
     const { share, grant } = authorized;
     const inspecting = new URL(request.url).searchParams.get("inspect") === "true";
-    if (!(inspecting ? rateLimiters.inspection : rateLimiters.press).allow(grant.grantId, nowMs())) throw relayError("automation_press_rate_limited");
+    if (!(inspecting ? rateLimiters.inspection : rateLimiters.press).allow(grant.grantId, nowMs()))
+      throw relayError("automation_press_rate_limited");
     const body = await readBody(request);
     if (inspecting) {
-      if (Object.keys(body).some(key => key !== "targets") || !Array.isArray(body.targets) || body.targets.length === 0 || body.targets.length > 50) throw badRequest("invalid inspection");
-      const targets = body.targets.map(value => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("invalid inspection");
+      if (
+        Object.keys(body).some((key) => key !== "targets") ||
+        !Array.isArray(body.targets) ||
+        body.targets.length === 0 ||
+        body.targets.length > 50
+      )
+        throw badRequest("invalid inspection");
+      const targets = body.targets.map((value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value))
+          throw badRequest("invalid inspection");
         const target = value as Record<string, unknown>;
-        if (Object.keys(target).some(key => !["automationId", "collectionPath", "definitionHash"].includes(key)) || typeof target.definitionHash !== "string" || !AUTOMATION_DEFINITION_HASH_PATTERN.test(target.definitionHash)) throw badRequest("invalid inspection");
-        return { automationId: line(target.automationId, "automationId", MAX_AUTOMATION_ID_CHARS), collectionPath: line(target.collectionPath, "collectionPath", MAX_COLLECTION_PATH_CHARS), definitionHash: target.definitionHash };
+        if (
+          Object.keys(target).some(
+            (key) => !["automationId", "collectionPath", "definitionHash"].includes(key),
+          ) ||
+          typeof target.definitionHash !== "string" ||
+          !AUTOMATION_DEFINITION_HASH_PATTERN.test(target.definitionHash)
+        )
+          throw badRequest("invalid inspection");
+        return {
+          automationId: line(target.automationId, "automationId", MAX_AUTOMATION_ID_CHARS),
+          collectionPath: line(target.collectionPath, "collectionPath", MAX_COLLECTION_PATH_CHARS),
+          definitionHash: target.definitionHash,
+        };
       });
-      if (targets.some(target => target.collectionPath !== targets[0]!.collectionPath) || !grantEditsCollection(storage, authorized, targets[0]!.collectionPath)) throw notFound();
-      const inspections = await Promise.all(targets.map(target => storage.inspectAutomationButton({ target,
-        source: { workspaceId: share.workspaceId, shareId, grantId: grant.grantId, grantGeneration: grant.generation, userId: actorUserId },
-        id: input.newId(), signal: request.signal, wake: () => activity.wake(topic(share.workspaceId)) })));
+      if (
+        targets.some((target) => target.collectionPath !== targets[0]!.collectionPath) ||
+        !grantEditsCollection(storage, authorized, targets[0]!.collectionPath)
+      )
+        throw notFound();
+      const inspections = await Promise.all(
+        targets.map((target) =>
+          storage.inspectAutomationButton({
+            target,
+            source: {
+              workspaceId: share.workspaceId,
+              shareId,
+              grantId: grant.grantId,
+              grantGeneration: grant.generation,
+              userId: actorUserId,
+            },
+            id: input.newId(),
+            signal: request.signal,
+            wake: () => activity.wake(topic(share.workspaceId)),
+          }),
+        ),
+      );
       return jsonResponse({ ok: true, inspections });
     }
     // Exactly these keys: who pressed comes from the session, never the body.
-    if (Object.keys(body).some((key) => !["pressId", "automationId", "collectionPath", "definitionHash", "recordId", "confirmed"].includes(key))) {
-      throw badRequest("a press names only pressId, automationId, collectionPath, definitionHash, and recordId");
+    if (
+      Object.keys(body).some(
+        (key) =>
+          ![
+            "pressId",
+            "automationId",
+            "collectionPath",
+            "definitionHash",
+            "recordId",
+            "confirmed",
+          ].includes(key),
+      )
+    ) {
+      throw badRequest(
+        "a press names only pressId, automationId, collectionPath, definitionHash, and recordId",
+      );
     }
     const definitionHash = body.definitionHash;
-    if (typeof definitionHash !== "string" || !AUTOMATION_DEFINITION_HASH_PATTERN.test(definitionHash)) throw badRequest("definitionHash is invalid");
+    if (
+      typeof definitionHash !== "string" ||
+      !AUTOMATION_DEFINITION_HASH_PATTERN.test(definitionHash)
+    )
+      throw badRequest("definitionHash is invalid");
     const confirmed = confirmations(body.confirmed);
     const pressed = storage.recordAutomationPress({
       shareId: share.shareId,
@@ -159,44 +250,99 @@ export function createAutomationPressRoutes(input: {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const url = new URL(request.url);
       const installId = computerInstallId(url.searchParams.get("installId"));
-      const waitMs = Math.min(waitParameter(url.searchParams.get("waitMs")), AUTOMATION_PRESS_MAX_WAIT_MS);
+      const waitMs = Math.min(
+        waitParameter(url.searchParams.get("waitMs")),
+        AUTOMATION_PRESS_MAX_WAIT_MS,
+      );
       const scope = { workspaceId, ownerUserId, installId };
       const release = storage.parkButtonInspectionHost(scope);
       try {
         // Only the running host waits; any other computer hears at once that there is nothing for it.
-        if (waitMs > 0 && storage.automationPressWait({ ...scope, nowMs: nowMs() }) === "empty" && storage.listButtonInspections(scope).length === 0) {
+        if (
+          waitMs > 0 &&
+          storage.automationPressWait({ ...scope, nowMs: nowMs() }) === "empty" &&
+          storage.listButtonInspections(scope).length === 0
+        ) {
           await activity.wait(topic(workspaceId), `user:${ownerUserId}`, {
             holdMs: waitMs,
             signal: request.signal,
-            shouldPark: () => storage.automationPressWait({ ...scope, nowMs: nowMs() }) === "empty" && storage.listButtonInspections(scope).length === 0,
+            shouldPark: () =>
+              storage.automationPressWait({ ...scope, nowMs: nowMs() }) === "empty" &&
+              storage.listButtonInspections(scope).length === 0,
           });
         }
-        const answer: RelayAutomationPressList = { presses: storage.listAutomationPresses({ ...scope, nowMs: nowMs() }), inspections: storage.listButtonInspections(scope) };
+        const answer: RelayAutomationPressList = {
+          presses: storage.listAutomationPresses({ ...scope, nowMs: nowMs() }),
+          inspections: storage.listButtonInspections(scope),
+        };
         return jsonResponse({ ok: true, ...answer });
-      } finally { release(); }
+      } finally {
+        release();
+      }
     }
     if (request.method !== "POST") throw relayError("method_not_allowed");
-    const accessCheck = route.action === "authority" || route.action === "inspection-authority" || route.action === "inspection-answer";
-    if (!(accessCheck ? rateLimiters.authority : rateLimiters.host).allow(ownerUserId, nowMs())) throw relayError("automation_press_rate_limited");
+    const accessCheck =
+      route.action === "authority" ||
+      route.action === "inspection-authority" ||
+      route.action === "inspection-answer";
+    if (!(accessCheck ? rateLimiters.authority : rateLimiters.host).allow(ownerUserId, nowMs()))
+      throw relayError("automation_press_rate_limited");
     const body = await readBody(request);
     const installId = computerInstallId(body.installId);
-    if (route.action === "authority" || route.action === "inspection-authority" || route.action === "inspection-answer") {
-      if (Object.keys(body).some(key => !["installId", "generation", "hostPressId", "inspectionId", "inspection"].includes(key))) throw badRequest("invalid host request");
+    if (
+      route.action === "authority" ||
+      route.action === "inspection-authority" ||
+      route.action === "inspection-answer"
+    ) {
+      if (
+        Object.keys(body).some(
+          (key) =>
+            !["installId", "generation", "hostPressId", "inspectionId", "inspection"].includes(key),
+        )
+      )
+        throw badRequest("invalid host request");
       const generation = body.generation;
-      if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) throw badRequest("generation is invalid");
+      if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1)
+        throw badRequest("generation is invalid");
       const scope = { workspaceId, ownerUserId, installId, generation };
-      if (route.action === "authority") return jsonResponse({ ok: true, authority: storage.resolveAutomationPress({ ...scope,
-        hostPressId: line(body.hostPressId, "hostPressId", AUTOMATION_PRESS_ID_MAX_CHARS), nowMs: nowMs() }) });
+      if (route.action === "authority")
+        return jsonResponse({
+          ok: true,
+          authority: storage.resolveAutomationPress({
+            ...scope,
+            hostPressId: line(body.hostPressId, "hostPressId", AUTOMATION_PRESS_ID_MAX_CHARS),
+            nowMs: nowMs(),
+          }),
+        });
       const inspectionId = line(body.inspectionId, "inspectionId", AUTOMATION_PRESS_ID_MAX_CHARS);
-      if (route.action === "inspection-authority") return jsonResponse({ ok: true, authority: storage.resolveButtonInspection({ ...scope, inspectionId }) });
+      if (route.action === "inspection-authority")
+        return jsonResponse({
+          ok: true,
+          authority: storage.resolveButtonInspection({ ...scope, inspectionId }),
+        });
       const result = body.inspection as RelayButtonInspection | undefined;
-      if (!result || !["ready", "denied", "unchecked"].includes(result.kind)) throw badRequest("invalid inspection");
+      if (!result || !["ready", "denied", "unchecked"].includes(result.kind))
+        throw badRequest("invalid inspection");
       // Denials never forward private host diagnostics. Confirmations are bounded public metadata for authorized operations.
-      const safe: RelayButtonInspection = result.kind === "ready" ? { kind: "ready", automationId: line(result.automationId, "automationId", MAX_AUTOMATION_ID_CHARS),
-        definitionHash: line(result.definitionHash, "definitionHash", 16), irreversible: irreversibleActions(result.irreversible) }
-        : { kind: result.kind, reason: result.kind === "denied"
-          ? [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(result.reason) ? result.reason : SHARED_BUTTON_DENIED
-          : SHARED_BUTTON_UNCHECKED };
+      const safe: RelayButtonInspection =
+        result.kind === "ready"
+          ? {
+              kind: "ready",
+              automationId: line(result.automationId, "automationId", MAX_AUTOMATION_ID_CHARS),
+              definitionHash: line(result.definitionHash, "definitionHash", 16),
+              irreversible: irreversibleActions(result.irreversible),
+            }
+          : {
+              kind: result.kind,
+              reason:
+                result.kind === "denied"
+                  ? [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(
+                      result.reason,
+                    )
+                    ? result.reason
+                    : SHARED_BUTTON_DENIED
+                  : SHARED_BUTTON_UNCHECKED,
+            };
       storage.answerButtonInspection({ ...scope, inspectionId }, safe);
       return jsonResponse({ ok: true });
     }
@@ -207,15 +353,25 @@ export function createAutomationPressRoutes(input: {
       }
       const hostPressIds = ids.map((id) => line(id, "hostPressIds", AUTOMATION_PRESS_ID_MAX_CHARS));
       const generation = body.generation;
-      if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) throw badRequest("generation is invalid");
-      const accepted = storage.acceptAutomationPresses({ workspaceId, ownerUserId, installId, generation, hostPressIds, nowMs: nowMs() });
+      if (typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1)
+        throw badRequest("generation is invalid");
+      const accepted = storage.acceptAutomationPresses({
+        workspaceId,
+        ownerUserId,
+        installId,
+        generation,
+        hostPressIds,
+        nowMs: nowMs(),
+      });
       return jsonResponse({ ok: true, accepted });
     }
     const outcome = body.outcome;
-    if (typeof outcome !== "string" || !OUTCOMES.includes(outcome as AutomationPressOutcome)) throw badRequest("outcome is invalid");
+    if (typeof outcome !== "string" || !OUTCOMES.includes(outcome as AutomationPressOutcome))
+      throw badRequest("outcome is invalid");
     const error = body.error === null ? null : errorText(body.error);
     const settled = storage.settleAutomationPress({
-      workspaceId, ownerUserId,
+      workspaceId,
+      ownerUserId,
       hostPressId: line(body.hostPressId, "hostPressId", AUTOMATION_PRESS_ID_MAX_CHARS),
       outcome: outcome as AutomationPressOutcome,
       error,
@@ -229,13 +385,16 @@ export function createAutomationPressRoutes(input: {
 
 function confirmations(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 100) throw badRequest("confirmed is invalid");
-  return [...new Set(value.map(name => line(name, "confirmed", 1024)))].sort();
+  return [...new Set(value.map((name) => line(name, "confirmed", 1024)))].sort();
 }
 function irreversibleActions(value: unknown): Array<{ name: string; label: string }> {
   if (!Array.isArray(value) || value.length > 100) throw badRequest("irreversible is invalid");
-  return value.map(item => {
+  return value.map((item) => {
     if (!item || typeof item !== "object") throw badRequest("irreversible is invalid");
-    return { name: line((item as Record<string, unknown>).name, "name", 1024), label: line((item as Record<string, unknown>).label, "label", 1024) };
+    return {
+      name: line((item as Record<string, unknown>).name, "name", 1024),
+      label: line((item as Record<string, unknown>).label, "label", 1024),
+    };
   });
 }
 
@@ -247,7 +406,8 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
     if (error instanceof RangeError) throw relayError("payload_too_large");
     throw badRequest("request body must be valid JSON");
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw badRequest("request body must be a JSON object");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw badRequest("request body must be a JSON object");
   return value as Record<string, unknown>;
 }
 
@@ -257,13 +417,19 @@ function line(value: unknown, name: string, max: number): string {
 }
 
 function errorText(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > AUTOMATION_PRESS_ERROR_MAX_CHARS) throw badRequest("error is invalid");
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > AUTOMATION_PRESS_ERROR_MAX_CHARS
+  )
+    throw badRequest("error is invalid");
   return value;
 }
 
 function waitParameter(value: string | null): number {
   if (value === null) return 0;
   const parsed = Number(value);
-  if (!/^(0|[1-9][0-9]{0,5})$/u.test(value) || !Number.isSafeInteger(parsed)) throw badRequest("waitMs must be a whole number of milliseconds");
+  if (!/^(0|[1-9][0-9]{0,5})$/u.test(value) || !Number.isSafeInteger(parsed))
+    throw badRequest("waitMs must be a whole number of milliseconds");
   return parsed;
 }

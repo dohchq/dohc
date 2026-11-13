@@ -20,9 +20,14 @@ export function splitPath(path: string): PathParts {
   const nameStart = path.lastIndexOf(separator) + 1;
   // The first folder runs through the separator after its own name: "C:\",
   // "\\server\", "/home/". Without one, or past the name, it is all before the name.
-  const afterFirst = path.indexOf(separator, path.search(separator === "\\" ? /[^\\]/ : /[^/]/)) + 1;
+  const afterFirst =
+    path.indexOf(separator, path.search(separator === "\\" ? /[^\\]/ : /[^/]/)) + 1;
   const firstEnd = afterFirst === 0 ? nameStart : Math.min(afterFirst, nameStart);
-  return { first: path.slice(0, firstEnd), middle: path.slice(firstEnd, nameStart), name: path.slice(nameStart) };
+  return {
+    first: path.slice(0, firstEnd),
+    middle: path.slice(firstEnd, nameStart),
+    name: path.slice(nameStart),
+  };
 }
 
 // Cuts a path after each separator, so a line can break between folders.
@@ -63,9 +68,10 @@ export function PathLine(props: { path: string; className?: string }) {
       const nameElement = namePart.current;
       if (!lineWidth || !dots.current || !nameElement) return;
       // A cut name reports its whole width only as a rounded scrollWidth.
-      const nameWidth = nameElement.scrollWidth > nameElement.clientWidth
-        ? nameElement.scrollWidth + 1
-        : nameElement.getBoundingClientRect().width;
+      const nameWidth =
+        nameElement.scrollWidth > nameElement.clientWidth
+          ? nameElement.scrollWidth + 1
+          : nameElement.getBoundingClientRect().width;
       const room = lineWidth - firstElement.getBoundingClientRect().width - nameWidth;
       if (widthFrom(0) <= room) {
         setKept(null);
@@ -90,7 +96,9 @@ export function PathLine(props: { path: string; className?: string }) {
 
   return (
     <span ref={line} className={`flex w-full min-w-0 whitespace-nowrap ${props.className ?? ""}`}>
-      <span ref={firstPart} className="shrink-0">{first}</span>
+      <span ref={firstPart} className="shrink-0">
+        {first}
+      </span>
       {middle ? (
         <>
           <span
@@ -100,12 +108,20 @@ export function PathLine(props: { path: string; className?: string }) {
             className={`before:content-['…'] ${kept === null ? "invisible absolute" : "shrink-0"}`}
           />
           {/* Laid out from the right, so a cut takes the start. */}
-          <span dir="rtl" className="shrink-0 overflow-clip" style={kept === null ? undefined : { width: kept }}>
-            <bdi ref={folders} dir="ltr">{middle}</bdi>
+          <span
+            dir="rtl"
+            className="shrink-0 overflow-clip"
+            style={kept === null ? undefined : { width: kept }}
+          >
+            <bdi ref={folders} dir="ltr">
+              {middle}
+            </bdi>
           </span>
         </>
       ) : null}
-      <span ref={namePart} className="min-w-0 truncate">{name}</span>
+      <span ref={namePart} className="min-w-0 truncate">
+        {name}
+      </span>
     </span>
   );
 }

@@ -1,4 +1,10 @@
-import { desktopPins, activityPin, settingsNavPin, editorTabTestId, editorTabPrefixPattern } from "../src/testPins";
+import {
+  desktopPins,
+  activityPin,
+  settingsNavPin,
+  editorTabTestId,
+  editorTabPrefixPattern,
+} from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
@@ -98,25 +104,22 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     // CLI while the app runs arrives unread live" in
     // workspace-chats-feed.spec.ts.
     await desktop.close();
-    await seedThroughDaemon(
-      { workspaceId, rootPath: temp.rootPath },
-      async ({ chats }) => {
-        const general = await chats.findChannelBySlug({
-          workspaceId,
-          slug: "general",
-        });
-        expect(general).not.toBeNull();
-        if (!general) throw new Error("general channel missing");
-        await chats.startChannelThread({
-          authorActorKey: null,
-          workspaceId,
-          channelId: general.id,
-          author: { kind: "agent", displayName: "Nova" },
-          authorOwnerDisplayName: "Sam",
-          body: "The zeppelin-cadence report is ready.",
-        });
-      },
-    );
+    await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats }) => {
+      const general = await chats.findChannelBySlug({
+        workspaceId,
+        slug: "general",
+      });
+      expect(general).not.toBeNull();
+      if (!general) throw new Error("general channel missing");
+      await chats.startChannelThread({
+        authorActorKey: null,
+        workspaceId,
+        channelId: general.id,
+        author: { kind: "agent", displayName: "Nova" },
+        authorOwnerDisplayName: "Sam",
+        body: "The zeppelin-cadence report is ready.",
+      });
+    });
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
@@ -141,9 +144,7 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
 
     // Back to the channel: the agent thread carries an unread badge.
     await view.getByTestId("chats-thread-back").click();
-    const agentThreadRow = view
-      .getByTestId("chats-thread")
-      .filter({ hasText: "zeppelin-cadence" });
+    const agentThreadRow = view.getByTestId("chats-thread").filter({ hasText: "zeppelin-cadence" });
     await expect(agentThreadRow).toBeVisible();
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
@@ -192,9 +193,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
 
   try {
     await seedWorkspaceManifest(temp, "chats-expand-e2e");
-    await writeWorkspaceFiles(temp, [
-      { path: "notes.md", contents: "# Notes\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "# Notes\n" }]);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -210,9 +209,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     const chatsTab = page.getByTestId(editorTabPrefixPattern("tab://chats/channel/", true));
     await expect(chatsTab).toBeVisible();
     await expect(chatsTab).toHaveAttribute("data-active", "true");
-    const pageChannelView = page.locator(
-      '[data-testid="chats-channel-view"][data-variant="page"]',
-    );
+    const pageChannelView = page.locator('[data-testid="chats-channel-view"][data-variant="page"]');
     await expect(pageChannelView).toBeVisible();
     await expect(chatsTab).toContainText("general");
     await expect(pageChannelView.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
@@ -226,13 +223,11 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     const newThreadComposer = pageChannelView.getByTestId("chats-new-thread-composer");
     await newThreadComposer.fill("Expand me into a tab.");
     await newThreadComposer.press("Enter");
-    const pageThreadView = page.locator(
-      '[data-testid="chats-thread-view"][data-variant="page"]',
-    );
+    const pageThreadView = page.locator('[data-testid="chats-thread-view"][data-variant="page"]');
     await expect(pageThreadView).toBeVisible();
-    await expect(
-      pageThreadView.getByTestId("chats-thread-post-title"),
-    ).toHaveText("Expand me into a tab.");
+    await expect(pageThreadView.getByTestId("chats-thread-post-title")).toHaveText(
+      "Expand me into a tab.",
+    );
     await expect(panel.getByTestId("chats-thread-view")).toHaveCount(0);
     const back = pageThreadView.getByRole("button", { name: "Back", exact: true });
     const column = pageThreadView.getByTestId("chats-thread-column");
@@ -244,7 +239,10 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     expect(composerGap).toBeGreaterThanOrEqual(0);
     expect(composerGap).toBeLessThan(60);
     for (const theme of ["light", "dark"] as const) {
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await page.emulateMedia({ reducedMotion: "reduce" });
       await back.focus();
       await expect(back).toBeFocused();
@@ -261,9 +259,7 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
     await expect(panel.getByTestId("chats-channel")).toBeVisible();
     await chatsTab.click();
     await expect(pageThreadView).toBeVisible();
-    await expect(pageThreadView.getByTestId("chats-composer")).toHaveValue(
-      "draft in flight",
-    );
+    await expect(pageThreadView.getByTestId("chats-composer")).toHaveValue("draft in flight");
 
     // Home has its own tab; returning to General preserves the thread draft.
     await panel.getByTestId("chats-feed-link").click();
@@ -290,23 +286,28 @@ test("a panel click opens the conversation in the Chats tab and the panel keeps 
       await page.keyboard.press("Enter");
       await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
       await waitForVisibleAnimations(page);
-      await page.screenshot({ path: test.info().outputPath(`chat-home-${theme.toLowerCase()}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`chat-home-${theme.toLowerCase()}.png`),
+      });
       await panel.getByTestId("chats-channel").focus();
       await page.keyboard.press("Enter");
       await expect(pageChannelView).toBeVisible();
       await waitForVisibleAnimations(page);
-      await page.screenshot({ path: test.info().outputPath(`chat-channel-${theme.toLowerCase()}.png`) });
+      await page.screenshot({
+        path: test.info().outputPath(`chat-channel-${theme.toLowerCase()}.png`),
+      });
     }
     // The durable channel identity and Home tab survive a desktop restart.
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
     page = desktop.page;
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
-    await expect(page.getByTestId(editorTabPrefixPattern("tab://chats/channel/", true))).toContainText("general");
+    await expect(
+      page.getByTestId(editorTabPrefixPattern("tab://chats/channel/", true)),
+    ).toContainText("general");
     await expect(page.getByTestId(editorTabTestId("tab://chats"))).toContainText("Home");
     await page.getByTestId(editorTabTestId("tab://chats")).click();
     await expect(page.getByTestId("chats-personal-feed")).toBeVisible();
-
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -328,13 +329,16 @@ test("About for a Group lists the files its messages mention and opens one", asy
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
-    for (const path of ["data/funnel.csv", "notes/plan.md"]) await waitForFileObjectId(page, workspaceId, path);
+    for (const path of ["data/funnel.csv", "notes/plan.md"])
+      await waitForFileObjectId(page, workspaceId, path);
 
     const panel = await openChatsView(page);
     await panel.getByTestId("chats-channel").click();
     const channelView = page.locator('[data-testid="chats-channel-view"][data-variant="page"]');
     const opening = channelView.getByTestId("chats-new-thread-composer");
-    await opening.fill("Numbers are in @[data/funnel.csv] and the plan is @[notes/plan.md] for review");
+    await opening.fill(
+      "Numbers are in @[data/funnel.csv] and the plan is @[notes/plan.md] for review",
+    );
     await opening.press("Enter");
     const threadView = page.locator('[data-testid="chats-thread-view"][data-variant="page"]');
     await expect(threadView).toBeVisible();
@@ -345,17 +349,26 @@ test("About for a Group lists the files its messages mention and opens one", asy
 
     await openAboutPanel(page);
     const about = page.getByTestId(desktopPins.aboutRail);
-    await expect(about.getByTestId("about-panel")).toHaveAttribute("data-conversation-kind", "group");
+    await expect(about.getByTestId("about-panel")).toHaveAttribute(
+      "data-conversation-kind",
+      "group",
+    );
     const links = about.getByTestId("about-conversation-link");
     // The conversation's link index may still be building when About opens.
     await expect(links).toHaveCount(2, { timeout: 30_000 });
     await expect(about.getByTestId("about-conversation-links-gathering")).toHaveCount(0);
-    expect(await links.evaluateAll((rows) => rows.map((row) => row.getAttribute("data-path"))))
-      .toEqual(["data/funnel.csv", "notes/plan.md"]);
-    await expect(links.first().getByTestId("about-conversation-link-authors")).toContainText("Mentioned by");
+    expect(
+      await links.evaluateAll((rows) => rows.map((row) => row.getAttribute("data-path"))),
+    ).toEqual(["data/funnel.csv", "notes/plan.md"]);
+    await expect(links.first().getByTestId("about-conversation-link-authors")).toContainText(
+      "Mentioned by",
+    );
 
     await links.nth(1).click();
-    await expect(page.getByTestId(editorTabTestId("notes/plan.md"))).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId(editorTabTestId("notes/plan.md"))).toHaveAttribute(
+      "data-active",
+      "true",
+    );
     await expect(about.getByTestId("about-header")).toHaveText("plan.md");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -375,41 +388,38 @@ test("performance: channel-list first paint and composer send latency", async ()
     // 50 channels x 10 threads = 500 threads (each with one message), seeded
     // through the engine daemon over RPC (post-cutover the retired TS
     // in-process store cannot create a daemon-acceptable store).
-    await seedThroughDaemon(
-      { workspaceId, rootPath: temp.rootPath },
-      async ({ chats }) => {
-        await chats.ensureGeneralChannel({ workspaceId });
-        for (let channelIndex = 1; channelIndex < 50; channelIndex += 1) {
-          const channel = await chats.createChannel({
-            workspaceId,
-            name: `channel-${String(channelIndex).padStart(2, "0")}`,
-          });
-          for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
-            await chats.startChannelThread({
-              authorActorKey: null,
-              workspaceId,
-              channelId: channel.id,
-              author: { kind: "human", displayName: "You" },
-              body: `Seed thread ${threadIndex} in ${channel.name}: budget check.`,
-            });
-          }
-        }
-        const general = await chats.findChannelBySlug({
+    await seedThroughDaemon({ workspaceId, rootPath: temp.rootPath }, async ({ chats }) => {
+      await chats.ensureGeneralChannel({ workspaceId });
+      for (let channelIndex = 1; channelIndex < 50; channelIndex += 1) {
+        const channel = await chats.createChannel({
           workspaceId,
-          slug: "general",
+          name: `channel-${String(channelIndex).padStart(2, "0")}`,
         });
-        if (!general) throw new Error("general channel missing");
         for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
           await chats.startChannelThread({
             authorActorKey: null,
             workspaceId,
-            channelId: general.id,
+            channelId: channel.id,
             author: { kind: "human", displayName: "You" },
-            body: `Seed thread ${threadIndex} in general: budget check.`,
+            body: `Seed thread ${threadIndex} in ${channel.name}: budget check.`,
           });
         }
-      },
-    );
+      }
+      const general = await chats.findChannelBySlug({
+        workspaceId,
+        slug: "general",
+      });
+      if (!general) throw new Error("general channel missing");
+      for (let threadIndex = 0; threadIndex < 10; threadIndex += 1) {
+        await chats.startChannelThread({
+          authorActorKey: null,
+          workspaceId,
+          channelId: general.id,
+          author: { kind: "human", displayName: "You" },
+          body: `Seed thread ${threadIndex} in general: budget check.`,
+        });
+      }
+    });
 
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
@@ -418,25 +428,28 @@ test("performance: channel-list first paint and composer send latency", async ()
     // Channel-list first paint: click-to-50-painted-rows measured inside the
     // page (rAF-polled), so harness polling/CDP overhead does not count
     // against the budget. Includes the lazy view chunk + the IPC round trip.
-    const firstPaintMs = await page.evaluate(async (railSelector) => {
-      const chatsRailItem = document.querySelector<HTMLButtonElement>(
-        railSelector,
-      );
-      if (!chatsRailItem) throw new Error("Chats rail item missing");
-      const start = performance.now();
-      chatsRailItem.click();
-      await new Promise<void>((resolve) => {
-        const check = () => {
-          const rows = document.querySelectorAll('[data-testid="chats-channel"]');
-          if (rows.length >= 50) return resolve();
-          requestAnimationFrame(check);
-        };
-        check();
-      });
-      return performance.now() - start;
-    }, `[data-testid="${activityPin("chats")}"]`);
+    const firstPaintMs = await page.evaluate(
+      async (railSelector) => {
+        const chatsRailItem = document.querySelector<HTMLButtonElement>(railSelector);
+        if (!chatsRailItem) throw new Error("Chats rail item missing");
+        const start = performance.now();
+        chatsRailItem.click();
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            const rows = document.querySelectorAll('[data-testid="chats-channel"]');
+            if (rows.length >= 50) return resolve();
+            requestAnimationFrame(check);
+          };
+          check();
+        });
+        return performance.now() - start;
+      },
+      `[data-testid="${activityPin("chats")}"]`,
+    );
     await expect(page.getByTestId("chats-channel")).toHaveCount(50);
-    console.log(`[perf] chats channel list first paint: ${firstPaintMs.toFixed(1)}ms (50 channels / 500 threads)`);
+    console.log(
+      `[perf] chats channel list first paint: ${firstPaintMs.toFixed(1)}ms (50 channels / 500 threads)`,
+    );
     expect(firstPaintMs).toBeLessThan(500);
 
     // Composer send-to-rendered: open a thread, then measure repeated sends
@@ -453,10 +466,7 @@ test("performance: channel-list first paint and composer send latency", async ()
           '[data-testid="chats-composer"]',
         );
         if (!composer) throw new Error("composer missing");
-        const setter = Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          "value",
-        )?.set;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
         setter?.call(composer, text);
         composer.dispatchEvent(new Event("input", { bubbles: true }));
         await new Promise((resolve) => requestAnimationFrame(resolve));
@@ -466,9 +476,7 @@ test("performance: channel-list first paint and composer send latency", async ()
         form.requestSubmit();
         await new Promise<void>((resolve) => {
           const check = () => {
-            const bodies = document.querySelectorAll(
-              '[data-testid="chats-message-body"]',
-            );
+            const bodies = document.querySelectorAll('[data-testid="chats-message-body"]');
             for (const node of bodies) {
               if (node.textContent === text) return resolve();
             }

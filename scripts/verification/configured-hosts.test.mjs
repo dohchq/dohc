@@ -6,13 +6,25 @@ import { join } from "node:path";
 import test from "node:test";
 import { readConfiguredHostProof } from "./configured-hosts.mjs";
 
-for (const [kind, count] of [["service", 2], ["device", 1]]) {
+for (const [kind, count] of [
+  ["service", 2],
+  ["device", 1],
+]) {
   test(`${kind} host proof requires every case to pass with the supplied binary`, () => {
     const root = mkdtempSync(join(tmpdir(), "configured-host-proof-"));
-    const binary = join(root, "engine"), sha256 = "a".repeat(64), tests = join(root, "vitest.json");
-    const result = { success: true, numTotalTests: count, numPassedTests: count, numFailedTests: 0, numPendingTests: 0, numTodoTests: 0 };
+    const binary = join(root, "engine"),
+      sha256 = "a".repeat(64),
+      tests = join(root, "vitest.json");
+    const result = {
+      success: true,
+      numTotalTests: count,
+      numPassedTests: count,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+    };
     const proof = { verdict: "PASS", executable: binary, sha256 };
-    const casePath = index => join(root, `case-${index}`, "result.json");
+    const casePath = (index) => join(root, `case-${index}`, "result.json");
     const verify = () => readConfiguredHostProof(kind, tests, root, binary, sha256);
     const write = (report = result) => writeFileSync(tests, JSON.stringify(report));
     try {
@@ -20,24 +32,41 @@ for (const [kind, count] of [["service", 2], ["device", 1]]) {
         mkdirSync(join(root, `case-${index}`));
         writeFileSync(casePath(index), JSON.stringify(proof));
       }
-      write(); assert.doesNotThrow(verify);
-      for (const delta of [{ success: false }, { numTotalTests: count - 1 }, { numPassedTests: count - 1 },
-        { numPendingTests: 1 }, { numTodoTests: 1 }, { numFailedTests: 1 }]) {
-        write({ ...result, ...delta }); assert.throws(verify, undefined, JSON.stringify(delta));
+      write();
+      assert.doesNotThrow(verify);
+      for (const delta of [
+        { success: false },
+        { numTotalTests: count - 1 },
+        { numPassedTests: count - 1 },
+        { numPendingTests: 1 },
+        { numTodoTests: 1 },
+        { numFailedTests: 1 },
+      ]) {
+        write({ ...result, ...delta });
+        assert.throws(verify, undefined, JSON.stringify(delta));
       }
       write();
       for (let index = 0; index < count; index++) {
-        for (const delta of [{ verdict: "FAIL" }, { sha256: "b".repeat(64) }, { executable: join(root, "another-engine") }]) {
+        for (const delta of [
+          { verdict: "FAIL" },
+          { sha256: "b".repeat(64) },
+          { executable: join(root, "another-engine") },
+        ]) {
           writeFileSync(casePath(index), JSON.stringify({ ...proof, ...delta }));
           assert.throws(verify, undefined, `case ${index}: ${JSON.stringify(delta)}`);
         }
-        rmSync(casePath(index)); assert.throws(verify, /ENOENT/);
+        rmSync(casePath(index));
+        assert.throws(verify, /ENOENT/);
         writeFileSync(casePath(index), JSON.stringify(proof));
       }
-      mkdirSync(join(root, "case-extra")); assert.throws(verify);
+      mkdirSync(join(root, "case-extra"));
+      assert.throws(verify);
       rmSync(join(root, "case-extra"), { recursive: true });
-      rmSync(join(root, `case-${count - 1}`), { recursive: true }); assert.throws(verify);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+      rmSync(join(root, `case-${count - 1}`), { recursive: true });
+      assert.throws(verify);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }
 
@@ -57,13 +86,26 @@ test("configured host verification refuses missing native inputs before any buil
 test("configured host verification refuses a changed binary before any build or proof", () => {
   const root = mkdtempSync(join(tmpdir(), "configured-host-inputs-"));
   try {
-    const binary = join(root, "engine"), evidence = join(root, "build.json");
+    const binary = join(root, "engine"),
+      evidence = join(root, "build.json");
     writeFileSync(binary, "changed executable");
-    const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: import.meta.dirname, encoding: "utf8" }).trim();
-    writeFileSync(evidence, JSON.stringify({ version: 1, engine: { artifact: "0".repeat(64), commit } }));
-    const result = spawnSync(process.execPath, [script, "--binary", binary, "--build-receipt", evidence], { encoding: "utf8" });
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: import.meta.dirname,
+      encoding: "utf8",
+    }).trim();
+    writeFileSync(
+      evidence,
+      JSON.stringify({ version: 1, engine: { artifact: "0".repeat(64), commit } }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [script, "--binary", binary, "--build-receipt", evidence],
+      { encoding: "utf8" },
+    );
     assert.equal(result.status, 1);
     assert.match(result.stderr, /differs from the supplied build hash/);
     assert.doesNotMatch(result.stdout, /\[run\]/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

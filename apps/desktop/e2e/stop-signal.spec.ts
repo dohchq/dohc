@@ -37,7 +37,9 @@ async function stopsCleanlyOn(
   let stopped: LaunchedDesktopApp | null = null;
   let reopened: LaunchedDesktopApp | null = null;
   try {
-    await writeWorkspaceFiles(temp, [{ path: "stop.md", contents: "# Stop\n\nBefore the signal.\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: "stop.md", contents: "# Stop\n\nBefore the signal.\n" },
+    ]);
     stopped = await launchDesktopApp({ workspace: temp });
     const { page, app, logs } = stopped;
     const child = app.process();
@@ -61,17 +63,24 @@ async function stopsCleanlyOn(
     const outputEnded = new Promise<true>((resolve) => child.once("close", () => resolve(true)));
     send({ group: pid, main });
     expect(await within(outputEnded, 60_000), "dohc ends on the signal").toBe(true);
-    const report = await readFile(join(temp.homeDir, "crash-report.json"), "utf8").catch(() => null);
+    const report = await readFile(join(temp.homeDir, "crash-report.json"), "utf8").catch(
+      () => null,
+    );
     expect(report, "The stop records no crash").toBeNull();
     if (finishesQuit) {
-      const quitLine = logs.find((entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"));
-      expect(quitLine?.text.trim() ?? "no quit line", "The quit finishes within its budget")
-        .toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
+      const quitLine = logs.find(
+        (entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"),
+      );
+      expect(
+        quitLine?.text.trim() ?? "no quit line",
+        "The quit finishes within its budget",
+      ).toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
       expect(engines.filter(isRunning), "The quit stops the engine").toEqual([]);
     } else {
       // Electron ends dohc before its quit finishes (#3411). The engine then
       // stops on its own once its input closes.
-      await expect.poll(() => engines.filter(isRunning), { message: "The engine stops", timeout: 30_000 })
+      await expect
+        .poll(() => engines.filter(isRunning), { message: "The engine stops", timeout: 30_000 })
         .toEqual([]);
     }
     // The file alone would pass the editor check below: dohc imports a file that
@@ -83,24 +92,38 @@ async function stopsCleanlyOn(
     await openWorkspaceFromFirstRun(reopened.page, temp);
     await waitForWorkspaceFile(reopened.page, opened.workspaceId, "stop.md");
     await explorerRow(reopened.page, "stop.md").click();
-    await expect(reopened.page.getByTestId("markdown-editor"), "The next start shows the saved edit")
-      .toContainText(EDIT);
+    await expect(
+      reopened.page.getByTestId("markdown-editor"),
+      "The next start shows the saved edit",
+    ).toContainText(EDIT);
     // At start, dohc shows a notice for a crash report or for typing it kept in
     // History. Both reads must find nothing, so neither notice can show.
     const startup = await reopened.page.evaluate(async (workspaceId) => {
       const api = window.dohcDesktop!;
-      const [crash, kept] = await Promise.all([api.readCrashReport({}), api.getCaptureRecoveryStatus({ workspaceId })]);
+      const [crash, kept] = await Promise.all([
+        api.readCrashReport({}),
+        api.getCaptureRecoveryStatus({ workspaceId }),
+      ]);
       return { crash: crash.report, kept: kept.captureRecoveries };
     }, opened.workspaceId);
-    expect(startup, "The next start finds no crash and no kept typing").toEqual({ crash: null, kept: [] });
-    await expect(reopened.page.locator('[data-testid="notice-toasts"] > *'), "The next start shows no notice")
-      .toHaveCount(0);
-    await expect(reopened.page.getByTestId("notice-center-toggle"), "Notices has no unread row")
-      .toHaveAttribute("aria-label", "Notices");
+    expect(startup, "The next start finds no crash and no kept typing").toEqual({
+      crash: null,
+      kept: [],
+    });
+    await expect(
+      reopened.page.locator('[data-testid="notice-toasts"] > *'),
+      "The next start shows no notice",
+    ).toHaveCount(0);
+    await expect(
+      reopened.page.getByTestId("notice-center-toggle"),
+      "Notices has no unread row",
+    ).toHaveAttribute("aria-label", "Notices");
   } finally {
     // Closing the first app attaches its logs, and stops it if the test failed
     // before the signal.
-    await stopped?.close().catch((error: unknown) => console.error("[stop-signal] closing the stopped app:", error));
+    await stopped
+      ?.close()
+      .catch((error: unknown) => console.error("[stop-signal] closing the stopped app:", error));
     await cleanupDesktopWorkspace(reopened, temp);
   }
 }

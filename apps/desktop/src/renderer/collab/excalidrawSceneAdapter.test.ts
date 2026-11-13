@@ -133,9 +133,7 @@ describe("Excalidraw scene adapter", () => {
       changed: true,
       assetsRefused: false,
     });
-    expect(
-      [...cloneCounts.values()].reduce((total, count) => total + count, 0),
-    ).toBe(1);
+    expect([...cloneCounts.values()].reduce((total, count) => total + count, 0)).toBe(1);
     expect(cloneCounts.get("shape-1499")).toBe(1);
   });
 
@@ -156,9 +154,7 @@ describe("Excalidraw scene adapter", () => {
       insertElementRevision(doc, generatedRectangle("shape-b", 2, 30, 30));
     });
     const second = binding.remote(transaction);
-    const secondById = new Map(
-      second.elements.map((element) => [element.id, element]),
-    );
+    const secondById = new Map(second.elements.map((element) => [element.id, element]));
 
     expect(secondById.get("shape-a")).toBe(firstById.get("shape-a"));
     expect(secondById.get("shape-b")).not.toBe(firstById.get("shape-b"));
@@ -180,9 +176,7 @@ describe("Excalidraw scene adapter", () => {
 
       for (let step = 0; step < stepsPerSequence; step += 1) {
         const targetIndex =
-          canvasElements.length === 0
-            ? -1
-            : Math.floor(random() * canvasElements.length);
+          canvasElements.length === 0 ? -1 : Math.floor(random() * canvasElements.length);
         const target = canvasElements[targetIndex];
         const operation = step % 6;
 
@@ -247,9 +241,7 @@ describe("Excalidraw scene adapter", () => {
           insertElementRevision(remote, {
             ...target,
             version: tiedRevision ? currentVersion : currentVersion + 1,
-            versionNonce: tiedRevision
-              ? currentNonce - 1
-              : Math.floor(random() * 1_000_000),
+            versionNonce: tiedRevision ? currentNonce - 1 : Math.floor(random() * 1_000_000),
             isDeleted: target.isDeleted === true ? false : target.isDeleted,
             x: Number(target.x) + 100,
           });
@@ -258,9 +250,7 @@ describe("Excalidraw scene adapter", () => {
           const transaction = captureTransaction(doc, () => {
             Y.applyUpdate(doc, update, "generated-remote");
           });
-          canvasElements = binding
-            .remote(transaction)
-            .elements.map((element) => ({ ...element }));
+          canvasElements = binding.remote(transaction).elements.map((element) => ({ ...element }));
         } else {
           const scene = binding.current();
           const before = Y.encodeStateVector(doc);
@@ -274,13 +264,10 @@ describe("Excalidraw scene adapter", () => {
           expect(Y.encodeStateVector(doc)).toEqual(before);
         }
 
-        expect(
-          stableJson(binding.current()),
-          `seed ${seed}, step ${step}`,
-        ).toBe(stableJson(foldScene(doc)));
-        canvasElements = binding
-          .current()
-          .elements.map((element) => ({ ...element }));
+        expect(stableJson(binding.current()), `seed ${seed}, step ${step}`).toBe(
+          stableJson(foldScene(doc)),
+        );
+        canvasElements = binding.current().elements.map((element) => ({ ...element }));
         comparisons += 1;
       }
     }
@@ -339,9 +326,7 @@ describe("Excalidraw scene adapter", () => {
 
     expect(result.changed).toBe(false);
     // The superseded revision was not re-added beside the winner.
-    expect([...declareSceneRoots(doc).revisions.keys()]).toEqual([
-      revisionKey("shape", 2, 7),
-    ]);
+    expect([...declareSceneRoots(doc).revisions.keys()]).toEqual([revisionKey("shape", 2, 7)]);
 
     // A real local edit is strictly newer than the winner and still lands.
     const edited = binding.apply({
@@ -549,9 +534,7 @@ describe("Excalidraw scene adapter", () => {
       );
     }
 
-    expect(new ExcalidrawSceneBinding(doc).current().elements).toEqual([
-      rectangle(1, 1, 10),
-    ]);
+    expect(new ExcalidrawSceneBinding(doc).current().elements).toEqual([rectangle(1, 1, 10)]);
   });
 
   it("converges after two mirrors edit offline", () => {
@@ -610,8 +593,6 @@ describe("Excalidraw scene adapter", () => {
 
     expect(result).toEqual({ changed: true, assetsRefused: false });
     expect(foldScene(doc).elements).toEqual([image(1, 2)]);
-    expect(new TextDecoder().decode(Y.encodeStateAsUpdate(doc))).not.toContain(
-      secret,
-    );
+    expect(new TextDecoder().decode(Y.encodeStateAsUpdate(doc))).not.toContain(secret);
   });
 });

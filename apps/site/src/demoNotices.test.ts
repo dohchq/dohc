@@ -5,8 +5,10 @@ import { beforeAll, expect, it } from "vitest";
 
 // demo.css's own rules. Its @import and @source lines build the desktop's
 // Tailwind styles, which jsdom can't, so the test leaves them out.
-const demoRules = readFileSync(join(import.meta.dirname, "demo.css"), "utf8")
-  .replace(/^@(?:import|source) [^;]+;$/gmu, "");
+const demoRules = readFileSync(join(import.meta.dirname, "demo.css"), "utf8").replace(
+  /^@(?:import|source) [^;]+;$/gmu,
+  "",
+);
 
 // The demo mounts the toasts and the Notices panel in its activity bar. Above
 // 720px the demo window places them. At 720px or less the workbench places

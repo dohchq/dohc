@@ -4,10 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { claimRelayWorkspace } from "./helpers/relayPeer";
-import {
-  openLiveDaemonWorkspace,
-  type LiveDaemonWorkspace,
-} from "./helpers/daemonSeed";
+import { openLiveDaemonWorkspace, type LiveDaemonWorkspace } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -88,44 +85,46 @@ async function grantedShare(
   page: Page,
   workspaceId: string,
 ): Promise<{ shareId: string; channelWireId: string }> {
-  return await page.waitForFunction(async (id) => {
-    const api = (
-      window as unknown as {
-        dohcDesktop: {
-          listChatChannelShares(payload: {
-            workspaceId: string;
-            channelWireIds: string[];
-          }): Promise<{
-            relay:
-              | {
-                  state: "answered";
-                  granted: Array<{
-                    shareId: string;
-                    channelWireId: string;
-                    revokedAtMs: number | null;
-                  }>;
-                }
-              | { state: "unreachable" }
-              | { state: "signed-out" };
-          }>;
-        };
-      }
-    ).dohcDesktop;
-    // This probe reads the granted relay lane only, so it names no channel:
-    // the joined lane is answered per channel a caller is showing.
-    const shares = await api
-      .listChatChannelShares({ workspaceId: id, channelWireIds: [] })
-      .catch(() => null);
-    const live =
-      shares?.relay.state === "answered"
-        ? shares.relay.granted.find((row) => row.revokedAtMs === null) ?? null
-        : null;
-    return live ? { shareId: live.shareId, channelWireId: live.channelWireId } : null;
-  }, workspaceId).then(
-    // waitForFunction only resolves on a truthy result, so the polled `null`
-    // branch is excluded at runtime — narrow the jsonValue union accordingly.
-    (handle) => handle.jsonValue() as Promise<{ shareId: string; channelWireId: string }>,
-  );
+  return await page
+    .waitForFunction(async (id) => {
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            listChatChannelShares(payload: {
+              workspaceId: string;
+              channelWireIds: string[];
+            }): Promise<{
+              relay:
+                | {
+                    state: "answered";
+                    granted: Array<{
+                      shareId: string;
+                      channelWireId: string;
+                      revokedAtMs: number | null;
+                    }>;
+                  }
+                | { state: "unreachable" }
+                | { state: "signed-out" };
+            }>;
+          };
+        }
+      ).dohcDesktop;
+      // This probe reads the granted relay lane only, so it names no channel:
+      // the joined lane is answered per channel a caller is showing.
+      const shares = await api
+        .listChatChannelShares({ workspaceId: id, channelWireIds: [] })
+        .catch(() => null);
+      const live =
+        shares?.relay.state === "answered"
+          ? (shares.relay.granted.find((row) => row.revokedAtMs === null) ?? null)
+          : null;
+      return live ? { shareId: live.shareId, channelWireId: live.channelWireId } : null;
+    }, workspaceId)
+    .then(
+      // waitForFunction only resolves on a truthy result, so the polled `null`
+      // branch is excluded at runtime — narrow the jsonValue union accordingly.
+      (handle) => handle.jsonValue() as Promise<{ shareId: string; channelWireId: string }>,
+    );
 }
 
 test("owner + participant chat and co-presence converge in the real app", async () => {
@@ -193,16 +192,11 @@ test("owner + participant chat and co-presence converge in the real app", async 
     await page.getByTestId("chats-new-thread-composer").fill("Kickoff the launch plan.");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-thread-view")).toBeVisible();
-    await expect(page.getByTestId("chats-message-body")).toContainText(
-      "Kickoff the launch plan.",
-    );
+    await expect(page.getByTestId("chats-message-body")).toContainText("Kickoff the launch plan.");
     // Capture the thread id (its own cross-machine id → the thread presence topic).
     await page.getByTestId("chats-thread-back").click();
     await expect(page.getByTestId("chats-channel-view")).toBeVisible();
-    const threadId = await page
-      .getByTestId("chats-thread")
-      .first()
-      .getAttribute("data-thread-id");
+    const threadId = await page.getByTestId("chats-thread").first().getAttribute("data-thread-id");
     expect(threadId).toBeTruthy();
 
     // --- (b) OWNER shares the channel to the participant from the Chats UI --
@@ -237,7 +231,9 @@ test("owner + participant chat and co-presence converge in the real app", async 
     expect(sawOwner).toBe(true);
 
     // The owner's REAL app renders the participant's presence face.
-    await expect(page.locator(`[aria-label="${RECIPIENT_USER} is here"]`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator(`[aria-label="${RECIPIENT_USER} is here"]`)).toBeVisible({
+      timeout: 30_000,
+    });
 
     // --- (e2) THREAD-level typing: the participant typing in the shared thread
     // renders as a typing indicator in the owner's real thread view. The thread
@@ -258,9 +254,12 @@ test("owner + participant chat and co-presence converge in the real app", async 
       }
     })();
     try {
-      await expect(page.getByTestId("presence-typing")).toContainText(`${RECIPIENT_USER} is typing`, {
-        timeout: 45_000,
-      });
+      await expect(page.getByTestId("presence-typing")).toContainText(
+        `${RECIPIENT_USER} is typing`,
+        {
+          timeout: 45_000,
+        },
+      );
       await expect(page.locator(`[aria-label="${RECIPIENT_USER} is here"]`)).toBeVisible();
     } finally {
       stopTyping.done = true;
@@ -326,12 +325,21 @@ test("owner + participant chat and co-presence converge in the real app", async 
         async () => {
           nudge += 1;
           await writeFile(join(temp.rootPath, `sync-nudge-${nudge}.md`), `nudge ${nudge}\n`);
-          await page.getByTestId("chats-thread-back").click().catch(() => undefined);
-          await page.getByTestId("chats-thread").first().click().catch(() => undefined);
+          await page
+            .getByTestId("chats-thread-back")
+            .click()
+            .catch(() => undefined);
+          await page
+            .getByTestId("chats-thread")
+            .first()
+            .click()
+            .catch(() => undefined);
           // The reopened thread paints its messages after the click returns.
           // Count once the owner's message is back, so the count reads a loaded thread.
-          await threadBodies.filter({ hasText: "Kickoff the launch plan." })
-            .waitFor({ timeout: 10_000 }).catch(() => undefined);
+          await threadBodies
+            .filter({ hasText: "Kickoff the launch plan." })
+            .waitFor({ timeout: 10_000 })
+            .catch(() => undefined);
           return await threadBodies.filter({ hasText: "count me in" }).count();
         },
         { timeout: 90_000, intervals: [2000] },

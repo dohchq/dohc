@@ -67,9 +67,7 @@ function seedShare(
   const shareId = `share-${suffix}`;
   const grantId = `link-${suffix}`;
   const createdAtMs = input.createdAtMs ?? 1_000;
-  expect(
-    storage.claimWorkspace({ workspaceId, ownerUserId: OWNER, createdAtMs }),
-  ).toBe("created");
+  expect(storage.claimWorkspace({ workspaceId, ownerUserId: OWNER, createdAtMs })).toBe("created");
   storage.createShare({
     share: {
       shareId,
@@ -98,7 +96,8 @@ function seedShare(
     access: input.access ?? "comment",
     createdAtMs: createdAtMs + 1,
     credentialId: `credential-${suffix}`,
-    secretSealed: null, secretHash: `secret-hash-${suffix}`,
+    secretSealed: null,
+    secretHash: `secret-hash-${suffix}`,
   });
   const hash = capabilityHash(`capability-${suffix}`);
   seedLinkSession(storage, {
@@ -265,7 +264,6 @@ function replaceSession(
 }
 
 describe("durable link discussion storage", () => {
-
   it("stamps one durable revision per current-state change and pages newest-first toward older messages", async () => {
     const { storage, dbPath } = await openStorage();
     const seeded = seedShare(storage, { suffix: "activity" });
@@ -314,12 +312,14 @@ describe("durable link discussion storage", () => {
       messageId: second.message.messageId,
     });
     expect(
-      storage.listShareDiscussionMessages({
-        shareId: seeded.shareId,
-        direction: "newest-first",
-        before: newest.nextCursor,
-        limit: 2,
-      }).messages.map((message) => message.body),
+      storage
+        .listShareDiscussionMessages({
+          shareId: seeded.shareId,
+          direction: "newest-first",
+          before: newest.nextCursor,
+          limit: 2,
+        })
+        .messages.map((message) => message.body),
     ).toEqual(["first"]);
 
     expect(
@@ -415,9 +415,7 @@ describe("durable link discussion storage", () => {
     const writable = inspectDatabase(dbPath);
     try {
       writable
-        .prepare(
-          "UPDATE sync_relay_shares SET discussion_revision = ? WHERE share_id = ?",
-        )
+        .prepare("UPDATE sync_relay_shares SET discussion_revision = ? WHERE share_id = ?")
         .run(Number.MAX_SAFE_INTEGER, capped.shareId);
     } finally {
       writable.close();
@@ -430,9 +428,7 @@ describe("durable link discussion storage", () => {
         pausedAtMs: 2_201,
       }),
     ).toBe(false);
-    expect(storage.getShareDiscussionRevision(capped.shareId)).toBe(
-      Number.MAX_SAFE_INTEGER,
-    );
+    expect(storage.getShareDiscussionRevision(capped.shareId)).toBe(Number.MAX_SAFE_INTEGER);
 
     const delta = storage.listShareDiscussionActivity({
       shareId: seeded.shareId,
@@ -462,19 +458,23 @@ describe("durable link discussion storage", () => {
     const db = inspectDatabase(dbPath, { readOnly: true });
     try {
       expect(
-        db.prepare(
-          "SELECT discussion_revision FROM sync_relay_shares WHERE share_id = ?",
-        ).get(seeded.shareId)?.discussion_revision,
+        db
+          .prepare("SELECT discussion_revision FROM sync_relay_shares WHERE share_id = ?")
+          .get(seeded.shareId)?.discussion_revision,
       ).toBe(6);
       expect(
-        db.prepare(
-          "SELECT discussion_revision FROM sync_relay_share_discussion_messages WHERE message_id = ?",
-        ).get(second.message.messageId)?.discussion_revision,
+        db
+          .prepare(
+            "SELECT discussion_revision FROM sync_relay_share_discussion_messages WHERE message_id = ?",
+          )
+          .get(second.message.messageId)?.discussion_revision,
       ).toBe(6);
       expect(
-        db.prepare(
-          "SELECT discussion_revision FROM sync_relay_link_principals WHERE principal_id = ?",
-        ).get(first.principal.principalId)?.discussion_revision,
+        db
+          .prepare(
+            "SELECT discussion_revision FROM sync_relay_link_principals WHERE principal_id = ?",
+          )
+          .get(first.principal.principalId)?.discussion_revision,
       ).toBe(4);
     } finally {
       db.close();
@@ -507,9 +507,10 @@ describe("durable link discussion storage", () => {
       linkCommentsPaused: false,
       activityRevision: 0,
     });
-    expect(
-      append(storage, seeded, { body: "", idempotencyKey: "refused" }),
-    ).toMatchObject({ ok: false, reason: "invalid-input" });
+    expect(append(storage, seeded, { body: "", idempotencyKey: "refused" })).toMatchObject({
+      ok: false,
+      reason: "invalid-input",
+    });
     expect(countRows(dbPath, "sync_relay_link_principals")).toBe(0);
     expect(countRows(dbPath, "sync_relay_share_discussion_messages")).toBe(0);
     expect(storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)).toMatchObject({
@@ -567,9 +568,7 @@ describe("durable link discussion storage", () => {
     expect(first).toMatchObject({ ok: true, replayed: false });
     if (!first.ok) throw new Error("discussion append did not commit");
 
-    const sessionBeforeNarrowing = storage.findLinkSessionByCapabilityHash(
-      seeded.capabilityHash,
-    );
+    const sessionBeforeNarrowing = storage.findLinkSessionByCapabilityHash(seeded.capabilityHash);
     expect(sessionBeforeNarrowing).toMatchObject({
       grantId: seeded.grantId,
       generation: 1,
@@ -585,9 +584,9 @@ describe("durable link discussion storage", () => {
         guard: () => {},
       }),
     ).toMatchObject({ ok: true, grant: { access: "view", generation: 1 } });
-    expect(
-      storage.findLinkSessionByCapabilityHash(seeded.capabilityHash),
-    ).toEqual(sessionBeforeNarrowing);
+    expect(storage.findLinkSessionByCapabilityHash(seeded.capabilityHash)).toEqual(
+      sessionBeforeNarrowing,
+    );
 
     const snapshot = {
       messages: countRows(dbPath, "sync_relay_share_discussion_messages"),
@@ -765,7 +764,8 @@ describe("durable link discussion storage", () => {
             guard: () => {},
             mintCredential: () => ({
               credentialId: "rotated-replay-credential",
-              secretSealed: null, secretHash: "rotated-replay-secret-hash",
+              secretSealed: null,
+              secretHash: "rotated-replay-secret-hash",
             }),
           }),
         ).toMatchObject({ ok: true });
@@ -938,12 +938,10 @@ describe("durable link discussion storage", () => {
       }),
     ).toMatchObject({ ok: true, message: { authorUserId: RECIPIENT } });
     expect(
-      storage.listShareDiscussionMessages({ shareId: firstShare.shareId, limit: 10 })
-        .messages,
+      storage.listShareDiscussionMessages({ shareId: firstShare.shareId, limit: 10 }).messages,
     ).toHaveLength(2);
     expect(
-      storage.listShareDiscussionMessages({ shareId: secondShare.shareId, limit: 10 })
-        .messages,
+      storage.listShareDiscussionMessages({ shareId: secondShare.shareId, limit: 10 }).messages,
     ).toHaveLength(1);
     expectExactWorkspaceUsage(dbPath, firstShare.workspaceId);
     expectExactWorkspaceUsage(dbPath, secondShare.workspaceId);
@@ -979,12 +977,14 @@ describe("durable link discussion storage", () => {
       storage.appendLogBatch({
         workspaceId: seeded.workspaceId,
         originId: "usage-lifecycle-origin",
-        ops: [{
-          originSeq: 0,
-          opKind: "quota.lifecycle",
-          payloadJson: JSON.stringify({ row: "log" }),
-          recordedAtMs: 1_102,
-        }],
+        ops: [
+          {
+            originSeq: 0,
+            opKind: "quota.lifecycle",
+            payloadJson: JSON.stringify({ row: "log" }),
+            recordedAtMs: 1_102,
+          },
+        ],
       }),
     ).toMatchObject({ inserted: 1 });
     expectExactWorkspaceUsage(dbPath, seeded.workspaceId);
@@ -1194,7 +1194,9 @@ describe("durable link discussion storage", () => {
       principalId: kept.principal.principalId,
     });
     expect(linkWritesPausedAtMs(storagePath(reopened), seeded.shareId)).toBe(2_300);
-    expect(reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toMatchObject({
+    expect(
+      reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 }),
+    ).toMatchObject({
       linkCommentsPaused: true,
       messages: [
         {
@@ -1471,7 +1473,8 @@ describe("durable link discussion storage", () => {
         guard: () => {},
         mintCredential: () => ({
           credentialId: "population-generation-two",
-          secretSealed: null, secretHash: "population-generation-two-secret",
+          secretSealed: null,
+          secretHash: "population-generation-two-secret",
         }),
       }),
     ).toMatchObject({ ok: true, grant: { generation: 2 } });
@@ -1531,7 +1534,8 @@ describe("durable link discussion storage", () => {
         guard: () => {},
         mintCredential: () => ({
           credentialId: "debt-generation-two",
-          secretSealed: null, secretHash: "debt-generation-two-secret",
+          secretSealed: null,
+          secretHash: "debt-generation-two-secret",
         }),
       }),
     ).toMatchObject({ ok: true, grant: { generation: 2 } });
@@ -1737,14 +1741,13 @@ describe("durable link discussion storage", () => {
     });
     expect(third.messages.map((row) => row.messageId)).toEqual(ids.slice(4));
     expect(third.nextCursor).toBeNull();
-    expect([...first.messages, ...second.messages, ...third.messages].map((row) => row.messageId)).toEqual(
-      ids,
-    );
+    expect(
+      [...first.messages, ...second.messages, ...third.messages].map((row) => row.messageId),
+    ).toEqual(ids);
     for (const limit of [0, 101, 1.5, Number.NaN]) {
-      expect(() =>
-        storage.listShareDiscussionMessages({ shareId: seeded.shareId, limit }),
-      ).toThrow(/limit/u);
+      expect(() => storage.listShareDiscussionMessages({ shareId: seeded.shareId, limit })).toThrow(
+        /limit/u,
+      );
     }
   });
-
 });

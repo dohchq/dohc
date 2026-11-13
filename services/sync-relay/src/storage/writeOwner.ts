@@ -28,7 +28,9 @@ export class RelayWriteOwner {
     this.#schema = continuity ? db.prepare("PRAGMA schema_version") : undefined;
   }
 
-  get unavailable(): AbortSignal { return this.#unavailable.signal; }
+  get unavailable(): AbortSignal {
+    return this.#unavailable.signal;
+  }
 
   captureStanding(): () => void {
     const check = () => {
@@ -42,16 +44,23 @@ export class RelayWriteOwner {
     this.captureStanding();
     if (this.#writing) throw new Error("Nested relay transactions are not supported.");
     this.#writing = true;
-    let began = false, changed = false, committing = false;
+    let began = false,
+      changed = false,
+      committing = false;
     const previous = this.#stamp;
-    let stamp = previous, nonce = this.#nonce;
+    let stamp = previous,
+      nonce = this.#nonce;
     try {
       this.db.exec("BEGIN IMMEDIATE");
       began = true;
       const before = this.continuity ? this.mutationState() : undefined;
       const result = operation();
-      if (result !== null && (typeof result === "object" || typeof result === "function") &&
-          "then" in result) throw new TypeError("Relay write callbacks must be synchronous.");
+      if (
+        result !== null &&
+        (typeof result === "object" || typeof result === "function") &&
+        "then" in result
+      )
+        throw new TypeError("Relay write callbacks must be synchronous.");
       this.captureStanding();
       if (this.continuity && this.mutationState() !== before) {
         // Refused and read-only callbacks do not incur durable sidecar writes.
@@ -59,7 +68,10 @@ export class RelayWriteOwner {
         if (!Number.isSafeInteger(stamp)) throw new Error("Relay continuity stamp is exhausted.");
         nonce = randomUUID();
         changed = true;
-        const updated = this.db.prepare(`UPDATE ${MARKER} SET stamp=?,nonce=?,previous_nonce=? WHERE singleton=1 AND stamp=? AND nonce=?`)
+        const updated = this.db
+          .prepare(
+            `UPDATE ${MARKER} SET stamp=?,nonce=?,previous_nonce=? WHERE singleton=1 AND stamp=? AND nonce=?`,
+          )
           .run(stamp, nonce, this.#nonce, previous, this.#nonce);
         if (Number(updated.changes) !== 1) {
           this.invalidate();
@@ -77,21 +89,24 @@ export class RelayWriteOwner {
       if (began) {
         try {
           this.db.exec("ROLLBACK");
-        } catch { this.invalidate(); }
+        } catch {
+          this.invalidate();
+        }
       }
       if (committing) this.invalidate();
       throw error;
-    } finally { this.#writing = false; }
+    } finally {
+      this.#writing = false;
+    }
   }
 
   private mutationState(): string {
-    return JSON.stringify([
-      this.#changes!.get()?.count,
-      this.#schema!.get()?.schema_version,
-    ]);
+    return JSON.stringify([this.#changes!.get()?.count, this.#schema!.get()?.schema_version]);
   }
 
-  invalidate(): void { this.#unavailable.abort(); }
+  invalidate(): void {
+    this.#unavailable.abort();
+  }
 
   close(): void {
     this.invalidate();

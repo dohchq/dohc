@@ -30,11 +30,18 @@ export function truncateName(value: string, maxBytes: number): string {
 /** `text` cut to `max` characters, ending with "…" when it was longer. No space comes before the "…". */
 export function cutText(text: string, max: number): string {
   const characters = [...text];
-  return characters.length <= max ? text : `${characters.slice(0, max - 1).join("").trimEnd()}…`;
+  return characters.length <= max
+    ? text
+    : `${characters
+        .slice(0, max - 1)
+        .join("")
+        .trimEnd()}…`;
 }
 
 export function isReservedWindowsName(value: string): boolean {
-  return /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu.test(value);
+  return /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu.test(
+    value,
+  );
 }
 
 // Shared with the engine: NFC, lowercase, whitespace/underscore to dash.
@@ -56,7 +63,17 @@ export function nameSlug(value: string, maxBytes = 200): string {
 
 // For app source paths, after the caller's workspace/permission checks.
 export function isPortableNamePath(value: string, maxBytes = 1024): boolean {
-  return nameByteLength(value) <= maxBytes &&
-    /^[\p{L}\p{N}\p{M}_@./-]+$/u.test(value) && value.split("/").every(part =>
-      part.length > 0 && !/^[. ]|[. ]$/u.test(part) && nameByteLength(part) <= 255 && !isReservedWindowsName(part));
+  return (
+    nameByteLength(value) <= maxBytes &&
+    /^[\p{L}\p{N}\p{M}_@./-]+$/u.test(value) &&
+    value
+      .split("/")
+      .every(
+        (part) =>
+          part.length > 0 &&
+          !/^[. ]|[. ]$/u.test(part) &&
+          nameByteLength(part) <= 255 &&
+          !isReservedWindowsName(part),
+      )
+  );
 }

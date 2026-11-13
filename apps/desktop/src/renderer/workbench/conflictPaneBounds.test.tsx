@@ -14,9 +14,7 @@ import type { WorkspaceVersionConflict } from "../../ipc/bridgeContract";
 const utf8ByteLengthSpy = vi.hoisted(() => vi.fn());
 const exceedsUtf8BytesSpy = vi.hoisted(() => vi.fn());
 vi.mock("../../workspaces/workspaceTextLimits", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("../../workspaces/workspaceTextLimits")
-  >();
+  const actual = await importOriginal<typeof import("../../workspaces/workspaceTextLimits")>();
   utf8ByteLengthSpy.mockImplementation(actual.utf8ByteLength);
   exceedsUtf8BytesSpy.mockImplementation(actual.exceedsUtf8Bytes);
   return {
@@ -35,9 +33,8 @@ function measurements(): number {
   return utf8ByteLengthSpy.mock.calls.length + exceedsUtf8BytesSpy.mock.calls.length;
 }
 
-const { CONFLICT_COMBINED_EDIT_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } = await import(
-  "./conflictPane"
-);
+const { CONFLICT_COMBINED_EDIT_MAX_BYTES, CONFLICT_PREVIEW_MAX_CHARS } =
+  await import("./conflictPane");
 const { ConflictReviewDialog, openConflictId } = await import("./WorkspaceVersions");
 
 // 250,000 lines of 41 characters: over 10 MiB, the band #524 opened up.
@@ -57,9 +54,7 @@ function hugeBody(marker: string): string {
 const HUGE_CURRENT = hugeBody("a");
 const HUGE_INCOMING = hugeBody("b");
 
-function conflict(
-  overrides: Partial<WorkspaceVersionConflict> = {},
-): WorkspaceVersionConflict {
+function conflict(overrides: Partial<WorkspaceVersionConflict> = {}): WorkspaceVersionConflict {
   return {
     conflictId: "c-1",
     path: "notes.md",
@@ -103,9 +98,13 @@ afterEach(() => {
 });
 
 async function openReview(conflicts: WorkspaceVersionConflict[]) {
-  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
+  bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({
+    conflicts,
+    nextAfterConflictId: null,
+  });
   render(
-    <ConflictReviewDialog beginLineageOperation={async () => () => {}}
+    <ConflictReviewDialog
+      beginLineageOperation={async () => () => {}}
       workspaceId="ws-1"
       onWorkspaceStateChanged={() => {}}
       onClose={() => {}}
@@ -117,9 +116,7 @@ async function openReview(conflicts: WorkspaceVersionConflict[]) {
 describe("a conflict side pane", () => {
   it("paints one window of a 10 MiB side and says what it held back", async () => {
     const incoming = HUGE_INCOMING;
-    await openReview([
-      conflict({ currentText: "main side\n", incomingText: incoming }),
-    ]);
+    await openReview([conflict({ currentText: "main side\n", incomingText: incoming })]);
 
     const panes = screen.getAllByTestId("version-conflict-side-text");
     expect(panes).toHaveLength(2);
@@ -139,8 +136,7 @@ describe("a conflict side pane", () => {
   it("shows one more window per press, and the rest stays reachable", async () => {
     await openReview([conflict({ incomingText: HUGE_INCOMING })]);
     const paintedLength = () =>
-      (screen.getAllByTestId("version-conflict-side-text")[1].textContent ?? "")
-        .length;
+      (screen.getAllByTestId("version-conflict-side-text")[1].textContent ?? "").length;
     const first = paintedLength();
     fireEvent.click(screen.getByTestId("version-conflict-side-show-more"));
     const second = paintedLength();
@@ -160,35 +156,26 @@ describe("combine by hand", () => {
     // `apply-merged` measures the submitted text and nothing else, so a short
     // replacement written by hand is a body the engine takes however large the
     // two sides are. Removing the affordance refused work it accepts.
-    await openReview([
-      conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING }),
-    ]);
+    await openReview([conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING })]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
-      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
-        .value,
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("");
-    expect(
-      screen.getByTestId("version-conflict-combined-source").textContent,
-    ).toBe(
+    expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       `Both copies are larger than ${CONFLICT_COMBINED_EDIT_MAX_BYTES.toLocaleString(
         "en-US",
-      )} bytes, so this starts empty. That is the largest copy you can combine ` +
-        `by hand.`,
+      )} bytes, so this starts empty. That is the largest copy you can combine ` + `by hand.`,
     );
     // And it can be applied: an empty combined copy is under every cap.
     expect(
-      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement)
-        .disabled,
+      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement).disabled,
     ).toBe(false);
   });
 
   it("is offered for a side that fits, seeded with the incoming copy", async () => {
     await openReview([conflict()]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
-    const input = screen.getByTestId(
-      "version-conflict-combined-input",
-    ) as HTMLTextAreaElement;
+    const input = screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement;
     expect(input.value).toBe("feature side\n");
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       "Started from Feature's copy.",
@@ -199,30 +186,24 @@ describe("combine by hand", () => {
     // A 10 MiB incoming copy beside a small copy on Main is still a conflict
     // the user can combine by hand. Preferring the oversized side and then
     // declaring the affordance unavailable refuses work the engine accepts.
-    await openReview([
-      conflict({ currentText: "main side\n", incomingText: HUGE_INCOMING }),
-    ]);
+    await openReview([conflict({ currentText: "main side\n", incomingText: HUGE_INCOMING })]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
-      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
-        .value,
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("main side\n");
     // The user has to know which copy they are editing.
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       "Started from Main's copy.",
     );
     expect(
-      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement)
-        .disabled,
+      (screen.getByTestId("version-conflict-apply-combined") as HTMLButtonElement).disabled,
     ).toBe(false);
   });
 
   it("keeps an over-cap paste out of the box, and names the size that was tried", async () => {
     await openReview([conflict()]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
-    const input = screen.getByTestId(
-      "version-conflict-combined-input",
-    ) as HTMLTextAreaElement;
+    const input = screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "my own draft\n" } });
 
     // A 10 MiB paste. Stored first and checked afterwards, this both counted
@@ -231,17 +212,13 @@ describe("combine by hand", () => {
     const paste = "x".repeat(10 * 1024 * 1024);
     fireEvent.change(input, { target: { value: paste } });
 
-    const box = screen.getByTestId(
-      "version-conflict-combined-input",
-    ) as HTMLTextAreaElement;
+    const box = screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement;
     expect(box.value).toBe("my own draft\n");
     expect(box.value.length).toBeLessThanOrEqual(CONFLICT_COMBINED_EDIT_MAX_BYTES);
     // The whole sentence, not just its numbers. The REASON is the part #566
     // changed — the limit is what this box will edit, not what the engine
     // will apply — and a `toContain` on the digits cannot tell the two apart.
-    expect(
-      screen.getByTestId("version-conflict-combined-too-large").textContent,
-    ).toBe(
+    expect(screen.getByTestId("version-conflict-combined-too-large").textContent).toBe(
       `That change would make the combined copy ${paste.length.toLocaleString(
         "en-US",
       )} bytes. Combining by hand works up to ` +
@@ -252,8 +229,7 @@ describe("combine by hand", () => {
     // The next change that fits is accepted, and the refusal goes away.
     fireEvent.change(box, { target: { value: "combined\n" } });
     expect(
-      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
-        .value,
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("combined\n");
     expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
   });
@@ -271,8 +247,7 @@ describe("combine by hand", () => {
     fireEvent.click(screen.getByTestId("version-conflict-combine-cancel"));
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
-      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
-        .value,
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("feature side\n");
     expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
   });
@@ -284,30 +259,23 @@ describe("combine by hand", () => {
 
     const atCap = "x".repeat(CONFLICT_COMBINED_EDIT_MAX_BYTES);
     fireEvent.change(input, { target: { value: atCap } });
-    expect((input as HTMLTextAreaElement).value).toHaveLength(
-      CONFLICT_COMBINED_EDIT_MAX_BYTES,
-    );
+    expect((input as HTMLTextAreaElement).value).toHaveLength(CONFLICT_COMBINED_EDIT_MAX_BYTES);
     expect(screen.queryByTestId("version-conflict-combined-too-large")).toBeNull();
 
     fireEvent.change(input, { target: { value: `${atCap}x` } });
-    expect((input as HTMLTextAreaElement).value).toHaveLength(
-      CONFLICT_COMBINED_EDIT_MAX_BYTES,
+    expect((input as HTMLTextAreaElement).value).toHaveLength(CONFLICT_COMBINED_EDIT_MAX_BYTES);
+    expect(screen.getByTestId("version-conflict-combined-too-large").textContent).toContain(
+      (CONFLICT_COMBINED_EDIT_MAX_BYTES + 1).toLocaleString("en-US"),
     );
-    expect(
-      screen.getByTestId("version-conflict-combined-too-large").textContent,
-    ).toContain((CONFLICT_COMBINED_EDIT_MAX_BYTES + 1).toLocaleString("en-US"));
   });
 
   it("starts empty when one side has no file and the other is over the cap", async () => {
     // A deletion against an oversized edit. The absent side is a zero-byte
     // start the engine accepts, so removing the affordance refused work.
-    await openReview([
-      conflict({ currentText: null, incomingText: HUGE_INCOMING }),
-    ]);
+    await openReview([conflict({ currentText: null, incomingText: HUGE_INCOMING })]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
-      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
-        .value,
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("");
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       "Main doesn't have this file. This starts empty.",
@@ -319,8 +287,7 @@ describe("combine by hand", () => {
     await openReview([conflict({ incomingText: null })]);
     fireEvent.click(screen.getByTestId("version-conflict-combine"));
     expect(
-      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
-        .value,
+      (screen.getByTestId("version-conflict-combined-input") as HTMLTextAreaElement).value,
     ).toBe("main side\n");
     expect(screen.getByTestId("version-conflict-combined-source").textContent).toBe(
       "Started from Main's copy.",
@@ -371,9 +338,7 @@ describe("a list of open conflicts", () => {
     // every render — and with both sides over the cap that meant rescanning
     // every byte of both on each one. Clicking Keep sets busy, which is a
     // local rerender.
-    await openReview([
-      conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING }),
-    ]);
+    await openReview([conflict({ currentText: HUGE_CURRENT, incomingText: HUGE_INCOMING })]);
     expect(measurements()).toBe(2);
 
     let reject: (error: Error) => void = () => {};
@@ -427,9 +392,7 @@ describe("a list of open conflicts", () => {
     fireEvent.click(within(cards[0]).getByTestId("version-conflict-toggle"));
     expect(screen.queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
     expect(
-      within(cards[0]).getByTestId("version-conflict-toggle").getAttribute(
-        "aria-expanded",
-      ),
+      within(cards[0]).getByTestId("version-conflict-toggle").getAttribute("aria-expanded"),
     ).toBe("false");
 
     // And collapsing a later card must not reopen the first one.
@@ -443,18 +406,12 @@ describe("a list of open conflicts", () => {
     await openReview(many);
     const cards = screen.getAllByTestId("version-conflict");
     expect(
-      within(cards[0])
-        .getByTestId("version-conflict-toggle")
-        .getAttribute("aria-expanded"),
+      within(cards[0]).getByTestId("version-conflict-toggle").getAttribute("aria-expanded"),
     ).toBe("true");
 
     fireEvent.click(within(cards[3]).getByTestId("version-conflict-toggle"));
-    expect(
-      within(cards[3]).queryAllByTestId("version-conflict-side-text"),
-    ).toHaveLength(2);
-    expect(
-      within(cards[0]).queryAllByTestId("version-conflict-side-text"),
-    ).toHaveLength(0);
+    expect(within(cards[3]).queryAllByTestId("version-conflict-side-text")).toHaveLength(2);
+    expect(within(cards[0]).queryAllByTestId("version-conflict-side-text")).toHaveLength(0);
     expect(screen.getAllByTestId("version-conflict-side-text")).toHaveLength(2);
   });
 
@@ -469,17 +426,14 @@ describe("a list of open conflicts", () => {
     // Collapsing must not discard the draft — the same discipline that keeps a
     // backdrop click from unmounting this card.
     fireEvent.click(within(cards[3]).getByTestId("version-conflict-toggle"));
-    expect(
-      within(cards[0]).getByTestId("version-conflict-draft-marker").textContent,
-    ).toBe("Combined copy in progress");
+    expect(within(cards[0]).getByTestId("version-conflict-draft-marker").textContent).toBe(
+      "Combined copy in progress",
+    );
 
     fireEvent.click(within(cards[0]).getByTestId("version-conflict-toggle"));
     expect(
-      (
-        within(cards[0]).getByTestId(
-          "version-conflict-combined-input",
-        ) as HTMLTextAreaElement
-      ).value,
+      (within(cards[0]).getByTestId("version-conflict-combined-input") as HTMLTextAreaElement)
+        .value,
     ).toBe("my combined copy\n");
   });
 
@@ -494,9 +448,7 @@ describe("a list of open conflicts", () => {
     const cards = screen.getAllByTestId("version-conflict");
     expect(cards).toHaveLength(39);
     expect(
-      within(cards[0])
-        .getByTestId("version-conflict-toggle")
-        .getAttribute("aria-expanded"),
+      within(cards[0]).getByTestId("version-conflict-toggle").getAttribute("aria-expanded"),
     ).toBe("true");
     expect(screen.getAllByTestId("version-conflict-side-text")).toHaveLength(2);
   });

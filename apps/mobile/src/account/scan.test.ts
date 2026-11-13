@@ -7,7 +7,11 @@ const readInDevelopment = (text: string) => readScannedCode(text, { developmentS
 
 describe("readScannedCode", () => {
   it("reads the code a computer makes for its server", () => {
-    for (const server of ["https://dohc.example.com", "https://dohc.example.com/", "https://dohc.example.com:8443"]) {
+    for (const server of [
+      "https://dohc.example.com",
+      "https://dohc.example.com/",
+      "https://dohc.example.com:8443",
+    ]) {
       expect(read(phoneConnectCode(server))).toEqual({ origin: new URL(server).origin });
     }
     expect(phoneConnectCode("https://dohc.example.com/")).toBe("https://dohc.example.com");
@@ -28,13 +32,27 @@ describe("readScannedCode", () => {
 
   it("refuses a code that holds more than an origin", () => {
     for (const text of [
-      "https://dohc.example.com/device", "https://dohc.example.com/device?user_code=ABCD-EFGH", "https://dohc.example.com/?code=1",
-      "https://dohc.example.com/#token", "https://me:secret@dohc.example.com",
-    ]) expect(read(text)).toEqual({ problem: "invalid" });
+      "https://dohc.example.com/device",
+      "https://dohc.example.com/device?user_code=ABCD-EFGH",
+      "https://dohc.example.com/?code=1",
+      "https://dohc.example.com/#token",
+      "https://me:secret@dohc.example.com",
+    ])
+      expect(read(text)).toEqual({ problem: "invalid" });
   });
 
   it("refuses text without a scheme, such as a sign-in code, that a typed address would take", () => {
-    for (const text of ["ABCD-EFGH", "dohc.example.com", "dohc", "123456", "", "   ", "ftp://dohc.example.com", "dohc://open", "not a server"]) {
+    for (const text of [
+      "ABCD-EFGH",
+      "dohc.example.com",
+      "dohc",
+      "123456",
+      "",
+      "   ",
+      "ftp://dohc.example.com",
+      "dohc://open",
+      "not a server",
+    ]) {
       expect(read(text)).toEqual({ problem: "invalid" });
     }
   });
@@ -52,8 +70,12 @@ describe("scanReader", () => {
   });
 
   it("starts again for each scanner", () => {
-    expect(scanReader({ developmentServer: false })("https://dohc.example.com")).toEqual({ origin: "https://dohc.example.com" });
-    expect(scanReader({ developmentServer: false })("https://dohc.example.com")).toEqual({ origin: "https://dohc.example.com" });
+    expect(scanReader({ developmentServer: false })("https://dohc.example.com")).toEqual({
+      origin: "https://dohc.example.com",
+    });
+    expect(scanReader({ developmentServer: false })("https://dohc.example.com")).toEqual({
+      origin: "https://dohc.example.com",
+    });
   });
 });
 
@@ -62,8 +84,14 @@ describe("cameraAccess", () => {
     const asked: string[] = [];
     return {
       asked,
-      get: async () => { asked.push("get"); return current; },
-      request: async () => { asked.push("request"); return answer; },
+      get: async () => {
+        asked.push("get");
+        return current;
+      },
+      request: async () => {
+        asked.push("request");
+        return answer;
+      },
     };
   }
   const granted = { granted: true, canAskAgain: true };

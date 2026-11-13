@@ -10,29 +10,54 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 /** What each removed directory held at removal: what a run interrupted at that point would leave behind. */
 const removed = vi.hoisted(() => new Map<string, string[]>());
-vi.mock("node:fs/promises", async importOriginal => {
+vi.mock("node:fs/promises", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...fs, rm: async (...args: Parameters<typeof fs.rm>) => {
-    const listing = await fs.readdir(args[0]).catch(() => undefined);
-    if (listing) removed.set(String(args[0]), listing);
-    return fs.rm(...args);
-  } };
+  return {
+    ...fs,
+    rm: async (...args: Parameters<typeof fs.rm>) => {
+      const listing = await fs.readdir(args[0]).catch(() => undefined);
+      if (listing) removed.set(String(args[0]), listing);
+      return fs.rm(...args);
+    },
+  };
 });
 
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment";
 import { checkRelayBackup, restoreRelayDeployment } from "./relayDeploymentRecovery";
-import { captureRelaySnapshot, openRelaySnapshot, saveRelaySnapshot,
-  sealRelaySnapshot, signS3Request, snapshotStorageFromEnv, uploadRelaySnapshot, withRelaySnapshot, type SnapshotStorage } from "./relaySnapshot";
+import {
+  captureRelaySnapshot,
+  openRelaySnapshot,
+  saveRelaySnapshot,
+  sealRelaySnapshot,
+  signS3Request,
+  snapshotStorageFromEnv,
+  uploadRelaySnapshot,
+  withRelaySnapshot,
+  type SnapshotStorage,
+} from "./relaySnapshot";
 
 const cleanups: (() => void | Promise<void>)[] = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "dohc-relay-snapshot-"));
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
-  const input = { configPath: join(root, "control", "deployment.json"), relayPath: join(root, "relay", "relay.sqlite"), continuityDirectory: join(root, "continuity") };
+  const input = {
+    configPath: join(root, "control", "deployment.json"),
+    relayPath: join(root, "relay", "relay.sqlite"),
+    continuityDirectory: join(root, "continuity"),
+  };
   initializeRelayDeployment(input);
-  const state = join(root, "snapshots"), key = randomBytes(32);
-  const options = { relayPath: input.relayPath, stateDirectory: state, key, release: "r", space: async () => ({ free: 1024 * gib, total: 1024 * gib }) };
+  const state = join(root, "snapshots"),
+    key = randomBytes(32);
+  const options = {
+    relayPath: input.relayPath,
+    stateDirectory: state,
+    key,
+    release: "r",
+    space: async () => ({ free: 1024 * gib, total: 1024 * gib }),
+  };
   return { ...input, root, state, key, options };
 }
 /** After a run, the state directory keeps only the lock database: the staging folder is gone. */
@@ -57,25 +82,46 @@ process.stdin.on("end", () => { stopped = true; }).resume();
 })();`;
 
 function startWriter(relayPath: string) {
-  const child = spawn(process.execPath, ["-e", writerScript, relayPath], { stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
-  const exited = new Promise<number | null>(resolve => child.on("exit", resolve));
-  cleanups.push(async () => { if (child.exitCode === null) { child.kill(); await exited; } });
+  const child = spawn(process.execPath, ["-e", writerScript, relayPath], {
+    stdio: ["pipe", "pipe", "inherit"],
+    windowsHide: true,
+  });
+  const exited = new Promise<number | null>((resolve) => child.on("exit", resolve));
+  cleanups.push(async () => {
+    if (child.exitCode === null) {
+      child.kill();
+      await exited;
+    }
+  });
   const lines = createInterface({ input: child.stdout! });
   let latest = 0;
   const waiters: { above: number; resolve: () => void }[] = [];
-  lines.on("line", line => {
+  lines.on("line", (line) => {
     latest = Number(line);
-    for (const waiter of waiters.splice(0)) if (latest > waiter.above) waiter.resolve(); else waiters.push(waiter);
+    for (const waiter of waiters.splice(0))
+      if (latest > waiter.above) waiter.resolve();
+      else waiters.push(waiter);
   });
   return {
-    reached: (above: number) => latest > above ? Promise.resolve() : new Promise<void>(resolve => waiters.push({ above, resolve })),
-    stop: async () => { child.stdin!.end(); expect(await exited).toBe(0); },
+    reached: (above: number) =>
+      latest > above
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => waiters.push({ above, resolve })),
+    stop: async () => {
+      child.stdin!.end();
+      expect(await exited).toBe(0);
+    },
   };
 }
 
-interface StoredObject { body: Buffer; headers: IncomingMessage["headers"] }
+interface StoredObject {
+  body: Buffer;
+  headers: IncomingMessage["headers"];
+}
 async function fakeS3(behavior: { dropAfterBytes?: number } = {}) {
-  const objects = new Map<string, StoredObject>(), methods: string[] = [], received: Buffer[] = [];
+  const objects = new Map<string, StoredObject>(),
+    methods: string[] = [],
+    received: Buffer[] = [];
   const server: Server = createServer((request, response) => {
     methods.push(request.method ?? "");
     const chunks: Buffer[] = [];
@@ -89,13 +135,28 @@ async function fakeS3(behavior: { dropAfterBytes?: number } = {}) {
       }
     });
     request.on("end", () => {
-      const body = Buffer.concat(chunks), headers = request.headers;
-      const signed = { "content-md5": String(headers["content-md5"]), host: headers.host!,
-        "x-amz-content-sha256": String(headers["x-amz-content-sha256"]), "x-amz-date": String(headers["x-amz-date"]) };
-      const expected = signS3Request({ method: request.method!, path: request.url!, headers: signed, ...credentials });
+      const body = Buffer.concat(chunks),
+        headers = request.headers;
+      const signed = {
+        "content-md5": String(headers["content-md5"]),
+        host: headers.host!,
+        "x-amz-content-sha256": String(headers["x-amz-content-sha256"]),
+        "x-amz-date": String(headers["x-amz-date"]),
+      };
+      const expected = signS3Request({
+        method: request.method!,
+        path: request.url!,
+        headers: signed,
+        ...credentials,
+      });
       // S3 stores an object only when the body is whole and matches its signed checksums. A bucket with Object Lock requires Content-MD5.
-      if (request.method !== "PUT" || headers.authorization !== expected || sha256(body) !== signed["x-amz-content-sha256"] ||
-          createHash("md5").update(body).digest("base64") !== signed["content-md5"] || body.length !== Number(headers["content-length"])) {
+      if (
+        request.method !== "PUT" ||
+        headers.authorization !== expected ||
+        sha256(body) !== signed["x-amz-content-sha256"] ||
+        createHash("md5").update(body).digest("base64") !== signed["content-md5"] ||
+        body.length !== Number(headers["content-length"])
+      ) {
         response.writeHead(400).end("<Error><Code>BadDigest</Code></Error>");
         return;
       }
@@ -103,13 +164,21 @@ async function fakeS3(behavior: { dropAfterBytes?: number } = {}) {
       response.writeHead(200).end();
     });
   });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const address = server.address() as { port: number };
-  const storage: SnapshotStorage = { endpoint: new URL(`http://127.0.0.1:${address.port}`), bucket: "dohc-snapshots", ...credentials };
+  const storage: SnapshotStorage = {
+    endpoint: new URL(`http://127.0.0.1:${address.port}`),
+    bucket: "dohc-snapshots",
+    ...credentials,
+  };
   return { storage, objects, methods, received };
 }
-const credentials = { region: "auto", accessKeyId: "AKIDEXAMPLE", secretAccessKey: "secret-example" };
+const credentials = {
+  region: "auto",
+  accessKeyId: "AKIDEXAMPLE",
+  secretAccessKey: "secret-example",
+};
 
 describe("online relay snapshots", () => {
   it("captures one consistent transaction while another process keeps writing", async () => {
@@ -120,44 +189,62 @@ describe("online relay snapshots", () => {
     const writer = startWriter(f.relayPath);
     await writer.reached(2);
     const output = join(f.root, "verified");
-    const manifest = await withRelaySnapshot({ ...f.options, release: "test-release" },
-      async snapshot => {
+    const manifest = await withRelaySnapshot(
+      { ...f.options, release: "test-release" },
+      async (snapshot) => {
         // Writes continue after the copy; the snapshot did not hold the writer back.
         await writer.reached(snapshot.manifest.stamp + 2);
-        return openRelaySnapshot(await saveRelaySnapshot(snapshot, join(f.root, "saved")), f.key, output);
-      });
+        return openRelaySnapshot(
+          await saveRelaySnapshot(snapshot, join(f.root, "saved")),
+          f.key,
+          output,
+        );
+      },
+    );
     await writer.stop();
     expect(manifest.stamp).toBeGreaterThan(2);
     expect(manifest.release).toBe("test-release");
     const copy = new DatabaseSync(join(output, "relay.sqlite"), { readOnly: true });
     try {
-      const evidence = copy.prepare("SELECT count(*) AS count, max(stamp) AS latest FROM evidence").get();
+      const evidence = copy
+        .prepare("SELECT count(*) AS count, max(stamp) AS latest FROM evidence")
+        .get();
       expect(evidence).toEqual({ count: manifest.stamp, latest: manifest.stamp });
-    } finally { copy.close(); }
+    } finally {
+      copy.close();
+    }
     expect(readdirSync(f.state)).toEqual(afterRun);
   });
 
   it("restores through today's restore when continuity matches, and refuses once it advances", async () => {
-    const f = fixture(), live = openRelayDeployment(f.configPath);
+    const f = fixture(),
+      live = openRelayDeployment(f.configPath);
     let snapshotPath: string;
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      snapshotPath = await withRelaySnapshot(f.options,
-        snapshot => saveRelaySnapshot(snapshot, join(f.root, "saved")));
-    } finally { live.storage.close(); }
+      snapshotPath = await withRelaySnapshot(f.options, (snapshot) =>
+        saveRelaySnapshot(snapshot, join(f.root, "saved")),
+      );
+    } finally {
+      live.storage.close();
+    }
     const verified = join(f.root, "verified");
     await openRelaySnapshot(snapshotPath, f.key, verified);
     writeFileSync(f.relayPath, "damaged database");
     await restoreRelayDeployment(f.configPath, verified);
     const reopened = openRelayDeployment(f.configPath);
-    try { expect(reopened.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 })).toBe("owned"); }
-    finally { reopened.storage.close(); }
+    try {
+      expect(
+        reopened.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 }),
+      ).toBe("owned");
+    } finally {
+      reopened.storage.close();
+    }
     const next = openRelayDeployment(f.configPath);
     next.storage.claimWorkspace({ workspaceId: "second", ownerUserId: "owner", createdAtMs: 2 });
     next.storage.close();
     await expect(checkRelayBackup(f.configPath, verified)).rejects.toThrow(/continuity/);
   });
-
 });
 
 describe("sealed snapshot packages", () => {
@@ -165,40 +252,57 @@ describe("sealed snapshot packages", () => {
     const live = openRelayDeployment(f.configPath);
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      return await withRelaySnapshot(f.options, snapshot => saveRelaySnapshot(snapshot, join(f.root, "saved")));
-    } finally { live.storage.close(); }
+      return await withRelaySnapshot(f.options, (snapshot) =>
+        saveRelaySnapshot(snapshot, join(f.root, "saved")),
+      );
+    } finally {
+      live.storage.close();
+    }
   }
 
   it("refuses changed ciphertext, changed format metadata, truncation and the wrong key", async () => {
-    const f = fixture(), path = await sealed(f), original = readFileSync(path);
+    const f = fixture(),
+      path = await sealed(f),
+      original = readFileSync(path);
     const attempt = async (bytes: Buffer, key = f.key) => {
-      const changed = join(f.root, `changed-${randomBytes(4).toString("hex")}.dohc-snapshot`), output = join(f.root, `out-${randomBytes(4).toString("hex")}`);
+      const changed = join(f.root, `changed-${randomBytes(4).toString("hex")}.dohc-snapshot`),
+        output = join(f.root, `out-${randomBytes(4).toString("hex")}`);
       writeFileSync(changed, bytes);
       const result = openRelaySnapshot(changed, key, output);
       await expect(result).rejects.toThrow();
       expect(existsSync(output)).toBe(false);
       return result.catch((error: Error) => error.message);
     };
-    const body = Buffer.from(original); body[body.length - 100] ^= 1;
+    const body = Buffer.from(original);
+    body[body.length - 100] ^= 1;
     expect(await attempt(body)).toMatch(/could not be decrypted/);
     // The whole plaintext was written before the tag check failed, and never under the name restore reads.
     expect([...removed.values()].at(-1)).toEqual(["relay.sqlite.partial"]);
-    const tag = Buffer.from(original); tag[tag.length - 1] ^= 1;
+    const tag = Buffer.from(original);
+    tag[tag.length - 1] ^= 1;
     expect(await attempt(tag)).toMatch(/could not be decrypted/);
     const headerLength = original.readUInt32BE(8);
     const header = JSON.parse(original.subarray(12, 12 + headerLength).toString());
-    const iv = Buffer.from(header.iv, "base64url"); iv[0] ^= 1;
+    const iv = Buffer.from(header.iv, "base64url");
+    iv[0] ^= 1;
     const metadata = Buffer.from(original);
     metadata.write(JSON.stringify({ ...header, iv: iv.toString("base64url") }), 12);
     expect(await attempt(metadata)).toMatch(/could not be decrypted/);
     // Same fields, different bytes: only the authenticated header can notice.
     const spaced = Buffer.from(JSON.stringify(header, null, 1));
-    const respaced = Buffer.concat([original.subarray(0, 8), Buffer.from([0, 0, spaced.length >> 8, spaced.length & 255]), spaced, original.subarray(12 + headerLength)]);
+    const respaced = Buffer.concat([
+      original.subarray(0, 8),
+      Buffer.from([0, 0, spaced.length >> 8, spaced.length & 255]),
+      spaced,
+      original.subarray(12 + headerLength),
+    ]);
     expect(await attempt(respaced)).toMatch(/could not be decrypted/);
     const version = Buffer.from(original);
     version.write(JSON.stringify({ ...header, version: 2 }), 12);
     expect(await attempt(version)).toMatch(/unsupported format/);
-    expect(await attempt(original.subarray(0, original.length - 4096))).toMatch(/could not be decrypted/);
+    expect(await attempt(original.subarray(0, original.length - 4096))).toMatch(
+      /could not be decrypted/,
+    );
     expect(await attempt(original, randomBytes(32))).toMatch(/different snapshot key/);
     expect(await attempt(Buffer.from("not a snapshot"))).toMatch(/not a dohc relay snapshot/);
   });
@@ -209,11 +313,17 @@ describe("sealed snapshot packages", () => {
     try {
       setup.exec(`CREATE TABLE evidence(stamp INTEGER PRIMARY KEY, padding BLOB);
         WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<200) INSERT INTO evidence SELECT value, randomblob(2000) FROM n`);
-    } finally { setup.close(); }
+    } finally {
+      setup.close();
+    }
     const live = openRelayDeployment(f.configPath);
     const plain = join(f.root, "plain.sqlite");
     let manifest;
-    try { manifest = await captureRelaySnapshot(f.relayPath, plain, "r"); } finally { live.storage.close(); }
+    try {
+      manifest = await captureRelaySnapshot(f.relayPath, plain, "r");
+    } finally {
+      live.storage.close();
+    }
     const intact = join(f.root, "intact.sqlite");
     writeFileSync(intact, readFileSync(plain));
     const corrupt = readFileSync(plain);
@@ -221,63 +331,99 @@ describe("sealed snapshot packages", () => {
     writeFileSync(plain, corrupt);
     const integrity = join(f.root, "integrity.dohc-snapshot");
     await sealRelaySnapshot(plain, { ...manifest, sha256: sha256(corrupt) }, f.key, integrity);
-    await expect(openRelaySnapshot(integrity, f.key, join(f.root, "out-integrity"))).rejects.toThrow(/integrity|malformed/);
+    await expect(
+      openRelaySnapshot(integrity, f.key, join(f.root, "out-integrity")),
+    ).rejects.toThrow(/integrity|malformed/);
     expect(existsSync(join(f.root, "out-integrity"))).toBe(false);
     const checksum = join(f.root, "checksum.dohc-snapshot");
     await sealRelaySnapshot(intact, { ...manifest, sha256: "0".repeat(64) }, f.key, checksum);
-    await expect(openRelaySnapshot(checksum, f.key, join(f.root, "out-checksum"))).rejects.toThrow(/checksum/);
+    await expect(openRelaySnapshot(checksum, f.key, join(f.root, "out-checksum"))).rejects.toThrow(
+      /checksum/,
+    );
   });
 });
 
 describe("off-site upload", () => {
-
   it("uploads the same package that --directory saves, under a unique name, and never deletes", async () => {
-    const f = fixture(), s3 = await fakeS3(), live = openRelayDeployment(f.configPath), saved = join(f.root, "saved");
-    const keys: string[] = [], paths: string[] = [];
+    const f = fixture(),
+      s3 = await fakeS3(),
+      live = openRelayDeployment(f.configPath),
+      saved = join(f.root, "saved");
+    const keys: string[] = [],
+      paths: string[] = [];
     try {
       for (const createdAtMs of [1, 2]) {
-        live.storage.claimWorkspace({ workspaceId: `w${createdAtMs}`, ownerUserId: "owner", createdAtMs });
-        await withRelaySnapshot(f.options, async snapshot => {
+        live.storage.claimWorkspace({
+          workspaceId: `w${createdAtMs}`,
+          ownerUserId: "owner",
+          createdAtMs,
+        });
+        await withRelaySnapshot(f.options, async (snapshot) => {
           keys.push(await uploadRelaySnapshot(snapshot, s3.storage));
           paths.push(await saveRelaySnapshot(snapshot, saved));
         });
       }
-    } finally { live.storage.close(); }
+    } finally {
+      live.storage.close();
+    }
     expect(new Set(keys).size).toBe(2);
     expect(s3.methods).toEqual(["PUT", "PUT"]);
-    expect(readdirSync(saved).sort()).toEqual(paths.map(path => path.slice(saved.length + 1)).sort());
+    expect(readdirSync(saved).sort()).toEqual(
+      paths.map((path) => path.slice(saved.length + 1)).sort(),
+    );
     const stamps: number[] = [];
     for (const [index, key] of keys.entries()) {
       const object = s3.objects.get(`/dohc-snapshots/${key}`)!;
       expect(object.body.equals(readFileSync(paths[index]!))).toBe(true);
       const uploaded = join(f.root, `uploaded-${index}.dohc-snapshot`);
       writeFileSync(uploaded, object.body);
-      stamps.push((await openRelaySnapshot(uploaded, f.key, join(f.root, `verified-${index}`))).stamp);
+      stamps.push(
+        (await openRelaySnapshot(uploaded, f.key, join(f.root, `verified-${index}`))).stamp,
+      );
     }
     expect(stamps[1]).toBeGreaterThan(stamps[0]!);
   });
 
   it("leaves no stored object after an interrupted upload, and the partial bytes do not verify", async () => {
-    const f = fixture(), s3 = await fakeS3({ dropAfterBytes: 1024 }), live = openRelayDeployment(f.configPath);
+    const f = fixture(),
+      s3 = await fakeS3({ dropAfterBytes: 1024 }),
+      live = openRelayDeployment(f.configPath);
     try {
       live.storage.claimWorkspace({ workspaceId: "w", ownerUserId: "owner", createdAtMs: 1 });
-      await expect(withRelaySnapshot(f.options,
-        snapshot => uploadRelaySnapshot(snapshot, s3.storage))).rejects.toThrow();
-    } finally { live.storage.close(); }
+      await expect(
+        withRelaySnapshot(f.options, (snapshot) => uploadRelaySnapshot(snapshot, s3.storage)),
+      ).rejects.toThrow();
+    } finally {
+      live.storage.close();
+    }
     expect(s3.objects.size).toBe(0);
     const partial = join(f.root, "partial.dohc-snapshot");
     writeFileSync(partial, s3.received[0]!);
-    await expect(openRelaySnapshot(partial, f.key, join(f.root, "out"))).rejects.toThrow(/could not be decrypted/);
+    await expect(openRelaySnapshot(partial, f.key, join(f.root, "out"))).rejects.toThrow(
+      /could not be decrypted/,
+    );
   });
 
   it("keeps upload opt-in and refuses partial or plain-HTTP storage settings", () => {
     expect(snapshotStorageFromEnv({})).toBeUndefined();
-    const complete = { DOHC_SNAPSHOT_S3_ENDPOINT: "https://account.r2.cloudflarestorage.com", DOHC_SNAPSHOT_S3_BUCKET: "dohc-snapshots",
-      DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: "id", DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: "secret" };
+    const complete = {
+      DOHC_SNAPSHOT_S3_ENDPOINT: "https://account.r2.cloudflarestorage.com",
+      DOHC_SNAPSHOT_S3_BUCKET: "dohc-snapshots",
+      DOHC_SNAPSHOT_S3_ACCESS_KEY_ID: "id",
+      DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: "secret",
+    };
     expect(snapshotStorageFromEnv(complete)?.region).toBe("auto");
-    expect(() => snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: "" })).toThrow(/partly configured/);
-    expect(() => snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_ENDPOINT: "http://storage.invalid" })).toThrow(/HTTPS origin/);
-    expect(() => snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_ENDPOINT: "https://storage.invalid/bucket" })).toThrow(/HTTPS origin/);
+    expect(() =>
+      snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_SECRET_ACCESS_KEY: "" }),
+    ).toThrow(/partly configured/);
+    expect(() =>
+      snapshotStorageFromEnv({ ...complete, DOHC_SNAPSHOT_S3_ENDPOINT: "http://storage.invalid" }),
+    ).toThrow(/HTTPS origin/);
+    expect(() =>
+      snapshotStorageFromEnv({
+        ...complete,
+        DOHC_SNAPSHOT_S3_ENDPOINT: "https://storage.invalid/bucket",
+      }),
+    ).toThrow(/HTTPS origin/);
   });
-
 });

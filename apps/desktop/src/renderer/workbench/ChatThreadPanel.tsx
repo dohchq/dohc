@@ -1,15 +1,34 @@
-import { AtSign, ChevronLeft, LoaderCircle, MessageSquare, RotateCw, Settings, Square, TriangleAlert, X } from "lucide-react";
+import {
+  AtSign,
+  ChevronLeft,
+  LoaderCircle,
+  MessageSquare,
+  RotateCw,
+  Settings,
+  Square,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { Children, useEffect, useRef, type ReactNode, type RefObject } from "react";
 import {
-  nextStepSettingsAction, nextStepWords,
-  type ActorPresentation, type ChatDispatchFailedRun, type ChatMessageRecord, type ChatRunRecord,
+  nextStepSettingsAction,
+  nextStepWords,
+  type ActorPresentation,
+  type ChatDispatchFailedRun,
+  type ChatMessageRecord,
+  type ChatRunRecord,
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { formatClock, formatShortTime, sameChatDay } from "../time";
 import { SecondaryButton } from "../ui/controls";
 import { ChatAvatar, useAgentInk } from "./ChatAvatar";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ChatMessageList, DENSITY, type ChatMessageListHandle, type ChatReactionControls } from "./chatMessages";
+import {
+  ChatMessageList,
+  DENSITY,
+  type ChatMessageListHandle,
+  type ChatReactionControls,
+} from "./chatMessages";
 
 export interface ChatThreads {
   // The conversation as the stream shows it: every message that is not a reply.
@@ -59,7 +78,14 @@ export function ThreadSummary(props: {
   if (!last) return null;
   return (
     <>
-      {last.authorKind === "agent" ? <AgentReplyPeek testIdPrefix={props.testIdPrefix} reply={last} mentionCandidates={props.mentionCandidates} onOpen={props.onOpen} /> : null}
+      {last.authorKind === "agent" ? (
+        <AgentReplyPeek
+          testIdPrefix={props.testIdPrefix}
+          reply={last}
+          mentionCandidates={props.mentionCandidates}
+          onOpen={props.onOpen}
+        />
+      ) : null}
       <RepliesLine {...props} last={last} />
     </>
   );
@@ -82,12 +108,23 @@ function AgentReplyPeek(props: {
       className={`mt-1.5 cursor-pointer border-l-2 border-current/55 pl-3 ${ink}`}
     >
       <span className="flex items-center gap-1.5 leading-5">
-        <ChatAvatar presentation={reply.presentation} name={reply.authorDisplayName} kind="agent" size="strip" />
+        <ChatAvatar
+          presentation={reply.presentation}
+          name={reply.authorDisplayName}
+          kind="agent"
+          size="strip"
+        />
         <span className="truncate text-[13px] font-semibold">{reply.authorDisplayName}</span>
-        <span className="shrink-0 text-[12px] tabular-nums text-subtle">{formatClock(reply.createdAtMs)}</span>
+        <span className="shrink-0 text-[12px] tabular-nums text-subtle">
+          {formatClock(reply.createdAtMs)}
+        </span>
       </span>
       <div inert className="dohc-chat-peek text-[14px] text-ink">
-        <ChatMarkdown body={reply.body} candidates={props.mentionCandidates} attachments={reply.attachments} />
+        <ChatMarkdown
+          body={reply.body}
+          candidates={props.mentionCandidates}
+          attachments={reply.attachments}
+        />
       </div>
     </div>
   );
@@ -108,7 +145,9 @@ function RepliesLine(props: {
   // Today's time, "Yesterday", or a short date.
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
-  const when = sameChatDay(last.createdAtMs, yesterday.getTime()) ? "Yesterday" : formatShortTime(last.createdAtMs);
+  const when = sameChatDay(last.createdAtMs, yesterday.getTime())
+    ? "Yesterday"
+    : formatShortTime(last.createdAtMs);
   return (
     <button
       type="button"
@@ -127,7 +166,9 @@ function RepliesLine(props: {
           />
         ))}
       </span>
-      <span className="shrink-0 font-semibold text-hue-blue">{repliesLabel(props.replies.length)}</span>
+      <span className="shrink-0 font-semibold text-hue-blue">
+        {repliesLabel(props.replies.length)}
+      </span>
       <span className="truncate text-[12px] text-subtle">Last reply {when}</span>
     </button>
   );
@@ -172,21 +213,48 @@ export interface ChatWorking {
 export function WorkingLine(props: { testIdPrefix: string; working: ChatWorking }) {
   const { working } = props;
   return (
-    <div data-testid={`${props.testIdPrefix}-working`} className="mt-1 flex h-7 items-center gap-2 text-[13px] text-muted">
-      <ChatAvatar presentation={working.presentation} name={working.agentName} kind="agent" size="strip" />
+    <div
+      data-testid={`${props.testIdPrefix}-working`}
+      className="mt-1 flex h-7 items-center gap-2 text-[13px] text-muted"
+    >
+      <ChatAvatar
+        presentation={working.presentation}
+        name={working.agentName}
+        kind="agent"
+        size="strip"
+      />
       <span className="min-w-0 truncate">{working.agentName} is working</span>
       <WorkingDots presentation={working.presentation} />
-      {working.onStop ? <StopButton testIdPrefix={props.testIdPrefix} stopping={working.stopping} onStop={working.onStop} /> : null}
+      {working.onStop ? (
+        <StopButton
+          testIdPrefix={props.testIdPrefix}
+          stopping={working.stopping}
+          onStop={working.onStop}
+        />
+      ) : null}
     </div>
   );
 }
 
 // Under a message that waits for its agent to end another run: the agent's
 // mark and that it will reply. It goes once the agent starts on the message.
-export function WaitingLine(props: { testIdPrefix: string; agentName: string; presentation: ActorPresentation; className?: string }) {
+export function WaitingLine(props: {
+  testIdPrefix: string;
+  agentName: string;
+  presentation: ActorPresentation;
+  className?: string;
+}) {
   return (
-    <div data-testid={`${props.testIdPrefix}-waiting`} className={`flex h-7 items-center gap-2 text-[13px] text-muted ${props.className ?? ""}`}>
-      <ChatAvatar presentation={props.presentation} name={props.agentName} kind="agent" size="strip" />
+    <div
+      data-testid={`${props.testIdPrefix}-waiting`}
+      className={`flex h-7 items-center gap-2 text-[13px] text-muted ${props.className ?? ""}`}
+    >
+      <ChatAvatar
+        presentation={props.presentation}
+        name={props.agentName}
+        kind="agent"
+        size="strip"
+      />
       <span className="min-w-0 truncate">{`${props.agentName} will reply when it's free.`}</span>
     </div>
   );
@@ -208,10 +276,12 @@ export function FailedRunLine(props: {
 }) {
   const step = props.failed.nextStep;
   const ownChat = step?.kind === "message" && step.agentId === props.chatAgentId;
-  const askAgain = step?.kind === "message" && props.onAskAgain && (ownChat || step.handle) ? step : null;
+  const askAgain =
+    step?.kind === "message" && props.onAskAgain && (ownChat || step.handle) ? step : null;
   const inSettings = step && step.kind !== "message" && props.onOpenAgentSettings ? step : null;
   const sentence = step && !askAgain && !inSettings ? step : null;
-  const actions = props.onRetry || askAgain || inSettings || Children.toArray(props.children).length > 0;
+  const actions =
+    props.onRetry || askAgain || inSettings || Children.toArray(props.children).length > 0;
   return (
     <div
       data-testid={`${props.testIdPrefix}-run-failed`}
@@ -222,16 +292,25 @@ export function FailedRunLine(props: {
           <span aria-hidden className="flex h-[1lh] shrink-0 items-center">
             <TriangleAlert size={14} className="text-danger" />
           </span>
-          <span role="status" className="min-w-0">{props.failed.words}</span>
+          <span role="status" className="min-w-0">
+            {props.failed.words}
+          </span>
         </span>
       </span>
       {sentence ? (
-        <span data-testid={`${props.testIdPrefix}-run-next-step`} role="status" className="min-w-0 pl-[22px] wrap-anywhere">
+        <span
+          data-testid={`${props.testIdPrefix}-run-next-step`}
+          role="status"
+          className="min-w-0 pl-[22px] wrap-anywhere"
+        >
           {nextStepWords(sentence, props.chatAgentId)}
         </span>
       ) : null}
       {actions ? (
-        <span data-testid={`${props.testIdPrefix}-run-actions`} className="flex flex-wrap items-center gap-2 pl-[22px]">
+        <span
+          data-testid={`${props.testIdPrefix}-run-actions`}
+          className="flex flex-wrap items-center gap-2 pl-[22px]"
+        >
           {props.onRetry ? (
             <SecondaryButton
               size="row"
@@ -240,9 +319,11 @@ export function FailedRunLine(props: {
               aria-busy={props.busy || undefined}
               onClick={props.busy ? undefined : props.onRetry}
             >
-              {props.busy
-                ? <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
-                : <RotateCw size={12} aria-hidden />}
+              {props.busy ? (
+                <LoaderCircle size={12} aria-hidden className="motion-safe:animate-spin" />
+              ) : (
+                <RotateCw size={12} aria-hidden />
+              )}
               Try again
             </SecondaryButton>
           ) : null}
@@ -283,28 +364,49 @@ export function failedRunEnd(
 ): string {
   let last: ChatMessageRecord | undefined;
   for (const message of messages) {
-    if (runRecords[message.id]?.runId === failed.runId && (!last || message.createdAtMs >= last.createdAtMs)) last = message;
+    if (
+      runRecords[message.id]?.runId === failed.runId &&
+      (!last || message.createdAtMs >= last.createdAtMs)
+    )
+      last = message;
   }
   return last?.id ?? failed.triggerMessageId;
 }
 
 // At the end of a stream or thread: the agent's row before its reply lands.
 // The reply takes its place.
-export function WorkingRow(props: { testIdPrefix: string; working: ChatWorking; density: keyof typeof DENSITY }) {
+export function WorkingRow(props: {
+  testIdPrefix: string;
+  working: ChatWorking;
+  density: keyof typeof DENSITY;
+}) {
   const { working } = props;
   const sizes = DENSITY[props.density];
   const ink = useAgentInk(working.presentation);
   return (
     <div data-testid={`${props.testIdPrefix}-working`} className={`grid ${sizes.row} pb-2 pt-1.5`}>
       <span className="flex justify-end">
-        <ChatAvatar presentation={working.presentation} name={working.agentName} kind="agent" size={sizes.avatar} />
+        <ChatAvatar
+          presentation={working.presentation}
+          name={working.agentName}
+          kind="agent"
+          size={sizes.avatar}
+        />
       </span>
       <div className="min-w-0">
-        <span className={`block truncate font-semibold leading-5 ${sizes.name} ${ink}`}>{working.agentName}</span>
+        <span className={`block truncate font-semibold leading-5 ${sizes.name} ${ink}`}>
+          {working.agentName}
+        </span>
         <span className="flex h-7 items-center gap-2 text-[14px] text-muted">
           Working
           <WorkingDots presentation={working.presentation} />
-          {working.onStop ? <StopButton testIdPrefix={props.testIdPrefix} stopping={working.stopping} onStop={working.onStop} /> : null}
+          {working.onStop ? (
+            <StopButton
+              testIdPrefix={props.testIdPrefix}
+              stopping={working.stopping}
+              onStop={working.onStop}
+            />
+          ) : null}
         </span>
       </div>
     </div>
@@ -355,7 +457,9 @@ export function ChatThreadPanel(props: {
       }}
       className={`flex min-h-0 min-w-0 flex-col bg-bg ${props.narrow ? "flex-1" : "w-[400px] shrink-0 border-l border-line"}`}
     >
-      <header className={`flex shrink-0 items-center gap-2 border-b border-line ${props.narrow ? "h-11 px-2" : "h-12 pl-4 pr-3"}`}>
+      <header
+        className={`flex shrink-0 items-center gap-2 border-b border-line ${props.narrow ? "h-11 px-2" : "h-12 pl-4 pr-3"}`}
+      >
         {props.narrow ? (
           <button
             type="button"
@@ -394,12 +498,24 @@ export function ChatThreadPanel(props: {
         reactionControls={props.reactionControls}
         renderMessageFooter={props.renderMessageFooter}
         rowActions={props.rowActions}
-        dividerAfterFirst={props.replies.length > 0 ? repliesLabel(props.replies.length) : undefined}
-        footer={props.working ? <WorkingRow testIdPrefix={`${props.testIdPrefix}-thread`} working={props.working} density={density} /> : null}
+        dividerAfterFirst={
+          props.replies.length > 0 ? repliesLabel(props.replies.length) : undefined
+        }
+        footer={
+          props.working ? (
+            <WorkingRow
+              testIdPrefix={`${props.testIdPrefix}-thread`}
+              working={props.working}
+              density={density}
+            />
+          ) : null
+        }
         anchor="start"
         density={density}
       />
-      <div data-thread-composer className="contents">{props.composer}</div>
+      <div data-thread-composer className="contents">
+        {props.composer}
+      </div>
     </aside>
   );
 }

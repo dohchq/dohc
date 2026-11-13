@@ -31,10 +31,20 @@ class Window extends EventEmitter {
   constructor(public bounds: { x: number; y: number; width: number; height: number }) {
     super();
   }
-  isDestroyed() { return this.destroyed; }
-  getNormalBounds() { return this.bounds; }
-  isMaximized() { return false; }
-  close() { this.emit("close"); this.destroyed = true; this.emit("closed"); }
+  isDestroyed() {
+    return this.destroyed;
+  }
+  getNormalBounds() {
+    return this.bounds;
+  }
+  isMaximized() {
+    return false;
+  }
+  close() {
+    this.emit("close");
+    this.destroyed = true;
+    this.emit("closed");
+  }
 }
 
 const FILE: Record<WindowRole, string> = {
@@ -51,10 +61,13 @@ function disk() {
     files,
     io: {
       read: (file: string) => files.get(file) ?? null,
-      write: (file: string, contents: string) => { files.set(file, contents); },
+      write: (file: string, contents: string) => {
+        files.set(file, contents);
+      },
     },
     bounds: (role: WindowRole) =>
-      parseWindowState(contents(role), role === "manager" ? MANAGER_WINDOW_SIZE : undefined)?.bounds,
+      parseWindowState(contents(role), role === "manager" ? MANAGER_WINDOW_SIZE : undefined)
+        ?.bounds,
   };
 }
 
@@ -64,37 +77,45 @@ function relaunch(d: ReturnType<typeof disk>) {
 }
 
 let d: ReturnType<typeof disk>;
-beforeEach(() => { d = disk(); resetChromeThemeForTests(d.io); });
-afterEach(() => { resetChromeThemeForTests(); });
+beforeEach(() => {
+  d = disk();
+  resetChromeThemeForTests(d.io);
+});
+afterEach(() => {
+  resetChromeThemeForTests();
+});
 
 describe("chrome theme across windows", () => {
   it.each([
     ["workspace", "manager"],
     ["manager", "workspace"],
-  ] as const)("keeps the theme current in a closed %s file when the %s flips it", (closedRole, openRole) => {
-    const closed = new Window({ x: 0, y: 0, width: 1280, height: 800 });
-    const open = new Window({ x: 40, y: 40, width: 900, height: 700 });
-    trackWindowState(closed, closedRole);
-    trackWindowState(open, openRole);
-    // Both roles have geometry on disk from earlier use; a close persists
-    // without destroying in this fake.
-    open.emit("close");
-    rememberChromeTheme("dark");
-    closed.close();
-    expect(persistedChromeTheme(closedRole)).toBe("dark");
+  ] as const)(
+    "keeps the theme current in a closed %s file when the %s flips it",
+    (closedRole, openRole) => {
+      const closed = new Window({ x: 0, y: 0, width: 1280, height: 800 });
+      const open = new Window({ x: 40, y: 40, width: 900, height: 700 });
+      trackWindowState(closed, closedRole);
+      trackWindowState(open, openRole);
+      // Both roles have geometry on disk from earlier use; a close persists
+      // without destroying in this fake.
+      open.emit("close");
+      rememberChromeTheme("dark");
+      closed.close();
+      expect(persistedChromeTheme(closedRole)).toBe("dark");
 
-    rememberChromeTheme("light");
-    // The closed role's file follows the flip and keeps its own geometry.
-    expect(persistedChromeTheme(closedRole)).toBe("light");
-    expect(persistedChromeTheme(openRole)).toBe("light");
-    expect(d.bounds(closedRole)).toEqual(closed.bounds);
-    expect(d.bounds(openRole)).toEqual(open.bounds);
+      rememberChromeTheme("light");
+      // The closed role's file follows the flip and keeps its own geometry.
+      expect(persistedChromeTheme(closedRole)).toBe("light");
+      expect(persistedChromeTheme(openRole)).toBe("light");
+      expect(d.bounds(closedRole)).toEqual(closed.bounds);
+      expect(d.bounds(openRole)).toEqual(open.bounds);
 
-    // Next launch opens the closed role first and reads the current theme.
-    relaunch(d);
-    expect(persistedChromeTheme(closedRole)).toBe("light");
-    expect(persistedChromeTheme(openRole)).toBe("light");
-  });
+      // Next launch opens the closed role first and reads the current theme.
+      relaunch(d);
+      expect(persistedChromeTheme(closedRole)).toBe("light");
+      expect(persistedChromeTheme(openRole)).toBe("light");
+    },
+  );
 
   it("does not let a theme flip overwrite geometry a newer window of the same role saved", () => {
     const older = new Window({ x: 0, y: 0, width: 1280, height: 800 });

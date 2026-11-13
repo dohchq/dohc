@@ -3,10 +3,17 @@ import type { ListAutomationHoldsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 
 /** A held step, and whether it waits on the owner's self-hosted server. */
-export type AutomationHoldNotice = ListAutomationHoldsResult["holds"][number] & { onServer: boolean };
+export type AutomationHoldNotice = ListAutomationHoldsResult["holds"][number] & {
+  onServer: boolean;
+};
 export type AutomationStopNotice = ListAutomationHoldsResult["stops"][number];
 
-const NO_HOLDS: ListAutomationHoldsResult = { holds: [], stops: [], unreadable: false, unprovenPaths: [] };
+const NO_HOLDS: ListAutomationHoldsResult = {
+  holds: [],
+  stops: [],
+  unreadable: false,
+  unprovenPaths: [],
+};
 const NO_SERVER_HOLDS: ListAutomationHoldsResult["holds"] = [];
 
 function unidentifiedMessage(path: string): string {
@@ -38,47 +45,57 @@ export function useAutomationHolds(
   const reported = useRef(new Set<string>());
   const report = useRef(reportShellError);
   report.current = reportShellError;
-  const reload = useCallback(async (asked: number, retryPath?: string) => {
-    const read = ++reads.current;
-    const result = await bridge().listAutomationHolds({ workspaceId, ...(retryPath === undefined ? {} : { retryPath }) });
-    if (asked !== token.current || read !== reads.current) return;
-    setLists(result);
-    // A path that left the list is reported again if it comes back.
-    for (const path of reported.current) if (!result.unprovenPaths.includes(path)) reported.current.delete(path);
-    // Try again reads the file once more. A retry that fails keeps Try again.
-    const unidentified = (path: string, error?: unknown) => {
-      const message = unidentifiedMessage(path);
-      report.current(message, error ?? new Error(message), () => {
-        if (asked !== token.current) return;
-        reported.current.delete(path);
-        void reload(asked, path).catch((failure: unknown) => {
-          if (asked !== token.current || reported.current.has(path)) return;
-          reported.current.add(path);
-          unidentified(path, failure);
-        });
+  const reload = useCallback(
+    async (asked: number, retryPath?: string) => {
+      const read = ++reads.current;
+      const result = await bridge().listAutomationHolds({
+        workspaceId,
+        ...(retryPath === undefined ? {} : { retryPath }),
       });
-    };
-    for (const path of result.unprovenPaths) {
-      if (reported.current.has(path)) continue;
-      reported.current.add(path);
-      unidentified(path);
-    }
-  }, [workspaceId]);
+      if (asked !== token.current || read !== reads.current) return;
+      setLists(result);
+      // A path that left the list is reported again if it comes back.
+      for (const path of reported.current)
+        if (!result.unprovenPaths.includes(path)) reported.current.delete(path);
+      // Try again reads the file once more. A retry that fails keeps Try again.
+      const unidentified = (path: string, error?: unknown) => {
+        const message = unidentifiedMessage(path);
+        report.current(message, error ?? new Error(message), () => {
+          if (asked !== token.current) return;
+          reported.current.delete(path);
+          void reload(asked, path).catch((failure: unknown) => {
+            if (asked !== token.current || reported.current.has(path)) return;
+            reported.current.add(path);
+            unidentified(path, failure);
+          });
+        });
+      };
+      for (const path of result.unprovenPaths) {
+        if (reported.current.has(path)) continue;
+        reported.current.add(path);
+        unidentified(path);
+      }
+    },
+    [workspaceId],
+  );
   // A list the server could not answer says so, with Try again, unless the
   // window moved to another workspace meanwhile. The report is read when it
   // is made, so a new one never reads the list again.
-  const reloadServer = useCallback(async (asked: number): Promise<void> => {
-    const read = ++serverReads.current;
-    try {
-      const result = await bridge().listServerAutomationHolds({ workspaceId });
-      if (asked === token.current && read === serverReads.current) setServerHolds(result.holds);
-    } catch (error) {
-      if (asked !== token.current || read !== serverReads.current) return;
-      report.current("dohc could not read the automation steps your server holds.", error, () => {
-        if (asked === token.current) void reloadServer(asked);
-      });
-    }
-  }, [workspaceId]);
+  const reloadServer = useCallback(
+    async (asked: number): Promise<void> => {
+      const read = ++serverReads.current;
+      try {
+        const result = await bridge().listServerAutomationHolds({ workspaceId });
+        if (asked === token.current && read === serverReads.current) setServerHolds(result.holds);
+      } catch (error) {
+        if (asked !== token.current || read !== serverReads.current) return;
+        report.current("dohc could not read the automation steps your server holds.", error, () => {
+          if (asked === token.current) void reloadServer(asked);
+        });
+      }
+    },
+    [workspaceId],
+  );
   useEffect(() => {
     if (!workspaceIsReady) return;
     const asked = ++token.current;
@@ -121,7 +138,10 @@ export function useAutomationHolds(
       .then(async (result) => {
         if (asked !== token.current) return;
         if (result.status === "roster-unknown") {
-          reportShellError("Couldn't reset automation holds.", new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."));
+          reportShellError(
+            "Couldn't reset automation holds.",
+            new Error("dohc cannot check who can edit this workspace yet. Try again in a moment."),
+          );
           return;
         }
         await reload(asked);
@@ -136,28 +156,37 @@ export function useAutomationHolds(
       .catch((error: unknown) => reportShellError("Couldn't open the automations folder.", error));
   }, [workspaceId, reportShellError]);
   const allowAutomationHold = useCallback(
-    (hold: AutomationHoldNotice) => change(
-      () => bridge().confirmCollectionAutomationStep({
-        workspaceId,
-        automationId: hold.automationId,
-        definitionHash: hold.definitionHash,
-        step: hold.step,
-        seq: hold.seq,
-        ...(hold.recipient ? { recipient: hold.recipient } : {}),
-        onServer: hold.onServer,
-      }),
-      "Couldn't allow that automation step.",
-    ),
+    (hold: AutomationHoldNotice) =>
+      change(
+        () =>
+          bridge().confirmCollectionAutomationStep({
+            workspaceId,
+            automationId: hold.automationId,
+            definitionHash: hold.definitionHash,
+            step: hold.step,
+            seq: hold.seq,
+            ...(hold.recipient ? { recipient: hold.recipient } : {}),
+            onServer: hold.onServer,
+          }),
+        "Couldn't allow that automation step.",
+      ),
     [workspaceId, change],
   );
   const dismissAutomationStops = useCallback(
-    (stops: readonly AutomationStopNotice[]) => change(
-      () => bridge().dismissAutomationStops({
-        workspaceId,
-        stops: stops.map(({ automationId, definitionHash, step, seq }) => ({ automationId, definitionHash, step, seq })),
-      }),
-      "Couldn't dismiss the stopped automations notice.",
-    ),
+    (stops: readonly AutomationStopNotice[]) =>
+      change(
+        () =>
+          bridge().dismissAutomationStops({
+            workspaceId,
+            stops: stops.map(({ automationId, definitionHash, step, seq }) => ({
+              automationId,
+              definitionHash,
+              step,
+              seq,
+            })),
+          }),
+        "Couldn't dismiss the stopped automations notice.",
+      ),
     [workspaceId, change],
   );
   const automationHolds = useMemo(

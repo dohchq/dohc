@@ -26,9 +26,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/table-interactions.md", contents: TABLE_DOC },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes/table-interactions.md", contents: TABLE_DOC }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
     let { app, page } = desktop;
@@ -37,11 +35,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     });
 
     const workspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(
-      page,
-      workspace.workspaceId,
-      "notes/table-interactions.md",
-    );
+    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/table-interactions.md");
     const reopenedFile = explorerRow(page, "notes/table-interactions.md");
     if (!(await reopenedFile.isVisible())) {
       await explorerRow(page, "notes").click();
@@ -58,9 +52,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     const geometry = await page.evaluate(() => {
       const wrapper = document.querySelector<HTMLElement>(".tableWrapper");
       const table = wrapper?.querySelector<HTMLTableElement>("table");
-      const intro = document.querySelector<HTMLElement>(
-        ".dohc-notion-editor > p",
-      );
+      const intro = document.querySelector<HTMLElement>(".dohc-notion-editor > p");
       if (!wrapper || !table || !intro) throw new Error("table geometry missing");
       return {
         clientWidth: wrapper.clientWidth,
@@ -73,9 +65,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     expect(geometry.tableTop - geometry.introBottom).toBeGreaterThanOrEqual(24);
     await wrapper.hover();
     await page.mouse.wheel(400, 0);
-    await expect
-      .poll(() => wrapper.evaluate((element) => element.scrollLeft))
-      .toBeGreaterThan(0);
+    await expect.poll(() => wrapper.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
     await wrapper.evaluate((element) => {
       element.scrollLeft = 0;
     });
@@ -90,16 +80,12 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     );
     expect(widthsAfter).toHaveLength(widthsBefore.length);
     widthsAfter.forEach((width, index) => {
-      expect(Math.abs(width - (widthsBefore[index] ?? width))).toBeLessThanOrEqual(
-        0.5,
-      );
+      expect(Math.abs(width - (widthsBefore[index] ?? width))).toBeLessThanOrEqual(0.5);
     });
 
     const firstBodyCell = table.locator("tr").nth(1).locator("td").first();
     await firstBodyCell.hover();
-    const columnGrip = table.locator(
-      '.dohc-table-grip--col[data-table-column="0"]',
-    );
+    const columnGrip = table.locator('.dohc-table-grip--col[data-table-column="0"]');
     await expect(columnGrip).toHaveCSS("opacity", "1");
     await expect(columnGrip).toHaveCSS("pointer-events", "auto");
     const handleClearance = await page.evaluate(() => {
@@ -113,9 +99,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     expect(handleClearance).toBeGreaterThanOrEqual(0);
 
     const firstBodyRow = table.locator("tr").nth(1);
-    const resizeHandle = table.locator(
-      '.dohc-table-row-resize[data-table-row-resize="1"]',
-    );
+    const resizeHandle = table.locator('.dohc-table-row-resize[data-table-row-resize="1"]');
     await expect(resizeHandle).toHaveCSS("opacity", "1");
     await expect(resizeHandle).toHaveCSS("pointer-events", "auto");
     const rowHeightBefore = await firstBodyRow.evaluate(
@@ -134,24 +118,17 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
       { steps: 5 },
     );
     await page.mouse.up();
-    const rowHeightAfter = await firstBodyRow.evaluate(
-      (row) => row.getBoundingClientRect().height,
-    );
+    const rowHeightAfter = await firstBodyRow.evaluate((row) => row.getBoundingClientRect().height);
     expect(rowHeightAfter - rowHeightBefore).toBeGreaterThanOrEqual(28);
     await expect(firstBodyRow).toHaveAttribute("data-row-height", /\d+/);
 
     await firstBodyCell.hover();
-    const sourceGrip = table.locator(
-      '.dohc-table-grip--row[data-table-row="1"]',
-    );
+    const sourceGrip = table.locator('.dohc-table-grip--row[data-table-row="1"]');
     const targetCell = table.locator("tr").nth(2).locator("td").first();
     const sourceBox = await sourceGrip.boundingBox();
     const targetBox = await targetCell.boundingBox();
     if (!sourceBox || !targetBox) throw new Error("row reorder target missing");
-    await page.mouse.move(
-      sourceBox.x + sourceBox.width / 2,
-      sourceBox.y + sourceBox.height / 2,
-    );
+    await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
     await page.mouse.down();
     await page.mouse.move(
       sourceBox.x + sourceBox.width / 2 + 8,
@@ -162,9 +139,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
       targetBox.y + targetBox.height * 0.75,
       { steps: 6 },
     );
-    const dropIndicator = page.locator(
-      ".dohc-table-drop-indicator.is-visible",
-    );
+    const dropIndicator = page.locator(".dohc-table-drop-indicator.is-visible");
     await expect(dropIndicator).toBeVisible();
     await expect(dropIndicator).toHaveAttribute("data-label", /Drop to row/);
     await page.mouse.up();
@@ -180,9 +155,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
     const resizedRow = table.locator("tr").filter({ hasText: "Row one" });
     const persistedHeight = await resizedRow.getAttribute("data-row-height");
     if (!persistedHeight) throw new Error("resized row height was not persisted");
-    const renderedHeight = await resizedRow.evaluate(
-      (row) => row.getBoundingClientRect().height,
-    );
+    const renderedHeight = await resizedRow.evaluate((row) => row.getBoundingClientRect().height);
 
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
@@ -191,15 +164,8 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
       BrowserWindow.getAllWindows()[0]?.setSize(1300, 850);
     });
     const reopenedWorkspace = await openWorkspaceFromFirstRun(page, temp);
-    await waitForWorkspaceFile(
-      page,
-      reopenedWorkspace.workspaceId,
-      "notes/table-interactions.md",
-    );
-    const reopenedFileAfterRestart = explorerRow(
-      page,
-      "notes/table-interactions.md",
-    );
+    await waitForWorkspaceFile(page, reopenedWorkspace.workspaceId, "notes/table-interactions.md");
+    const reopenedFileAfterRestart = explorerRow(page, "notes/table-interactions.md");
     if (!(await reopenedFileAfterRestart.isVisible())) {
       await explorerRow(page, "notes").click();
     }
@@ -212,9 +178,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
       .locator(".dohc-notion-editor .tableWrapper table tr")
       .filter({ hasText: "Row one" });
     await expect(reopenedRow).toHaveAttribute("data-row-height", persistedHeight);
-    const reopenedHeight = await reopenedRow.evaluate(
-      (row) => row.getBoundingClientRect().height,
-    );
+    const reopenedHeight = await reopenedRow.evaluate((row) => row.getBoundingClientRect().height);
     expect(Math.abs(reopenedHeight - renderedHeight)).toBeLessThanOrEqual(1);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

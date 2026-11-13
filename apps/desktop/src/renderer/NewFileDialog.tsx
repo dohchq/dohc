@@ -30,8 +30,13 @@ export function NewFileDialog(props: {
     const relativePath = withMarkdownDefault(name.trim());
     if (!relativePath || pendingRef.current) return;
     const platform = window.dohcDesktop?.platform ?? "";
-    const invalidName = workspaceDestinationError(name, platform) ?? workspaceDestinationError(relativePath, platform);
-    if (invalidName) { setError(invalidName); return; }
+    const invalidName =
+      workspaceDestinationError(name, platform) ??
+      workspaceDestinationError(relativePath, platform);
+    if (invalidName) {
+      setError(invalidName);
+      return;
+    }
     pendingRef.current = true;
     setPending(true);
     setError(null);
@@ -72,8 +77,8 @@ export function NewFileDialog(props: {
             New file
           </h2>
           <p id="new-file-help" className="m-0 text-xs text-muted">
-            Name it like a path — any folders you name are created for you.
-            No extension means markdown (.md).
+            Name it like a path — any folders you name are created for you. No extension means
+            markdown (.md).
           </p>
         </div>
         <input
@@ -84,7 +89,10 @@ export function NewFileDialog(props: {
           placeholder="notes/today.md"
           disabled={pending}
           value={name}
-          onChange={(event) => { setName(event.target.value); setError(null); }}
+          onChange={(event) => {
+            setName(event.target.value);
+            setError(null);
+          }}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? "new-file-name-error" : undefined}
           className={`w-full rounded-md border ${error ? "border-danger focus:border-danger! focus:shadow-[inset_0_-1px_0_var(--dohc-danger)]!" : "border-line"} bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink placeholder:text-subtle disabled:opacity-50`}

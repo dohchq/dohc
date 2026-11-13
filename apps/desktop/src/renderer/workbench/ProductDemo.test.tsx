@@ -13,10 +13,17 @@ vi.mock("../editor/MarkdownEditor", () => ({ MarkdownEditor: () => null }));
 
 beforeEach(() => {
   localStorage.clear();
-  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  vi.stubGlobal("matchMedia", () => ({
+    matches: true,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
   Element.prototype.scrollIntoView = vi.fn();
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 it("keeps a demo Explorer collision in Notices after the toast closes", async () => {
   const host = document.createElement("div");
@@ -42,7 +49,10 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
   const copy = demo.getByRole("button", { name: "Copy details" });
   fireEvent.pointerDown(copy, { bubbles: true, composed: true });
   expect(demo.getByRole("button", { name: "Copy details" })).toBe(copy);
-  fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), { bubbles: true, composed: true });
+  fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), {
+    bubbles: true,
+    composed: true,
+  });
   expect(demo.queryByTestId("notice-center")).toBeNull();
   fireEvent.click(demo.getByRole("button", { name: "Notices, 1 unread" }));
   const dismiss = demo.getByRole("button", { name: "Dismiss notice" });

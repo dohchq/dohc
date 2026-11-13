@@ -34,9 +34,7 @@ test("profiles the expanded 5,000-file Explorer folder", async () => {
       timeout: 120_000,
     });
     const firstChildAt = await page.evaluate(() => performance.now());
-    const mountedRowsAfterExpand = await page
-      .locator('[data-testid="tree-row"]')
-      .count();
+    const mountedRowsAfterExpand = await page.locator('[data-testid="tree-row"]').count();
     expect(mountedRowsAfterExpand).toBeLessThanOrEqual(96);
     const initiallyMountedPaths = await page
       .locator('[data-testid="tree-row"]')

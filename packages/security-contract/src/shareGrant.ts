@@ -26,10 +26,7 @@ type ShareGrantRecordBase = {
 };
 
 export type ShareGrantRecord = ShareGrantRecordBase &
-  (
-    | { kind: "file"; access: ShareAccess }
-    | { kind: "chat"; access: ChatShareAccess }
-  );
+  ({ kind: "file"; access: ShareAccess } | { kind: "chat"; access: ChatShareAccess });
 
 export type LinkCredentialRecord = {
   credentialId: string;
@@ -83,16 +80,12 @@ export function isSharePrincipal(value: unknown): value is SharePrincipal {
 }
 
 export function isGrantStatusValue(value: unknown): value is GrantStatus {
-  return (
-    typeof value === "string" &&
-    (GRANT_STATUS_VALUES as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (GRANT_STATUS_VALUES as readonly string[]).includes(value);
 }
 
 export function isChatShareAccessValue(value: unknown): value is ChatShareAccess {
   return (
-    typeof value === "string" &&
-    (CHAT_SHARE_ACCESS_VALUES as readonly string[]).includes(value)
+    typeof value === "string" && (CHAT_SHARE_ACCESS_VALUES as readonly string[]).includes(value)
   );
 }
 
@@ -123,9 +116,7 @@ export function isShareGrantRecord(value: unknown): value is ShareGrantRecord {
   }
 }
 
-export function isLinkCredentialRecord(
-  value: unknown,
-): value is LinkCredentialRecord {
+export function isLinkCredentialRecord(value: unknown): value is LinkCredentialRecord {
   return (
     isRecord(value) &&
     typeof value.credentialId === "string" &&

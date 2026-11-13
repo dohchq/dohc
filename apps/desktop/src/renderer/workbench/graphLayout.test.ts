@@ -44,7 +44,10 @@ describe("graphLayout", () => {
     for (let i = 0; i < 40; i++) {
       expect(Number.isFinite(layout.x[i])).toBe(true);
       for (let j = i + 1; j < 40; j++) {
-        closest = Math.min(closest, Math.hypot(layout.x[i]! - layout.x[j]!, layout.y[i]! - layout.y[j]!));
+        closest = Math.min(
+          closest,
+          Math.hypot(layout.x[i]! - layout.x[j]!, layout.y[i]! - layout.y[j]!),
+        );
       }
     }
     expect(closest).toBeGreaterThan(5);
@@ -70,10 +73,14 @@ describe("graphLayout", () => {
 
   it("separates two nodes that start on one point, whatever their indexes", () => {
     // Remembered positions can put two files on one point.
-    const layout = layoutOf(144, [], (i) => (i === 0 || i === 143 ? { x: 0, y: 0 } : { x: i * 50, y: 2000 }));
+    const layout = layoutOf(144, [], (i) =>
+      i === 0 || i === 143 ? { x: 0, y: 0 } : { x: i * 50, y: 2000 },
+    );
     reheat(layout, 1);
     for (let i = 0; i < 20; i++) tick(layout, DEFAULT_FORCES);
-    expect(Math.hypot(layout.x[0]! - layout.x[143]!, layout.y[0]! - layout.y[143]!)).toBeGreaterThan(1);
+    expect(
+      Math.hypot(layout.x[0]! - layout.x[143]!, layout.y[0]! - layout.y[143]!),
+    ).toBeGreaterThan(1);
   });
 
   it("keeps a pinned node where it was put", () => {
@@ -97,7 +104,8 @@ describe("graphLayout", () => {
     const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
     const links: [number, number][] = [];
     while (links.length < 20000) {
-      const s = Math.floor(random() * 5000), t = Math.floor(5000 * random() ** 2.6);
+      const s = Math.floor(random() * 5000),
+        t = Math.floor(5000 * random() ** 2.6);
       if (s !== t) links.push([s, t]);
     }
     const layout = layoutOf(5000, links);
@@ -114,7 +122,10 @@ describe("layout engine", () => {
   function engine() {
     const frames: LayoutFrame[] = [];
     const queue: (() => void)[] = [];
-    const layout = createLayoutEngine((frame) => frames.push(frame), (run) => queue.push(run));
+    const layout = createLayoutEngine(
+      (frame) => frames.push(frame),
+      (run) => queue.push(run),
+    );
     const flush = () => {
       while (queue.length) queue.shift()!();
     };
@@ -207,7 +218,13 @@ describe("layout engine", () => {
 
   it("builds its quadtree around near-duplicate pairs that nest past the first arrays", () => {
     // Each pair is just over the merge distance apart, so it splits about 33 levels deep.
-    const spots = [[0, 0], [1.1e-9, 0], [10, 10], [10 + 1.1e-9, 10], [5, 5]];
+    const spots = [
+      [0, 0],
+      [1.1e-9, 0],
+      [10, 10],
+      [10 + 1.1e-9, 10],
+      [5, 5],
+    ];
     const layout = layoutOf(spots.length, [], (i) => ({ x: spots[i]![0]!, y: spots[i]![1]! }));
     tick(layout, DEFAULT_FORCES);
     expect(Array.from(layout.x).every(Number.isFinite)).toBe(true);

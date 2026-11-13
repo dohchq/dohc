@@ -53,7 +53,10 @@ const item = (label: string, id: ExplorerMenuCommand): ExplorerMenuEntry => ({
 });
 const separator: ExplorerMenuEntry = { kind: "separator" };
 
-export function explorerMenuEntries(scope: ExplorerMenuScope, platform: string): ExplorerMenuEntry[] {
+export function explorerMenuEntries(
+  scope: ExplorerMenuScope,
+  platform: string,
+): ExplorerMenuEntry[] {
   const isSharedView = scope.shareView !== null;
   const reveal = item(revealInFileManagerLabel(platform), "open-externally");
   // The four routed operations — create, rename, delete, import — offered

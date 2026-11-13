@@ -1,8 +1,4 @@
-import {
-  DEFAULT_ZOOM_LEVEL,
-  clampZoomLevel,
-  type ZoomStep,
-} from "../settings/userSettings";
+import { DEFAULT_ZOOM_LEVEL, clampZoomLevel, type ZoomStep } from "../settings/userSettings";
 
 export function nextZoomLevel(current: number, step: ZoomStep): number {
   if (step === "reset") return DEFAULT_ZOOM_LEVEL;

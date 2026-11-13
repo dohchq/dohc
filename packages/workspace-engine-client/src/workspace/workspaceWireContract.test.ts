@@ -35,20 +35,55 @@ const snapshot = {
 };
 
 it("preserves the owner-only link author through the collection history wire contract", () => {
-  const linkAuthor = { kind: "link", grantId: "ended-link", grantGeneration: 2, publicPrincipalId: "public-holder" };
+  const linkAuthor = {
+    kind: "link",
+    grantId: "ended-link",
+    grantGeneration: 2,
+    publicPrincipalId: "public-holder",
+  };
   const raw = {
     collection: { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
-    record: { id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", path: "tasks/a.md", conflicted: false, values: [] },
-    history: [{ historyId: 1, field: "Status", previous: { present: false, value: null }, next: { present: true, value: "Done" },
-      authorOriginId: null, actorKind: null, onBehalfOf: null, depth: null, recordedAtMs: 1, automationRun: null, linkAuthor }],
+    record: {
+      id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+      path: "tasks/a.md",
+      conflicted: false,
+      values: [],
+    },
+    history: [
+      {
+        historyId: 1,
+        field: "Status",
+        previous: { present: false, value: null },
+        next: { present: true, value: "Done" },
+        authorOriginId: null,
+        actorKind: null,
+        onBehalfOf: null,
+        depth: null,
+        recordedAtMs: 1,
+        automationRun: null,
+        linkAuthor,
+      },
+    ],
     nextBeforeHistoryId: null,
   };
   const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, raw);
   expect(fetched.history[0]?.linkAuthor).toEqual(linkAuthor);
-  expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
-    ...raw,
-    history: [{ ...raw.history[0], linkAuthor: { kind: "link", grantId: "ended-link", grantGeneration: 2, principalId: "private-holder" } }],
-  })).toThrow(ProtocolShapeError);
+  expect(() =>
+    decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
+      ...raw,
+      history: [
+        {
+          ...raw.history[0],
+          linkAuthor: {
+            kind: "link",
+            grantId: "ended-link",
+            grantGeneration: 2,
+            principalId: "private-holder",
+          },
+        },
+      ],
+    }),
+  ).toThrow(ProtocolShapeError);
 });
 
 const state = {
@@ -114,9 +149,9 @@ function collectionValueDepth(value: CollectionValue): number {
 
 describe("workspace wire schemas", () => {
   it("preserves the public object-shape error", () => {
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryPage, []),
-    ).toThrow("must be a JSON object");
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryPage, [])).toThrow(
+      "must be a JSON object",
+    );
   });
 
   it("decodes a conflict's waiting version, its absence, and none", () => {
@@ -129,9 +164,7 @@ describe("workspace wire schemas", () => {
     expect(decodeConflictRecord({ ...conflict, waitingVersion }).waitingVersion).toEqual(
       waitingVersion,
     );
-    expect(
-      decodeConflictRecord({ ...conflict, waitingVersion: null }).waitingVersion,
-    ).toBeNull();
+    expect(decodeConflictRecord({ ...conflict, waitingVersion: null }).waitingVersion).toBeNull();
     // A resolve answer, and an engine from before the field, send none.
     expect("waitingVersion" in decodeConflictRecord(conflict)).toBe(false);
     for (const malformed of [
@@ -142,9 +175,9 @@ describe("workspace wire schemas", () => {
       { ...waitingVersion, originSeq: "0" },
       { ...waitingVersion, path: "note.md" },
     ]) {
-      expect(() =>
-        decodeConflictRecord({ ...conflict, waitingVersion: malformed }),
-      ).toThrow(ProtocolShapeError);
+      expect(() => decodeConflictRecord({ ...conflict, waitingVersion: malformed })).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
 
@@ -317,9 +350,7 @@ describe("workspace wire schemas", () => {
 
   it("decodes the shared collection field pipeline wire vector", () => {
     const rawValues = pipelineFixture.vectors.map((vector) => {
-      expect(JSON.stringify(vector.expectedWireValue), vector.name).toBe(
-        vector.expectedWireJson,
-      );
+      expect(JSON.stringify(vector.expectedWireValue), vector.name).toBe(vector.expectedWireJson);
       return {
         field: vector.fieldName,
         value: vector.expectedWireValue,
@@ -345,12 +376,8 @@ describe("workspace wire schemas", () => {
     for (const [index, vector] of pipelineFixture.vectors.entries()) {
       const value = decoded.records[0]?.values[index];
       expect(value?.field, vector.name).toBe(vector.fieldName);
-      expect(encodeFixtureBigInts(value?.value), vector.name).toEqual(
-        vector.expectedSemantic,
-      );
-      expect(value?.validation, vector.name).toEqual(
-        vector.expectedValidation,
-      );
+      expect(encodeFixtureBigInts(value?.value), vector.name).toEqual(vector.expectedSemantic);
+      expect(value?.validation, vector.name).toEqual(vector.expectedValidation);
     }
   });
 
@@ -368,38 +395,36 @@ describe("workspace wire schemas", () => {
   ])(
     "round-trips $name through every collection request and response surface",
     ({ marker, decoded }) => {
-    const record = {
-      id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
-      path: "projects/roadmap.md",
-      conflicted: false,
-      values: [
-        {
-          field: "estimate",
-          value: marker,
-          validation: { status: "valid" },
-          resolvedRelations: [],
+      const record = {
+        id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        path: "projects/roadmap.md",
+        conflicted: false,
+        values: [
+          {
+            field: "estimate",
+            value: marker,
+            validation: { status: "valid" },
+            resolvedRelations: [],
+          },
+        ],
+      };
+
+      const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
+        collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
+        records: [record],
+        groups: [{ value: marker, records: [record] }],
+        nextCursor: {
+          sortValues: [{ present: true, value: marker }],
+          recordPath: record.path,
+          recordId: record.id,
         },
-      ],
-    };
+      });
+      expect(queried.records[0]?.values[0]?.value).toBe(decoded);
+      expect(queried.groups?.[0]?.value).toBe(decoded);
+      expect(queried.groups?.[0]?.records[0]?.values[0]?.value).toBe(decoded);
+      expect(queried.nextCursor?.sortValues[0]?.value).toBe(decoded);
 
-    const queried = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsQuery, {
-      collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
-      records: [record],
-      groups: [{ value: marker, records: [record] }],
-      nextCursor: {
-        sortValues: [{ present: true, value: marker }],
-        recordPath: record.path,
-        recordId: record.id,
-      },
-    });
-    expect(queried.records[0]?.values[0]?.value).toBe(decoded);
-    expect(queried.groups?.[0]?.value).toBe(decoded);
-    expect(queried.groups?.[0]?.records[0]?.values[0]?.value).toBe(decoded);
-    expect(queried.nextCursor?.sortValues[0]?.value).toBe(decoded);
-
-    const fetched = decodeWorkspaceResult(
-      WORKSPACE_METHOD.collectionsGetRecord,
-      {
+      const fetched = decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGetRecord, {
         collection: { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
         record,
         history: [
@@ -418,62 +443,59 @@ describe("workspace wire schemas", () => {
           },
         ],
         nextBeforeHistoryId: null,
-      },
-    );
-    expect(fetched.record.values[0]?.value).toBe(decoded);
-    expect(fetched.history[0]?.previous.value).toBe(decoded);
-    expect(fetched.history[0]?.next.value).toBe(decoded);
+      });
+      expect(fetched.record.values[0]?.value).toBe(decoded);
+      expect(fetched.history[0]?.previous.value).toBe(decoded);
+      expect(fetched.history[0]?.next.value).toBe(decoded);
 
-    expect(
-      encodeCollectionQueryParams({
-        collectionPath: "projects",
-        filter: {
-          field: "estimate",
-          operator: "equals",
-          value: decoded,
-        },
-        cursor: {
-          sortValues: [{ present: true, value: decoded }],
-          recordPath: record.path,
-          recordId: record.id,
-        },
-      }),
-    ).toMatchObject({
-      filter: { value: marker },
-      cursor: { sortValues: [{ value: marker }] },
-    });
+      expect(
+        encodeCollectionQueryParams({
+          collectionPath: "projects",
+          filter: {
+            field: "estimate",
+            operator: "equals",
+            value: decoded,
+          },
+          cursor: {
+            sortValues: [{ present: true, value: decoded }],
+            recordPath: record.path,
+            recordId: record.id,
+          },
+        }),
+      ).toMatchObject({
+        filter: { value: marker },
+        cursor: { sortValues: [{ value: marker }] },
+      });
 
-    expect(
-      validateFieldValue({ name: "estimate", type: "number" }, decoded),
-    ).toEqual({ status: "valid" });
-
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
-        collections: [
-          { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
-        ],
-        nextCursor: null,
-      }).collections,
-    ).toHaveLength(1);
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
-        path: "projects",
-        objectId: "object-projects",
+      expect(validateFieldValue({ name: "estimate", type: "number" }, decoded)).toEqual({
         status: "valid",
-        reasons: [],
-        schema: {
-          name: null,
-          description: null,
-          fields: [],
-          views: [],
-        },
-        recordCount: 1,
-      }).recordCount,
-    ).toBe(1);
-    expect(
-      decodeWorkspaceResult(
-        WORKSPACE_METHOD.collectionsListPendingAdoptions,
-        {
+      });
+
+      expect(
+        decodeWorkspaceResult(WORKSPACE_METHOD.collectionsList, {
+          collections: [
+            { path: "projects", objectId: "object-projects", status: "valid", reasons: [] },
+          ],
+          nextCursor: null,
+        }).collections,
+      ).toHaveLength(1);
+      expect(
+        decodeWorkspaceResult(WORKSPACE_METHOD.collectionsGet, {
+          path: "projects",
+          objectId: "object-projects",
+          status: "valid",
+          reasons: [],
+          schema: {
+            name: null,
+            description: null,
+            fields: [],
+            views: [],
+          },
+          recordCount: 1,
+        }).recordCount,
+      ).toBe(1);
+      expect(
+        decodeWorkspaceResult(WORKSPACE_METHOD.collectionsListPendingAdoptions, {
           adoptions: [
             {
               versionId: "main",
@@ -484,9 +506,8 @@ describe("workspace wire schemas", () => {
             },
           ],
           nextCursor: null,
-        },
-      ).adoptions,
-    ).toHaveLength(1);
+        }).adoptions,
+      ).toHaveLength(1);
     },
   );
 
@@ -521,9 +542,9 @@ describe("workspace wire schemas", () => {
       const decoded = decodeCollectionValue(marker);
 
       expect(decoded).toBe(integer);
-      expect(
-        validateFieldValue({ name: "estimate", type: "number" }, decoded),
-      ).toEqual({ status: "valid" });
+      expect(validateFieldValue({ name: "estimate", type: "number" }, decoded)).toEqual({
+        status: "valid",
+      });
       expect(encodeCollectionValue(decoded)).toEqual(marker);
       expect(
         encodeCollectionQueryParams({
@@ -544,25 +565,17 @@ describe("workspace wire schemas", () => {
   ])(
     "rejects the collection integer marker immediately outside domain edge %s in both directions",
     (integer, decimal) => {
-      expect(() =>
-        decodeCollectionValue({ $dohcInt64: decimal }),
-      ).toThrow(ProtocolShapeError);
-      expect(() => encodeCollectionValue(integer)).toThrow(
-        ProtocolShapeError,
-      );
+      expect(() => decodeCollectionValue({ $dohcInt64: decimal })).toThrow(ProtocolShapeError);
+      expect(() => encodeCollectionValue(integer)).toThrow(ProtocolShapeError);
     },
   );
 
   it("enforces safe-range collection integer marker rules", () => {
-    expect(() =>
-      decodeCollectionValue({ $dohcInt64: "9007199254740991" }),
-    ).toThrow(ProtocolShapeError);
-    expect(encodeCollectionValue(9007199254740991n)).toBe(
-      Number.MAX_SAFE_INTEGER,
+    expect(() => decodeCollectionValue({ $dohcInt64: "9007199254740991" })).toThrow(
+      ProtocolShapeError,
     );
-    expect(encodeCollectionValue(-9007199254740991n)).toBe(
-      -Number.MAX_SAFE_INTEGER,
-    );
+    expect(encodeCollectionValue(9007199254740991n)).toBe(Number.MAX_SAFE_INTEGER);
+    expect(encodeCollectionValue(-9007199254740991n)).toBe(-Number.MAX_SAFE_INTEGER);
   });
 
   it("rejects malformed collection integer markers", () => {
@@ -590,15 +603,12 @@ describe("workspace wire schemas", () => {
     ).toThrow(ProtocolShapeError);
   });
 
-  it.each([
-    "01",
-    "9007199254740991",
-    "100000000000000000001",
-  ])("rejects malformed collection float marker %s", (decimal) => {
-    expect(() =>
-      decodeCollectionValue({ $dohcFloat64: decimal }),
-    ).toThrow(ProtocolShapeError);
-  });
+  it.each(["01", "9007199254740991", "100000000000000000001"])(
+    "rejects malformed collection float marker %s",
+    (decimal) => {
+      expect(() => decodeCollectionValue({ $dohcFloat64: decimal })).toThrow(ProtocolShapeError);
+    },
+  );
 
   it.each([
     {
@@ -611,9 +621,7 @@ describe("workspace wire schemas", () => {
     { replicated: true, status: "skipped" },
     { replicated: true, status: "crashed", committed: true },
   ])("decodes replicated conflict result $status", (result) => {
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.conflictsOpen, result),
-    ).toEqual(result);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.conflictsOpen, result)).toEqual(result);
   });
 
   it.each(["deferred", "pendingResolve"])(
@@ -699,7 +707,10 @@ describe("automations wire schemas", () => {
       ],
     };
     expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, { watchedGeneration: 3, handover }),
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsReleaseGroups, {
+        watchedGeneration: 3,
+        handover,
+      }),
     ).toEqual({ watchedGeneration: 3, handover });
     expect(decodeAutomationGroupHandover(handover)).toEqual(handover);
     expect(() =>
@@ -714,14 +725,15 @@ describe("automations wire schemas", () => {
       }),
     ).toEqual({ needsHandover: true });
     expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsGroupSkips, { aheadAtMs: 5, lateAtMs: null }),
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsGroupSkips, {
+        aheadAtMs: 5,
+        lateAtMs: null,
+      }),
     ).toEqual({ aheadAtMs: 5, lateAtMs: null });
   });
 
   it("decodes a claim from claimNext with its change's field facts", () => {
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim),
-    ).toEqual(claim);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, claim)).toEqual(claim);
   });
 
   it("decodes a Group message claim, whose message has no record and may carry its body truncated", () => {
@@ -734,8 +746,15 @@ describe("automations wire schemas", () => {
         kind: "message",
         fields: [],
         message: {
-          id: "m1", threadId: "t1", groupId: "trip", lane: "posts", authorKind: "human",
-          authorDisplayName: "Ana", authorUserId: "user-ana", createdAtMs: 1, body: { truncated: true, bytes: 70_000 },
+          id: "m1",
+          threadId: "t1",
+          groupId: "trip",
+          lane: "posts",
+          authorKind: "human",
+          authorDisplayName: "Ana",
+          authorUserId: "user-ana",
+          createdAtMs: 1,
+          body: { truncated: true, bytes: 70_000 },
         },
       },
     };
@@ -743,13 +762,16 @@ describe("automations wire schemas", () => {
   });
 
   it("decodes null from a drained claimNext", () => {
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, null),
-    ).toBeNull();
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, null)).toBeNull();
   });
 
   it("decodes the person or Edit link a live change came through, and nothing else in its place", () => {
-    const link = { kind: "link", grantId: "grant-link", grantGeneration: 2, principalId: "holder-1" };
+    const link = {
+      kind: "link",
+      grantId: "grant-link",
+      grantGeneration: 2,
+      principalId: "holder-1",
+    };
     const named = { kind: "named", userId: "user-ana", grantId: "grant-ana", grantGeneration: 1 };
     for (const sharedAuthor of [link, named]) {
       const claim = { ...summary, change: { ...summary.change, sharedAuthor } };
@@ -760,8 +782,12 @@ describe("automations wire schemas", () => {
       { kind: "link", grantId: "grant-link", grantGeneration: 2 },
       { kind: "owner", principalId: "owner" },
     ]) {
-      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, sharedAuthor } }))
-        .toThrow(ProtocolShapeError);
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, {
+          ...summary,
+          change: { ...summary.change, sharedAuthor },
+        }),
+      ).toThrow(ProtocolShapeError);
     }
   });
 
@@ -769,8 +795,12 @@ describe("automations wire schemas", () => {
     const claim = { ...summary, change: { ...summary.change, liveCursor: 41 } };
     expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toEqual(claim);
     for (const liveCursor of [1.5, "41", undefined]) {
-      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, { ...summary, change: { ...summary.change, liveCursor } }))
-        .toThrow(ProtocolShapeError);
+      expect(() =>
+        decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, {
+          ...summary,
+          change: { ...summary.change, liveCursor },
+        }),
+      ).toThrow(ProtocolShapeError);
     }
   });
 
@@ -789,18 +819,12 @@ describe("automations wire schemas", () => {
       state: "failed",
       error: "handler threw",
     };
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, failed),
-    ).toEqual(failed);
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary),
-    ).toEqual(summary);
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRelease, summary),
-    ).toEqual(summary);
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 3 }),
-    ).toEqual({ applied: 3 });
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, failed)).toEqual(failed);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRetry, summary)).toEqual(summary);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRelease, summary)).toEqual(summary);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 3 })).toEqual({
+      applied: 3,
+    });
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.syncRemoteChanges, { applied: 1.5 }),
     ).toThrow(ProtocolShapeError);
@@ -810,9 +834,9 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.syncCollectionsWaiting, { waiting: "yes" }),
     ).toThrow(ProtocolShapeError);
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim),
-    ).toThrow(ProtocolShapeError);
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, claim)).toThrow(
+      ProtocolShapeError,
+    );
   });
 
   it("decodes a removed record's claim keyed by its moment", () => {
@@ -822,21 +846,15 @@ describe("automations wire schemas", () => {
       change: {
         ...claim.change,
         kind: "removed",
-        fields: [
-          { field: "status", historyId: null, previous: { value: "done" }, next: null },
-        ],
+        fields: [{ field: "status", historyId: null, previous: { value: "done" }, next: null }],
       },
     };
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, removed),
-    ).toEqual(removed);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, removed)).toEqual(removed);
   });
 
   it("decodes a page of claim history, one claim, and a prune", () => {
     const history = { claims: [summary, { ...summary, state: "done" }], next: "1000:atc_x" };
-    expect(
-      decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, history),
-    ).toEqual(history);
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, history)).toEqual(history);
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, {
         claims: [],
@@ -847,7 +865,9 @@ describe("automations wire schemas", () => {
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsListClaims, { claims: [] }),
     ).toThrow();
     for (const claim of [summary, null]) {
-      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsGetClaim, { claim })).toEqual({ claim });
+      expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsGetClaim, { claim })).toEqual({
+        claim,
+      });
     }
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsPruneHistory, { pruned: 3, more: false }),
@@ -875,9 +895,7 @@ describe("automations wire schemas", () => {
     ).toEqual({ failures: [] });
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
-        failures: [
-          { automationId: "collection:tasks#triage", claimId: "claim-1", error: "x" },
-        ],
+        failures: [{ automationId: "collection:tasks#triage", claimId: "claim-1", error: "x" }],
       }),
     ).toThrow(ProtocolShapeError);
   });
@@ -930,7 +948,9 @@ describe("automations wire schemas", () => {
       withMessage({ ...facts, extra: true }),
       { ...pressed, change: { ...pressed.change, message: facts } },
     ]) {
-      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed)).toThrow(ProtocolShapeError);
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed)).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
 
@@ -939,7 +959,14 @@ describe("automations wire schemas", () => {
       ...summary,
       automationId: "collection:Invoices#mark-paid",
       trigger: { key: "press:press-1" },
-      change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "user:ada", sharedAuthor: null, liveCursor: null },
+      change: {
+        kind: "button",
+        authorOriginId: null,
+        actorKind: "human",
+        onBehalfOf: "user:ada",
+        sharedAuthor: null,
+        liveCursor: null,
+      },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: false, claim: pressed }),
@@ -947,19 +974,36 @@ describe("automations wire schemas", () => {
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, { busy: true, claim: null }),
     ).toEqual({ busy: true, claim: null });
-    for (const malformed of [{ busy: true, claim: pressed }, { busy: false, claim: null }, { claim: pressed }]) {
-      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, malformed)).toThrow(ProtocolShapeError);
+    for (const malformed of [
+      { busy: true, claim: pressed },
+      { busy: false, claim: null },
+      { claim: pressed },
+    ]) {
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsPress, malformed)).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
 
   it("decodes a schedule step and the schedule marks", () => {
-    const mark = { automationId: "collection:Invoices#weekday-report", scheduleHash: "h1", throughMs: 3_000 };
+    const mark = {
+      automationId: "collection:Invoices#weekday-report",
+      scheduleHash: "h1",
+      throughMs: 3_000,
+    };
     const due = {
       ...summary,
       automationId: mark.automationId,
       trigger: { key: "schedule:2000" },
       recordId: null,
-      change: { kind: "schedule", authorOriginId: null, actorKind: null, onBehalfOf: null, sharedAuthor: null, liveCursor: null },
+      change: {
+        kind: "schedule",
+        authorOriginId: null,
+        actorKind: null,
+        onBehalfOf: null,
+        sharedAuthor: null,
+        liveCursor: null,
+      },
     };
     expect(
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [due], mark }),
@@ -970,10 +1014,19 @@ describe("automations wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimSchedule, { claims: [] }),
     ).toThrow(ProtocolShapeError);
-    const runNow = { ...due, trigger: { key: "run-now:schedule-skipped:ws:collection:Invoices#weekday-report:2000" } };
-    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: runNow })).toEqual({ claim: runNow });
-    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: null })).toThrow(ProtocolShapeError);
-    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, {})).toThrow(ProtocolShapeError);
+    const runNow = {
+      ...due,
+      trigger: { key: "run-now:schedule-skipped:ws:collection:Invoices#weekday-report:2000" },
+    };
+    expect(decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: runNow })).toEqual({
+      claim: runNow,
+    });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, { claim: null }),
+    ).toThrow(ProtocolShapeError);
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsRunNow, {})).toThrow(
+      ProtocolShapeError,
+    );
   });
 
   it("refuses a claim with an unknown state, trigger, change kind, or fact value", () => {
@@ -1005,46 +1058,105 @@ describe("automations wire schemas", () => {
         },
       },
     ]) {
-      expect(() =>
-        decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed),
-      ).toThrow(ProtocolShapeError);
+      expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, malformed)).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
 });
 
 it("recovery replies only authorize retirement after a committed decision", () => {
   for (const outcome of ["replayed", "imported", "covered"] as const) {
-    expect(decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,
-      {committed:true,outcome,momentId:outcome === "imported" ? "moment" : null})).toMatchObject({committed:true,outcome});
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery, {
+        committed: true,
+        outcome,
+        momentId: outcome === "imported" ? "moment" : null,
+      }),
+    ).toMatchObject({ committed: true, outcome });
   }
-  for (const reply of [{committed:false,outcome:"replayed",momentId:null},{committed:true,outcome:"unknown",momentId:null}]) {
-    expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery,reply)).toThrow(ProtocolShapeError);
+  for (const reply of [
+    { committed: false, outcome: "replayed", momentId: null },
+    { committed: true, outcome: "unknown", momentId: null },
+  ]) {
+    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.captureImportRecovery, reply)).toThrow(
+      ProtocolShapeError,
+    );
   }
 });
 
-it("decodes whether a recovery keeps typing for a deleted file",()=>{
- const record={momentId:"recovery",versionId:"main",objectId:"object",path:"note.md",captureMomentId:"deleted",deleted:true};
- expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus,{running:true,degraded:false,terminal:false,phase:"ready",noAtomicPlacement:false,recoveryUnavailable:false,deferredWrites:[],keptFiles:[],captureRecoveries:[record],heldFiles:[],retainedCopies:{count:0,bytes:0}})).toMatchObject({captureRecoveries:[record],heldFiles:[],retainedCopies:{count:0,bytes:0}});
+it("decodes whether a recovery keeps typing for a deleted file", () => {
+  const record = {
+    momentId: "recovery",
+    versionId: "main",
+    objectId: "object",
+    path: "note.md",
+    captureMomentId: "deleted",
+    deleted: true,
+  };
+  expect(
+    decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, {
+      running: true,
+      degraded: false,
+      terminal: false,
+      phase: "ready",
+      noAtomicPlacement: false,
+      recoveryUnavailable: false,
+      deferredWrites: [],
+      keptFiles: [],
+      captureRecoveries: [record],
+      heldFiles: [],
+      retainedCopies: { count: 0, bytes: 0 },
+    }),
+  ).toMatchObject({
+    captureRecoveries: [record],
+    heldFiles: [],
+    retainedCopies: { count: 0, bytes: 0 },
+  });
 });
 
 it("decodes outside writes waiting for an open document", () => {
-  const status = { running: true, degraded: false, terminal: false, phase: "ready",
-    noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
-    heldFiles: [], retainedCopies: { count: 0, bytes: 0 }, deferredWrites: ["notes/open.md"] };
+  const status = {
+    running: true,
+    degraded: false,
+    terminal: false,
+    phase: "ready",
+    noAtomicPlacement: false,
+    recoveryUnavailable: false,
+    keptFiles: [],
+    captureRecoveries: [],
+    heldFiles: [],
+    retainedCopies: { count: 0, bytes: 0 },
+    deferredWrites: ["notes/open.md"],
+  };
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
   for (const deferredWrites of [null, [""], [1]]) {
-    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, deferredWrites })).toThrow(ProtocolShapeError);
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, deferredWrites }),
+    ).toThrow(ProtocolShapeError);
   }
 });
 
 it("decodes why protected files wait on the secret key", () => {
-  const status = { running: true, degraded: true, terminal: false, phase: "ready",
-    noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [], captureRecoveries: [],
-    heldFiles: [], retainedCopies: { count: 0, bytes: 0 }, deferredWrites: [],
-    secretKeyUnavailable: "volume-shares-new-files" };
+  const status = {
+    running: true,
+    degraded: true,
+    terminal: false,
+    phase: "ready",
+    noAtomicPlacement: false,
+    recoveryUnavailable: false,
+    keptFiles: [],
+    captureRecoveries: [],
+    heldFiles: [],
+    retainedCopies: { count: 0, bytes: 0 },
+    deferredWrites: [],
+    secretKeyUnavailable: "volume-shares-new-files",
+  };
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
   for (const secretKeyUnavailable of [null, "", 1]) {
-    expect(() => decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, secretKeyUnavailable })).toThrow(ProtocolShapeError);
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, secretKeyUnavailable }),
+    ).toThrow(ProtocolShapeError);
   }
 });
 
@@ -1061,22 +1173,37 @@ const heldFile = {
   retryRequested: false,
 };
 const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
-  ["capture.retryHeld" as WorkspaceMethod, { deferredWrites: [], settled: true, running: true, degraded: false, retried: true }],
-  [WORKSPACE_METHOD.captureFlush, { deferredWrites: [], settled: true, running: true, degraded: false }],
-  [WORKSPACE_METHOD.captureReconcile, { deferredWrites: [], settled: true, running: true, degraded: false }],
-  [WORKSPACE_METHOD.captureRetry, { deferredWrites: [], settled: true, running: true, degraded: false, restarted: true }],
-  [WORKSPACE_METHOD.watcherStatus, {
-    running: true,
-    degraded: false,
-    terminal: false,
-    phase: "ready",
-    noAtomicPlacement: false,
-    recoveryUnavailable: false,
-    deferredWrites: [],
-    keptFiles: [],
-    captureRecoveries: [],
-    retainedCopies: { count: 0, bytes: 0 },
-  }],
+  [
+    "capture.retryHeld" as WorkspaceMethod,
+    { deferredWrites: [], settled: true, running: true, degraded: false, retried: true },
+  ],
+  [
+    WORKSPACE_METHOD.captureFlush,
+    { deferredWrites: [], settled: true, running: true, degraded: false },
+  ],
+  [
+    WORKSPACE_METHOD.captureReconcile,
+    { deferredWrites: [], settled: true, running: true, degraded: false },
+  ],
+  [
+    WORKSPACE_METHOD.captureRetry,
+    { deferredWrites: [], settled: true, running: true, degraded: false, restarted: true },
+  ],
+  [
+    WORKSPACE_METHOD.watcherStatus,
+    {
+      running: true,
+      degraded: false,
+      terminal: false,
+      phase: "ready",
+      noAtomicPlacement: false,
+      recoveryUnavailable: false,
+      deferredWrites: [],
+      keptFiles: [],
+      captureRecoveries: [],
+      retainedCopies: { count: 0, bytes: 0 },
+    },
+  ],
 ];
 
 for (const [method, base] of holdReplies) {
@@ -1084,7 +1211,9 @@ for (const [method, base] of holdReplies) {
     const result = { ...base, heldFiles: [], deferredWrites: ["notes/open.md"] };
     expect(decodeWorkspaceResult(method, result)).toEqual(result);
     for (const deferredWrites of [null, [""], [1]]) {
-      expect(() => decodeWorkspaceResult(method, { ...result, deferredWrites })).toThrow(ProtocolShapeError);
+      expect(() => decodeWorkspaceResult(method, { ...result, deferredWrites })).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
   it.each([{ heldFiles: [] }, { heldFiles: [heldFile] }])(
@@ -1097,7 +1226,10 @@ for (const [method, base] of holdReplies) {
     },
   );
   it(`rejects malformed ${method} held files`, () => {
-    expect(decodeWorkspaceResult(method, { ...base, heldFiles: [] })).toEqual({ ...base, heldFiles: [] });
+    expect(decodeWorkspaceResult(method, { ...base, heldFiles: [] })).toEqual({
+      ...base,
+      heldFiles: [],
+    });
     for (const heldFiles of [
       null,
       [{}],
@@ -1114,15 +1246,46 @@ for (const [method, base] of holdReplies) {
   });
 }
 
-it("decodes the passive current view manifest and rejects a frontier-only placeholder",()=>{
-  const file={versionId:"main",objectId:"a",path:"docs/a.md",contentKind:"text",sha256:"a".repeat(64),byteLength:4,lineageClaimId:null,restoreGeneration:null};
-  const view={workspaceId:"w",revision:1,logCursor:3,journalCursor:5,delta:false,removed:[],moved:false,nextCursor:null,refusedFiles:[],files:[file],texts:[{sha256:file.sha256,text:"text"}]};
-  expect(decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,view)).toEqual(view);
-  expect(()=>decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut,{revision:1,logCursor:3,journalCursor:5})).toThrow(ProtocolShapeError);
+it("decodes the passive current view manifest and rejects a frontier-only placeholder", () => {
+  const file = {
+    versionId: "main",
+    objectId: "a",
+    path: "docs/a.md",
+    contentKind: "text",
+    sha256: "a".repeat(64),
+    byteLength: 4,
+    lineageClaimId: null,
+    restoreGeneration: null,
+  };
+  const view = {
+    workspaceId: "w",
+    revision: 1,
+    logCursor: 3,
+    journalCursor: 5,
+    delta: false,
+    removed: [],
+    moved: false,
+    nextCursor: null,
+    refusedFiles: [],
+    files: [file],
+    texts: [{ sha256: file.sha256, text: "text" }],
+  };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut, view)).toEqual(view);
+  expect(() =>
+    decodeWorkspaceResult(WORKSPACE_METHOD.replicaCut, {
+      revision: 1,
+      logCursor: 3,
+      journalCursor: 5,
+    }),
+  ).toThrow(ProtocolShapeError);
 });
 
 it("decodes retained copy listings and deletes, and rejects negative counts", () => {
-  const listed = { copies: [{ id: 3, revision: 10 }], more: false, total: { count: 4, bytes: 4096 } };
+  const listed = {
+    copies: [{ id: 3, revision: 10 }],
+    more: false,
+    total: { count: 4, bytes: 4096 },
+  };
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.retainedCopiesList, listed)).toEqual(listed);
   const deleted = { deleted: 1, skipped: 2, failed: 0, remaining: { count: 3, bytes: 3072 } };
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.retainedCopiesDelete, deleted)).toEqual(deleted);
@@ -1132,9 +1295,13 @@ it("decodes retained copy listings and deletes, and rejects negative counts", ()
     { ...deleted, remaining: { count: 0 } },
     { ...deleted, deleted: 1.5 },
   ]) {
-    expect(() => decodeWorkspaceResult(
-      "copies" in reply ? WORKSPACE_METHOD.retainedCopiesList : WORKSPACE_METHOD.retainedCopiesDelete,
-      reply,
-    )).toThrow(ProtocolShapeError);
+    expect(() =>
+      decodeWorkspaceResult(
+        "copies" in reply
+          ? WORKSPACE_METHOD.retainedCopiesList
+          : WORKSPACE_METHOD.retainedCopiesDelete,
+        reply,
+      ),
+    ).toThrow(ProtocolShapeError);
   }
 });

@@ -66,12 +66,8 @@ const utf8 = new TextEncoder();
 
 function changeBytes(change: VersionFileChange): number {
   return (
-    (change.currentText === undefined
-      ? 0
-      : utf8.encode(change.currentText).byteLength) +
-    (change.incomingText === undefined
-      ? 0
-      : utf8.encode(change.incomingText).byteLength)
+    (change.currentText === undefined ? 0 : utf8.encode(change.currentText).byteLength) +
+    (change.incomingText === undefined ? 0 : utf8.encode(change.incomingText).byteLength)
   );
 }
 
@@ -119,10 +115,8 @@ export async function compareVersionFilesPage(
         versionId,
         path: entry.path,
       });
-    const current =
-      entry.status === "added" ? null : await read(input.targetVersionId);
-    const incoming =
-      entry.status === "deleted" ? null : await read(input.sourceVersionId);
+    const current = entry.status === "added" ? null : await read(input.targetVersionId);
+    const incoming = entry.status === "deleted" ? null : await read(input.sourceVersionId);
     const change: VersionFileChange = {
       path: entry.path,
       status: entry.status,

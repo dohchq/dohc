@@ -39,14 +39,21 @@ const SCHEMA_PATH = "trip/packing/collection.yaml";
 const AUTOMATIONS_PATH = "trip/packing/automations.yaml";
 const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
 const SCHEMA_TWO = "name: Packing\nfields:\n  Title:\n    type: text\n  Count:\n    type: number\n";
-const SCHEMA_AFTER_STOP = "name: Packing\nfields:\n  Title:\n    type: text\n  Notes:\n    type: text\n";
+const SCHEMA_AFTER_STOP =
+  "name: Packing\nfields:\n  Title:\n    type: text\n  Notes:\n    type: text\n";
 const automation = (id: string, title: string) =>
   `  - id: ${id}\n    name: ${id}\n    when: record-added\n    do:\n      - set:\n          Title: ${title}\n`;
 const automations = (...items: string[]) => `version: 1\nautomations:\n${items.join("")}`;
 const AUTOMATIONS = automations(automation("stamp", "Packed"));
 const AUTOMATIONS_THEIRS = automations(automation("stamp", "Packed"), automation("tidy", "Tidied"));
-const AUTOMATIONS_OWNER = automations(automation("stamp", "Packed by me"), automation("tidy", "Tidied"));
-const AUTOMATIONS_LATE = automations(automation("stamp", "Packed"), automation("tidy", "Tidied twice"));
+const AUTOMATIONS_OWNER = automations(
+  automation("stamp", "Packed by me"),
+  automation("tidy", "Tidied"),
+);
+const AUTOMATIONS_LATE = automations(
+  automation("stamp", "Packed"),
+  automation("tidy", "Tidied twice"),
+);
 
 type LogOp = { originId: string; opKind: string; payload: Record<string, unknown> };
 type Api = DohcDesktopBridge;
@@ -58,7 +65,11 @@ async function ownerLog(relay: SyncRelayHandle, workspaceId: string): Promise<Lo
   // the identity it adopted.
   const identity = relayAdoptedIdentity(relay.dbPath, workspaceId);
   const query = new URLSearchParams({ since: "0", limit: "1000", ...identity });
-  const read = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${workspaceId}/log?${query.toString()}`);
+  const read = await relayJson(
+    relay.baseUrl,
+    OWNER_TOKEN,
+    `/sync/${workspaceId}/log?${query.toString()}`,
+  );
   expect(read.status, read.body).toBe(200);
   return (JSON.parse(read.body) as { ops: LogOp[] }).ops;
 }
@@ -66,24 +77,34 @@ async function ownerLog(relay: SyncRelayHandle, workspaceId: string): Promise<Lo
 /** The paths the relay wrote into the owner's workspace for the recipient. */
 async function directPaths(relay: SyncRelayHandle, workspaceId: string): Promise<string[]> {
   return (await ownerLog(relay, workspaceId))
-    .filter((op) => op.originId.startsWith("relay:collection-file:") && op.opKind === "moment.append")
+    .filter(
+      (op) => op.originId.startsWith("relay:collection-file:") && op.opKind === "moment.append",
+    )
     .map((op) => String(op.payload.path));
 }
 
 /** Writes a file in the page's only workspace the way an editor save does. */
 async function saveText(page: Page, path: string, text: string): Promise<string> {
-  return await page.evaluate(async ({ path, text }) => {
-    const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-    const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
-    try {
-      const read = await api.readWorkspaceText({ workspaceId, relativePath: path });
-      if (read.truncated) return "the file read back truncated";
-      await api.writeWorkspaceText({ workspaceId, relativePath: path, text, expectedContentHash: read.contentHash });
-      return "written";
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }, { path, text });
+  return await page.evaluate(
+    async ({ path, text }) => {
+      const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+      const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
+      try {
+        const read = await api.readWorkspaceText({ workspaceId, relativePath: path });
+        if (read.truncated) return "the file read back truncated";
+        await api.writeWorkspaceText({
+          workspaceId,
+          relativePath: path,
+          text,
+          expectedContentHash: read.contentHash,
+        });
+        return "written";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    },
+    { path, text },
+  );
 }
 
 test("@two-client a recipient with Edit changes a Collection directly, and the owner sees it, races it, and stops it", async () => {
@@ -112,9 +133,15 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       { path: AUTOMATIONS_PATH, contents: AUTOMATIONS },
       { path: "private/ledger.md", contents: "The kraken ledger stays private.\n" },
     ]);
-    await seedWorkspaceRegistry(ownerTemp, [{ workspaceId: ownerWorkspaceId, rootPath: ownerTemp.rootPath }]);
+    await seedWorkspaceRegistry(ownerTemp, [
+      { workspaceId: ownerWorkspaceId, rootPath: ownerTemp.rootPath },
+    ]);
     await seedCloudCredentials(ownerTemp, {
-      serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: OWNER_EMAIL, userId: OWNER_USER, token: OWNER_TOKEN,
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: OWNER_EMAIL,
+      userId: OWNER_USER,
+      token: OWNER_TOKEN,
     });
     owner = await launchDesktopApp({ workspace: ownerTemp, env: syncEnv });
     await openWorkspaceFromFirstRun(owner.page, ownerTemp);
@@ -130,20 +157,37 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     }, ownerWorkspaceId);
     expect(enabled).toBe("enabled");
     await expect
-      .poll(async () => (await ownerLog(relay!, ownerWorkspaceId)).some((op) => op.payload.path === AUTOMATIONS_PATH),
-        { timeout: 60_000, intervals: [1_000] })
+      .poll(
+        async () =>
+          (await ownerLog(relay!, ownerWorkspaceId)).some(
+            (op) => op.payload.path === AUTOMATIONS_PATH,
+          ),
+        { timeout: 60_000, intervals: [1_000] },
+      )
       .toBe(true);
 
     // --- The owner shares the trip folder with Edit ------------------------
     // Sharing from the owner's app refreshes the roster History names people from.
-    const { shareId } = await owner.page.evaluate(async ({ workspaceId, recipientEmail }) => {
-      const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-      return await api.createRelayShare({ workspaceId, recipientEmail, paths: ["trip"], access: "edit" });
-    }, { workspaceId: ownerWorkspaceId, recipientEmail: RECIPIENT_EMAIL });
+    const { shareId } = await owner.page.evaluate(
+      async ({ workspaceId, recipientEmail }) => {
+        const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+        return await api.createRelayShare({
+          workspaceId,
+          recipientEmail,
+          paths: ["trip"],
+          access: "edit",
+        });
+      },
+      { workspaceId: ownerWorkspaceId, recipientEmail: RECIPIENT_EMAIL },
+    );
 
     // --- The recipient opens the share and changes the Collection ---------
     await seedCloudCredentials(recipientTemp, {
-      serverUrl: relay.baseUrl, relayUrl: relay.baseUrl, email: RECIPIENT_EMAIL, userId: RECIPIENT_USER, token: RECIPIENT_TOKEN,
+      serverUrl: relay.baseUrl,
+      relayUrl: relay.baseUrl,
+      email: RECIPIENT_EMAIL,
+      userId: RECIPIENT_USER,
+      token: RECIPIENT_TOKEN,
     });
     recipient = await launchDesktopApp({ workspace: recipientTemp, env: syncEnv });
     const page = recipient.page;
@@ -154,68 +198,127 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     await expect(page.getByTestId("shared-view-banner")).toBeVisible();
 
     // A save pushes a Collection's own files on its own: no Send changes.
-    await expect.poll(() => saveText(page, SCHEMA_PATH, SCHEMA_TWO), { timeout: 60_000, intervals: [1_000] }).toBe("written");
-    await expect.poll(() => saveText(page, AUTOMATIONS_PATH, AUTOMATIONS_THEIRS), { timeout: 60_000, intervals: [1_000] }).toBe("written");
     await expect
-      .poll(async () => (await directPaths(relay!, ownerWorkspaceId)).sort(), { timeout: 60_000, intervals: [1_000] })
+      .poll(() => saveText(page, SCHEMA_PATH, SCHEMA_TWO), { timeout: 60_000, intervals: [1_000] })
+      .toBe("written");
+    await expect
+      .poll(() => saveText(page, AUTOMATIONS_PATH, AUTOMATIONS_THEIRS), {
+        timeout: 60_000,
+        intervals: [1_000],
+      })
+      .toBe("written");
+    await expect
+      .poll(async () => (await directPaths(relay!, ownerWorkspaceId)).sort(), {
+        timeout: 60_000,
+        intervals: [1_000],
+      })
       .toEqual([AUTOMATIONS_PATH, SCHEMA_PATH]);
-    const direct = (await ownerLog(relay, ownerWorkspaceId)).filter((op) => op.originId.startsWith("relay:collection-file:"));
-    expect(direct.every((op) => ((op.payload.authors as Array<{ kind: string; userId: string }>)[0]!).userId === RECIPIENT_USER)).toBe(true);
+    const direct = (await ownerLog(relay, ownerWorkspaceId)).filter((op) =>
+      op.originId.startsWith("relay:collection-file:"),
+    );
+    expect(
+      direct.every(
+        (op) =>
+          (op.payload.authors as Array<{ kind: string; userId: string }>)[0]!.userId ===
+          RECIPIENT_USER,
+      ),
+    ).toBe(true);
     // Nothing waited for the owner's review.
-    const proposals = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/proposals`);
+    const proposals = await relayJson(
+      relay.baseUrl,
+      OWNER_TOKEN,
+      `/sync/${ownerWorkspaceId}/proposals`,
+    );
     expect((JSON.parse(proposals.body) as { proposals: unknown[] }).proposals).toEqual([]);
 
     // --- The owner's disk and History have it, named for the recipient ----
     await expect
-      .poll(async () => {
-        await wakeOwner();
-        return await readFile(join(ownerTemp.rootPath, SCHEMA_PATH), "utf8");
-      }, { timeout: 120_000, intervals: [2_000] })
+      .poll(
+        async () => {
+          await wakeOwner();
+          return await readFile(join(ownerTemp.rootPath, SCHEMA_PATH), "utf8");
+        },
+        { timeout: 120_000, intervals: [2_000] },
+      )
       .toBe(SCHEMA_TWO);
     await expect
-      .poll(async () => (await readHistoryMoments(owner!.page, ownerWorkspaceId, SCHEMA_PATH))
-        ?.find((moment) => moment.namedAuthor)?.namedAuthor?.label ?? null, { timeout: 60_000, intervals: [2_000] })
+      .poll(
+        async () =>
+          (await readHistoryMoments(owner!.page, ownerWorkspaceId, SCHEMA_PATH))?.find(
+            (moment) => moment.namedAuthor,
+          )?.namedAuthor?.label ?? null,
+        { timeout: 60_000, intervals: [2_000] },
+      )
       .toBe(`${RECIPIENT_EMAIL} (Edit)`);
 
     // --- A race: the owner changes the automations first -----------------
     await writeWorkspaceFiles(ownerTemp, [{ path: AUTOMATIONS_PATH, contents: AUTOMATIONS_OWNER }]);
     await expect
-      .poll(async () => (await ownerLog(relay!, ownerWorkspaceId)).some((op) =>
-        !op.originId.startsWith("relay:") && op.payload.payloadAfterBlobSha256 === sha256(AUTOMATIONS_OWNER)),
-        { timeout: 60_000, intervals: [1_000] })
+      .poll(
+        async () =>
+          (await ownerLog(relay!, ownerWorkspaceId)).some(
+            (op) =>
+              !op.originId.startsWith("relay:") &&
+              op.payload.payloadAfterBlobSha256 === sha256(AUTOMATIONS_OWNER),
+          ),
+        { timeout: 60_000, intervals: [1_000] },
+      )
       .toBe(true);
     // The recipient's share view has not pulled it, so their save builds on
     // the version the owner replaced.
     expect(await saveText(page, AUTOMATIONS_PATH, AUTOMATIONS_LATE)).toBe("written");
-    const stale = page.getByTestId("workspace-shell-error").filter({ hasText: "changed before your change reached" });
+    const stale = page
+      .getByTestId("workspace-shell-error")
+      .filter({ hasText: "changed before your change reached" });
     await expect(stale).toBeVisible({ timeout: 60_000 });
     expect(await directPaths(relay, ownerWorkspaceId)).toHaveLength(2);
     // The notice sends it as a proposal instead.
     await stale.getByTestId("workspace-shell-error-action").click();
     await expect
-      .poll(async () => {
-        const listed = await relayJson(relay!.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/proposals`);
-        const open = (JSON.parse(listed.body) as { proposals: Array<{ proposalId: string }> }).proposals;
-        if (open.length !== 1) return open.length;
-        const opened = await relayJson(relay!.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/proposals/${open[0]!.proposalId}`);
-        return (JSON.parse(opened.body) as { proposal: { ops: Array<{ afterPath: string }> } }).proposal.ops.map((op) => op.afterPath);
-      }, { timeout: 60_000, intervals: [1_000] })
+      .poll(
+        async () => {
+          const listed = await relayJson(
+            relay!.baseUrl,
+            OWNER_TOKEN,
+            `/sync/${ownerWorkspaceId}/proposals`,
+          );
+          const open = (JSON.parse(listed.body) as { proposals: Array<{ proposalId: string }> })
+            .proposals;
+          if (open.length !== 1) return open.length;
+          const opened = await relayJson(
+            relay!.baseUrl,
+            OWNER_TOKEN,
+            `/sync/${ownerWorkspaceId}/proposals/${open[0]!.proposalId}`,
+          );
+          return (
+            JSON.parse(opened.body) as { proposal: { ops: Array<{ afterPath: string }> } }
+          ).proposal.ops.map((op) => op.afterPath);
+        },
+        { timeout: 60_000, intervals: [1_000] },
+      )
       .toEqual([AUTOMATIONS_PATH]);
 
     // --- Stop and restore ---------------------------------------------------
     const grants = await relayJson(relay.baseUrl, OWNER_TOKEN, "/sync/shares");
-    const grantId = (JSON.parse(grants.body) as { granted: Array<{ shareId: string; grantId: string }> })
-      .granted.find((row) => row.shareId === shareId)!.grantId;
+    const grantId = (
+      JSON.parse(grants.body) as { granted: Array<{ shareId: string; grantId: string }> }
+    ).granted.find((row) => row.shareId === shareId)!.grantId;
     let outcome: Awaited<ReturnType<Api["stopAndRestore"]>> | null = null;
     await expect
-      .poll(async () => {
-        await wakeOwner();
-        outcome = await owner!.page.evaluate(async ({ workspaceId, userId }) => {
-          const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
-          return await api.stopAndRestore({ workspaceId, target: { kind: "person", userId } });
-        }, { workspaceId: ownerWorkspaceId, userId: RECIPIENT_USER });
-        return outcome.status;
-      }, { timeout: 120_000, intervals: [2_000] })
+      .poll(
+        async () => {
+          await wakeOwner();
+          outcome = await owner!.page.evaluate(
+            async ({ workspaceId, userId }) => {
+              const api = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+              return await api.stopAndRestore({ workspaceId, target: { kind: "person", userId } });
+            },
+            { workspaceId: ownerWorkspaceId, userId: RECIPIENT_USER },
+          );
+          return outcome.status;
+        },
+        { timeout: 120_000, intervals: [2_000] },
+      )
       .toBe("restored");
     // The schema goes back; the automations the owner changed since stay,
     // listed for the owner to check.
@@ -225,36 +328,80 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
       unfinished: null,
     });
     expect(await readFile(join(ownerTemp.rootPath, SCHEMA_PATH), "utf8")).toBe(SCHEMA);
-    expect(await readFile(join(ownerTemp.rootPath, AUTOMATIONS_PATH), "utf8")).toBe(AUTOMATIONS_OWNER);
-    const ledger = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/collection-writes/${grantId}`);
+    expect(await readFile(join(ownerTemp.rootPath, AUTOMATIONS_PATH), "utf8")).toBe(
+      AUTOMATIONS_OWNER,
+    );
+    const ledger = await relayJson(
+      relay.baseUrl,
+      OWNER_TOKEN,
+      `/sync/${ownerWorkspaceId}/collection-writes/${grantId}`,
+    );
     expect((JSON.parse(ledger.body) as { writes: unknown[] }).writes).toHaveLength(2);
 
     // Keep the recipient open. Metadata checks discover the owner's stop
     // without a refresh click or a write attempt.
     await page.bringToFront();
-    await expect(page.getByTestId("shared-view-banner")).toContainText("This share was ended", { timeout: 60_000 });
+    await expect(page.getByTestId("shared-view-banner")).toContainText("This share was ended", {
+      timeout: 60_000,
+    });
     await expect(page.getByTestId("share-changes-send")).toHaveCount(0);
     // --- A server write after the stop is still refused ---------------------
-    const refused = await relayJson(relay.baseUrl, RECIPIENT_TOKEN, `/sync/shares/${shareId}/collection-writes`, {
-      method: "POST",
-      body: JSON.stringify({
-        submitId: "after-stop",
-        changes: [{
-          basedOnPath: SCHEMA_PATH, basedOnBlobSha256: sha256(SCHEMA), operation: "write", afterPath: SCHEMA_PATH,
-          afterBlobSha256: sha256(SCHEMA_AFTER_STOP), afterContentKind: "text",
-          afterByteLength: Buffer.byteLength(SCHEMA_AFTER_STOP), recordedAtMs: Date.now(),
-        }],
-      }),
-    });
+    const refused = await relayJson(
+      relay.baseUrl,
+      RECIPIENT_TOKEN,
+      `/sync/shares/${shareId}/collection-writes`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          submitId: "after-stop",
+          changes: [
+            {
+              basedOnPath: SCHEMA_PATH,
+              basedOnBlobSha256: sha256(SCHEMA),
+              operation: "write",
+              afterPath: SCHEMA_PATH,
+              afterBlobSha256: sha256(SCHEMA_AFTER_STOP),
+              afterContentKind: "text",
+              afterByteLength: Buffer.byteLength(SCHEMA_AFTER_STOP),
+              recordedAtMs: Date.now(),
+            },
+          ],
+        }),
+      },
+    );
     expect(refused.status).toBe(404);
-    const after = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/collection-writes/${grantId}`);
+    const after = await relayJson(
+      relay.baseUrl,
+      OWNER_TOKEN,
+      `/sync/${ownerWorkspaceId}/collection-writes/${grantId}`,
+    );
     expect((JSON.parse(after.body) as { writes: unknown[] }).writes).toHaveLength(2);
     expect(await directPaths(relay, ownerWorkspaceId)).toHaveLength(2);
   } finally {
-    try { await recipient?.close(); } catch (error) { console.error("Recipient cleanup failed:", error); }
-    try { await owner?.close(); } catch (error) { console.error("Owner cleanup failed:", error); }
-    try { await relay?.stop(); } catch (error) { console.error("Relay cleanup failed:", error); }
-    try { await recipientTemp.cleanup(); } catch (error) { console.error("Recipient workspace cleanup failed:", error); }
-    try { await ownerTemp.cleanup(); } catch (error) { console.error("Owner workspace cleanup failed:", error); }
+    try {
+      await recipient?.close();
+    } catch (error) {
+      console.error("Recipient cleanup failed:", error);
+    }
+    try {
+      await owner?.close();
+    } catch (error) {
+      console.error("Owner cleanup failed:", error);
+    }
+    try {
+      await relay?.stop();
+    } catch (error) {
+      console.error("Relay cleanup failed:", error);
+    }
+    try {
+      await recipientTemp.cleanup();
+    } catch (error) {
+      console.error("Recipient workspace cleanup failed:", error);
+    }
+    try {
+      await ownerTemp.cleanup();
+    } catch (error) {
+      console.error("Owner workspace cleanup failed:", error);
+    }
   }
 });

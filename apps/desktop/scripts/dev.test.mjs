@@ -114,8 +114,5 @@ test("desktop dev verifies Cargo built the executable Electron loads", () => {
       ),
     /Cargo target configuration.*Remove \[build\]\.target/,
   );
-  assert.throws(
-    () => validateWorkspaceEngineBuild("", root, "win32"),
-    /did not report.*Expected/,
-  );
+  assert.throws(() => validateWorkspaceEngineBuild("", root, "win32"), /did not report.*Expected/);
 });

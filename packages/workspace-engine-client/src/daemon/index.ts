@@ -9,6 +9,12 @@ export * from "./fileResolution";
 export * from "./replicaJournal";
 export * from "./workReferences";
 
-export type { ReplicaCurrentView, ReplicaCurrentViewPage, ReplicaCurrentViewPosition, ReplicaCurrentViewCursor, ReplicaCurrentViewSelector } from "../workspace/workspaceWireContract";
+export type {
+  ReplicaCurrentView,
+  ReplicaCurrentViewPage,
+  ReplicaCurrentViewPosition,
+  ReplicaCurrentViewCursor,
+  ReplicaCurrentViewSelector,
+} from "../workspace/workspaceWireContract";
 
-export {decodeReplicaCurrentView} from "../workspace/workspaceWireContract";
+export { decodeReplicaCurrentView } from "../workspace/workspaceWireContract";

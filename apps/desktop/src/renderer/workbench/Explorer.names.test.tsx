@@ -56,7 +56,9 @@ function file(path: string): WorkspaceFileEntry {
 }
 
 function treeRow(path: string): HTMLElement {
-  const row = screen.getAllByTestId("tree-row").find((candidate) => candidate.dataset.path === path);
+  const row = screen
+    .getAllByTestId("tree-row")
+    .find((candidate) => candidate.dataset.path === path);
   if (!row) throw new Error(`no tree row for ${path}`);
   return row;
 }
@@ -74,12 +76,29 @@ const FOLDER = "quarterly-planning-and-budget-review-2026";
 describe("splitName", () => {
   it("keeps the last five characters and the whole extension in the end", () => {
     expect(splitName(NOTES)).toEqual({ start: "2026-07-08-meeting-", end: "notes.md" });
-    expect(splitName("flow-for-the-launch.excalidraw")).toEqual({ start: "flow-for-the-l", end: "aunch.excalidraw" });
-    expect(splitName(FOLDER)).toEqual({ start: "quarterly-planning-and-budget-review", end: "-2026" });
+    expect(splitName("flow-for-the-launch.excalidraw")).toEqual({
+      start: "flow-for-the-l",
+      end: "aunch.excalidraw",
+    });
+    expect(splitName(FOLDER)).toEqual({
+      start: "quarterly-planning-and-budget-review",
+      end: "-2026",
+    });
   });
 
   it("joins back into the name", () => {
-    for (const name of [NOTES, FOLDER, ".gitignore", "a.md", "plan", "copy (2).md", "Q3 report v1.5", "café 🚀 notes.md", "annual  report.md", "  a b  c  .md"]) {
+    for (const name of [
+      NOTES,
+      FOLDER,
+      ".gitignore",
+      "a.md",
+      "plan",
+      "copy (2).md",
+      "Q3 report v1.5",
+      "café 🚀 notes.md",
+      "annual  report.md",
+      "  a b  c  .md",
+    ]) {
       const { start, end } = splitName(name);
       expect(start + end).toBe(name);
     }
@@ -92,13 +111,22 @@ describe("splitName", () => {
   });
 
   it("keeps a whole extension of 15 characters", () => {
-    expect(splitName("quarterly-report.fifteen-chars-x")).toEqual({ start: "quarterly-r", end: "eport.fifteen-chars-x" });
+    expect(splitName("quarterly-report.fifteen-chars-x")).toEqual({
+      start: "quarterly-r",
+      end: "eport.fifteen-chars-x",
+    });
     expect(splitName("workspace-settings.code-workspace").end).toBe("tings.code-workspace");
   });
 
   it("moves the cut off a space, so neither part starts or ends with one", () => {
-    expect(splitName("Meeting with Ana re. the venue")).toEqual({ start: "Meeting with Ana re. th", end: "e venue" });
-    expect(splitName("budget review  final.md")).toEqual({ start: "budget revie", end: "w  final.md" });
+    expect(splitName("Meeting with Ana re. the venue")).toEqual({
+      start: "Meeting with Ana re. th",
+      end: "e venue",
+    });
+    expect(splitName("budget review  final.md")).toEqual({
+      start: "budget revie",
+      end: "w  final.md",
+    });
     expect(splitName("project notes (12).md")).toEqual({ start: "project note", end: "s (12).md" });
   });
 
@@ -107,7 +135,10 @@ describe("splitName", () => {
   });
 
   it("never splits a character made of two code units", () => {
-    expect(splitName("launch-plan-🚀🚀🚀🚀🚀")).toEqual({ start: "launch-plan-", end: "🚀🚀🚀🚀🚀" });
+    expect(splitName("launch-plan-🚀🚀🚀🚀🚀")).toEqual({
+      start: "launch-plan-",
+      end: "🚀🚀🚀🚀🚀",
+    });
   });
 
   it("leaves a short name whole in the end", () => {
@@ -117,7 +148,15 @@ describe("splitName", () => {
 
 describe("Explorer names", () => {
   it("draws a long tree name as a start that shrinks and an end that stays", () => {
-    render(<Explorer {...explorerProps({ files: [file(`notes/${NOTES}`), file(`${FOLDER}/plan.md`)], folders: [FOLDER, "notes"], expandedFolders: ["notes"] })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [file(`notes/${NOTES}`), file(`${FOLDER}/plan.md`)],
+          folders: [FOLDER, "notes"],
+          expandedFolders: ["notes"],
+        })}
+      />,
+    );
     const row = treeRow(`notes/${NOTES}`);
     expect(parts(row)).toEqual(["2026-07-08-meeting-", "notes.md"]);
     expect(row.querySelector("[data-name-start]")?.className).toContain("truncate");
@@ -126,8 +165,19 @@ describe("Explorer names", () => {
   });
 
   it("names the tree row and its tooltip with the whole name", () => {
-    render(<Explorer {...explorerProps({ files: [file(`notes/${NOTES}`), file(`${FOLDER}/plan.md`)], folders: [FOLDER, "notes"], expandedFolders: ["notes"] })} />);
-    for (const [path, name] of [[`notes/${NOTES}`, NOTES], [FOLDER, FOLDER]] as const) {
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [file(`notes/${NOTES}`), file(`${FOLDER}/plan.md`)],
+          folders: [FOLDER, "notes"],
+          expandedFolders: ["notes"],
+        })}
+      />,
+    );
+    for (const [path, name] of [
+      [`notes/${NOTES}`, NOTES],
+      [FOLDER, FOLDER],
+    ] as const) {
       const row = treeRow(path);
       // Chromium reads the two parts' boxes as two words. jsdom does not, so
       // check the label that keeps the name whole, as well as the role's name.
@@ -141,13 +191,24 @@ describe("Explorer names", () => {
   it("collapses repeated spaces as one line does", () => {
     // jsdom draws nothing, so check the parts and their white-space classes.
     // Each part collapses its own spaces with nowrap, as one line did.
-    render(<Explorer {...explorerProps({ files: [file("annual  report.md"), file("Meeting with Ana re. the venue")] })} />);
+    render(
+      <Explorer
+        {...explorerProps({
+          files: [file("annual  report.md"), file("Meeting with Ana re. the venue")],
+        })}
+      />,
+    );
     const fits = treeRow("annual  report.md");
     expect(parts(fits)).toEqual(["annual  r", "eport.md"]);
     expect(fits.textContent).toBe("annual  report.md");
     expect(fits.innerHTML).not.toContain("whitespace-pre");
-    expect(fits.querySelector("[data-name-start]")?.parentElement?.className).toContain("whitespace-nowrap");
-    expect(parts(treeRow("Meeting with Ana re. the venue"))).toEqual(["Meeting with Ana re. th", "e venue"]);
+    expect(fits.querySelector("[data-name-start]")?.parentElement?.className).toContain(
+      "whitespace-nowrap",
+    );
+    expect(parts(treeRow("Meeting with Ana re. the venue"))).toEqual([
+      "Meeting with Ana re. th",
+      "e venue",
+    ]);
   });
 
   it("draws a short tree name in one part, as before", () => {
@@ -181,7 +242,11 @@ describe("pending share mark", () => {
   it("marks a closed note whose edits wait for the server, and leaves the mark to the tab once it opens", () => {
     const marks = createPathMarks();
     marks.set(["plan.md"], []);
-    render(<PendingShareMarks.Provider value={marks}><Explorer {...explorerProps({ files: [file("plan.md"), file("notes.md")] })} /></PendingShareMarks.Provider>);
+    render(
+      <PendingShareMarks.Provider value={marks}>
+        <Explorer {...explorerProps({ files: [file("plan.md"), file("notes.md")] })} />
+      </PendingShareMarks.Provider>,
+    );
     const row = treeRow("plan.md");
     expect(row.dataset.state).toBe("pending-share");
     expect(within(row).getByTestId("tree-row-pending-share")).toBeTruthy();

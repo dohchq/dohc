@@ -32,9 +32,7 @@ function namedPaths(paths: readonly UnjournalablePath[]): string {
   return paths.length > 3 ? `${named}, and ${paths.length - 3} more` : named;
 }
 
-export function unjournalablePathMessages(
-  paths: readonly UnjournalablePath[],
-): string[] {
+export function unjournalablePathMessages(paths: readonly UnjournalablePath[]): string[] {
   const groups = new Map<UnjournalablePath["reason"], UnjournalablePath[]>();
   for (const path of paths) {
     const group = groups.get(path.reason) ?? [];
@@ -53,9 +51,13 @@ export function unjournalablePathMessages(
   ] as const) {
     const group = groups.get(reason);
     if (!group || group.length === 0) continue;
-    const shown = reason === "local-collision"
-      ? [...new Set(group.map(entry => entry.owner ?? entry.path))].map(path => ({ path, reason }))
-      : group;
+    const shown =
+      reason === "local-collision"
+        ? [...new Set(group.map((entry) => entry.owner ?? entry.path))].map((path) => ({
+            path,
+            reason,
+          }))
+        : group;
     const names = namedPaths(shown);
     const one = shown.length === 1;
     if (reason === "oversized-text") {
@@ -102,9 +104,7 @@ export function unjournalablePathMessages(
 
 // A spelling collision holds nothing of this machine's, so it never stops
 // changes from being sent.
-export function assertShareChangesJournalable(
-  unjournalable: readonly UnjournalablePath[],
-): void {
+export function assertShareChangesJournalable(unjournalable: readonly UnjournalablePath[]): void {
   const paths = unjournalable.filter((path) => path.reason !== "spelling-collision");
   if (paths.length === 0) return;
   const one = paths.length === 1;
@@ -116,9 +116,7 @@ export function assertShareChangesJournalable(
 
 // A held spelling's file is the file of the spelling that owns it, so saving,
 // moving or deleting the held one would write over the owner's (#2416).
-export function assertHeldSpellingsUnchanged(
-  unjournalable: readonly UnjournalablePath[],
-): void {
+export function assertHeldSpellingsUnchanged(unjournalable: readonly UnjournalablePath[]): void {
   const held = unjournalable.filter((path) => path.reason === "spelling-collision");
   if (held.length === 0) return;
   throw new Error(
@@ -136,9 +134,7 @@ export class SharePinInvalidError extends Error {
   }
 }
 
-export function recordedShareSelector(
-  value: unknown,
-): ShareViewSelector | null {
+export function recordedShareSelector(value: unknown): ShareViewSelector | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -149,19 +145,14 @@ export function recordedShareSelector(
   };
   if (!Array.isArray(candidate.paths)) return null;
   if (!isShareablePathList(candidate.paths)) return null;
-  if (
-    candidate.versionId !== null &&
-    !isValidShareVersionId(candidate.versionId)
-  ) {
+  if (candidate.versionId !== null && !isValidShareVersionId(candidate.versionId)) {
     return null;
   }
   if (candidate.paths.length === 0 && candidate.versionId === null) return null;
   if (!isShareAccessValue(candidate.access)) return null;
   return {
     paths: [...(candidate.paths as string[])],
-    versionId: isValidShareVersionId(candidate.versionId)
-      ? candidate.versionId
-      : null,
+    versionId: isValidShareVersionId(candidate.versionId) ? candidate.versionId : null,
     access: candidate.access,
   };
 }

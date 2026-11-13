@@ -43,8 +43,8 @@ beforeEach(() => {
     email: "recipient@dohc.test",
   });
   bridgeMock.pickWorkspaceRoot.mockResolvedValue("/home/sam/dohc/shared");
-  bridgeMock.getDefaultShareRoot.mockImplementation(async ({ shareId }: { shareId: string }) =>
-    `/home/sam/dohc/shared/${shareId}`,
+  bridgeMock.getDefaultShareRoot.mockImplementation(
+    async ({ shareId }: { shareId: string }) => `/home/sam/dohc/shared/${shareId}`,
   );
   bridgeMock.openSharedView.mockResolvedValue({ workspace: SHARED_VIEW });
   bridgeMock.getRelayReceivedShare.mockResolvedValue({ found: false });
@@ -103,16 +103,12 @@ describe("OpenSharedView", () => {
 
     await user.click(screen.getByTestId("open-share-start"));
 
-    expect(screen.getByTestId("open-share-start").textContent).toBe(
-      "Adding the share…",
-    );
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Adding the share…");
     expectMissingInput(null);
     const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
     expect(back.disabled).toBe(false);
     expect(
-      screen.getByText(
-        "If you go back, dohc keeps adding the share to shared-with-me/.",
-      ),
+      screen.getByText("If you go back, dohc keeps adding the share to shared-with-me/."),
     ).toBeTruthy();
 
     await user.click(back);
@@ -134,7 +130,6 @@ describe("OpenSharedView", () => {
     expect(onWorkspaceReady).not.toHaveBeenCalled();
     expect(onMounted).not.toHaveBeenCalled();
   });
-
 
   it("keeps Back available while opening separately and ignores the late result after leaving", async () => {
     const pending = deferred<{ workspace: typeof SHARED_VIEW }>();
@@ -162,16 +157,12 @@ describe("OpenSharedView", () => {
     await screen.findByText("/home/sam/dohc/shared");
     await user.click(screen.getByTestId("open-share-start"));
 
-    expect(screen.getByTestId("open-share-start").textContent).toBe(
-      "Opening the share…",
-    );
+    expect(screen.getByTestId("open-share-start").textContent).toBe("Opening the share…");
     expectMissingInput(null);
     const back = screen.getByRole("button", { name: "Back" }) as HTMLButtonElement;
     expect(back.disabled).toBe(false);
     expect(
-      screen.getByText(
-        "If you go back, dohc keeps opening the share into the folder you chose.",
-      ),
+      screen.getByText("If you go back, dohc keeps opening the share into the folder you chose."),
     ).toBeTruthy();
 
     await user.click(back);
@@ -203,11 +194,9 @@ describe("OpenSharedView", () => {
       />,
     );
 
-    expect(
-      (await screen.findByTestId("open-share-mode-mount")).getAttribute(
-        "aria-checked",
-      ),
-    ).toBe("true");
+    expect((await screen.findByTestId("open-share-mode-mount")).getAttribute("aria-checked")).toBe(
+      "true",
+    );
     expect(screen.queryByTestId("open-share-code")).toBeNull();
     expect(screen.queryByTestId("open-share-choose-folder")).toBeNull();
     expect(screen.getByTestId("open-share-mode-separate")).toBeTruthy();
@@ -246,9 +235,9 @@ describe("OpenSharedView", () => {
     );
     await user.click(screen.getByTestId("open-share-start"));
 
-    expect(
-      (await screen.findByTestId("open-share-error")).textContent,
-    ).toContain("already added to this workspace");
+    expect((await screen.findByTestId("open-share-error")).textContent).toContain(
+      "already added to this workspace",
+    );
   });
 
   it("never opens share B into the folder suggested for share A", async () => {
@@ -362,7 +351,9 @@ describe("OpenSharedView defaults for a pasted code", () => {
     expect(screen.getByText(/Open separately to edit shared Markdown/)).toBeTruthy();
     await waitFor(() => expect(start.disabled).toBe(false));
     expect(start.textContent).toBe("Open share");
-    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({ shareId: "share-1" });
+    expect(bridgeMock.getRelayReceivedShare).toHaveBeenCalledExactlyOnceWith({
+      shareId: "share-1",
+    });
   });
 
   it("keeps the mode the person picked when the answer lands", async () => {

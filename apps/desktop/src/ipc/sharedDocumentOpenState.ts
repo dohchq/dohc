@@ -7,5 +7,7 @@ export const SharedDocumentOpenState = z.object({
 export type SharedDocumentOpenState = z.infer<typeof SharedDocumentOpenState>;
 
 export class SharedDocumentWaitingError extends Error {
-  constructor(readonly waiting: SharedDocumentOpenState) { super(waiting.message); }
+  constructor(readonly waiting: SharedDocumentOpenState) {
+    super(waiting.message);
+  }
 }
