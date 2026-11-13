@@ -2892,13 +2892,14 @@ pub(super) mod tests {
         assert_eq!(conflict_files(root), Vec::<String>::new());
     }
 
-    /// The page of a replica that is not hosted is unchanged: it writes the
-    /// file and leaves the projections' writes queued, as before (#3804). A
-    /// server's automation replica runs this page. A desktop does not.
+    /// A server's automations copy joins as an ordinary replica, not a hosted
+    /// one, and runs the same page. Its projections' queued writes end once
+    /// the file holds the head, so the replay at its next start finds nothing
+    /// to write and keeps no earlier state beside the file.
     #[test]
-    fn a_page_off_a_hosted_replica_leaves_its_projection_writes_queued() {
+    fn an_ordinary_server_copy_ends_the_writes_its_projections_queued() {
         use dohc_engine_storage::JobStatus;
-        let (scratch, _, mut store) = dohc_engine_testkit::open_store();
+        let (scratch, path, mut store) = dohc_engine_testkit::open_store();
         ensure_mutation_version_on_store(&mut store, "ws", "main", 1, &NoFaults).unwrap();
         three_queued_projection_writes(&mut store);
         materialize_relay_page_on_store(
@@ -2915,6 +2916,40 @@ pub(super) mod tests {
             std::fs::read_to_string(scratch.join("note.md")).unwrap(),
             "third\n"
         );
-        assert_eq!(projection_write_statuses(&store), [JobStatus::Pending; 3]);
+
+        // The copy restarts, and its open replays every pending write.
+        drop(store);
+        let mut store = dohc_engine_storage::EngineStore::open(&path, 30).unwrap();
+        let replayed = super::super::materialization::replay_pending_materializations(
+            &mut store,
+            &scratch,
+            super::super::materialization::MaterializationReplayScope {
+                holds: None,
+                workspace_id: "ws",
+                self_writes: None,
+                progress: None,
+                file_outcomes_settled: false,
+                released_hold_paths: None,
+                planned_against_active_heads: false,
+            },
+            30,
+            &NoFaults,
+            None,
+            false,
+        );
+        assert_eq!(conflict_files(&scratch), Vec::<String>::new());
+        replayed.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.join("note.md")).unwrap(),
+            "third\n"
+        );
+        assert_eq!(
+            projection_write_statuses(&store),
+            [
+                JobStatus::Cancelled,
+                JobStatus::Cancelled,
+                JobStatus::Complete
+            ]
+        );
     }
 }
