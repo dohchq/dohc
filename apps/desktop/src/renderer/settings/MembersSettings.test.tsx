@@ -249,6 +249,32 @@ describe("Members page", () => {
     expect(screen.getByRole("switch", { name: "Invite link" }).getAttribute("aria-checked")).toBe("true");
   });
 
+  it("keeps a newer change's view when the reread after overlapping changes fails last", async () => {
+    const linkOff = { inviteLink: { enabled: false, url: null } };
+    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    const link = deferred<MembersResult>();
+    const level = deferred<MembersResult>();
+    const reread = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise).mockReturnValueOnce(reread.promise);
+    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    const both = ownerView({ memberLevel: "edit" });
+    await act(async () => level.resolve({ status: "ready", view: both }));
+    await act(async () => link.resolve({ status: "ready", view: both }));
+    expect(requests().at(-1)).toEqual({ action: "list" });
+    // The page stays usable while it reads again, and a later change lands first.
+    const promoted = ownerView({ memberLevel: "edit", people: [owner, ana, { ...bo, role: "admin" }, cy, dee] });
+    bridge.workspaceMembers.mockImplementationOnce(async () => ({ status: "ready", view: promoted }));
+    await makeAdmin("m-bo");
+    expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
+    await act(async () => reread.reject(new Error("dohc could not reach your server. Check your connection, then try again.")));
+    expect(screen.queryByTestId("settings-members-failed")).toBeNull();
+    expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
   it("still reads the page again after overlapping changes when a change from another workspace answers last", async () => {
     const linkOff = { inviteLink: { enabled: false, url: null } };
     bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
@@ -280,11 +306,15 @@ describe("Members page", () => {
     await screen.findByTestId("settings-members-page");
     const old = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(old.promise);
-    await makeAdmin("m-bo");
+    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
     rerender({ workspaceId: "ws-2" });
     await screen.findByTestId("settings-members-page");
     rerender({ workspaceId: "ws-1" });
     await screen.findByTestId("settings-members-page");
+    // The earlier visit's change no longer holds the switch or its value.
+    const linkSwitch = screen.getByRole("switch", { name: "Invite link" });
+    expect(linkSwitch.getAttribute("aria-checked")).toBe("false");
+    expect((linkSwitch as HTMLButtonElement).disabled).toBe(false);
     const link = deferred<MembersResult>();
     const level = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);

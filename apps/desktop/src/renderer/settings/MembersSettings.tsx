@@ -137,6 +137,9 @@ export function MembersSettings(props: {
 
   const [load, setLoad] = useState<{ key: string; load: Load } | null>(null);
   const [pending, setPending] = useState<{ key: string; items: ReadonlyMap<PendingKey, MembersRequest> } | null>(null);
+  // A change still running from an earlier visit cannot clear its own entry,
+  // so a switch drops them all.
+  useEffect(() => setPending(null), [scopeKey]);
   const [attempt, setAttempt] = useState(0);
   // The owner ended membership here. The page says so above what it lists
   // next, until another change goes through.
@@ -174,7 +177,8 @@ export function MembersSettings(props: {
         }
       },
       (cause: unknown) => {
-        if (!scope.isCurrent(token)) return;
+        // A newer change's view already answers this read.
+        if (!scope.isCurrent(token) || order < applied.current) return;
         const message = ipcErrorMessage(cause, FALLBACK.list);
         setLoad({ key: scopeKey, load: { status: "failed", message } });
         report.current.onError?.(message, cause, async () => setAttempt((count) => count + 1), undefined, listIdentity);
