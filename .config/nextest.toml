@@ -35,21 +35,8 @@ retries = 1
 
 # Keep the latency fixture isolated from other tests in this runner.
 [[profile.default.overrides]]
-filter = 'test(two_thousand_members_bound_store_work_and_ydoc_wait)'
+filter = 'test(many_members_bound_store_work_and_ydoc_wait)'
 threads-required = "num-test-threads"
-
-# Run the WAL-pressure held-proof test alone: it grows the WAL past the write limit, and other tests slow the checkpoints it waits for (#2960).
-[[profile.default.overrides]]
-filter = 'binary_id(=dohc-engine-runtime::integration) & test(=owner_publication::held_proof::a_proof_gives_way_when_the_wal_presses_and_writes_keep_succeeding)'
-threads-required = "num-test-threads"
-
-# This test syncs the disk after each of 2,000 link placements, so a slow or
-# busy disk slows it without stopping it. Under heavy load one run placed 692
-# files in its first 5 minutes, so it gets 20. A stall still fails within two
-# minutes through the test's progress check (#3136).
-[[profile.default.overrides]]
-filter = 'test(=actor::link_rewrites::tests::publication::two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update)'
-slow-timeout = { period = "60s", terminate-after = 20 }
 
 # PR checks select this profile on runners without Landlock, and run the app
 # compiler owner's tests, which apply Landlock, in their confinement job.

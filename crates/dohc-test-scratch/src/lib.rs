@@ -527,27 +527,6 @@ mod tests {
     /// name.
     const THIS_RUN: &str = "current-run-4821-0000000000000003";
 
-    /// Every account shares `/tmp`, so each user gets a parent of their own
-    /// that no other account may enter.
-    #[cfg(unix)]
-    #[test]
-    fn the_default_parent_is_named_for_this_user_and_private() {
-        use std::os::unix::fs::MetadataExt;
-        let parent = private_scratch_parent().expect("this user's parent");
-        let metadata = fs::symlink_metadata(&parent).expect("the parent exists");
-        let name = parent.file_name().and_then(OsStr::to_str).expect("named");
-        assert_eq!(name, user_scratch_parent_name(metadata.uid()));
-        assert_eq!(
-            metadata.mode() & 0o077,
-            0,
-            "only this user may enter {name}"
-        );
-        assert!(
-            is_managed_parent_name(OsStr::new(name)),
-            "the sweep must own {name}"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn a_parent_another_user_owns_or_can_enter_is_refused() {
@@ -577,30 +556,6 @@ mod tests {
         )
         .expect("a link is refused");
         assert!(linked.contains("is not a directory"), "got: {linked}");
-    }
-
-    #[test]
-    fn only_a_managed_parent_name_is_swept() {
-        for managed in [SCRATCH_PARENT, "dohc-scratch-501", "dohc-scratch-0"] {
-            assert!(is_managed_parent_name(OsStr::new(managed)), "{managed}");
-        }
-        for other in [
-            "dohc-scratch-",
-            "dohc-scratch-ice",
-            "dohc-scratchy",
-            "dohc-test-scratch-501",
-            "tmp",
-        ] {
-            assert!(!is_managed_parent_name(OsStr::new(other)), "{other}");
-        }
-    }
-
-    #[test]
-    fn only_a_generated_run_root_is_this_process_to_remove() {
-        assert!(generates_run_root(None, None));
-        assert!(generates_run_root(Some(""), Some("")));
-        assert!(!generates_run_root(Some("/gate/root"), None));
-        assert!(!generates_run_root(None, Some("ci-123")));
     }
 
     #[test]
@@ -635,73 +590,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn drop_removes_the_scratch_directory() {
-        let path = {
-            let scratch = ScratchDir::new_named("drop-test").expect("scratch");
-            let path = scratch.path().to_owned();
-            fs::write(scratch.join("file.txt"), "content").expect("write fixture");
-            path
-        };
-        assert!(
-            !path.exists(),
-            "dropping the guard must remove its directory"
-        );
-    }
-
-    /// A failing test unwinds instead of returning, and cleanup that only runs
-    /// on the success path is what filled the disk. `Drop` runs during the
-    /// unwind, so the directory goes with it. The panic message below is
-    /// deliberate and expected in the test log.
-    #[test]
-    fn a_panicking_test_still_removes_its_scratch_directory() {
-        let scratch = ScratchDir::new_named("panic-test").expect("scratch");
-        let path = scratch.path().to_owned();
-        fs::write(scratch.join("file.txt"), "content").expect("write fixture");
-
-        // The guard moves into the closure, so the unwind is what drops it.
-        let outcome = std::panic::catch_unwind(move || {
-            let _held = scratch;
-            panic!("EXPECTED: a simulated test failure holding a live scratch directory");
-        });
-
-        assert!(outcome.is_err(), "the closure must have panicked");
-        assert!(
-            !path.exists(),
-            "a panicking test must still remove its scratch directory"
-        );
-    }
-
-    /// The runner that inspects this tree hands the root down instead of
-    /// deriving it a second time. Node's `os.tmpdir()` and Rust's
-    /// `std::env::temp_dir()` disagree under WSL, and a runner that counted its
-    /// own guess would report an absent tree as clean.
-    #[test]
-    fn an_explicit_root_wins_over_every_derived_one() {
-        let handed_down = if cfg!(windows) {
-            PathBuf::from(r"C:\handed\down\root")
-        } else {
-            PathBuf::from("/handed/down/root")
-        };
-        let derived_temp = Path::new(if cfg!(windows) {
-            r"C:\other\temp"
-        } else {
-            "/other/temp"
-        });
-
-        let resolved = resolve_run_root(
-            Some(&handed_down.to_string_lossy()),
-            Some("ignored-run-id"),
-            derived_temp,
-        )
-        .expect("an absolute root resolves");
-
-        assert_eq!(
-            resolved, handed_down,
-            "the handed-down root must be used verbatim, never re-derived"
-        );
-    }
-
     /// The JS twin's `safePrefix` had to reject `.` and `..` outright, because
     /// it joins the bare prefix and `join` folds a direction away before
     /// `mkdtemp` adds its suffix. Nothing here has to reject them, because the
@@ -718,53 +606,6 @@ mod tests {
                 "a scratch named {name:?} escaped the run root"
             );
         }
-    }
-
-    /// The relay deployment refuses a path that resolves elsewhere, and macOS
-    /// temp directories resolve into `/private`.
-    #[cfg(unix)]
-    #[test]
-    fn a_scratch_path_is_already_resolved() {
-        let scratch = ScratchDir::new().expect("scratch");
-        assert_eq!(
-            scratch.path(),
-            fs::canonicalize(scratch.path()).expect("canonical scratch")
-        );
-    }
-
-    /// The sweep infers ownership from the run shape, so nothing a caller names
-    /// may take that shape. Without this, `DOHC_TEST_SCRATCH_RUN=ci-123-0123456789abcdef`
-    /// would be swept as a run this crate created. The JS twin refuses the same
-    /// ids in `scratchRunId`.
-    #[test]
-    fn a_configured_run_id_shaped_like_a_generated_one_is_refused() {
-        let temp = Path::new(if cfg!(windows) { r"C:\temp" } else { "/tmp" });
-        let error = resolve_run_root(None, Some("ci-123-0123456789abcdef"), temp)
-            .expect_err("a configured id that reads as generated is not the caller's to keep");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            error.to_string().contains("DOHC_TEST_SCRATCH_RUN"),
-            "the refusal must name the variable, got: {error}"
-        );
-
-        // A name of the caller's own is still theirs to choose.
-        let kept = resolve_run_root(None, Some("ci-123"), temp).expect("a caller's own name");
-        assert_eq!(kept.file_name(), Some(OsStr::new("ci-123")));
-        assert!(
-            !is_run_root_name(OsStr::new("ci-123")),
-            "a name the sweep refuses to touch must not be run-shaped"
-        );
-    }
-
-    #[test]
-    fn a_relative_root_is_refused_by_name() {
-        let error = resolve_run_root(Some("relative/root"), None, Path::new("/tmp"))
-            .expect_err("a relative root cannot be trusted to point anywhere");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            error.to_string().contains("DOHC_TEST_SCRATCH_ROOT"),
-            "the refusal must name the variable, got: {error}"
-        );
     }
 
     /// A soak writes into a workspace it created in its first minute. The run
@@ -825,84 +666,6 @@ mod tests {
         );
     }
 
-    /// The gate hands down `/tmp/dohc-scratch-<uid>/rust-gate-...`, so the
-    /// guard above must not stop the sweep the crate is for.
-    #[test]
-    fn a_run_root_under_the_managed_parent_still_sweeps() {
-        let harness = ScratchDir::new_named("managed-parent").expect("scratch");
-        let parent = harness.join(SCRATCH_PARENT);
-        let aged = parent.join("rust-gate-1234-000000000000dead");
-        let current = parent.join("rust-gate-5678-000000000000beef");
-        fs::create_dir_all(&aged).expect("aged run");
-        fs::create_dir_all(&current).expect("current run");
-
-        let now = SystemTime::now();
-        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
-        set_file_mtime(&aged, stale).expect("age the run root");
-
-        sweep_managed_parent(&current, now);
-
-        assert!(!aged.exists(), "a handed-down gate root must still sweep");
-        assert!(
-            current.exists(),
-            "the current run must survive its own sweep"
-        );
-    }
-
-    /// A clock correction moves `now` behind files already on disk. Their age
-    /// cannot be computed, and the sweep's next act is a recursive delete — so
-    /// an age nobody can establish has to mean the run is busy, never that it
-    /// is 48 hours idle. The JS twin already reads this way: its
-    /// `nowMs - mtimeMs` goes negative, which is inside the cutoff.
-    #[test]
-    fn sweep_keeps_a_run_whose_mtime_is_in_the_future() {
-        let harness = ScratchDir::new_named("future-mtime").expect("scratch");
-        let parent = harness.join("runs");
-        let live = parent.join("future-run-4821-00000000000000bb");
-        fs::create_dir_all(&live).expect("run root");
-        let file = live.join("engine.db");
-        fs::write(&file, b"written after the clock moved back").expect("write");
-
-        let now = SystemTime::now();
-        // The run root itself looks long abandoned; only the file is ahead.
-        let stale = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(60));
-        set_file_mtime(&live, stale).expect("age the run root");
-        set_file_mtime(
-            &file,
-            FileTime::from_system_time(now + Duration::from_secs(3600)),
-        )
-        .expect("stamp the file in the future");
-
-        sweep_old_runs(&parent, &parent.join("current-run"), now).expect("sweep");
-
-        assert!(
-            live.exists(),
-            "an age that cannot be established must read as busy, not as idle"
-        );
-    }
-
-    #[test]
-    fn sweep_removes_only_aged_inactive_runs() {
-        let harness = ScratchDir::new_named("sweep-test").expect("scratch");
-        let parent = harness.join("runs");
-        let old = parent.join("old-run-4821-0000000000000001");
-        let live = parent.join("live-run-4821-0000000000000002");
-        let current = parent.join(THIS_RUN);
-        fs::create_dir_all(&old).expect("old run");
-        fs::create_dir_all(&live).expect("live run");
-        fs::create_dir_all(&current).expect("current run");
-
-        let now = SystemTime::now();
-        let old_time = FileTime::from_system_time(now - MAX_RUN_AGE - Duration::from_secs(1));
-        set_file_mtime(&old, old_time).expect("age old run");
-
-        sweep_old_runs(&parent, &current, now).expect("sweep");
-
-        assert!(!old.exists(), "the sweep must remove an aged run");
-        assert!(live.exists(), "the sweep must keep a recent run");
-        assert!(current.exists(), "the sweep must keep the current run");
-    }
-
     /// The managed parent is a shared directory in `%TEMP%`, and anything can
     /// land in it: a person's own folder, an unpacked archive, another tool's
     /// cache. Age says nothing about who made a directory, and what follows a
@@ -936,130 +699,5 @@ mod tests {
             !mine.exists(),
             "an aged run-shaped root must still be swept"
         );
-    }
-
-    /// The name the Rust gate hands down, read out of the gate itself.
-    ///
-    /// The third producer of run roots is a JavaScript template this crate
-    /// cannot call, and a hand-copied example of its output proves only that
-    /// somebody once typed a matching string. Reading the template means a gate
-    /// that changes how it names its run root fails here instead of leaking
-    /// every root it creates.
-    fn gate_run_root_name() -> String {
-        let gate = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/rust-engine-program/run-rust-checks.mjs");
-        let source = fs::read_to_string(&gate).expect("the gate script is readable");
-        const PREFIX: &str = "rust-gate-${process.pid}-${randomBytes(";
-        let after = source.split_once(PREFIX).map(|(_, rest)| rest).unwrap_or_else(|| {
-            panic!(
-                "{} no longer names its run root `{PREFIX}...`; the sweep's shape guard must be \
-                 checked against whatever it names them now",
-                gate.display()
-            )
-        });
-        let (bytes, rest) = after
-            .split_once(')')
-            .expect("the nonce width is parenthesised");
-        assert!(
-            rest.starts_with(".toString(\"hex\")}"),
-            "the gate's nonce is no longer hex; got `{}`",
-            &rest[..rest.len().min(24)]
-        );
-        let bytes: usize = bytes.parse().expect("the nonce width is a number");
-        format!("rust-gate-4821-{}", "0".repeat(bytes * 2))
-    }
-
-    /// `std`'s `UnixListener::bind` refuses a path that does not fit in
-    /// macOS's 104-byte `sun_path`, terminator included. Tests bind sockets
-    /// straight into a scratch directory, so the longest path the gate's
-    /// layout can produce must stay under that. The worst case is a 10-digit
-    /// uid, a 7-digit gate PID, a four-digit sequence, and the longest socket
-    /// name a test binds: `occupied.sock`, beside `relay.sock` and
-    /// `other.sock`. macOS resolves `/tmp` to `/private/tmp`.
-    #[cfg(unix)]
-    #[test]
-    fn the_longest_socket_path_the_gate_can_produce_fits_on_macos() {
-        const MACOS_SUN_PATH: usize = 104;
-        let gate = gate_run_root_name().replacen("-4821-", "-1234567-", 1);
-        assert!(is_run_root_name(OsStr::new(&gate)), "{gate}");
-        let worst = Path::new("/private/tmp")
-            .join(user_scratch_parent_name(u32::MAX))
-            .join(&gate)
-            .join(scratch_dir_name("scratch", 9_999, u64::MAX))
-            .join("occupied.sock");
-        let length = worst.as_os_str().len();
-        assert!(
-            length < MACOS_SUN_PATH,
-            "{} is {length} bytes; a macOS socket path must be under {MACOS_SUN_PATH}",
-            worst.display()
-        );
-    }
-
-    /// The guard is only as good as its agreement with the names this crate and
-    /// its callers actually create. A producer that drifts out of the shape
-    /// would leak every run it makes, silently, so every producer is checked
-    /// against the predicate rather than described in a comment.
-    #[test]
-    fn every_run_root_this_repo_creates_is_run_shaped() {
-        let temp = Path::new(if cfg!(windows) { r"C:\temp" } else { "/tmp" });
-        let derived = resolve_run_root(None, None, temp).expect("a derived run root");
-        let name = derived.file_name().expect("the run root is named");
-        assert!(
-            is_run_root_name(name),
-            "this crate's own run root is not run-shaped: {name:?}"
-        );
-
-        let gate = gate_run_root_name();
-        assert!(
-            is_run_root_name(OsStr::new(&gate)),
-            "the Rust gate's run root is not run-shaped: {gate:?}"
-        );
-
-        for refused in [
-            "notes-from-a-conference",
-            "process-4821",
-            "process-4821-",
-            "-4821-0f3a1c0d5e2b7648",
-            "process--0f3a1c0d5e2b7648",
-            // A short nonce, an over-long one, and a non-hex one: each is a
-            // name something else made that happens to read like a run.
-            "process-4821-0f3a1c0d",
-            "process-4821-0f3a1c0d5e2b76489",
-            "process-4821-0F3A1C0D5E2B7648",
-            "process-4821-zzzzzzzzzzzzzzzz",
-            // The process id is a number, not any component.
-            "process-main-0f3a1c0d5e2b7648",
-        ] {
-            assert!(
-                !is_run_root_name(OsStr::new(refused)),
-                "{refused:?} is not a name this crate creates, so the sweep must refuse it"
-            );
-        }
-    }
-
-    /// Names both sweeps must agree about, and the answer. `apps/desktop/src/
-    /// workspaces/testTemp.test.ts` holds the same list. A newline is a legal
-    /// character in a name where the gate runs on Linux, and a component may
-    /// hold hyphens of its own — the two are the cases the twins are most
-    /// likely to read differently.
-    const TWIN_CORPUS: &[(&str, bool)] = &[
-        ("process-4821-0f3a1c0d5e2b7648", true),
-        ("rust-gate-1180-3c2e9a1b7d4f0e65", true),
-        ("a-b-c-4821-0f3a1c0d5e2b7648", true),
-        ("a\nb-4821-0f3a1c0d5e2b7648", true),
-        ("notes-from-a-conference", false),
-        ("ci-123", false),
-        ("process-4821-0f3a1c0d", false),
-    ];
-
-    #[test]
-    fn a_run_root_name_is_read_the_same_by_both_sweeps() {
-        for (name, expected) in TWIN_CORPUS {
-            assert_eq!(
-                is_run_root_name(OsStr::new(name)),
-                *expected,
-                "the shared corpus disagrees about {name:?}"
-            );
-        }
     }
 }

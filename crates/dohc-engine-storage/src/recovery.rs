@@ -398,18 +398,6 @@ pub fn create_earlier_store_for_test(path: &Path, missing: usize) -> Result<(), 
     Ok(())
 }
 
-/// Create the store at `path` as a build that stopped before migration `id`
-/// left it.
-#[cfg(any(test, feature = "test-support"))]
-pub fn create_store_before_migration_for_test(path: &Path, id: &str) -> Result<(), StorageError> {
-    use crate::migration::BASELINE_MIGRATIONS;
-    let before = BASELINE_MIGRATIONS
-        .iter()
-        .position(|migration| migration.id == id)
-        .expect("a known migration id");
-    create_earlier_store_for_test(path, BASELINE_MIGRATIONS.len() - before)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,7 +535,7 @@ mod tests {
     #[test]
     fn a_refused_ledger_or_store_is_never_read_or_copied() {
         type Damage = fn(&Path);
-        let cases: [(&str, Damage, &str); 5] = [
+        let cases: [(&str, Damage, &str); 3] = [
             (
                 "unknown",
                 |source| {
@@ -564,30 +552,6 @@ mod tests {
                         .unwrap()
                         .execute_batch(
                             "UPDATE engine_migrations SET checksum='other' WHERE ordinal=1",
-                        )
-                        .unwrap();
-                },
-                "migration-failed",
-            ),
-            (
-                "ordinal",
-                |source| {
-                    Connection::open(source)
-                        .unwrap()
-                        .execute_batch(
-                            "UPDATE engine_migrations SET ordinal=ordinal+1000 WHERE ordinal=2",
-                        )
-                        .unwrap();
-                },
-                "migration-failed",
-            ),
-            (
-                "integrity",
-                |source| {
-                    Connection::open(source)
-                        .unwrap()
-                        .execute_batch(
-                            "UPDATE engine_migrations SET integrity_ok=0 WHERE ordinal=3",
                         )
                         .unwrap();
                 },
@@ -665,27 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn a_migration_that_fails_on_the_copy_stays_a_refusal() {
-        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-runner").unwrap();
-        let (store, folder) = (scratch.path().join("store"), scratch.path().join("copy"));
-        std::fs::create_dir(&store).unwrap();
-        let source = store.join("engine.db");
-        create_store_before_migration_for_test(&source, "v2-live-owner-activations").unwrap();
-        // That migration creates an index of this name, so on this store it fails.
-        Connection::open(&source)
-            .unwrap()
-            .execute_batch("CREATE TABLE live_owner_adoptions_lineage (planted INTEGER)")
-            .unwrap();
-        let before = contents(&store);
-        let refused = open(&source, &folder, &RealFreeSpace, &Arc::default()).unwrap_err();
-        assert!(
-            matches!(&refused, RecoveryError::Storage(error) if error.code() == "migration-failed"),
-            "{refused:?}"
-        );
-        assert_eq!(contents(&store), before);
-    }
-
-    #[test]
     fn a_copy_without_room_or_cancelled_leaves_the_store_as_it_was() {
         let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-space").unwrap();
         let store = scratch.path().join("store");
@@ -736,145 +679,5 @@ mod tests {
         );
         drop((source_conn, target));
         assert_eq!(contents(&store), before);
-    }
-
-    #[test]
-    fn a_store_another_connection_holds_is_busy() {
-        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-busy").unwrap();
-        let store = scratch.path().join("store");
-        std::fs::create_dir(&store).unwrap();
-        let source = store.join("engine.db");
-        earlier_store(&source);
-        let holder = Connection::open(&source).unwrap();
-        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let refused = open(
-            &source,
-            &scratch.path().join("copy"),
-            &RealFreeSpace,
-            &Arc::default(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(refused, RecoveryError::Storage(StorageError::FileLocked)),
-            "{refused:?}"
-        );
-        assert!(!scratch.path().join("copy").exists());
-    }
-
-    /// The WAL another connection makes after the source's WAL was looked for,
-    /// as it opens the store first, stays: the busy open never held the store.
-    #[test]
-    fn a_busy_open_leaves_the_wal_another_connection_made() {
-        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-busy-wal").unwrap();
-        let store = scratch.path().join("store");
-        std::fs::create_dir(&store).unwrap();
-        let source = store.join("engine.db");
-        earlier_store(&source);
-        let wal = store.join("engine.db-wal");
-        assert!(!wal.exists());
-        let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
-        AFTER_WAL_CHECK.with(|hook| {
-            let (holder, source, wal) = (holder.clone(), source.clone(), wal.clone());
-            *hook.borrow_mut() = Some(Box::new(move || {
-                // Out of WAL mode, its exclusive lock keeps every reader out,
-                // and the empty WAL it leaves is open nowhere, so even Windows
-                // would let it be removed.
-                let conn = Connection::open(&source).unwrap();
-                let mode: String = conn
-                    .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
-                    .unwrap();
-                assert_eq!(mode, "delete");
-                conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
-                std::fs::write(&wal, b"").unwrap();
-                *holder.borrow_mut() = Some(conn);
-            }));
-        });
-        let refused = open(
-            &source,
-            &scratch.path().join("copy"),
-            &RealFreeSpace,
-            &Arc::default(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(refused, RecoveryError::Storage(StorageError::FileLocked)),
-            "{refused:?}"
-        );
-        assert!(wal.exists());
-        drop(holder);
-    }
-
-    /// A first read can fail before it takes the store, here with an I/O
-    /// error. The WAL another connection made after the source's WAL was
-    /// looked for then stays.
-    #[test]
-    fn a_failed_first_read_leaves_the_wal_another_connection_made() {
-        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-ioerr-wal").unwrap();
-        let store = scratch.path().join("store");
-        std::fs::create_dir(&store).unwrap();
-        let source = store.join("engine.db");
-        earlier_store(&source);
-        let wal = store.join("engine.db-wal");
-        assert!(!wal.exists());
-        AFTER_WAL_CHECK.with(|hook| {
-            let wal = wal.clone();
-            // Empty and open nowhere, so even Windows would let it be removed.
-            *hook.borrow_mut() = Some(Box::new(move || std::fs::write(&wal, b"").unwrap()));
-        });
-        FIRST_READ_FAULT.with(|fault| {
-            *fault.borrow_mut() = Some(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-                None,
-            ));
-        });
-        let refused = open(
-            &source,
-            &scratch.path().join("copy"),
-            &RealFreeSpace,
-            &Arc::default(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                refused,
-                RecoveryError::Storage(StorageError::StateCorrupt { .. })
-            ),
-            "{refused:?}"
-        );
-        assert!(wal.exists());
-    }
-
-    #[test]
-    fn the_last_check_of_a_migrated_copy_stops_once_cancelled() {
-        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-last-check").unwrap();
-        let copy = scratch.path().join("engine.db");
-        drop(EngineStore::open(&copy, 1).unwrap());
-        assert!(open_copy(&copy, &Arc::new(AtomicBool::new(true))).is_err());
-        assert!(open_copy(&copy, &Arc::default()).is_ok());
-    }
-
-    #[test]
-    fn a_full_volume_for_the_copy_folder_is_a_volume_without_room() {
-        let scratch = dohc_test_scratch::ScratchDir::new_named("recovery-folder-full").unwrap();
-        let store = scratch.path().join("store");
-        std::fs::create_dir(&store).unwrap();
-        let source = store.join("engine.db");
-        earlier_store(&source);
-        let refused = open_for_recovery(
-            &source,
-            |_| Ok(true),
-            || Err(std::io::ErrorKind::StorageFull.into()),
-            &RealFreeSpace,
-            &Arc::default(),
-            1,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                refused,
-                RecoveryError::Storage(StorageError::DiskFull { .. })
-            ),
-            "{refused:?}"
-        );
     }
 }

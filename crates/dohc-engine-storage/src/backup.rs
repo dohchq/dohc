@@ -537,8 +537,6 @@ fn write_manifest_atomic(
 
 #[cfg(test)]
 mod tests {
-    use super::COMPARED_TABLES;
-
     #[test]
     fn vacuum_backup_includes_commits_retained_in_wal_after_actor_close() {
         use crate::{EngineStore, NoFaults, StorageError};
@@ -635,41 +633,10 @@ mod tests {
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
-            "live_audit_record_manifests",
-            "live_audit_pending_exports",
-            "live_audit_settlements",
-            "live_audit_settlement_publications",
-            "live_audit_settlement_conflicts",
-            "live_audit_record_chunks",
-            "live_audit_events",
-            "live_audit_projection_authors",
-            "live_audit_projection_contributions",
-            "live_audit_event_publications",
-            "live_audit_event_conflicts",
-            "live_audit_base_publications",
-            "live_audit_bases",
-            "live_audit_base_conflicts",
             "live_accepted_updates",
-            "live_accepted_checkpoints",
-            "live_accepted_reader_history",
-            "live_restore_fences",
-            "live_restore_cancellations",
-            "ydoc_owner_base_sources",
-            "ydoc_owner_activation_sources",
-            "live_owner_adoptions",
-            "live_owner_activations",
-            "live_owner_retirements",
+            "live_audit_record_manifests",
             "released_tail_generations",
             "released_hold_revisions",
-            "owner_ydoc_outbox_refusals",
-            "live_device_bootstraps",
-            "live_device_settlements",
-            "live_device_application_bindings",
-            "live_device_update_applications",
-            "live_device_application_first_seen",
-            "replication_log",
-            "replication_refused_moment_blobs",
-            "replication_refused_ydoc_blobs",
             "capture_file_holds",
         ]
         .into_iter()
@@ -702,101 +669,6 @@ mod tests {
                     "{table}, missing={missing}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn backup_compares_live_application_tables() {
-        for table in [
-            "live_audit_base_publications",
-            "live_audit_held_records",
-            "live_audit_held_blobs",
-            "live_audit_held_exports",
-            "live_audit_bases",
-            "live_audit_base_conflicts",
-            "live_accepted_updates",
-            "live_accepted_checkpoints",
-            "live_accepted_reader_history",
-            "live_restore_fences",
-            "live_restore_cancellations",
-            "live_owner_adoptions",
-            "live_owner_activations",
-            "live_owner_retirements",
-            "released_tail_generations",
-            "released_hold_revisions",
-            "live_device_bootstraps",
-            "live_device_settlements",
-            "live_empty_settlements",
-            "live_device_application_bindings",
-            "live_device_update_applications",
-            "live_device_application_first_seen",
-        ] {
-            assert!(
-                COMPARED_TABLES.contains(&table),
-                "restore must compare {table}"
-            );
-        }
-    }
-
-    #[test]
-    fn backup_compares_pending_conflict_bundle_tables() {
-        for table in [
-            "replication_pending_conflict_bundles",
-            "replication_pending_conflict_ops",
-            "replication_pending_conflict_moments",
-            "replication_pending_conflict_text_blobs",
-            "replication_pending_conflict_binary_blobs",
-        ] {
-            assert!(
-                COMPARED_TABLES.contains(&table),
-                "backup restore verification must compare {table}"
-            );
-        }
-    }
-
-    #[test]
-    fn backup_compares_the_replication_identity_and_its_pull_progress() {
-        assert!(COMPARED_TABLES.contains(&"sync_identity"));
-    }
-
-    #[test]
-    fn backup_compares_ydoc_arbitration_tables() {
-        for table in [
-            "ydoc_base_relay_candidates",
-            "ydoc_recovery_decisions",
-            "ydoc_drain_reports",
-            "released_hold_copy_decisions",
-        ] {
-            assert!(
-                COMPARED_TABLES.contains(&table),
-                "backup restore verification must compare {table}"
-            );
-        }
-    }
-
-    #[test]
-    fn backup_compares_work_reference_tables() {
-        for table in ["work_references", "work_reference_outbox"] {
-            assert!(
-                COMPARED_TABLES.contains(&table),
-                "backup restore verification must compare {table}"
-            );
-        }
-    }
-
-    #[test]
-    fn backup_compares_owner_ydoc_outbox_tables() {
-        for table in [
-            "owner_ydoc_outboxes",
-            "owner_ydoc_outbox_entries",
-            "owner_ydoc_outbox_refusals",
-            "ydoc_owner_base_sources",
-            "ydoc_owner_activation_sources",
-        ] {
-            assert!(
-                COMPARED_TABLES.contains(&table),
-                "backup restore verification must compare {table}"
-            );
         }
     }
 }

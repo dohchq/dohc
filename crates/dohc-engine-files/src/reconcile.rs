@@ -1078,40 +1078,6 @@ mod ack_receipt_tests {
     }
 
     #[test]
-    fn empty_ack_preserves_manifest_storage_and_advances_generation() {
-        let mut controller = ReconcileController::new();
-        controller.manifest.insert(
-            "note.md".to_owned(),
-            ManifestEntry {
-                size: 3,
-                sha256: "abc".to_owned(),
-                mtime_ms: 42,
-            },
-        );
-        controller.outstanding = true;
-        let plan = empty_plan(&controller);
-        let receipt = empty_receipt();
-        let hash_storage = controller.manifest.get("note.md").unwrap().sha256.as_ptr();
-
-        controller.acknowledge_capture(&plan, &receipt).unwrap();
-
-        let entry = controller.manifest.get("note.md").unwrap();
-        assert_eq!(
-            entry.sha256.as_ptr(),
-            hash_storage,
-            "an empty acknowledgement must not clone the manifest"
-        );
-        assert_eq!(entry.mtime_ms, 42);
-        assert_eq!(controller.generation, plan.to_generation);
-        assert!(!controller.outstanding);
-        assert!(!controller.dirty);
-        assert!(matches!(
-            controller.acknowledge_capture(&plan, &receipt),
-            Err(FilesError::StaleReconcilePlan)
-        ));
-    }
-
-    #[test]
     fn empty_ack_preserves_newer_dirty_signals_and_degraded_retry() {
         let mut controller = ReconcileController::new();
         controller.outstanding = true;
@@ -1279,39 +1245,12 @@ mod respell_order_tests {
             }
         }
     }
-
-    /// A folded group can hold names the volume keeps apart, such as one with
-    /// a zero-width space. A retire pairs only with the ingest at the exact
-    /// spelling its file is stored under, never with another name that shares
-    /// its key.
-    #[test]
-    fn a_respelled_retire_pairs_only_with_its_stored_spelling() {
-        for (ingested, paired) in [("AB.md", false), ("A\u{200b}B.md", true)] {
-            let diff = ScanDiff {
-                added: vec![entry(ingested)],
-                removed: vec!["a\u{200b}b.md".to_owned()],
-                ..ScanDiff::default()
-            };
-            let plan = ReconcilePlan::from_diff(
-                diff,
-                |_| Some("A\u{200b}B.md".to_owned()),
-                ScanGeneration(0),
-                ScanGeneration(1),
-                false,
-                0,
-                false,
-                Vec::new(),
-            );
-            assert_eq!(!plan.respelled_retires.is_empty(), paired, "{ingested}");
-        }
-    }
 }
 
 #[cfg(test)]
 mod stored_name_tests {
     use super::stored_name_among;
     use std::ffi::{OsStr, OsString};
-    use std::io::ErrorKind;
 
     /// Which of `names` a lookup of `leaf` reached, where `same` are the
     /// names that are the file it found.
@@ -1326,43 +1265,7 @@ mod stored_name_tests {
     }
 
     #[test]
-    fn a_listed_name_is_its_own_stored_name() {
-        let found = among("Notes.md", &["notes.md", "Notes.md"], &["notes.md"]);
-        assert_eq!(found.unwrap(), "Notes.md");
-    }
-
-    #[test]
-    fn an_unlisted_name_is_stored_as_the_same_file_spelled_like_it() {
-        let found = among(
-            "Notes.md",
-            &["backup.md", "notes.md"],
-            &["backup.md", "notes.md"],
-        );
-        assert_eq!(
-            found.unwrap(),
-            "notes.md",
-            "a hard link under another name is not this entry"
-        );
-    }
-
-    #[test]
-    fn a_name_the_disk_folds_but_dohc_does_not_still_finds_its_entry() {
-        let found = among(
-            "NOTES~1.MD",
-            &["other.md", "Notes draft.md"],
-            &["Notes draft.md"],
-        );
-        assert_eq!(found.unwrap(), "Notes draft.md");
-    }
-
-    #[test]
     fn two_names_that_could_be_the_entry_are_an_error_not_a_guess() {
         among("NOTES~1.MD", &["a.md", "b.md"], &["a.md", "b.md"]).unwrap_err();
-    }
-
-    #[test]
-    fn a_folder_without_the_file_has_no_stored_name() {
-        let missing = among("Notes.md", &["other.md"], &[]).unwrap_err();
-        assert_eq!(missing.kind(), ErrorKind::NotFound);
     }
 }

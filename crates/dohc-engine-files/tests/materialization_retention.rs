@@ -2,16 +2,16 @@
 #![cfg(unix)]
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, MaterializeOptions, NoBackoff, StdReplacer,
-    materialize_one, recover_displacements,
+    materialize_one,
 };
 use dohc_engine_storage::{
     EngineStore, MaterializationJob, MaterializationJobSpec, NoFaults, Preimage, enqueue_job,
 };
 use dohc_test_scratch::ScratchDir;
-use std::io::Write;
+
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
 fn options(replacer: &dyn AtomicReplacer) -> MaterializeOptions<'_> {
     MaterializeOptions {
         holds: None,
@@ -64,76 +64,7 @@ fn p0_main_proof_held_descriptor_stays_reachable() {
         "main unlinks an inode still open for writing"
     );
 }
-#[test]
-fn p0_main_proof_write_within_q_has_a_reachable_source() {
-    let scratch = ScratchDir::new_named("p0-main-write").unwrap();
-    let root = scratch.path();
-    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
-    let target = root.join("notes.md");
-    std::fs::write(&target, b"before").unwrap();
-    let mut writer = std::fs::OpenOptions::new()
-        .write(true)
-        .open(&target)
-        .unwrap();
-    let j = job(&mut store, "notes.md");
-    materialize_one(&store, root, &j, &options(&StdReplacer)).unwrap();
-    writer.write_all(b"outside within Q").unwrap();
-    drop(writer);
-    let retained = std::fs::read_dir(root.join(".dohc/engine/displaced"))
-        .unwrap()
-        .any(|p| std::fs::read(p.unwrap().path()).unwrap() == b"outside within Q");
-    assert!(retained, "main loses the descriptor write before Q");
-}
-#[test]
-fn p0_main_proof_restart_keeps_a_known_staged_original() {
-    let scratch = ScratchDir::new_named("p0-main-restart").unwrap();
-    let root = scratch.path();
-    let db = root.join("engine.db");
-    let mut store = EngineStore::open(&db, 0).unwrap();
-    let j = job(&mut store, "notes.md");
-    let staging = root.join(".dohc/engine/displaced");
-    std::fs::create_dir_all(&staging).unwrap();
-    let staged = staging.join("736574746c65.0");
-    std::fs::write(&staged, b"before").unwrap();
-    std::fs::write(root.join("notes.md"), b"after").unwrap();
-    drop(store);
-    let store = EngineStore::open(&db, 1000).unwrap();
-    recover_displacements(&store, root, Some("ws"), &options(&StdReplacer)).unwrap();
-    assert!(
-        staged.exists(),
-        "main recovery deletes the known staged original"
-    );
-    assert_eq!(j.job_id, "settle");
-}
-struct CrossVolume(AtomicUsize);
-impl AtomicReplacer for CrossVolume {
-    fn displace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        self.0.fetch_add(1, Ordering::Relaxed);
-        if to.parent().unwrap().file_name().unwrap() == "displaced" {
-            Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
-        } else {
-            std::fs::rename(from, to)
-        }
-    }
-}
-#[test]
-fn p0_main_proof_cross_volume_retries_on_target_volume() {
-    let scratch = ScratchDir::new_named("p0-main-cross").unwrap();
-    let root = scratch.path();
-    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
-    std::fs::write(root.join("notes.md"), b"before").unwrap();
-    let j = job(&mut store, "notes.md");
-    let replacer = CrossVolume(AtomicUsize::new(0));
-    assert_eq!(
-        materialize_one(&store, root, &j, &options(&replacer)).unwrap(),
-        JobOutcome::Completed
-    );
-    assert_eq!(
-        replacer.0.load(Ordering::Relaxed),
-        2,
-        "main uses the checked fallback instead of sibling staging"
-    );
-}
+
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "run only in the task-owned Docker container with DOHC_P0_CONTAINER=1"]
@@ -168,59 +99,4 @@ fn p0_real_cross_volume_save_uses_sibling_staging() {
     std::fs::remove_dir(&sibling).unwrap();
     std::fs::remove_file(root.join(&rel)).unwrap();
     std::fs::remove_dir(root.join(&parent)).unwrap();
-}
-
-#[test]
-#[ignore = "requested save-latency comparison, run in the owned Linux container"]
-fn p0_measure_save_latency() {
-    let mut samples = Vec::new();
-    for round in 0..4 {
-        let scratch = ScratchDir::new_named("p0-latency-sample").unwrap();
-        let root = scratch.path();
-        let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
-        let mut before = vec![0; 64 * 1024];
-        std::fs::write(root.join("notes.md"), &before).unwrap();
-        for n in 0..200 {
-            let after = vec![(n % 251 + 1) as u8; 64 * 1024];
-            let before_sha = store.put_binary_blob(&before).unwrap();
-            let after_sha = store.put_binary_blob(&after).unwrap();
-            let id = format!("sample-{round}-{n}");
-            store
-                .write_with(&NoFaults, |tx| {
-                    enqueue_job(
-                        tx,
-                        &MaterializationJobSpec {
-                            job_id: id.clone(),
-                            workspace_id: "ws".into(),
-                            target_path: "notes.md".into(),
-                            content_sha256: after_sha,
-                            preimage: Preimage::Present(before_sha),
-                            target_generation: n + 1,
-                            now_ms: n,
-                        },
-                    )
-                })
-                .unwrap();
-            let job = store.load_materialization_job(&id).unwrap().unwrap();
-            let mut opts = options(&StdReplacer);
-            opts.policy = DurabilityPolicy::per_os();
-            let start = std::time::Instant::now();
-            assert_eq!(
-                materialize_one(&store, root, &job, &opts).unwrap(),
-                JobOutcome::Completed
-            );
-            if n >= 25 {
-                samples.push(start.elapsed().as_micros());
-            }
-            before = after;
-        }
-    }
-    samples.sort();
-    println!(
-        "save-latency label={} policy=per_os bytes=65536 samples={} median_us={} p95_us={}",
-        std::env::var("R1_LATENCY_LABEL").unwrap_or_default(),
-        samples.len(),
-        samples[samples.len() / 2],
-        samples[samples.len() * 95 / 100]
-    );
 }

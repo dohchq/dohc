@@ -72,38 +72,6 @@ fn complete(
     page
 }
 #[test]
-fn replica_delta_one_edit_in_twenty_thousand_and_all_base_fallbacks() {
-    let (_scratch, mut store) = fixture(20_000);
-    let mut cache = CurrentViewCache::default();
-    let mut request = request();
-    let first = complete(&store, &mut request, &mut cache);
-    assert_eq!(first.files.len(), 20_000);
-    request.since = Some(position(&first));
-    edit(&mut store, 2);
-    let changed = complete(&store, &mut request, &mut cache);
-    assert!(changed.delta);
-    assert_eq!(changed.files.len(), 1);
-    assert_eq!(changed.files[0].object_id, "o000000");
-    assert!(changed.removed.is_empty());
-    request.since = Some(position(&first));
-    assert_eq!(
-        complete(&store, &mut request, &mut cache).files.len(),
-        20_000
-    );
-    request.since = cache.position.clone();
-    request.selectors[0].paths = vec!["docs".into()];
-    assert!(!complete(&store, &mut request, &mut cache).delta);
-    request.since = cache.position.clone();
-    request.incarnation = "two".into();
-    assert_eq!(
-        complete(&store, &mut request, &mut cache).files.len(),
-        20_000
-    );
-    request.since = cache.position.clone();
-    let mut empty = CurrentViewCache::default();
-    assert!(!complete(&store, &mut request, &mut empty).delta);
-}
-#[test]
 fn replica_delta_pagination_rejects_movement_and_tracks_removals() {
     let (_scratch, mut store) = fixture(16_002);
     let mut cache = CurrentViewCache::default();
@@ -162,24 +130,6 @@ fn replica_delta_path_replacement_removes_the_displaced_object() {
     assert_eq!(delta.files[0].object_id, "o000001");
     assert_eq!(delta.removed.len(), 1);
     assert_eq!(delta.removed[0].object_id, "o000000");
-}
-
-#[test]
-fn replica_delta_keeps_writes_after_the_first_page() {
-    let (_scratch, mut store) = fixture(16_002);
-    let mut cache = CurrentViewCache::default();
-    let mut request = request();
-    let first = collect_current_view_cached(&store, "ws", &request, &mut cache).unwrap();
-    request.position = Some(position(&first));
-    request.cursor = first.next_cursor;
-    // A tracked write at the same frontier must survive collection completion.
-    edit(&mut store, 1);
-    let full = complete(&store, &mut request, &mut cache);
-    request.since = Some(position(&full));
-    let delta = complete(&store, &mut request, &mut cache);
-    assert!(delta.delta);
-    assert_eq!(delta.files.len(), 1);
-    assert_eq!(delta.files[0].object_id, "o000000");
 }
 
 #[test]

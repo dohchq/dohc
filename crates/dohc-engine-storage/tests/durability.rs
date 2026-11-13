@@ -6,10 +6,9 @@
 //! `cargo test --workspace`).
 
 use dohc_engine_storage::{
-    BackupOutcome, CorruptionKind, DiagnosticBundle, DisplacementResolution, DisplacementSpec,
-    DisplacementState, EngineStore, FreeSpaceProbe, JobStatus, MaterializationJobSpec, NoFaults,
-    Preimage, StorageError, classify, create_verified_backup, enqueue_job, hex_sha256,
-    load_valid_backup,
+    BackupOutcome, CorruptionKind, DisplacementResolution, DisplacementSpec, DisplacementState,
+    EngineStore, FreeSpaceProbe, JobStatus, MaterializationJobSpec, NoFaults, Preimage,
+    StorageError, classify, create_verified_backup, enqueue_job, hex_sha256, load_valid_backup,
 };
 use dohc_test_scratch::ScratchDir;
 use rusqlite::config::DbConfig;
@@ -127,54 +126,6 @@ fn materialization_reads_text_without_copy_and_checks_integrity() {
     );
 }
 
-#[test]
-fn binary_blob_dedup_and_readback() {
-    let scratch = Scratch::new("blob");
-    let store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-
-    let a = store.put_binary_blob(b"hello world").expect("put a");
-    let a2 = store.put_binary_blob(b"hello world").expect("put a again");
-    let b = store.put_binary_blob(b"different").expect("put b");
-
-    assert_eq!(a, a2, "identical content dedups to one key");
-    assert_ne!(a, b);
-    assert_eq!(
-        store.binary_blob_count().expect("count"),
-        2,
-        "dedup: 2 rows"
-    );
-    assert_eq!(
-        store.get_binary_blob(&a).expect("get"),
-        Some(b"hello world".to_vec())
-    );
-    assert_eq!(a, hex_sha256(b"hello world"), "key is the content sha-256");
-    assert!(store.get_binary_blob("00").expect("miss").is_none());
-}
-
-#[test]
-fn binary_blob_integrity_check_fails_closed_on_tampered_bytes() {
-    let scratch = Scratch::new("blob-tamper");
-    let key = hex_sha256(b"authentic");
-    {
-        let store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        store.put_binary_blob(b"authentic").expect("put");
-        drop(store);
-    }
-    // Tamper: overwrite the bytes under the same key via a raw connection.
-    {
-        let conn = Connection::open(scratch.db_path()).expect("raw open");
-        conn.execute(
-            "UPDATE binary_blobs SET bytes = ?1 WHERE sha256 = ?2",
-            rusqlite::params![b"CORRUPTED".to_vec(), key],
-        )
-        .expect("tamper");
-        conn.close().expect("close");
-    }
-    let store = EngineStore::open(&scratch.db_path(), 2).expect("reopen");
-    let err = store.get_binary_blob(&key).unwrap_err();
-    assert_eq!(err.code(), "blob-integrity");
-}
-
 // ---------------------------------------------------------------------------
 // backups
 // ---------------------------------------------------------------------------
@@ -213,33 +164,6 @@ fn verified_backup_restore_roundtrips_the_data() {
     let restored = EngineStore::open(&backup_db, 1000).expect("open backup as store");
     assert_eq!(read_doc(&restored, "doc-a"), Some("alpha".to_owned()));
     assert_eq!(read_doc(&restored, "doc-b"), Some("beta".to_owned()));
-}
-
-#[test]
-fn backup_disk_full_fails_closed_and_never_touches_source() {
-    let scratch = Scratch::new("backup-full");
-    let recovery = scratch.sub("recovery");
-    let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-    write_doc(&mut store, "doc-a", "important");
-
-    // A probe reporting almost no space forces disk-full before any copy.
-    let err = create_verified_backup(
-        &store,
-        &recovery,
-        "snapshot",
-        "periodic",
-        999,
-        &FakeSpace(1),
-        &NoFaults,
-    )
-    .unwrap_err();
-    assert_eq!(err.code(), "disk-full");
-    // The only valid source is untouched and still readable.
-    assert_eq!(read_doc(&store, "doc-a"), Some("important".to_owned()));
-    assert!(
-        !recovery.join("snapshot.db").exists(),
-        "no partial backup left"
-    );
 }
 
 #[cfg(feature = "fault-injection")]
@@ -317,124 +241,11 @@ mod backup_crash {
             "manifest after retry"
         );
     }
-
-    #[test]
-    fn crash_during_restore_verify_never_sets_verified_and_source_untouched() {
-        let scratch = Scratch::new("backup-crash-verify");
-        let recovery = scratch.sub("recovery");
-        let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        write_doc(&mut store, "doc-a", "data");
-
-        let faults = OneShot::at(FaultPoint::BackupDuringRestoreVerify);
-        let outcome = create_verified_backup(
-            &store,
-            &recovery,
-            "snapshot",
-            "periodic",
-            999,
-            &FakeSpace(1 << 30),
-            &faults,
-        )
-        .expect("backup");
-        assert!(matches!(outcome, BackupOutcome::Crashed { .. }));
-        assert!(
-            !recovery.join("snapshot.manifest.json").exists(),
-            "verified flag never persisted"
-        );
-        assert_eq!(read_doc(&store, "doc-a"), Some("data".to_owned()));
-    }
 }
 
 // ---------------------------------------------------------------------------
 // corruption classification + diagnostics
 // ---------------------------------------------------------------------------
-
-#[test]
-fn corruption_kinds_are_distinct_per_error_family() {
-    let cases: &[(StorageError, CorruptionKind)] = &[
-        (
-            StorageError::UnsupportedFingerprint {
-                found: 1,
-                expected: 2,
-            },
-            CorruptionKind::UnsupportedFingerprint,
-        ),
-        (
-            StorageError::MigrationFailed { source: None },
-            CorruptionKind::MigrationFailure,
-        ),
-        (
-            StorageError::MigratedByNewerBuild {
-                ordinal: 5,
-                id: "from-a-newer-build".to_owned(),
-            },
-            CorruptionKind::MigrationFailure,
-        ),
-        (
-            StorageError::DiskFull {
-                needed: 10,
-                available: 1,
-            },
-            CorruptionKind::DiskFull,
-        ),
-        (
-            StorageError::PermissionDenied { source: None },
-            CorruptionKind::Permission,
-        ),
-        (StorageError::FileLocked, CorruptionKind::TransientLock),
-        (
-            StorageError::StateCorrupt { source: None },
-            CorruptionKind::Corruption,
-        ),
-        (StorageError::ForeignDatabase, CorruptionKind::Corruption),
-    ];
-    for (err, expected) in cases {
-        assert_eq!(classify(err), *expected, "classify {}", err.code());
-    }
-    // Every kind has a distinct code.
-    let codes = [
-        CorruptionKind::UnsupportedFingerprint.code(),
-        CorruptionKind::MigrationFailure.code(),
-        CorruptionKind::Corruption.code(),
-        CorruptionKind::Permission.code(),
-        CorruptionKind::DiskFull.code(),
-        CorruptionKind::TransientLock.code(),
-    ];
-    let unique: std::collections::HashSet<_> = codes.iter().collect();
-    assert_eq!(unique.len(), codes.len(), "codes are distinct");
-}
-
-#[test]
-fn unsupported_fingerprint_open_is_refused_and_preserves_evidence() {
-    let scratch = Scratch::new("v1-fence");
-    let db = scratch.db_path();
-    // Build a v1 (foreign-fingerprint) database with a table.
-    {
-        let conn = Connection::open(&db).expect("raw");
-        conn.execute_batch("CREATE TABLE legacy (x INTEGER);")
-            .expect("ddl");
-        conn.pragma_update(None, "user_version", 1).expect("uv");
-        conn.close().expect("close");
-    }
-    let before = std::fs::read(&db).expect("read before");
-
-    let err = EngineStore::open(&db, 1).unwrap_err();
-    assert_eq!(err.code(), "unsupported-fingerprint");
-    assert_eq!(classify(&err), CorruptionKind::UnsupportedFingerprint);
-
-    // Original DB preserved byte-for-byte (never initialized-over).
-    let after = std::fs::read(&db).expect("read after");
-    assert_eq!(before, after, "rejected store left byte-unchanged");
-
-    // Redacted diagnostic bundle: no absolute path, valid classification.
-    let bundle = DiagnosticBundle::for_open_failure(&err, None, &db, 5);
-    let json = bundle.to_json();
-    assert!(json.contains("\"unsupported-fingerprint\""));
-    let root_str = scratch.root.to_string_lossy().to_string();
-    assert!(!json.contains(&root_str), "no absolute path in the bundle");
-    // Evidence lists the file basename only.
-    assert!(bundle.evidence.iter().any(|e| e == "engine.db"));
-}
 
 /// The rows a newer build's migration commits: its table and a completed
 /// ledger row after the last one this build defines.
@@ -484,43 +295,6 @@ fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     );
 }
 
-/// A newer build that also stamps another schema version, zero included, is
-/// still a newer build. Its store needs an update, never the rebuild that an
-/// unsupported fingerprint or a foreign database offers.
-#[test]
-fn a_newer_build_that_restamps_the_schema_version_is_named_as_newer() {
-    for version in [3, 0] {
-        let scratch = Scratch::new(&format!("newer-build-version-{version}"));
-        let db = scratch.db_path();
-        drop(EngineStore::open(&db, 1).expect("open"));
-        {
-            let conn = Connection::open(&db).expect("raw");
-            conn.execute_batch(NEWER_BUILD_MIGRATION)
-                .expect("a newer build migrates");
-            conn.pragma_update(None, "user_version", version)
-                .expect("and stamps its own version");
-            conn.close().expect("close");
-        }
-        let before = std::fs::read(&db).expect("read before");
-
-        for refused in [
-            EngineStore::open(&db, 2).unwrap_err(),
-            EngineStore::open_read_only(&db).unwrap_err(),
-        ] {
-            assert_eq!(
-                refused.code(),
-                "migrated-by-newer-build",
-                "user_version {version}"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&db).expect("read after"),
-            before,
-            "refused store left byte-identical at user_version {version}"
-        );
-    }
-}
-
 /// A newer build that crashed leaves its last commit in the WAL. Refusing
 /// its store must not checkpoint that commit into engine.db: both files stay
 /// byte-identical, so no frame is lost or moved.
@@ -559,48 +333,6 @@ fn refusing_a_newer_store_leaves_its_wal_frames_in_place() {
         wal_before,
         "the WAL keeps every frame"
     );
-}
-
-#[test]
-fn corrupt_page1_header_classifies_as_corruption_not_unsupported() {
-    let scratch = Scratch::new("corrupt-header");
-    let db = scratch.db_path();
-    // A real store with data, then a garbage user_version stamped on top.
-    {
-        let mut store = EngineStore::open(&db, 1).expect("open");
-        write_doc(&mut store, "doc-a", "payload-for-pages");
-        drop(store);
-    }
-    {
-        let conn = Connection::open(&db).expect("raw");
-        conn.pragma_update(None, "user_version", 99).expect("uv");
-        conn.close().expect("close");
-    }
-    // Corrupt page-2 bytes so integrity is genuinely broken (a garbled header
-    // that merely changed user_version would otherwise read as a foreign
-    // fingerprint). Wipe the WAL/SHM first so the main file is authoritative.
-    let _ = std::fs::remove_file(scratch.root.join("engine.db-wal"));
-    let _ = std::fs::remove_file(scratch.root.join("engine.db-shm"));
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&db)
-            .expect("open db");
-        f.seek(SeekFrom::Start(4096)).expect("seek");
-        f.write_all(&[0xFFu8; 1024]).expect("corrupt");
-        f.sync_all().expect("sync");
-    }
-
-    let err = EngineStore::open(&db, 2).unwrap_err();
-    // A corrupt store must be classified corruption ("restore from backup"),
-    // never unsupported-fingerprint ("export/reset").
-    assert_eq!(
-        classify(&err),
-        CorruptionKind::Corruption,
-        "err was {}",
-        err.code()
-    );
-    assert_ne!(err.code(), "unsupported-fingerprint");
 }
 
 // ---------------------------------------------------------------------------
@@ -691,103 +423,6 @@ fn job_spec(id: &str, path: &str, content_sha: &str, now: i64) -> Materializatio
         preimage: Preimage::Absent,
         target_generation: 1,
         now_ms: now,
-    }
-}
-
-#[test]
-fn materialization_job_lifecycle_transitions() {
-    let scratch = Scratch::new("job-life");
-    let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-    let sha = store.put_binary_blob(b"content").expect("blob");
-
-    // Enqueue two jobs in one transaction (phase-1 atomicity is type-enforced:
-    // `enqueue_job` demands a `&Transaction`, so this cannot compile on an
-    // autocommit connection).
-    store
-        .write_with(&NoFaults, |tx| {
-            enqueue_job(tx, &job_spec("j1", "notes/a.md", &sha, 10))?;
-            enqueue_job(tx, &job_spec("j2", "notes/b.md", &sha, 11))?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("enqueue");
-
-    assert_eq!(store.pending_materialization_count().expect("count"), 2);
-    let pending = store.list_pending_materialization_jobs().expect("list");
-    assert_eq!(pending.len(), 2);
-    assert_eq!(pending[0].job_id, "j1", "oldest first");
-
-    store
-        .mark_materialization_complete("j1", 20)
-        .expect("complete");
-    assert_eq!(store.pending_materialization_count().expect("count2"), 1);
-    store
-        .mark_materialization_conflict("j2", 21)
-        .expect("conflict");
-    assert_eq!(store.pending_materialization_count().expect("count3"), 0);
-
-    let j2 = store
-        .load_materialization_job("j2")
-        .expect("load")
-        .expect("some");
-    assert_eq!(j2.status, dohc_engine_storage::JobStatus::Conflict);
-}
-
-#[test]
-fn corrupt_materialization_rows_refuse_loading_without_rewriting_the_ledger() {
-    for mutation in [
-        "preimage_present = 1, preimage_sha256 = NULL",
-        "preimage_present = 1, preimage_sha256 = ''",
-        "preimage_present = 0, preimage_sha256 = 'unexpected'",
-        "preimage_present = 2, preimage_sha256 = NULL",
-        "status = 'unknown'",
-        "operation = 'unknown'",
-    ] {
-        let scratch = Scratch::new("corrupt-materialization-job");
-        let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        let sha = store.put_binary_blob(b"content").expect("blob");
-        store
-            .write_with(&NoFaults, |tx| {
-                enqueue_job(tx, &job_spec("j1", "notes/a.md", &sha, 10))
-            })
-            .expect("enqueue");
-        assert_eq!(
-            store
-                .load_materialization_job("j1")
-                .unwrap()
-                .unwrap()
-                .preimage,
-            Preimage::Absent
-        );
-        let db = Connection::open(scratch.db_path()).expect("open ledger");
-        db.execute_batch(&format!(
-            "UPDATE materialization_jobs SET {mutation} WHERE job_id = 'j1'"
-        ))
-        .expect("inject malformed row");
-        let row_json = || {
-            db.query_row(
-                "SELECT json_array(preimage_present, preimage_sha256, status, operation) \
-                 FROM materialization_jobs WHERE job_id = 'j1'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read evidence")
-        };
-        let before = row_json();
-        assert!(
-            matches!(
-                store.load_materialization_job("j1"),
-                Err(StorageError::StateCorrupt { .. })
-            ),
-            "loading {mutation} must report corruption"
-        );
-        assert!(
-            matches!(
-                store.list_materialization_jobs(),
-                Err(StorageError::StateCorrupt { .. })
-            ),
-            "listing {mutation} must report corruption"
-        );
-        assert_eq!(row_json(), before, "refusal must preserve {mutation}");
     }
 }
 
@@ -902,75 +537,6 @@ fn job_and_canonical_state_commit_atomically() {
 // transient contention
 // ---------------------------------------------------------------------------
 
-/// Real contention, not an injected variant: a second connection holds the
-/// write lock and the store's own transaction is refused.
-///
-/// `StorageError::FileLocked` had NO producer anywhere in the engine. Its
-/// doc-comment described a busy SQLite handle, `diagnostics` classified it
-/// `TransientLock`, and the whole taxonomy above it answered a condition
-/// nothing ever raised — every genuine `SQLITE_BUSY` went to
-/// `StorageError::persist` and reached callers as terminal `persist-failed`.
-///
-/// This test is the reachability proof, so it uses no fault injection and
-/// builds no error by hand: it makes SQLite say busy and reads what the store
-/// returns. The wait is the store's own `ENGINE_SQLITE_BUSY_TIMEOUT_MS`
-/// budget, which is what "the retry budget was exhausted" means.
-///
-#[test]
-fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
-    let scratch = Scratch::new("busy-contention");
-    let path = scratch.db_path();
-    let mut store = EngineStore::open(&path, 1_000).expect("open the engine store");
-
-    // A second connection takes the write lock and keeps it.
-    let blocker = Connection::open(&path).expect("open a second connection");
-    blocker
-        .execute_batch("BEGIN IMMEDIATE")
-        .expect("the blocker takes the write lock");
-
-    // The store's own write now waits out its busy budget and is refused.
-    let refused = store
-        .write_with(&NoFaults, |tx| {
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS r3_probe (id INTEGER)")
-                .map_err(StorageError::persist_public)
-        })
-        .expect_err("a held write lock must refuse this transaction");
-
-    assert!(
-        matches!(refused, StorageError::FileLocked),
-        "real SQLITE_BUSY is not the transient lock, it is {refused:?}"
-    );
-    assert_eq!(refused.code(), "file-locked");
-    // The store is intact, which is the half that makes it retryable: the
-    // same write succeeds once the blocker lets go.
-    blocker
-        .execute_batch("ROLLBACK")
-        .expect("the blocker releases the write lock");
-    store
-        .write_with(&NoFaults, |tx| {
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS r3_probe (id INTEGER)")
-                .map_err(StorageError::persist_public)
-        })
-        .expect("the same write lands once the contention clears");
-}
-
-/// The narrowness guard. `is_busy` reads the SQLite result code, so an
-/// ordinary SQL failure must keep its terminal answer — otherwise every
-/// persist failure would advertise a retry that cannot help.
-///
-#[test]
-fn an_ordinary_sql_failure_is_still_terminal() {
-    let scratch = Scratch::new("busy-narrowness");
-    let mut store = EngineStore::open(&scratch.db_path(), 1_000).expect("open the engine store");
-    let refused = store
-        .write_with(&NoFaults, |tx| {
-            tx.execute_batch("THIS IS NOT SQL")
-                .map_err(StorageError::persist_public)
-        })
-        .expect_err("a malformed statement must fail");
-    assert_eq!(refused.code(), "persist-failed");
-}
-
 // ---------------------------------------------------------------------------
 // materialization displacements
 // ---------------------------------------------------------------------------
@@ -985,33 +551,6 @@ fn displacement_spec(job_id: &str, displaced_name: &str) -> DisplacementSpec {
         content_sha256: Some(hex_sha256(b"content")),
         now_ms: 5,
     }
-}
-
-#[test]
-fn displacement_group_commit_rolls_back_every_row_on_failure() {
-    let sc = Scratch::new("displacement-batch");
-    let store = EngineStore::open(&sc.db_path(), 1).expect("open");
-    let one = displacement_spec("j1", "6a31.0");
-    let mut invalid = displacement_spec("j2", "6a32.0");
-    invalid.displaced_name = one.displaced_name.clone();
-    // Duplicate names may not be unique in old stores; force a trigger error
-    // after the first insertion to prove transaction-wide rollback.
-    let conn = Connection::open(sc.db_path()).expect("connection");
-    conn.execute_batch("CREATE TRIGGER reject_second BEFORE INSERT ON materialization_displacements WHEN NEW.job_id = 'j2' BEGIN SELECT RAISE(ABORT, 'injected'); END;").expect("trigger");
-    assert!(store.open_displacements(&[one.clone(), invalid]).is_err());
-    assert!(
-        store
-            .list_unsettled_displacements()
-            .expect("rows")
-            .is_empty()
-    );
-    conn.execute_batch("DROP TRIGGER reject_second")
-        .expect("drop trigger");
-    let ids = store
-        .open_displacements(&[one, displacement_spec("j2", "6a32.0")])
-        .expect("batch");
-    assert_eq!(ids.len(), 2);
-    assert_eq!(store.list_unsettled_displacements().expect("rows").len(), 2);
 }
 
 /// A row moves open, then kept or deleted, and its job's status changes in

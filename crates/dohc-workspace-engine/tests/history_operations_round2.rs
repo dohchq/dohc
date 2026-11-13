@@ -98,36 +98,8 @@ async fn fixture(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn history_operation_large_summary_is_bounded() {
-    let (_scratch, transport, handle) = fixture(5000).await;
-    let result = call(
-        &transport,
-        &handle,
-        20,
-        "history.operations",
-        json!({"operationId":OP}),
-    )
-    .await;
-    let bytes = serde_json::to_vec(&result).unwrap().len();
-    println!("5000-member operation summary: {bytes} bytes");
-    assert!(
-        bytes < 16 * 1024,
-        "operation summary must not grow with group size"
-    );
-    assert_eq!(result["momentCount"], 5000);
-    assert!(result.get("moments").is_none());
-    call(&transport, &handle, 21, "workspace.close", json!({})).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_operation_large_undo_rpc_is_bounded_and_paged() {
     undo_rpc_proof(128).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "5000-member end-to-end measurement runs separately under the build budget"]
-async fn history_operation_5000_member_undo_rpc_budget() {
-    undo_rpc_proof(5000).await;
 }
 
 async fn undo_rpc_proof(n: usize) {

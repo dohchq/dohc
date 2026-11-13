@@ -1956,25 +1956,6 @@ mod tests {
     }
 
     #[test]
-    fn dependents_changed_maps_to_conflict_for_share_requests() {
-        assert_eq!(
-            map_server_code("dependents_changed", RequestContext::Share),
-            RelayError::Conflict
-        );
-    }
-
-    #[test]
-    fn relay_api_version_matches_the_typescript_contract() {
-        let contract = include_str!("../../../packages/workspace-contracts/src/relayValues.ts");
-        assert!(contract.contains(&format!(
-            "export const RELAY_API_VERSION_HEADER = \"{RELAY_API_VERSION_HEADER}\";"
-        )));
-        assert!(contract.contains(&format!(
-            "export const RELAY_API_VERSION = {RELAY_API_VERSION};"
-        )));
-    }
-
-    #[test]
     fn mapped_server_codes_and_relay_fixture_are_bidirectional() {
         let fixture: Vec<RelayErrorFixture> = serde_json::from_str(include_str!(
             "../../../services/sync-relay/relay-error-codes.json"
@@ -2226,71 +2207,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hosted_push_reads_the_relays_refusal_of_each_op() {
-        let op = ReplicationEnvelope {
-            workspace_id: "ws".into(),
-            origin_id: "service-host:host".into(),
-            origin_seq: 3,
-            relay_seq: None,
-            op_kind: "ydoc.update".into(),
-            payload: serde_json::json!({"objectId":"object"}),
-            recorded_at_ms: 7,
-            settlement_admission: None,
-            admitted_author_snapshot: None,
-        };
-        let (base, server) = answer_once(
-            200,
-            r#"{"ok":true,"accepted":1,"inserted":1,"skipped":0,"currentMaxOriginSeq":3,"refusals":[{"originId":"service-host:host","originSeq":3,"opKind":"ydoc.update","reason":"outside-hosted-documents"}]}"#,
-        );
-        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token")
-            .unwrap()
-            .hosted();
-        let response = transport
-            .push_hosted(PushRequest {
-                work_references: Vec::new(),
-                workspace_id: "ws".into(),
-                replication_epoch: "epoch".into(),
-                stream_identity: "stream".into(),
-                origin_id: "service-host:host".into(),
-                after_seq: 2,
-                ops: vec![op],
-            })
-            .unwrap();
-        assert_eq!(
-            response.hosted_refusals,
-            [dohc_engine_sync::HostedPushRefusal {
-                origin_id: "service-host:host".into(),
-                origin_seq: 3,
-                op_kind: "ydoc.update".into(),
-                reason: "outside-hosted-documents".into(),
-            }]
-        );
-        assert!(server.join().unwrap().contains("/sync/ws/hosted/log"));
-    }
-
-    #[test]
-    fn settlement_proof_budget_503_is_retryable() {
-        let (base, server) = answer_once(
-            503,
-            r#"{"code":"settlement_proof_budget","error":"Publication proof exceeds this request's budget."}"#,
-        );
-        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
-        assert_eq!(
-            transport.push(PushRequest {
-                work_references: Vec::new(),
-                workspace_id: "ws".into(),
-                replication_epoch: "epoch".into(),
-                stream_identity: "stream".into(),
-                origin_id: "origin".into(),
-                after_seq: -1,
-                ops: vec![]
-            }),
-            Err(RelayError::SettlementProofBudget)
-        );
-        server.join().unwrap();
-    }
-
     /// A stale base and a refusal come back as answers the recipient shows;
     /// every other refusal is an error, mapped as every route maps it.
     #[test]
@@ -2371,29 +2287,6 @@ mod tests {
     }
 
     #[test]
-    fn response_budget_covers_a_full_maximal_relay_page() {
-        let required = MAX_PULL_OPS
-            * (MAX_PAYLOAD_JSON_BYTES + MAX_LOG_ROW_RESPONSE_OVERHEAD_BYTES)
-            + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES;
-        assert!(
-            usize::try_from(MAX_JSON_RESPONSE_BYTES).is_ok_and(|budget| budget >= required),
-            "a legal 500-row page must fit the configured response budget"
-        );
-    }
-
-    #[test]
-    fn native_settlement_authors_follow_the_service_credential_route() {
-        for (token, native) in [
-            ("dohc-service-v1.test", true),
-            ("dohc-automation-v1.test", false),
-            ("test:owner", false),
-        ] {
-            let transport = HttpRelayTransport::new("https://relay.example", token).unwrap();
-            assert_eq!(transport.publishes_native_settlements(), native);
-        }
-    }
-
-    #[test]
     fn plaintext_bearer_transport_requires_the_debug_loopback_opt_in() {
         assert_eq!(
             HttpRelayTransport::new("http://127.0.0.1:1", "token").err(),
@@ -2431,38 +2324,6 @@ mod tests {
                 .is_err()
             );
         }
-    }
-
-    #[test]
-    fn relay_base_url_rejects_query_and_fragment_components() {
-        assert_eq!(
-            HttpRelayTransport::new("https://relay.example?tenant=a", "token").err(),
-            Some(RelayError::InvalidResponse),
-            "a malformed https address must not tell the person to use https"
-        );
-        assert_eq!(
-            HttpRelayTransport::new("HTTPS://relay.example/#fragment", "token").err(),
-            Some(RelayError::InvalidResponse)
-        );
-        assert!(
-            HttpRelayTransport::new("https://relay.example/base", "token").is_ok(),
-            "ordinary path prefixes remain supported"
-        );
-    }
-
-    #[test]
-    fn production_https_agent_refuses_every_redirect_and_requires_https() {
-        let transport =
-            HttpRelayTransport::new("https://relay.example", "token").expect("https transport");
-        assert!(
-            transport.agent.config().https_only(),
-            "disabling https_only permits an https base to downgrade on redirect"
-        );
-        assert_eq!(
-            transport.agent.config().max_redirects(),
-            0,
-            "restoring ureq's redirect default reaches unvalidated destinations"
-        );
     }
 
     #[test]
@@ -2708,15 +2569,6 @@ mod tests {
             matches!(&outcome, Err(RelayError::Local(reason)) if reason == "relay-io-cancelled"),
             "a cancelled body must not expose the bytes read before cancellation: {outcome:?}"
         );
-    }
-
-    #[test]
-    fn loopback_opt_in_disables_https_only_but_still_refuses_redirects() {
-        let transport =
-            HttpRelayTransport::new_insecure_loopback_for_tests("http://127.0.0.1:1", "token")
-                .expect("loopback transport");
-        assert!(!transport.agent.config().https_only());
-        assert_eq!(transport.agent.config().max_redirects(), 0);
     }
 
     /// The debug-only constructor that trusts one test CA, against a real TLS

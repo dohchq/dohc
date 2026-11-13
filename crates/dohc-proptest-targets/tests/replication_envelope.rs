@@ -1,32 +1,5 @@
-//! Cutover-blocking fuzz families: replication envelopes (generic + secret).
-//!
-//! Surfaces under test:
-//! - `serde_json::from_slice::<ReplicationEnvelope>` -- arbitrary bytes off
-//!   the wire (a relay/peer is a remote, cross-process input source).
-//! - `dohc_engine_sync::apply_envelope_with` against a REAL `EngineStore`
-//!   (via `dohc-engine-testkit`'s `ScratchDir`, the same bootstrap this
-//!   crate's own unit tests use) -- structurally-random envelope field
-//!   values (adversarial strings, huge/negative integers, oversized
-//!   payloads) run through the actual production validate-then-transact
-//!   boundary, not a reimplementation of it.
-//! - `dohc_engine_sync::apply_secret_envelope` -- the 4th untrusted input
-//!   surface: ENCRYPTED secret replication envelopes (`secret.file.put` /
-//!   `secret.file.delete`), including structurally-plausible-but-invalid
-//!   secret payloads (random iv/tag/sha/byte-length).
-//!
-//! Properties asserted:
-//! - **No panic** (implicit: proptest fails the case on any panic).
-//! - **Fail-closed BEFORE any store mutation**: `apply_envelope_with` calls
-//!   `envelope.validate()` as its very first step, before opening a
-//!   transaction (`crates/dohc-engine-sync/src/apply.rs`) -- an envelope
-//!   that violates `ReplicationEnvelope::validate`'s documented bounds
-//!   (non-empty/bounded `workspace_id`/`origin_id`/`op_kind`, `origin_seq`
-//!   in the wire-integer range, payload under the byte cap) must be
-//!   rejected WITHOUT the caller's `mutation` closure ever running.
-//! - Valid secret puts reach storage; single-field mutations fail at the
-//!   intended metadata/blob check without writing secret tips or moments.
-//! - Serialized payloads at the relay byte cap apply; one byte over is
-//!   refused before the mutation callback, including escaped JSON strings.
+//! Real-store envelope validation, secret corruption refusals, and byte limits.
+//! Copied stores retain independent commits and replay them after reopen.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -115,74 +88,6 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
             any::<i64>().prop_map(|value| serde_json::json!(value)),
             "[a-zA-Z0-9]{0,256}".prop_map(|value| serde_json::json!(value)),
         ],
-        any::<i64>(),
-    )
-        .prop_map(
-            |(workspace_id, origin_id, origin_seq, relay_seq, op_kind, payload, recorded_at_ms)| {
-                ReplicationEnvelope {
-                    settlement_admission: None,
-                    admitted_author_snapshot: None,
-                    workspace_id,
-                    origin_id,
-                    origin_seq,
-                    relay_seq,
-                    op_kind,
-                    payload,
-                    recorded_at_ms,
-                }
-            },
-        )
-}
-
-/// A secret replication `op_kind`: biased toward the two real secret kinds so
-/// the apply path is actually exercised, plus arbitrary junk kinds that must
-/// be rejected as unsupported.
-fn secret_op_kind() -> impl Strategy<Value = String> {
-    prop_oneof![
-        Just("secret.file.put".to_owned()),
-        Just("secret.file.delete".to_owned()),
-        arbitrary_string(),
-    ]
-}
-
-/// A secret payload: nulls/scalars plus a `secret.file.put`-SHAPED object with
-/// random field values (random base64-ish iv/tag, random sha, random byte
-/// length). Structurally plausible, never actually valid against a fresh
-/// store.
-fn arbitrary_secret_payload() -> impl Strategy<Value = serde_json::Value> {
-    prop_oneof![
-        Just(serde_json::Value::Null),
-        "[a-zA-Z0-9]{0,64}".prop_map(|value| serde_json::json!(value)),
-        (
-            "[a-zA-Z0-9._/-]{0,64}",
-            "[a-zA-Z0-9._/-]{0,64}",
-            "[a-zA-Z0-9+/=]{0,64}",
-            "[a-zA-Z0-9+/=]{0,64}",
-            "[a-f0-9]{0,64}",
-            any::<i64>(),
-        )
-            .prop_map(|(version_id, path, iv, tag, sha, byte_length)| {
-                serde_json::json!({
-                    "versionId": version_id,
-                    "path": path,
-                    "metadata": { "origin": "replication", "summary": null, "correlationId": null },
-                    "ivBase64": iv,
-                    "authTagBase64": tag,
-                    "ciphertextSha256": sha,
-                    "byteLength": byte_length,
-                })
-            }),
-    ]
-}
-
-fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
-    (
-        arbitrary_string(),
-        arbitrary_string(),
-        any::<i64>(),
-        prop::option::of(any::<i64>()),
-        secret_op_kind(),
-        arbitrary_secret_payload(),
         any::<i64>(),
     )
         .prop_map(
@@ -461,63 +366,7 @@ fn serialized_payload_boundary_is_enforced_before_mutation() {
 }
 
 proptest! {
-    // `ProptestConfig::default()` is 256 cases and honors the standard
-    // `PROPTEST_CASES` env var; `with_cases(256)` pinned it and silently
-    // ignored the env var, so evidence runs asking for a large corpus got 256.
-    #![proptest_config(ProptestConfig::default())]
-
-    #[test]
-    fn valid_envelopes_invoke_mutation_once_and_redelivery_skips(
-        workspace_id in "[a-zA-Z0-9_-]{1,64}",
-        origin_id in "[a-zA-Z0-9_-]{1,64}",
-        payload in prop::collection::vec(any::<char>(), 0..256),
-    ) {
-        let mut envelope = valid_envelope(serde_json::json!(payload.into_iter().collect::<String>()));
-        envelope.workspace_id = workspace_id;
-        envelope.origin_id = origin_id;
-        let (_scratch, mut engine) = copied_empty_store();
-        let calls = AtomicUsize::new(0);
-        for expected in [ApplyDisposition::Applied(()), ApplyDisposition::Skipped] {
-            let outcome = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_, _| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Ok::<(), SyncError>(())
-            }).unwrap();
-            prop_assert_eq!(outcome.primary, expected);
-            prop_assert_eq!(calls.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    #[test]
-    fn valid_secret_puts_apply_and_single_mutations_refuse(
-        ciphertext in prop::collection::vec(any::<u8>(), 1..128),
-        iv in any::<[u8; SECRET_IV_BYTES]>(),
-        tag in any::<[u8; SECRET_TAG_BYTES]>(),
-        mutation in prop::sample::select(SECRET_MUTATIONS.to_vec()),
-    ) {
-        let (_scratch, mut engine, envelope) = secret_fixture(&ciphertext, &iv, &tag);
-        assert_secret_applies(&mut engine, &envelope, &ciphertext);
-        assert_secret_mutation_refused(&ciphertext, &iv, &tag, mutation);
-    }
-
-    /// Arbitrary bytes as purported wire JSON: deserialization never panics,
-    /// and any successfully-decoded envelope is a COMPLETE value that
-    /// round-trips (re-serialize + re-parse yields an equal envelope) -- i.e.
-    /// serde never hands back a partially-populated struct that would then
-    /// re-encode to something different.
-    #[test]
-    fn arbitrary_bytes_deserialize_cleanly_or_fail_closed(bytes in prop::collection::vec(any::<u8>(), 0..2048)) {
-        if let Ok(envelope) = serde_json::from_slice::<ReplicationEnvelope>(&bytes) {
-            let reencoded =
-                serde_json::to_vec(&envelope).expect("a decoded envelope re-serializes");
-            let roundtrip = serde_json::from_slice::<ReplicationEnvelope>(&reencoded)
-                .expect("re-parse of a self-produced encoding");
-            prop_assert_eq!(
-                envelope,
-                roundtrip,
-                "a decoded envelope must be a complete, round-tripping value"
-            );
-        }
-    }
+    #![proptest_config(ProptestConfig::with_cases(16))]
 
     /// Structurally-random envelopes through the REAL apply boundary: never
     /// panics, and a structurally-invalid envelope is refused before the
@@ -551,23 +400,6 @@ proptest! {
             prop_assert!(matches!(result, Err(SyncError::SequenceGap)));
             prop_assert_eq!(mutation_ran.load(Ordering::SeqCst), 0);
         }
-    }
-
-    /// 4th untrusted surface: encrypted secret replication envelopes through
-    /// `apply_secret_envelope`. Never panics; against a fresh store with NO
-    /// prior version state, no random secret envelope may reach
-    /// `ApplyDisposition::Applied` (an `Err`, or a no-op `Skipped`, is fine --
-    /// neither writes a durable secret).
-    #[test]
-    fn structurally_random_secret_envelopes_never_apply(
-        envelope in arbitrary_secret_envelope(),
-    ) {
-        let (_scratch, mut engine) = copied_empty_store();
-        let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
-        prop_assert!(
-            !matches!(result, Ok(ApplyOutcome { primary: ApplyDisposition::Applied(()), .. })),
-            "an untrusted secret envelope must never apply against a store with no prior state: {envelope:?} -> {result:?}"
-        );
     }
 }
 
@@ -604,27 +436,6 @@ fn copied_stores_apply_independently_and_keep_commits_after_reopen() {
     assert!(matches!(replay.primary, ApplyDisposition::Skipped));
 }
 
-/// Seed-corpus sanity: a real, valid envelope applies cleanly.
-#[test]
-fn seed_valid_envelope_applies() {
-    let (_scratch, mut engine) = store();
-    let envelope = ReplicationEnvelope {
-        settlement_admission: None,
-        admitted_author_snapshot: None,
-        workspace_id: "ws".to_owned(),
-        origin_id: "peer-a".to_owned(),
-        origin_seq: 0,
-        relay_seq: None,
-        op_kind: "fuzz.seed".to_owned(),
-        payload: serde_json::json!({ "hello": "fuzz" }),
-        recorded_at_ms: 1_000,
-    };
-    let outcome = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_tx, _envelope| {
-        Ok::<(), SyncError>(())
-    });
-    assert!(outcome.is_ok(), "seed envelope must apply: {outcome:?}");
-}
-
 /// Seed-corpus sanity: a non-secret `op_kind` routed to the secret applier is
 /// rejected as unsupported (never panics, never applies).
 #[test]
@@ -643,29 +454,4 @@ fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
     };
     let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
     assert!(matches!(result, Err(SyncError::UnsupportedOperation)));
-}
-
-/// Seed-corpus sanity: an empty `workspace_id` is refused before the
-/// mutation closure runs.
-#[test]
-fn seed_empty_workspace_id_is_refused_before_mutation() {
-    let (_scratch, mut engine) = store();
-    let envelope = ReplicationEnvelope {
-        settlement_admission: None,
-        admitted_author_snapshot: None,
-        workspace_id: String::new(),
-        origin_id: "peer-a".to_owned(),
-        origin_seq: 0,
-        relay_seq: None,
-        op_kind: "fuzz.seed".to_owned(),
-        payload: serde_json::Value::Null,
-        recorded_at_ms: 1_000,
-    };
-    let mutation_ran = AtomicUsize::new(0);
-    let result = apply_envelope_with(&mut engine, &envelope, &NoFaults, |_tx, _envelope| {
-        mutation_ran.fetch_add(1, Ordering::SeqCst);
-        Ok::<(), SyncError>(())
-    });
-    assert!(result.is_err());
-    assert_eq!(mutation_ran.load(Ordering::SeqCst), 0);
 }

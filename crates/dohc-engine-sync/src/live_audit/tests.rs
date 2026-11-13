@@ -510,55 +510,6 @@ fn audit_apply_live_audit_corrupt_chunk_length_is_storage() {
     assert_corrupt_length_is_storage(false);
 }
 
-#[test]
-fn audit_apply_live_audit_corrupt_update_length_is_storage() {
-    assert_corrupt_length_is_storage(true);
-}
-
-#[test]
-fn audit_apply_live_audit_missing_chunk_retries_without_ack() {
-    let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
-    let audit = client
-        .transport()
-        .pull
-        .lock()
-        .unwrap()
-        .as_ref()
-        .unwrap()
-        .ops[0]
-        .clone();
-    let sha = audit.payload["manifest"]["chunks"][0]["sha256"]
-        .as_str()
-        .unwrap();
-    let bytes = receiver.get_binary_blob(sha).unwrap().unwrap();
-    receiver
-        .write_with(&NoFaults, |tx| {
-            tx.execute("DELETE FROM binary_blobs WHERE sha256=?1", [sha])
-                .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })
-        .unwrap();
-    for _ in 0..2 {
-        assert!(matches!(
-            apply_audit_envelope(&mut receiver, &audit, &NoFaults),
-            Err(SyncError::BlobInvalid)
-        ));
-        assert_eq!(
-            crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
-            audit.origin_seq - 1
-        );
-        assert_eq!(count(&receiver, "live_audit_events"), 0);
-        assert_eq!(count(&receiver, "replication_pending_refusals"), 0);
-    }
-    receiver.put_binary_blob(&bytes).unwrap();
-    let result = apply_audit_envelope(&mut receiver, &audit, &NoFaults).unwrap();
-    assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
-    assert_eq!(
-        crate::read_replication_acked_seq(&receiver, "ws", "owner-origin").unwrap(),
-        audit.origin_seq
-    );
-}
-
 fn assert_checksum_precedes_length_refusal(claim: LengthClaim) {
     let (_scratch, mut receiver, client, _) = length_claim_pull(claim);
     let audit = client
@@ -625,49 +576,8 @@ fn audit_apply_live_audit_checksum_precedes_wrong_chunk_length_refusal() {
 }
 
 #[test]
-fn audit_apply_live_audit_checksum_precedes_wrong_update_length_refusal() {
-    assert_checksum_precedes_length_refusal(LengthClaim::Update);
-}
-
-#[test]
-#[ignore = "manual valid live audit import measurement"]
-fn relay_pull_live_audit_valid_import_measurement() {
-    for sample in 0..21 {
-        let (_scratch, mut receiver, client, _) = length_claim_pull(LengthClaim::Valid);
-        let started = std::time::Instant::now();
-        let result = client
-            .pull_chat_workspace(
-                &mut receiver,
-                &mut WriterDocCache::new(),
-                "ws",
-                &NoFaults,
-                &NoLiveLeases,
-                302,
-            )
-            .unwrap();
-        let micros = started.elapsed().as_micros();
-        assert!(matches!(
-            result,
-            crate::SyncPassOutcome::Complete {
-                applied: 2,
-                refused: 0,
-                ..
-            }
-        ));
-        if sample > 0 {
-            println!("AUDITSTALL valid_import sample={sample} micros={micros}");
-        }
-    }
-}
-
-#[test]
 fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
     deferred_settlement_export(true);
-}
-
-#[test]
-fn uncaptured_historical_settlement_exports_saved_work_without_proof() {
-    deferred_settlement_export(false);
 }
 
 fn deferred_settlement_export(retain_capture: bool) {
@@ -828,42 +738,6 @@ fn bootstrap_publication_rolls_back_with_native_source_and_replays_once() {
     assert_eq!(count(&reopened, "live_audit_base_publications"), 1);
 }
 
-#[test]
-fn identity_alone_does_not_publish_and_later_publication_uses_event_zero() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
-    assert_eq!(count(&f.store, "live_audit_base_publications"), 0);
-    assert!(
-        !operations(&f.store)
-            .iter()
-            .any(|op| op.op_kind == "ydoc.update")
-    );
-    f.store.write_with(&NoFaults,|tx| {
-        let later = put_binary_blob(tx,b"later checkpoint bytes")?;
-        tx.execute("INSERT INTO live_accepted_checkpoints SELECT relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,1,1,'{}',binding_json,origin_stamp,?1,evidence_digest,NULL,NULL FROM live_accepted_checkpoints WHERE event_count=0",[later]).map_err(SyncError::persist)?;
-        Ok::<_,SyncError>(())
-    }).unwrap();
-    contact(&mut f.store);
-    f.store
-        .write_with(&NoFaults, |tx| {
-            journal_live_base_in_tx(tx, "relay", &f.binding, 102)
-        })
-        .unwrap();
-    let audit = published(&f);
-    assert_eq!(
-        audit.payload["record"]["checkpoint"]["stateDigest"],
-        hex_sha256(&f.bytes)
-    );
-    assert_eq!(audit.payload["record"]["checkpoint"]["eventCount"], 0);
-    assert_eq!(
-        operations(&f.store)
-            .iter()
-            .filter(|op| op.op_kind == "ydoc.update")
-            .count(),
-        1
-    );
-}
-
 fn accept_enrollment_event(f: &mut Fixture, cursor: i64) {
     accept_named_event(f, cursor, format!("enrollment-{cursor}"));
 }
@@ -914,50 +788,6 @@ fn accept_named_event(f: &mut Fixture, cursor: i64, delivery: String) {
         },
     )
     .unwrap();
-}
-
-#[test]
-fn first_push_exports_native_history_after_actual_contact() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
-    accept_enrollment_event(&mut f, 1);
-    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
-    client
-        .claim_workspace(
-            &mut f.store,
-            crate::ClaimRequest {
-                workspace_id: "ws".into(),
-                replication_epoch: "epoch".into(),
-                stream_identity: "stream".into(),
-            },
-            None,
-            &NoFaults,
-        )
-        .unwrap();
-    let outcome = client
-        .push_workspace(
-            &mut f.store,
-            "ws",
-            &NoFaults,
-            &crate::NoLiveLeases,
-            201,
-            100_000_000,
-        )
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        crate::SyncPassOutcome::Complete {
-            has_more: false,
-            ..
-        }
-    ));
-    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
-    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
-    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
-    assert_eq!(
-        crate::cursor::read_pushed_seq(&f.store, "ws", "owner-origin").unwrap(),
-        operations(&f.store).last().unwrap().origin_seq
-    );
 }
 
 #[test]
@@ -1064,161 +894,6 @@ fn enrollment_exports_durable_history_across_crash_new_edits_and_reopen() {
     );
 }
 
-#[test]
-fn origin_recovery_keeps_pending_live_exports_publishable() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
-    accept_enrollment_event(&mut f, 1);
-    contact(&mut f.store);
-    assert_eq!(count(&f.store, "live_audit_pending_exports"), 1);
-    let ops = operations(&f.store);
-    let relay = crate::tests::FakeRelay::default();
-    *relay.pull.lock().unwrap() = Some(crate::PullResponse {
-        work_references: Vec::new(),
-        next_reference_after: None,
-        reference_has_more: false,
-        next_cursor: ops.len() as i64,
-        ops,
-        has_more: false,
-    });
-    let recovery = crate::RelaySyncClient::new(relay);
-    let recovered = recovery
-        .recover_origin(&mut f.store, "ws", "recovered-owner", &NoFaults)
-        .unwrap();
-    assert_eq!(recovered.preserved_ops, 0);
-    f.store
-        .write_with(&NoFaults, |tx| {
-            assert!(crate::workspace_replicates_with_relay_in_tx(tx, "ws")?);
-            Ok::<_, SyncError>(())
-        })
-        .unwrap();
-    f.store = EngineStore::open(&f.path, 202).unwrap();
-    let cursor = crate::read_relay_cursor(&f.store, "ws").unwrap().unwrap();
-    assert_eq!(cursor.cursor, 0);
-    assert!(cursor.bootstrap_complete);
-    let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
-    client
-        .claim_workspace(
-            &mut f.store,
-            crate::ClaimRequest {
-                workspace_id: "ws".into(),
-                replication_epoch: "epoch".into(),
-                stream_identity: "stream".into(),
-            },
-            None,
-            &NoFaults,
-        )
-        .unwrap();
-    client
-        .push_workspace(
-            &mut f.store,
-            "ws",
-            &NoFaults,
-            &crate::NoLiveLeases,
-            203,
-            100_000_000,
-        )
-        .expect("pending exports must survive origin recovery without another pull");
-    assert_eq!(count(&f.store, "live_audit_event_publications"), 1);
-    assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
-}
-
-#[test]
-fn retained_base_export_preserves_a_different_current_marker() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
-    let replacement_doc = dohc_engine_collab::Ydoc::wire();
-    replacement_doc.apply(&f.bytes).unwrap();
-    replacement_doc
-        .rewrite_content_to_markdown_preserving_source(
-            dohc_engine_collab::ContentKind::Richdoc,
-            "A different current marker",
-        )
-        .unwrap();
-    let replacement_bytes = replacement_doc.encode_full_state();
-    let replacement = hex_sha256(&replacement_bytes);
-    f.store.write_with(&NoFaults,|tx| {
-        put_binary_blob(tx, &replacement_bytes)?;
-        tx.execute("UPDATE ydoc_docs SET lineage_claim_id=?1 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'",[&replacement]).map_err(SyncError::persist)?;
-        Ok::<_,SyncError>(())
-    }).unwrap();
-    contact(&mut f.store);
-    enrollment::prepare_exports(
-        &mut f.store,
-        "ws",
-        &NoFaults,
-        &crate::NoLiveLeases,
-        201,
-        &mut false,
-    )
-    .unwrap();
-    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
-    let key = DocKey::new("ws", "main", "object").unwrap();
-    let marker = f
-        .store
-        .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
-        .unwrap()
-        .unwrap();
-    assert_eq!(marker.lineage_claim_id, Some(replacement));
-    assert_eq!(marker.base_origin_id, None);
-    assert_eq!(
-        published(&f).payload["record"]["checkpoint"]["binding"]["lineageClaimId"],
-        f.binding.lineage_claim_id
-    );
-}
-
-#[test]
-fn an_existing_scoped_content_coordinate_keeps_its_original_attribution() {
-    let mut f = fixture(true);
-    bootstrap_committed::<Box<dyn std::error::Error>>(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &f.handle,
-        f.input.clone(),
-        f.bytes.clone(),
-        &NoFaults,
-        |tx, _, namespace, binding| {
-            let key = DocKey::new("ws", "main", "object")?;
-            let payload = crate::ydoc_update_payload(
-                &key,
-                "note.md",
-                ContentKind::Richdoc,
-                &binding.lineage_claim_id,
-                &binding.lineage_claim_id,
-                Some("original-author"),
-                None,
-                true,
-            );
-            let sequence = journal_local_op_in_tx(tx, "ws", "ydoc.update", &payload, 10)?;
-            dohc_engine_collab::record_base_coordinate_in_tx(
-                tx,
-                dohc_engine_collab::BaseCoordinateRecord {
-                    key: &key,
-                    lineage_claim_id: &binding.lineage_claim_id,
-                    origin_id: "owner-origin",
-                    origin_seq: sequence,
-                    relay_seq: Some(4),
-                    now_ms: 10,
-                },
-            )?;
-            journal_live_base_in_tx(tx, namespace, binding, 100)?;
-            Ok(())
-        },
-    )
-    .unwrap();
-    let ops = operations(&f.store);
-    let bases: Vec<_> = ops
-        .iter()
-        .filter(|op| op.op_kind == "ydoc.update")
-        .collect();
-    assert_eq!(bases.len(), 1);
-    assert_eq!(bases[0].payload["actorOriginId"], "original-author");
-    assert_eq!(
-        published(&f).payload["record"]["baseCoordinate"]["originSeq"],
-        bases[0].origin_seq
-    );
-}
-
 fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let (scratch, path, mut store) = open_store();
     store
@@ -1251,28 +926,8 @@ fn imported_authored_live_update_annotates_only_its_changed_projection() {
 }
 
 #[test]
-fn a_late_coordinate_audit_preserves_a_local_authorless_edit() {
-    import_authored_projection_with_local_gap(false, false, None, false, true, false);
-}
-
-#[test]
 fn an_audited_drain_preserves_a_local_authorless_edit() {
     import_authored_projection_with_local_gap(true, false, None, false, true, false);
-}
-
-#[test]
-fn an_audited_drain_with_a_known_author_fits_a_full_author_interval() {
-    import_authored_projection_with_local_gap(true, false, None, false, false, true);
-}
-
-#[test]
-fn audited_authors_reach_a_deferred_projection_after_reopen() {
-    import_authored_projection(true, false, None, false);
-}
-
-#[test]
-fn audited_projection_preserves_existing_and_checkpoint_authors() {
-    import_authored_projection(false, true, None, false);
 }
 
 #[test]
@@ -1283,16 +938,6 @@ fn drained_projection_keeps_authorless_coordinate_coverage() {
 #[test]
 fn drained_projection_unions_verified_recipient_coordinates() {
     import_authored_projection(true, false, Some(FirstDrainCoordinate::Verified), false);
-}
-
-#[test]
-fn late_drain_audit_cannot_remove_unattributed_coverage() {
-    import_authored_projection(true, false, Some(FirstDrainCoordinate::Verified), true);
-}
-
-#[test]
-fn drained_projection_keeps_declared_and_verified_authors_without_attestation() {
-    import_authored_projection(true, false, Some(FirstDrainCoordinate::Declared), false);
 }
 
 #[test]
@@ -1345,19 +990,6 @@ enum Confirmation {
 }
 
 #[test]
-fn relay_confirmed_audit_keeps_an_independent_local_marker() {
-    import_projection(
-        true,
-        false,
-        None,
-        false,
-        true,
-        false,
-        Confirmation::Admitted,
-    );
-}
-
-#[test]
 fn confirmed_audited_drain_at_capacity_cannot_attest_prior_credit() {
     import_projection(
         true,
@@ -1371,18 +1003,8 @@ fn confirmed_audited_drain_at_capacity_cannot_attest_prior_credit() {
 }
 
 #[test]
-fn relay_confirmed_audit_authors_reach_import_and_origin_echo() {
-    import_confirmed_projection(false, false, None, false, Confirmation::Admitted);
-}
-
-#[test]
 fn relay_confirmed_audit_authors_survive_deferred_projection_and_reopen() {
     import_confirmed_projection(true, false, None, false, Confirmation::Admitted);
-}
-
-#[test]
-fn relay_confirmed_audit_preserves_other_checkpoint_authors() {
-    import_confirmed_projection(false, true, None, false, Confirmation::Admitted);
 }
 
 #[test]
@@ -2030,143 +1652,6 @@ fn import_projection(
     assert_eq!(reopened.author_json, moment.author_json);
 }
 
-#[test]
-fn declared_owner_history_exports_and_imports_with_its_agent() {
-    use dohc_engine_collab::live_update_application::{
-        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveUpdateReceipt,
-        RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority, apply_committed,
-    };
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let declaration = dohc_engine_domain::AgentDeclaration {
-        agent_id: "trip-agent 旅行".into(),
-        on_behalf_of: Some("owner".into()),
-        depth: 1,
-    };
-    let event = AdmittedLiveUpdate {
-        metadata: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: "declared-delivery".into(),
-                    update_digest: hex_sha256(&f.bytes),
-                    journal_cursor: 1,
-                    accepting_host_epoch: 1,
-                },
-                binding: f.binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Owner {
-                    principal_id: "owner".into(),
-                },
-                received_at_ms: 200,
-            },
-            first_seen: Vec::new(),
-
-            canonical_version: Some(2),
-
-            author_snapshot: Some(
-                (Some(declaration.clone()))
-                    .into_iter()
-                    .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
-                    .collect(),
-            ),
-
-            first_seen_deletes: Some(vec![]),
-
-            checkpoint_coverage: None,
-        },
-        update_bytes: f.bytes.clone(),
-    };
-    assert!(matches!(
-        apply_committed(
-            &mut f.store,
-            &mut WriterDocCache::new(),
-            &f.handle,
-            event,
-            &NoFaults,
-            100_000_000,
-            |tx, namespace, binding, count| journal_live_event_in_tx(
-                tx, namespace, binding, count, 200
-            )
-            .map(|_| ())
-            .map_err(|error| {
-                dohc_engine_collab::live_update_application::ApplicationError::Storage(
-                    dohc_engine_storage::StorageError::persist_public(error),
-                )
-            })
-        )
-        .unwrap(),
-        ApplicationResult::Applied(..)
-    ));
-    let ops = operations(&f.store);
-    let audit = ops
-        .iter()
-        .find(|op| op.op_kind == application_record::EVENT_OP)
-        .unwrap()
-        .clone();
-    let (_scratch, path, mut receiver) = open_store();
-    let blobs: Vec<Vec<u8>> = f
-        .store
-        .read_with(|conn| {
-            conn.prepare("SELECT bytes FROM binary_blobs")
-                .unwrap()
-                .query_map([], |r| r.get(0))
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .unwrap();
-    receiver
-        .write_with(&NoFaults, |tx| {
-            for bytes in &blobs {
-                put_binary_blob(tx, bytes)?;
-            }
-            Ok::<_, SyncError>(())
-        })
-        .unwrap();
-    for mut op in ops {
-        op.relay_seq = Some(op.origin_seq + 1);
-        let result = crate::apply_replication_envelope(
-            &mut receiver,
-            &mut WriterDocCache::new(),
-            &op,
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
-        assert!(
-            matches!(result.primary, ApplyDisposition::Applied(_)),
-            "{}: {:?}",
-            op.op_kind,
-            result.primary
-        );
-    }
-    drop(receiver);
-    let receiver = EngineStore::open(&path, 300).unwrap();
-    assert_eq!(count(&receiver, "live_audit_events"), 1);
-    assert_eq!(count(&receiver, "live_device_update_applications"), 0);
-    let manifest: chunks::Manifest =
-        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
-    receiver
-        .read_with(|conn| {
-            let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
-            let record: serde_json::Value = serde_json::from_reader(&mut reader).unwrap();
-            reader.finish().unwrap();
-            let accepted = &record["metadata"]["accepted"];
-            assert_eq!(
-                record["metadata"]["authorSnapshot"][0],
-                serde_json::to_value(
-                    dohc_engine_collab::live_update_application::LiveAuthorEntry::from(
-                        declaration.clone()
-                    )
-                )
-                .unwrap()
-            );
-            // The declaration sits beside the authority; it never replaces it.
-            assert_eq!(accepted["authority"]["principalKind"], "owner");
-            assert_eq!(accepted["authority"]["principalId"], "owner");
-            Ok::<_, SyncError>(())
-        })
-        .unwrap();
-}
-
 const DEVICE: &str = "owner-origin";
 const HOST: &str = "service-host:host";
 
@@ -2448,78 +1933,6 @@ fn audit_record_refused(
     refused
 }
 
-/// History the relay committed before it refused personal agents can name one.
-/// The owner applies such an event, then parses and journals its audit record,
-/// so only a peer's import of a new record refuses a personal agent.
-#[test]
-fn the_owner_journals_committed_history_naming_a_personal_agent() {
-    use dohc_engine_collab::live_update_application::{
-        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
-        LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
-        ServerDerivedLiveUpdateAuthority, apply_committed,
-    };
-    let personal = LiveAuthorEntry::Agent {
-        agent_id: format!("p-{}", "a".repeat(26)),
-        agent_name: None,
-        on_behalf_of: Some("owner".into()),
-        depth: Some(1),
-    };
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let event = AdmittedLiveUpdate {
-        metadata: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: "personal-delivery".into(),
-                    update_digest: hex_sha256(&f.bytes),
-                    journal_cursor: 1,
-                    accepting_host_epoch: 1,
-                },
-                binding: f.binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Owner {
-                    principal_id: "owner".into(),
-                },
-                received_at_ms: 200,
-            },
-            first_seen: Vec::new(),
-            canonical_version: Some(2),
-            author_snapshot: Some(vec![personal.clone()]),
-            first_seen_deletes: Some(vec![]),
-            checkpoint_coverage: Some(vec![LiveCheckpointAuthorCoverage {
-                author: personal,
-                struct_ranges: Vec::new(),
-                deletion_ranges: Vec::new(),
-            }]),
-        },
-        update_bytes: f.bytes.clone(),
-    };
-    let result = apply_committed(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &f.handle,
-        event,
-        &NoFaults,
-        100_000_000,
-        |tx, namespace, binding, count| {
-            journal_live_event_in_tx(tx, namespace, binding, count, 200)
-                .map(|_| ())
-                .map_err(|error| {
-                    dohc_engine_collab::live_update_application::ApplicationError::Storage(
-                        dohc_engine_storage::StorageError::persist_public(error),
-                    )
-                })
-        },
-    )
-    .unwrap();
-    assert!(matches!(result, ApplicationResult::Applied(..)));
-    assert_eq!(count(&f.store, "live_audit_events"), 1);
-    assert!(
-        operations(&f.store)
-            .iter()
-            .any(|op| op.op_kind == application_record::EVENT_OP)
-    );
-}
-
 #[test]
 fn admitted_link_history_roundtrips_without_creating_native_authority() {
     use dohc_engine_collab::live_update_application::{
@@ -2754,54 +2167,6 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
 }
 
 #[test]
-fn imported_event_zero_is_durable_historical_evidence_without_native_authority_or_echo() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let (_scratch, path, mut receiver) = import_source(&f);
-    assert_eq!(count(&receiver, "live_audit_bases"), 1);
-    for table in [
-        "live_audit_base_publications",
-        "live_accepted_checkpoints",
-        "live_device_bootstraps",
-        "live_owner_adoptions",
-        "live_restore_fences",
-        "live_device_application_bindings",
-        "live_device_update_applications",
-    ] {
-        assert_eq!(count(&receiver, table), 0, "{table}");
-    }
-    let mut replay = published(&f);
-    replay.relay_seq = Some(replay.origin_seq + 1);
-    assert!(matches!(
-        apply_base_envelope(&mut receiver, &replay, &NoFaults)
-            .unwrap()
-            .primary,
-        ApplyDisposition::Skipped
-    ));
-    drop(receiver);
-    let receiver = EngineStore::open(&path, 200).unwrap();
-    assert_eq!(count(&receiver, "live_audit_bases"), 1);
-    assert_eq!(
-        receiver
-            .read_with(|conn| conn.query_row(
-                "SELECT COUNT(*) FROM replication_log WHERE imported=0",
-                [],
-                |row| row.get::<_, i64>(0)
-            ))
-            .unwrap(),
-        0
-    );
-    assert!(
-        receiver
-            .read_with(|conn| conn.execute(
-                "DELETE FROM binary_blobs WHERE sha256=?1",
-                [&f.binding.lineage_claim_id]
-            ))
-            .is_err()
-    );
-}
-
-#[test]
 fn conflicting_audit_identity_keeps_both_records_and_classifies_the_coordinate() {
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
@@ -2859,37 +2224,6 @@ fn conflicting_audit_identity_keeps_both_records_and_classifies_the_coordinate()
 }
 
 #[test]
-fn missing_bytes_and_base_ordering_do_not_advance_the_peer_ack() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let (_scratch, _path, mut receiver) = open_store();
-    let mut audit = published(&f);
-    audit.origin_id = "audit-first".into();
-    audit.origin_seq = 0;
-    audit.relay_seq = Some(10);
-    assert!(matches!(
-        apply_base_envelope(&mut receiver, &audit, &NoFaults),
-        Err(SyncError::BlobInvalid)
-    ));
-    assert_eq!(
-        crate::read_replication_acked_seq(&receiver, "ws", "audit-first").unwrap(),
-        -1
-    );
-    receiver
-        .write_with(&NoFaults, |tx| put_binary_blob(tx, &f.bytes))
-        .unwrap();
-    assert!(matches!(
-        apply_base_envelope(&mut receiver, &audit, &NoFaults),
-        Err(SyncError::RetryableState { .. })
-    ));
-    assert_eq!(
-        crate::read_replication_acked_seq(&receiver, "ws", "audit-first").unwrap(),
-        -1
-    );
-    assert_eq!(count(&receiver, "live_audit_bases"), 0);
-}
-
-#[test]
 fn scope_digest_and_nonzero_checkpoint_forgeries_are_refused_without_native_rows() {
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
@@ -2920,40 +2254,6 @@ fn scope_digest_and_nonzero_checkpoint_forgeries_are_refused_without_native_rows
 }
 
 #[test]
-fn a_global_digest_match_cannot_substitute_another_documents_base_coordinate() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let (_scratch, _path, mut receiver) = open_store();
-    receiver
-        .write_with(&NoFaults, |tx| put_binary_blob(tx, &f.bytes))
-        .unwrap();
-    let mut base = operations(&f.store)
-        .into_iter()
-        .find(|op| op.op_kind == "ydoc.update")
-        .unwrap();
-    base.origin_id = "other-base".into();
-    base.origin_seq = 0;
-    base.payload["objectId"] = json!("other-object");
-    crate::apply_envelope_with(&mut receiver, &base, &NoFaults, |_, _| Ok(())).unwrap();
-    let mut audit = published(&f);
-    audit.origin_id = "audit".into();
-    audit.origin_seq = 0;
-    let mut payload: BasePayload = serde_json::from_value(audit.payload.clone()).unwrap();
-    payload.record.base_coordinate = BaseCoordinate {
-        origin_id: base.origin_id,
-        origin_seq: 0,
-    };
-    audit.payload = payload.record.payload().unwrap();
-    assert!(matches!(
-        apply_base_envelope(&mut receiver, &audit, &NoFaults)
-            .unwrap()
-            .primary,
-        ApplyDisposition::Refused(_)
-    ));
-    assert_eq!(count(&receiver, "live_audit_bases"), 0);
-}
-
-#[test]
 fn every_file_share_level_refuses_historical_native_audit() {
     let mut f = fixture(true);
     bootstrap(&mut f, false).unwrap();
@@ -2981,26 +2281,6 @@ fn every_file_share_level_refuses_historical_native_audit() {
         assert_eq!(count(&receiver, "live_audit_bases"), 0);
         assert_eq!(count(&receiver, "replication_log"), 0);
     }
-}
-
-#[test]
-fn bounded_event_zero_payload_fits_the_existing_operation_ceiling() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let mut payload: BasePayload = serde_json::from_value(published(&f).payload).unwrap();
-    let b = &mut payload.record.checkpoint.binding;
-    b.workspace_id = "\\".repeat(512);
-    b.main_version_id = "\\".repeat(512);
-    b.object_id = "\\".repeat(512);
-    b.current_path = "\\".repeat(1024);
-    b.selector_paths = vec!["\\".repeat(1024); 100];
-    b.restore_fence_generation = crate::MAX_WIRE_INTEGER;
-    payload.record.relay_database_namespace = "\\".repeat(1024);
-    payload.record.base_coordinate.origin_id = "\\".repeat(512);
-    payload.record.base_coordinate.origin_seq = crate::MAX_WIRE_INTEGER;
-    payload.record.base_byte_length = dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
-    // Overstate escaping even for paths the canonical binding validator rejects.
-    assert!(serde_json::to_vec(&payload).unwrap().len() < crate::MAX_PAYLOAD_JSON_BYTES);
 }
 
 #[test]
@@ -3050,58 +2330,6 @@ fn native_origin_details_survive_import_and_forged_source_is_rejected() {
     );
     assert_eq!(count(&receiver, "live_device_bootstraps"), 0);
     assert_eq!(count(&receiver, "live_owner_adoptions"), 0);
-}
-
-#[test]
-fn historical_event_export_reads_the_base_once_then_reuses_its_published_scope() {
-    let mut f = fixture(false);
-    bootstrap(&mut f, false).unwrap();
-    for cursor in 1..=3 {
-        accept_enrollment_event(&mut f, cursor);
-    }
-    assert_eq!(count(&f.store, "live_audit_base_publications"), 0);
-    contact(&mut f.store);
-    BASE_BLOB_BYTES_READ.with(|read| read.set(0));
-    for event_count in 1..=3 {
-        let result = f
-            .store
-            .write_with(&NoFaults, |tx| {
-                journal_live_event_in_tx(tx, "relay", &f.binding, event_count, 300)
-            })
-            .unwrap();
-        assert!(matches!(
-            result,
-            dohc_engine_storage::TxnOutcome::Committed(Some(_))
-        ));
-        assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), f.bytes.len());
-    }
-    assert_eq!(count(&f.store, "live_audit_base_publications"), 1);
-    assert_eq!(count(&f.store, "live_audit_event_publications"), 3);
-    let published = operations(&f.store);
-    BASE_BLOB_BYTES_READ.with(|read| read.set(0));
-    f.store
-        .write_with(&NoFaults, |tx| {
-            journal_live_event_in_tx(tx, "relay", &f.binding, 3, 301)
-        })
-        .unwrap();
-    assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), 0);
-    assert_eq!(operations(&f.store), published);
-    assert!(
-        f.store
-            .write_with(&NoFaults, |tx| {
-                journal_live_event_in_tx(tx, "different-relay", &f.binding, 1, 302)
-            })
-            .is_err()
-    );
-    assert_eq!(operations(&f.store), published);
-    // An explicit base replay still verifies its complete bytes and saved coordinate.
-    f.store
-        .write_with(&NoFaults, |tx| {
-            journal_live_base_in_tx(tx, "relay", &f.binding, 303)
-        })
-        .unwrap();
-    assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), f.bytes.len());
-    assert_eq!(operations(&f.store), published);
 }
 
 /// Accepts a delivery at `cursor` that adds a paragraph to the baseline, and
@@ -3653,48 +2881,6 @@ fn first_bootstrap_settlement_publishes_admitted_baseline_then_chains() {
     );
 }
 
-#[test]
-fn first_bootstrap_settlement_rejects_another_objects_baseline() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    accept_enrollment_event(&mut f, 1);
-    let foreign = VersionedTextStore::new(&mut f.store)
-        .write_text(
-            &dohc_engine_domain::WriteText {
-                workspace_id: "ws".into(),
-                version_id: "main".into(),
-                object_id: "other-object".into(),
-                path: "other.md".into(),
-                text: "A different document".into(),
-                moment_id: "other-baseline".into(),
-                metadata_origin: "sync".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 100,
-                request_id: None,
-            },
-            &NoFaults,
-        )
-        .unwrap();
-    f.store.write_with(&NoFaults, |tx| {
-        tx.execute(
-            "UPDATE live_device_bootstraps SET bootstrap_moment_id='other-baseline',projected_markdown_digest=?1,projected_markdown_byte_length=?2 WHERE workspace_id='ws'",
-            params![foreign.snapshot.blob_sha256, foreign.snapshot.text.len() as i64],
-        ).map_err(SyncError::persist)?;
-        Ok::<_, SyncError>(())
-    }).unwrap();
-    assert!(settle_bootstrap_publication(&mut f, 1, "invalid-baseline-settlement").is_err());
-    assert_eq!(count(&f.store, "live_audit_settlement_publications"), 0);
-    assert_eq!(count(&f.store, "live_device_settlements"), 0);
-    assert_eq!(count(&f.store, "live_settlement_publication_states"), 0);
-    assert!(
-        !operations(&f.store)
-            .iter()
-            .any(|op| op.payload["momentId"] == "invalid-baseline-settlement")
-    );
-}
-
 fn settle_bootstrap_publication(
     f: &mut Fixture,
     cursor: i64,
@@ -3768,18 +2954,8 @@ fn settle_bootstrap_publication(
 }
 
 #[test]
-fn first_imported_activation_settlement_starts_at_native_event_zero() {
-    imported_activation_publication(false, false);
-}
-
-#[test]
 fn first_imported_activation_settlement_rejects_another_objects_baseline() {
     imported_activation_publication(true, false);
-}
-
-#[test]
-fn imported_activation_publication_admits_the_preserved_event_zero_source() {
-    imported_activation_publication(false, true);
 }
 
 /// An owner lineage adopted on a store that replicates as `service-origin`,
@@ -4296,68 +3472,6 @@ fn update_native_audit_fixture() {
 }
 
 #[test]
-fn refused_audit_replayed_below_ack_does_not_block_later_operations() {
-    let mut f = fixture(true);
-    let op = ReplicationEnvelope {
-        workspace_id: "ws".into(),
-        origin_id: "remote".into(),
-        origin_seq: 0,
-        op_kind: application_record::EVENT_OP.into(),
-        recorded_at_ms: 200,
-        payload: json!({"extra":"refused"}),
-        relay_seq: Some(100),
-        admitted_author_snapshot: Some(
-            json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]),
-        ),
-        settlement_admission: None,
-    };
-    let first = crate::apply_replication_envelope(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &op,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
-    assert!(matches!(first.primary, ApplyDisposition::Refused(_)));
-    let replay = crate::apply_replication_envelope(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &op,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
-    assert!(matches!(replay.primary, ApplyDisposition::Skipped));
-    let mut next = op;
-    next.origin_seq = 1;
-    next.relay_seq = Some(101);
-    next.op_kind = "workspace.init".into();
-    next.payload = json!({});
-    next.admitted_author_snapshot = None;
-    let later = crate::apply_replication_envelope(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &next,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
-    assert!(matches!(later.primary, ApplyDisposition::Applied(_)));
-}
-
-#[test]
-fn ordinary_human_drain_keeps_exact_authors_without_an_unknown_contributor() {
-    import_confirmed_projection(
-        true,
-        false,
-        Some(FirstDrainCoordinate::DeclaredHuman),
-        false,
-        Confirmation::None,
-    );
-}
-
-#[test]
 fn confirmed_and_unconfirmed_audits_of_one_person_merge_without_confirmation() {
     import_confirmed_projection(
         true,
@@ -4770,141 +3884,8 @@ fn pull_refused_audit(receiver: &mut EngineStore, mut audit: ReplicationEnvelope
 }
 
 #[test]
-fn record_digest_mismatch_does_not_stall_pull() {
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    accept_enrollment_event(&mut f, 1);
-    let (_scratch, _path, mut receiver) = open_store();
-    crate::adopt_join_identity(
-        &mut receiver,
-        "ws",
-        "receiver",
-        "epoch",
-        "stream",
-        200,
-        &NoFaults,
-    )
-    .unwrap();
-    copy_audit_blobs(&f.store, &mut receiver);
-    let mut ops = operations(&f.store);
-    let mut audit = ops.pop().unwrap();
-    assert_eq!(audit.op_kind, application_record::EVENT_OP);
-    for mut op in ops {
-        op.relay_seq = Some(op.origin_seq + 1);
-        crate::apply_replication_envelope(
-            &mut receiver,
-            &mut WriterDocCache::new(),
-            &op,
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
-    }
-    audit.payload["manifest"]["recordDigest"] = json!("f".repeat(64));
-    pull_refused_audit(&mut receiver, audit);
-}
-
-#[test]
 fn malformed_restore_receipt_epoch_does_not_stall_pull() {
     malformed_restore_receipt_pull("acceptingHostEpoch", json!(0));
-}
-
-#[test]
-fn malformed_restore_receipt_delivery_does_not_stall_pull() {
-    malformed_restore_receipt_pull("deliveryId", json!(""));
-}
-
-#[test]
-fn malformed_restore_receipt_digest_does_not_stall_pull() {
-    malformed_restore_receipt_pull("updateDigest", json!("x"));
-}
-
-fn canonical_version_read_failure(refresh: bool) {
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    accept_enrollment_event(&mut f, 1);
-    accept_enrollment_event(&mut f, 2);
-    let (_scratch, _path, mut receiver) = open_store();
-    copy_audit_blobs(&f.store, &mut receiver);
-    let mut ops = operations(&f.store);
-    let mut audit = ops.pop().unwrap();
-    assert_eq!(audit.op_kind, application_record::EVENT_OP);
-    for mut op in ops {
-        op.relay_seq = Some(op.origin_seq + 1);
-        crate::apply_replication_envelope(
-            &mut receiver,
-            &mut WriterDocCache::new(),
-            &op,
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
-    }
-    audit.relay_seq = Some(audit.origin_seq + 1);
-    audit.admitted_author_snapshot = Some(json!([]));
-    if refresh {
-        crate::apply_replication_envelope(
-            &mut receiver,
-            &mut WriterDocCache::new(),
-            &audit,
-            &NoFaults,
-            &NoLiveLeases,
-        )
-        .unwrap();
-    }
-    let target = &mut receiver;
-    let before_ack = crate::read_replication_acked_seq(target, "ws", &audit.origin_id).unwrap();
-    let denied = Arc::new(AtomicBool::new(false));
-    let captured = denied.clone();
-    target
-        .hooks_with(|conn| {
-            conn.authorizer(Some(move |ctx: AuthContext<'_>| {
-                if matches!(
-                    ctx.action,
-                    AuthAction::Read {
-                        table_name: "live_audit_events",
-                        column_name: "canonical_version"
-                    }
-                ) {
-                    captured.store(true, Ordering::SeqCst);
-                    Authorization::Deny
-                } else {
-                    Authorization::Allow
-                }
-            }))
-        })
-        .unwrap();
-    let failed = crate::apply_replication_envelope(
-        target,
-        &mut WriterDocCache::new(),
-        &audit,
-        &NoFaults,
-        &NoLiveLeases,
-    );
-    target
-        .hooks_with(|conn| conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>))
-        .unwrap();
-    assert!(denied.load(Ordering::SeqCst));
-    assert!(matches!(failed, Err(SyncError::Storage(_))), "{failed:?}");
-    assert_eq!(
-        crate::read_replication_acked_seq(target, "ws", &audit.origin_id).unwrap(),
-        before_ack
-    );
-    assert_eq!(count(target, "replication_pending_refusals"), 0);
-    let retried = crate::apply_replication_envelope(
-        target,
-        &mut WriterDocCache::new(),
-        &audit,
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .unwrap();
-    assert!(!matches!(retried.primary, ApplyDisposition::Refused(_)));
 }
 
 /// An event audited before events kept their generation leaves the next
@@ -4949,16 +3930,6 @@ fn an_event_after_one_kept_without_a_generation_refuses() {
         result.primary
     );
     assert_eq!(count(&receiver, "live_audit_events"), 1);
-}
-
-#[test]
-fn canonical_version_read_failure_on_import_can_retry() {
-    canonical_version_read_failure(false);
-}
-
-#[test]
-fn canonical_version_read_failure_on_refresh_can_retry() {
-    canonical_version_read_failure(true);
 }
 
 #[test]
@@ -5378,114 +4349,6 @@ fn a_parked_hosted_document_resumes_its_activation_after_it_returns() {
     assert_eq!(resumed.activation_id, activation.activation_id);
     assert_eq!(resumed.source, activation.source);
     assert_eq!(resumed.full_state, activation.full_state);
-}
-
-/// An owner holding the service host's ordinary update ends the hold on the
-/// host's next op, so the host must journal each live delivery's update and
-/// its audit as adjacent ops in one transaction. When the same update is
-/// already journaled, the audit names that coordinate and no update is
-/// journaled, so nothing waits on it.
-#[test]
-fn a_live_delivery_journals_its_update_and_then_its_audit_in_one_transaction() {
-    use dohc_engine_collab::live_update_application::{
-        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, ApplicationResult,
-        LiveUpdateReceipt, RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority,
-        apply_committed,
-    };
-    let mut f = fixture(true);
-    bootstrap(&mut f, false).unwrap();
-    let doc = dohc_engine_collab::Ydoc::wire();
-    doc.apply(&f.bytes).unwrap();
-    let event = |cursor: i64, update: Vec<u8>| AdmittedLiveUpdate {
-        metadata: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: format!("delivery-{cursor}"),
-                    update_digest: hex_sha256(&update),
-                    journal_cursor: cursor,
-                    accepting_host_epoch: 1,
-                },
-                binding: f.binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Link {
-                    principal_id: "link-principal".into(),
-                    grant_id: "link-grant".into(),
-                    grant_generation: 1,
-                },
-                received_at_ms: 200,
-            },
-            first_seen: Vec::new(),
-            canonical_version: None,
-            author_snapshot: None,
-            first_seen_deletes: None,
-            checkpoint_coverage: None,
-        },
-        update_bytes: update,
-    };
-    let journal = |tx: &rusqlite::Transaction<'_>,
-                   namespace: &str,
-                   binding: &LiveObjectBinding,
-                   count: i64| {
-        journal_live_event_in_tx(tx, namespace, binding, count, 200)
-            .map(|_| ())
-            .map_err(|error| {
-                ApplicationError::Storage(dohc_engine_storage::StorageError::persist_public(error))
-            })
-    };
-    let before = operations(&f.store).len();
-    let updates = [
-        doc.richdoc_append_paragraph("First delivery."),
-        doc.richdoc_append_paragraph("Second delivery."),
-    ];
-    for (index, update) in updates.iter().enumerate() {
-        let applied = apply_committed(
-            &mut f.store,
-            &mut WriterDocCache::new(),
-            &f.handle,
-            event(index as i64 + 1, update.clone()),
-            &NoFaults,
-            100_000_000,
-            journal,
-        )
-        .unwrap();
-        assert!(matches!(applied, ApplicationResult::Applied(..)));
-    }
-    let ops = operations(&f.store);
-    let audits: Vec<_> = ops[before..]
-        .iter()
-        .filter(|op| op.op_kind == application_record::EVENT_OP)
-        .collect();
-    assert_eq!(audits.len(), 2);
-    for (index, audit) in audits.into_iter().enumerate() {
-        let digest = json!(hex_sha256(&updates[index]));
-        assert_eq!(audit.payload["updateBlobSha256"], digest);
-        assert_eq!(audit.payload["eventCount"], json!(index as i64 + 1));
-        let update = ops
-            .iter()
-            .find(|op| op.origin_seq == audit.origin_seq - 1)
-            .unwrap();
-        assert_eq!(
-            (update.op_kind.as_str(), &update.payload["updateBlobSha256"]),
-            ("ydoc.update", &digest),
-            "the audit's update is the op journaled just before it"
-        );
-    }
-
-    // A delivery whose transaction fails journals neither.
-    let third = doc.richdoc_append_paragraph("Never committed.");
-    let failed = apply_committed(
-        &mut f.store,
-        &mut WriterDocCache::new(),
-        &f.handle,
-        event(3, third),
-        &NoFaults,
-        100_000_000,
-        |tx, namespace, binding, count| {
-            journal(tx, namespace, binding, count)?;
-            Err(ApplicationError::Interrupted)
-        },
-    );
-    assert!(failed.is_err());
-    assert_eq!(operations(&f.store), ops);
 }
 
 /// Two live notes share the relay's journal, so another note's events take

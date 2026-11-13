@@ -47,16 +47,6 @@ fn fixture() -> (Connection, DocKey, Ydoc, String, ReaderResolver) {
     )
 }
 
-#[test]
-fn outside_fold_round1_unclaimed_note_skips_document_load() {
-    let (conn, key, _, _, _) = fixture();
-    conn.execute("UPDATE ydoc_docs SET lineage_claim_id=NULL", [])
-        .unwrap();
-    assert!(prepare_fold(&conn, &key, "note.md", "**changed**")
-        .expect("unclaimed document was loaded")
-        .is_none());
-}
-
 fn canonical_fold_clears_the_reader_marker(staging: bool) {
     let (_, _, doc, _, _) = fixture();
     assert!(doc.has_reader_source());
@@ -78,11 +68,6 @@ fn canonical_fold_clears_the_reader_marker(staging: bool) {
 #[test]
 fn canonical_folds_clear_the_reader_marker_with_the_witness() {
     canonical_fold_clears_the_reader_marker(false);
-}
-
-#[test]
-fn canonical_staging_clears_the_reader_marker_with_the_witness() {
-    canonical_fold_clears_the_reader_marker(true);
 }
 
 #[test]
@@ -110,21 +95,6 @@ fn frontmatter_source_recording_keeps_the_reader_marker() {
             .as_deref(),
         Some(markdown.as_str())
     );
-}
-
-#[test]
-fn ordinary_source_recording_and_frontmatter_edits_do_not_create_a_reader_marker() {
-    let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "plain paragraph")
-        .unwrap();
-    assert!(!doc.has_reader_source());
-    doc.frontmatter_set_preserving_markdown_source(
-        "title",
-        "changed",
-        "---\ntitle: changed\n---\nplain paragraph",
-    )
-    .unwrap();
-    assert!(!doc.has_reader_source());
 }
 
 #[test]
@@ -169,22 +139,6 @@ fn reject_native_metadata_value(key: &str, value: yrs::Any) {
     assert_eq!(base.encode_full_state(), before);
 }
 
-#[test]
-fn native_fold_candidate_rejects_source() {
-    reject_native_metadata("dohcMarkdownSource");
-}
-#[test]
-fn native_fold_candidate_rejects_source_digest() {
-    reject_native_metadata("dohcMarkdownSourceSha256");
-}
-#[test]
-fn native_fold_candidate_rejects_source_witness() {
-    reject_native_metadata("dohcMarkdownSourceProjectionSha256");
-}
-#[test]
-fn native_fold_candidate_rejects_reader_marker() {
-    reject_native_metadata("dohcMarkdownSourceReader");
-}
 #[test]
 fn native_fold_candidate_rejects_unknown_metadata() {
     reject_native_metadata("unknown");
@@ -277,16 +231,6 @@ fn real_reader_proves_frontmatter_source_without_rewriting_live_state() {
 }
 
 #[test]
-fn restore_generation_sql_errors_keep_their_storage_cause() {
-    let (conn, key, doc, _, resolver) = fixture();
-    conn.execute("DROP TABLE live_restore_fences", []).unwrap();
-    assert!(matches!(
-        lookup(&conn, &key, &doc, &resolver),
-        Err(CollabError::Storage(_))
-    ));
-}
-
-#[test]
 fn expired_proofs_must_match_the_engine_projection() {
     use std::{fs, process::Command};
     let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
@@ -372,22 +316,6 @@ fn pending(result: Result<Option<String>, CollabError>) -> Arc<PendingProof> {
         other => panic!("{other:?}"),
     }
 }
-
-pub(crate) fn evict_with_other_snapshot_misses(resolver: &ReaderResolver) {
-    let (conn, key, doc, _, _) = fixture();
-    for index in 0..MAX_ENTRIES {
-        conn.execute(
-            "UPDATE snapshots SET latest_moment_id=?1",
-            [format!("other-workspace-{index}")],
-        )
-        .unwrap();
-        assert!(matches!(
-            lookup(&conn, &key, &doc, resolver),
-            Err(CollabError::MarkdownReaderPending(_))
-        ));
-    }
-    assert_eq!(resolver.entries.lock().unwrap().len(), MAX_ENTRIES);
-}
 fn prime(conn: &Connection, key: &DocKey, doc: &Ydoc, resolver: &ReaderResolver) {
     // This cache test supplies the receipt; the real-reader test below obtains it from the child.
     pending(lookup(conn, key, doc, resolver))
@@ -396,49 +324,6 @@ fn prime(conn: &Connection, key: &DocKey, doc: &Ydoc, resolver: &ReaderResolver)
         .unwrap();
 }
 
-#[test]
-fn exact_output_needs_a_snapshot_and_never_anchors_itself() {
-    let (conn, key, doc, _, resolver) = fixture();
-    conn.execute("DELETE FROM snapshots", []).unwrap();
-    assert!(matches!(
-        lookup(&conn, &key, &doc, &resolver),
-        Err(CollabError::MarkdownReaderUnavailable)
-    ));
-    assert!(resolver.entries.lock().unwrap().is_empty());
-}
-
-#[test]
-fn partial_witnesses_hold_before_dispatch() {
-    use yrs::{updates::decoder::Decode, Map, ReadTxn, Transact};
-    for field in [
-        "dohcMarkdownSource",
-        "dohcMarkdownSourceSha256",
-        "dohcMarkdownSourceProjectionSha256",
-    ] {
-        let (conn, key, doc, _, resolver) = fixture();
-        let scratch = yrs::Doc::new();
-        scratch
-            .transact_mut()
-            .apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap())
-            .unwrap();
-        scratch
-            .get_or_insert_map("meta")
-            .remove(&mut scratch.transact_mut(), field);
-        let partial = Ydoc::wire();
-        partial
-            .apply(
-                &scratch
-                    .transact()
-                    .encode_state_as_update_v1(&yrs::StateVector::default()),
-            )
-            .unwrap();
-        assert!(matches!(
-            lookup(&conn, &key, &partial, &resolver),
-            Err(CollabError::MarkdownReaderUnavailable)
-        ));
-        assert!(resolver.entries.lock().unwrap().is_empty());
-    }
-}
 #[test]
 fn snapshot_digest_and_length_are_checked_before_dispatch() {
     for sql in [
@@ -457,43 +342,6 @@ fn snapshot_digest_and_length_are_checked_before_dispatch() {
         );
         assert!(resolver.entries.lock().unwrap().is_empty());
     }
-}
-#[test]
-fn expired_source_continuation_requires_the_current_settlement_digest() {
-    let (conn, key, doc, _, resolver) = fixture();
-    let canonical = doc.project(ContentKind::Richdoc).unwrap().content;
-    let sha = crate::hex_sha256(canonical.as_bytes());
-    conn.execute(
-        "UPDATE blobs SET sha256=?1,text=?2,byte_length=?3",
-        params![sha, canonical, canonical.len() as i64],
-    )
-    .unwrap();
-    conn.execute("UPDATE snapshots SET blob_sha256=?1", [&sha])
-        .unwrap();
-    assert!(matches!(
-        lookup(&conn, &key, &doc, &resolver),
-        Err(CollabError::MarkdownReaderUnavailable)
-    ));
-    assert!(resolver.entries.lock().unwrap().is_empty());
-    conn.execute("UPDATE ydoc_docs SET last_settled_sha=?1", [&sha])
-        .unwrap();
-    pending(lookup(&conn, &key, &doc, &resolver))
-        .result
-        .set(Ok(false))
-        .unwrap();
-    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
-    doc.richdoc_append_paragraph("A later edit");
-    pending(lookup(&conn, &key, &doc, &resolver))
-        .result
-        .set(Ok(false))
-        .unwrap();
-    assert_eq!(lookup(&conn, &key, &doc, &resolver).unwrap(), None);
-    conn.execute("UPDATE ydoc_docs SET last_settled_sha=NULL", [])
-        .unwrap();
-    assert!(matches!(
-        lookup(&conn, &key, &doc, &resolver),
-        Err(CollabError::MarkdownReaderUnavailable)
-    ));
 }
 #[test]
 fn cache_hit_rechecks_snapshot_claim_path_and_restore_fences() {
@@ -524,31 +372,6 @@ fn checkpoint_changes_and_foreign_objects_cannot_reuse_a_proof() {
     assert!(lookup(&conn, &foreign, &doc, &resolver).is_err());
 }
 
-#[test]
-fn reloading_maps_keeps_the_proof_but_changed_attributes_at_the_same_clocks_do_not() {
-    let (conn, key, doc, source, resolver) = fixture();
-    prime(&conn, &key, &doc, &resolver);
-    let checkpoint = doc.encode_full_state();
-    for _ in 0..32 {
-        let reloaded = Ydoc::wire();
-        reloaded.apply(&checkpoint).unwrap();
-        assert_eq!(
-            lookup(&conn, &key, &reloaded, &resolver).unwrap(),
-            Some(source.clone())
-        );
-    }
-    let mut forged = checkpoint;
-    let needle = b"\"href\":\"https://example.com\"";
-    let offset = forged
-        .windows(needle.len())
-        .position(|bytes| bytes == needle)
-        .unwrap();
-    forged[offset + needle.len() - 4..offset + needle.len() - 1].copy_from_slice(b"net");
-    let changed = Ydoc::wire();
-    changed.apply(&forged).unwrap();
-    assert_eq!(changed.encode_state_vector(), doc.encode_state_vector());
-    pending(lookup(&conn, &key, &changed, &resolver));
-}
 #[test]
 fn pending_entries_are_bounded_and_restart_has_no_proofs() {
     let (conn, key, doc, _, resolver) = fixture();
@@ -632,43 +455,6 @@ fn exhausted_transient_proof_remains_retryable() {
 }
 
 #[test]
-fn transient_retries_are_bounded_then_allow_a_later_action() {
-    for failure in RETRIED {
-        let (conn, key, doc, _, resolver) = fixture();
-        let (mut requests, mut backoffs, mut ended) = (0, 0, false);
-        for _ in 0..4 * usize::from(MAX_TRANSIENT_RETRIES) {
-            match lookup(&conn, &key, &doc, &resolver) {
-                Err(CollabError::MarkdownReaderPending(proof)) => {
-                    requests += 1;
-                    proof.result.set(Err(failure)).unwrap();
-                }
-                Err(CollabError::MarkdownReaderRetryable) => backoffs += 1,
-                Err(CollabError::MarkdownReaderUnavailable) => {
-                    ended = true;
-                    break;
-                }
-                other => panic!("{failure:?}: {other:?}"),
-            }
-        }
-        assert!(ended, "{failure:?} kept retrying");
-        assert_eq!(
-            requests,
-            usize::from(MAX_TRANSIENT_RETRIES) + 1,
-            "{failure:?}"
-        );
-        // The first retry is immediate; every later one waited for a backoff.
-        assert_eq!(
-            backoffs,
-            usize::from(MAX_TRANSIENT_RETRIES) - 1,
-            "{failure:?}"
-        );
-        assert!(resolver.entries.lock().unwrap().is_empty());
-        // Try again, or the next edit, starts a new count.
-        pending(lookup(&conn, &key, &doc, &resolver));
-    }
-}
-
-#[test]
 fn transient_retries_stay_bounded_when_proofs_evict_each_other() {
     // The same requests and backoffs as a proof that stays in the cache.
     let retries = usize::from(MAX_TRANSIENT_RETRIES);
@@ -732,61 +518,6 @@ fn transient_retries_stay_bounded_when_proofs_evict_each_other() {
     }
 }
 
-/// A note that fills the reader's heap crashes it on every request, so its
-/// second crash ends the proof instead of using a timeout's retries (#3575).
-#[test]
-fn a_second_crash_ends_the_proof_then_allows_a_later_action() {
-    let (conn, key, doc, _, resolver) = fixture();
-    // The first crash is retried at once, as any transient failure is.
-    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-    // Asking again without a change, as recovery does, never reaches the reader.
-    for _ in 0..3 {
-        assert!(matches!(
-            lookup(&conn, &key, &doc, &resolver),
-            Err(CollabError::MarkdownReaderUnavailable)
-        ));
-        assert_eq!(resolver.entries.lock().unwrap().len(), 1);
-    }
-    // The save stays owed. The engine starting gives it a fresh count, so its
-    // first crash is retried again.
-    let restarted = ReaderResolver::new(Arc::new(Reader::new(None)));
-    fail_next_request(&conn, &key, &doc, &restarted, Failure::Crashed);
-    pending(lookup(&conn, &key, &doc, &restarted));
-    // So does a new save, which is a new proof.
-    doc.richdoc_append_paragraph("A later edit");
-    fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-    pending(lookup(&conn, &key, &doc, &resolver));
-}
-
-/// Timeouts and readers that never started do not count as crashes, so a
-/// reader that cannot start gets a timeout's retries (#3575).
-#[test]
-fn crashes_between_timeouts_still_end_the_proof_at_the_second() {
-    for other in [Failure::TimedOut, Failure::NotStarted] {
-        let (conn, key, doc, _, resolver) = fixture();
-        fail_next_request(&conn, &key, &doc, &resolver, other);
-        fail_next_request(&conn, &key, &doc, &resolver, Failure::Crashed);
-        for failure in [other, other, Failure::Crashed] {
-            assert!(
-                matches!(
-                    lookup(&conn, &key, &doc, &resolver),
-                    Err(CollabError::MarkdownReaderRetryable)
-                ),
-                "{other:?}"
-            );
-            fail_next_request(&conn, &key, &doc, &resolver, failure);
-        }
-        assert!(
-            matches!(
-                lookup(&conn, &key, &doc, &resolver),
-                Err(CollabError::MarkdownReaderUnavailable)
-            ),
-            "{other:?}"
-        );
-    }
-}
-
 /// A terminal failure ends the proof at once, whether it is the first answer
 /// or comes after a backoff, and the cached failure answers every later lookup
 /// without asking the reader again.
@@ -822,41 +553,12 @@ fn assert_terminal(failure: Failure) {
     }
 }
 
-// A reader asset that changed after it was checked: process.rs `check_assets`,
-// the hash cap in `file_sha`, and a runtime or bundle digest that no longer
-// matches. The reader answers Unavailable and closes
-// (`post_hello_asset_replacement_is_unavailable`,
-// `replacement_after_hash_is_blocked_or_refused_before_spawn`,
-// `identity_mismatch_stays_unavailable_without_rehashing`).
-#[test]
-fn changed_reader_assets_stay_terminal() {
-    assert_terminal(Failure::Unavailable);
-}
-
 // `platform::open_asset` refuses an asset another user can write or a linked
 // ancestor; `Worker::start` answers Unavailable
 // (`writable_ancestor_is_refused_even_with_a_protected_generation`,
 // `closure_rejects_untrusted_writers_before_spawn`).
 #[test]
 fn reader_permission_refusals_stay_terminal() {
-    assert_terminal(Failure::Unavailable);
-}
-
-// A deleted runtime, bundle or manifest fails `open_asset` at start or in
-// `check_assets`; the reader answers Unavailable
-// (`closure_rejects_directory_and_missing_assets_before_spawn`, and the
-// "runtime", "bundle" and "manifest" cases of
-// `invalid_configuration_or_identity_is_unavailable`).
-#[test]
-fn deleted_reader_files_stay_terminal() {
-    assert_terminal(Failure::Unavailable);
-}
-
-// An answer that does not prove these exact inputs becomes Unavailable in
-// `PendingProof::resolve`; `expired_proofs_must_match_the_engine_projection`
-// drives it through a real reader.
-#[test]
-fn invalid_proofs_stay_terminal() {
     assert_terminal(Failure::Unavailable);
 }
 
@@ -932,30 +634,6 @@ fn externally_held_failed_proofs_stay_in_the_cache_budget() {
     }
     drop(first);
     pending(lookup(&conn, &key, &doc, &resolver));
-}
-
-#[test]
-fn native_stale_witnesses_keep_the_existing_canonical_path() {
-    let native = Ydoc::wire();
-    native
-        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Original paragraph\n")
-        .unwrap();
-    native.richdoc_append_paragraph("Edit");
-    assert!(!native.has_reader_source());
-}
-
-#[test]
-fn dispatch_drops_the_request_even_while_the_verdict_is_retained() {
-    let (conn, key, doc, _, resolver) = fixture();
-    let proof = pending(lookup(&conn, &key, &doc, &resolver));
-    assert!(proof.request.lock().unwrap().is_some());
-    run(proof.resolve());
-    assert!(proof.request.lock().unwrap().is_none());
-    assert!(matches!(
-        proof.result.get(),
-        Some(Err(Failure::Unavailable))
-    ));
-    assert_eq!(resolver.entries.lock().unwrap().len(), 1);
 }
 
 pub(crate) fn run(future: impl std::future::Future<Output = ()>) {

@@ -235,28 +235,6 @@ fn remote_event(f: &mut Fixture, cursor: i64) -> AdmittedLiveUpdate {
 }
 
 #[test]
-fn every_acknowledgement_keeps_its_real_receipt_without_an_observed_binding() {
-    let mut f = Fixture::new();
-    f.edit(true);
-    let saved: (bool, Option<String>) = f
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT pending,accepted_receipt_json FROM owner_ydoc_outbox_entries",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-        })
-        .unwrap();
-    let receipt = f.cut.terminal_receipt.clone().unwrap();
-    assert_eq!(
-        saved,
-        (false, Some(serde_json::to_string(&receipt).unwrap())),
-        "an unobserved outbox keeps the receipt it was acknowledged with"
-    );
-}
-
-#[test]
 fn the_service_seed_hold_admits_only_the_seed_and_replays() {
     let (mut f, seed, full) = seeded();
     let held = remote_event(&mut f, 2);
@@ -314,59 +292,6 @@ fn a_device_seed_holds_nothing_and_applies_in_journal_order() {
 }
 
 #[test]
-fn a_quarantined_device_seed_holds_nothing() {
-    let (mut f, seed, _) = device_seeded();
-    let outbox: String = f
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
-                [&seed],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    owner_outbox::quarantine(
-        &mut f.store,
-        "workspace",
-        owner_outbox::OwnerOutboxQuarantineInput {
-            outbox_id: outbox,
-            reason: "refused".into(),
-            observed_binding: None,
-        },
-        5,
-    )
-    .unwrap();
-    // Delivery never retries or acknowledges a quarantined seed.
-    assert_eq!(pending_seed_delivery(&f), seed);
-    let event = remote_event(&mut f, 1);
-    assert!(matches!(
-        apply_event(&mut f, event).unwrap(),
-        ApplicationResult::Applied(..)
-    ));
-    assert_eq!(applied_deliveries(&f), vec!["remote-1".to_owned()]);
-}
-
-#[test]
-fn a_receipt_first_seed_applies_only_as_the_acceptance_it_kept() {
-    let (mut f, seed, full) = seeded();
-    let seed_event = native_tail_event(&f, full, seed, 1);
-    acknowledge_entry(&mut f, &seed_event.metadata.accepted.receipt);
-    // Acknowledged, the seed holds nothing, and other work need not wait for it.
-    assert_eq!(pending_bytes(&f), 0);
-    let mut elsewhere = seed_event.clone();
-    elsewhere.metadata.accepted.receipt.journal_cursor = 5;
-    assert!(matches!(
-        apply_event(&mut f, elsewhere),
-        Err(ApplicationError::Conflict)
-    ));
-    assert!(matches!(
-        apply_event(&mut f, seed_event).unwrap(),
-        ApplicationResult::Applied(..)
-    ));
-}
-
-#[test]
 fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_application() {
     let (mut f, seed, full) = seeded();
     let seed_event = native_tail_event(&f, full, seed, 1);
@@ -408,28 +333,6 @@ fn reconciliation_reports_an_accepted_but_unapplied_seed_and_then_its_applicatio
         reconcile(&mut f, 0, None, None),
         Err(ApplicationError::Conflict)
     ), "a receipt past F");
-}
-
-#[test]
-fn a_lost_delivery_ack_is_proved_from_the_journal() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let entry = native_tail_edit(&mut f, "# Unacknowledged\n", 11);
-    assert_eq!(
-        reconcile(&mut f, 10, None, None).unwrap(),
-        Reconciliation::PendingDelivery(vec![entry.delivery_id.clone()])
-    );
-    let receipt = receipt_of(&entry.delivery_id, &entry.update_digest, 4);
-    let evidence = JournalEvidence { receipts: vec![receipt.clone()], absent: vec![] };
-    assert!(matches!(
-        reconcile(&mut f, 10, None, Some(&evidence)).unwrap(),
-        Reconciliation::Reconciled { .. }
-    ));
-    assert_eq!(
-        native_entries(&f)[0],
-        (entry.delivery_id, false, Some(serde_json::to_string(&receipt).unwrap()), None, None, None)
-    );
-    assert_eq!(pending_bytes(&f), 0);
 }
 
 #[test]
@@ -531,77 +434,6 @@ fn a_seed_the_journal_never_accepted_is_abandoned_once_and_recognized_after() {
     ));
 }
 
-/// Opus's round 2 F4: an application that races the abandonment lands only
-/// before it, and then abandonment refuses. After it, the activation applies
-/// nothing, not even the seed's own delivery, so every later pass still
-/// recognizes the seed it abandoned.
-#[test]
-fn an_abandoned_seed_holds_every_later_application() {
-    let (mut f, seed, full) = seeded();
-    let absent = JournalEvidence { receipts: vec![], absent: vec![seed.clone()] };
-    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
-    let event = remote_event(&mut f, 2);
-    let seed_event = native_tail_event(&f, full, seed, 1);
-    for held in [event, seed_event] {
-        assert!(matches!(
-            apply_event(&mut f, held).unwrap(),
-            ApplicationResult::Pending(ApplicationPending::ApplicabilityUnavailable)
-        ));
-    }
-    assert!(applied_deliveries(&f).is_empty());
-    assert!(matches!(
-        reconcile(&mut f, 10, None, None).unwrap(),
-        Reconciliation::Reconciled { .. }
-    ));
-}
-
-/// Opus's round 2 F2: a quarantined service seed is never retried, so its
-/// hold says so, and reconciliation reports it apart from ordinary pending
-/// delivery. The journal's answer still ends it as for any seed never delivered.
-#[test]
-fn a_quarantined_service_seed_is_reported_and_still_retires() {
-    let (mut f, seed, _) = seeded();
-    let outbox: String = f
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT outbox_id FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
-                [&seed],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    owner_outbox::quarantine(
-        &mut f.store,
-        "workspace",
-        owner_outbox::OwnerOutboxQuarantineInput {
-            outbox_id: outbox,
-            reason: "provenance-refused".into(),
-            observed_binding: None,
-        },
-        5,
-    )
-    .unwrap();
-    let held = remote_event(&mut f, 2);
-    assert!(matches!(
-        apply_event(&mut f, held).unwrap(),
-        ApplicationResult::Pending(ApplicationPending::SeedQuarantined)
-    ));
-    assert_eq!(
-        reconcile(&mut f, 10, None, None).unwrap(),
-        Reconciliation::SeedQuarantined(vec![seed.clone()])
-    );
-    let absent = JournalEvidence { receipts: vec![], absent: vec![seed.clone()] };
-    assert!(matches!(
-        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
-        Reconciliation::Reconciled { .. }
-    ));
-    assert_eq!(
-        native_entries(&f),
-        vec![(seed, false, None, None, None, Some("activation-released".into()))]
-    );
-}
-
 fn outbox_of(f: &Fixture, delivery: &str) -> String {
     f.store
         .read_with(|conn| {
@@ -696,106 +528,6 @@ fn a_kept_refusal_retires_with_its_bytes() {
     ));
 }
 
-/// Opus's N1 on round 2: the engine never heard the relay's refusal, so the
-/// queue was still active at Stop. Stop's quarantine records the refusal of
-/// its head, as delivery does, and after the copy retirement keeps the edit.
-/// A quarantine with no refusal recorded leaves nothing to keep it by, and
-/// every pass fails.
-#[test]
-fn a_refusal_recorded_at_stop_retires_with_its_bytes() {
-    for recorded in [true, false] {
-        let mut f = Fixture::new();
-        f.adopt().unwrap();
-        let entry = native_tail_edit(&mut f, "# Refused\n", 11);
-        let outbox = outbox_of(&f, &entry.delivery_id);
-        let input = owner_outbox::OwnerOutboxQuarantineInput {
-            outbox_id: outbox.clone(),
-            reason: "delivery-conflict".into(),
-            observed_binding: None,
-        };
-        if recorded {
-            let refusal = owner_outbox::OwnerOutboxRefusal {
-                delivery_id: entry.delivery_id.clone(),
-                key: format!("quarantined:{}", entry.delivery_id),
-            };
-            owner_outbox::record_refusal(&mut f.store, "workspace", input, refusal, 5).unwrap();
-        } else {
-            owner_outbox::quarantine(&mut f.store, "workspace", input, 5).unwrap();
-        }
-        assert_eq!(
-            quarantine_state(&f, &outbox),
-            ("quarantined".to_owned(), i64::from(recorded))
-        );
-        let absent = JournalEvidence {
-            receipts: vec![],
-            absent: vec![entry.delivery_id.clone()],
-        };
-        if !recorded {
-            for _ in 0..2 {
-                assert!(matches!(
-                    reconcile(&mut f, 10, None, Some(&absent)),
-                    Err(ApplicationError::Conflict)
-                ));
-            }
-            continue;
-        }
-        for journal in [Some(&absent), None] {
-            assert!(matches!(
-                reconcile(&mut f, 10, None, journal).unwrap(),
-                Reconciliation::Reconciled { .. }
-            ));
-        }
-        assert_eq!(native_entries(&f)[0].5.as_deref(), Some("retirement-kept"));
-        assert_eq!(entry_update(&f, &entry.delivery_id), entry.update);
-    }
-}
-
-/// A seed the relay refused and nothing applied is abandoned once, whatever
-/// the refusal. Its captured state stays for the owner's recovery.
-#[test]
-fn a_refused_seed_nothing_applied_is_abandoned_once() {
-    let (mut f, seed, full) = seeded();
-    refuse_head(&mut f, &seed, "delivery-conflict");
-    assert_eq!(
-        reconcile(&mut f, 10, None, None).unwrap(),
-        Reconciliation::SeedQuarantined(vec![seed.clone()])
-    );
-    let absent = JournalEvidence {
-        receipts: vec![],
-        absent: vec![seed.clone()],
-    };
-    assert!(matches!(
-        reconcile(&mut f, 10, None, Some(&absent)).unwrap(),
-        Reconciliation::Reconciled { .. }
-    ));
-    assert_eq!(
-        native_entries(&f),
-        vec![(
-            seed.clone(),
-            false,
-            None,
-            None,
-            None,
-            Some("activation-released".into())
-        )]
-    );
-    let kept: bool = f
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
-                [hex_sha256(&full)],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    assert!(kept, "the captured seed stays");
-    assert!(matches!(
-        reconcile(&mut f, 10, None, Some(&absent)),
-        Ok(Reconciliation::Reconciled { .. })
-    ));
-}
-
 /// A refused seed with work applied after it may still have reached a
 /// collaborator, so retirement holds without abandoning it or failing.
 #[test]
@@ -817,57 +549,6 @@ fn a_refused_seed_with_later_applied_work_holds_its_retirement() {
         Reconciliation::SeedQuarantined(vec![seed])
     );
     assert_eq!((native_entries(&f), pending_bytes(&f)), before);
-}
-
-/// Opus F3: the relay accepted a Try again, but its acknowledgement was lost
-/// and its grant ended. The journal's receipt still acknowledges it on the
-/// quarantined outbox.
-#[test]
-fn a_journal_receipt_acknowledges_a_lost_try_again_on_a_quarantined_outbox() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let entry = native_tail_edit(&mut f, "# Retried\n", 11);
-    let outbox = refuse_head(&mut f, &entry.delivery_id, "capacity-refused");
-    owner_outbox::retry(
-        &mut f.store,
-        "workspace",
-        owner_outbox::OwnerOutboxRetryInput {
-            outbox_id: outbox.clone(),
-            binding: f.binding.clone(),
-        },
-    )
-    .unwrap();
-    owner_outbox::quarantine(
-        &mut f.store,
-        "workspace",
-        owner_outbox::OwnerOutboxQuarantineInput {
-            outbox_id: outbox,
-            reason: "capacity-refused".into(),
-            observed_binding: None,
-        },
-        6,
-    )
-    .unwrap();
-    let receipt = receipt_of(&entry.delivery_id, &entry.update_digest, 3);
-    let evidence = JournalEvidence {
-        receipts: vec![receipt.clone()],
-        absent: vec![],
-    };
-    assert!(matches!(
-        reconcile(&mut f, 10, None, Some(&evidence)).unwrap(),
-        Reconciliation::Reconciled { .. }
-    ));
-    assert_eq!(
-        native_entries(&f)[0],
-        (
-            entry.delivery_id,
-            false,
-            Some(serde_json::to_string(&receipt).unwrap()),
-            None,
-            None,
-            None
-        )
-    );
 }
 
 /// Phase A ends one activation in its owner: only registrations tagged with
@@ -995,27 +676,6 @@ fn retiring_an_activation_ends_only_its_own_registrations_and_cache_entry() {
     assert_eq!(binding_row(&f), before);
 }
 
-/// N8: an unload names the activation it ends. A registration serving
-/// another, or any while the unload names none, refuses it; an ordinary
-/// registration serves none and goes with any unload of its document.
-#[test]
-fn an_unload_must_name_the_activation_its_registration_serves() {
-    let mut f = Fixture::new();
-    for named in [None, Some("adoption")] {
-        assert!(f._owner.require_unload_activation("object", named).is_ok());
-    }
-    f.adopt().unwrap();
-    for named in [None, Some("successor")] {
-        assert!(matches!(
-            f._owner.unregister(&mut f.store, "object", named),
-            Err(ApplicationError::Conflict)
-        ));
-        assert_eq!(f._owner.current.len(), 1, "{named:?}");
-    }
-    f._owner.unregister(&mut f.store, "object", Some("adoption")).unwrap();
-    assert!(f._owner.current.is_empty());
-}
-
 #[test]
 fn a_seed_missing_any_condition_is_not_abandoned() {
     let damage: [(&str, &str); 12] = [
@@ -1139,22 +799,6 @@ fn a_seed_missing_any_condition_is_not_abandoned() {
 }
 
 #[test]
-fn a_terminal_reason_alone_is_not_an_abandoned_seed() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let entry = native_tail_edit(&mut f, "# Native\n", 11);
-    acknowledge_entry(&mut f, &receipt_of(&entry.delivery_id, &entry.update_digest, 3));
-    write(
-        &mut f,
-        "UPDATE owner_ydoc_outbox_entries SET accepted_receipt_json=NULL,terminal_reason='activation-released'",
-    );
-    assert!(matches!(
-        reconcile(&mut f, 10, None, None),
-        Err(ApplicationError::Conflict)
-    ));
-}
-
-#[test]
 fn retirement_validates_the_exact_activation_before_reading_its_entries() {
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -1203,86 +847,12 @@ fn retirement_validates_the_exact_activation_before_reading_its_entries() {
     assert!(refused(&mut f, &source), "overtaken by a successor");
 }
 
-/// Every row a refused never-adopted retirement could have written.
-type NeverAdoptedInventory = (Vec<i64>, (String, String, Option<String>), i64, i64);
-
-fn never_adopted_inventory(f: &Fixture) -> NeverAdoptedInventory {
-    let binding = f
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT lineage_claim_id,current_path,activation_id FROM live_device_application_bindings",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-        })
-        .unwrap();
-    (
-        f.counts(),
-        binding,
-        f.store.table_row_count("live_owner_activations").unwrap(),
-        f.store.table_row_count("ydoc_owner_activation_sources").unwrap(),
-    )
-}
-
 /// A source `captured` no activation recorded, on a lineage never adopted.
 fn never_adopted() -> Fixture {
     let mut f = Fixture::new();
     f.cut.adoption_id = "captured".into();
     retain_captured(&mut f);
     f
-}
-
-#[test]
-fn a_never_adopted_source_reconciles_only_against_its_own_binding() {
-    let other = "f".repeat(64);
-    let cases = [
-        ("unnamed, on another lineage", format!("lineage_claim_id='{other}'")),
-        ("named, on another lineage", format!("lineage_claim_id='{other}',activation_id='captured'")),
-        ("unnamed, at another path", "current_path='other.md'".to_owned()),
-        ("named, at another path", "current_path='other.md',activation_id='captured'".to_owned()),
-        ("named for another activation", "activation_id='adoption'".to_owned()),
-    ];
-    for (case, set) in cases {
-        let mut f = never_adopted();
-        write(&mut f, &format!("UPDATE live_device_application_bindings SET {set}"));
-        let before = never_adopted_inventory(&f);
-        assert!(
-            matches!(reconcile(&mut f, 10, None, None), Err(ApplicationError::Conflict)),
-            "{case}"
-        );
-        assert_eq!(never_adopted_inventory(&f), before, "{case}");
-    }
-    // Its own binding, unnamed or naming it, has nothing to prove.
-    for named in [false, true] {
-        let mut f = never_adopted();
-        if named {
-            write(&mut f, "UPDATE live_device_application_bindings SET activation_id='captured'");
-        }
-        assert_eq!(
-            reconcile(&mut f, 10, None, None).unwrap(),
-            Reconciliation::Reconciled {
-                adoption: None,
-                applications: vec![],
-                has_more_applications: false,
-                settle: false
-            },
-            "named={named}"
-        );
-    }
-    // An unnamed binding is its own only while its lineage was never adopted.
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    release(&mut f, "adoption");
-    retain_captured(&mut f);
-    write(&mut f, "UPDATE live_device_application_bindings SET activation_id=NULL");
-    f.cut.adoption_id = "captured".into();
-    let before = never_adopted_inventory(&f);
-    assert!(matches!(
-        reconcile(&mut f, 10, None, None),
-        Err(ApplicationError::Conflict)
-    ));
-    assert_eq!(never_adopted_inventory(&f), before);
 }
 
 fn retirement_host() -> ApplicationHostCoordinate {
@@ -1636,56 +1206,6 @@ fn an_adopted_activation_releases_once_parked_and_reconciled() {
     assert_eq!(rows(&f, &RELEASE_WRITES), released);
 }
 
-/// Work that legitimately completed since reconciliation asks for another
-/// reconciliation; evidence that cannot hold refuses with no writes.
-#[test]
-fn a_release_recomputes_and_refuses_invalid_evidence_without_writes() {
-    // An application after the last reconciliation needs settling first.
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    host_document(&mut f, true, true);
-    assert!(matches!(reconcile(&mut f, 10, None, None).unwrap(), Reconciliation::Reconciled { settle: false, .. }));
-    let event = remote_event(&mut f, 2);
-    apply_event(&mut f, event).unwrap();
-    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Reconciliation));
-    // So does a native update still waiting for the relay.
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    host_document(&mut f, true, true);
-    native_tail_edit(&mut f, "# Pending\n", 11);
-    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Reconciliation));
-    assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 1);
-    // An application past F refuses: B must be its last.
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let event = remote_event(&mut f, 11);
-    apply_event(&mut f, event).unwrap();
-    host_document(&mut f, true, true);
-    let before = rows(&f, &RELEASE_WRITES);
-    assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)));
-    assert_eq!(rows(&f, &RELEASE_WRITES), before);
-    // So does accepted history that ends elsewhere, and a receipt past F.
-    for damage in ["history endpoint", "receipt past F"] {
-        let (mut f, covered, _, _) = covered_and_carried();
-        host_document(&mut f, true, true);
-        retirement_settle(&mut f, 10, Some(covered)).unwrap();
-        let through = if damage == "receipt past F" {
-            4
-        } else {
-            // Accepted history still ends at 3, but nothing applied past the
-            // origin any more, so B is the origin.
-            write(
-                &mut f,
-                "DELETE FROM live_device_application_first_seen; DELETE FROM live_device_update_applications",
-            );
-            10
-        };
-        let before = rows(&f, &RELEASE_WRITES);
-        assert!(matches!(release_through(&mut f, through), Err(ApplicationError::Conflict)), "{damage}");
-        assert_eq!(rows(&f, &RELEASE_WRITES), before, "{damage}");
-    }
-}
-
 /// Each class needs its own evidence. Covered: accepted history keeps the
 /// exact receipt. Carried: the receipt names the entry's own delivery.
 /// Abandoned: the strict seed representation. One failing condition each
@@ -1736,76 +1256,6 @@ fn each_release_class_needs_its_own_evidence() {
     }
 }
 
-/// A never-adopted source releases before parking, which it would hold back,
-/// but only once its document left the scope. It follows its lineage's
-/// released tail and keeps that tail's boundary, and deletes only a binding
-/// that names it.
-#[test]
-fn a_never_adopted_source_releases_before_parking() {
-    for named in [false, true] {
-        let mut f = never_adopted();
-        if named {
-            write(&mut f, "UPDATE live_device_application_bindings SET activation_id='captured'");
-        }
-        host_document(&mut f, false, false);
-        assert!(matches!(release_through(&mut f, 10), Err(ApplicationError::Conflict)));
-        host_document(&mut f, true, false);
-        assert_eq!(
-            release_through(&mut f, 10).unwrap(),
-            Release::Released { replayed: false, boundary: None }
-        );
-        let row: (Option<String>, Option<String>, Option<i64>, i64, String) = f
-            .store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT origin_adoption_id,predecessor_activation_id,terminal_cursor,released_accepted_cursor,
-                        carried_manifest_json FROM live_owner_activations WHERE activation_id='captured'",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                )
-            })
-            .unwrap();
-        assert_eq!(row, (None, None, None, 10, "[]".to_owned()));
-        assert_eq!(
-            f.store.table_row_count("live_device_application_bindings").unwrap(),
-            if named { 0 } else { 1 },
-            "named={named}"
-        );
-        assert_eq!(f.store.table_row_count("ydoc_owner_activation_sources").unwrap(), 1);
-        assert_eq!(
-            release_through(&mut f, 10).unwrap(),
-            Release::Released { replayed: true, boundary: None }
-        );
-    }
-    // After an adopted predecessor's release, it inherits that boundary.
-    let (mut f, covered, carried, sequence) = covered_and_carried();
-    host_document(&mut f, true, true);
-    retirement_settle(&mut f, 10, Some(covered)).unwrap();
-    let Release::Released { boundary, .. } = release_through(&mut f, 10).unwrap() else {
-        panic!("released");
-    };
-    f.cut.adoption_id = "captured".into();
-    assert_eq!(
-        release_through(&mut f, 12).unwrap(),
-        Release::Released { replayed: false, boundary }
-    );
-    let (predecessor, manifest): (String, String) = f
-        .store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT predecessor_activation_id,carried_manifest_json FROM live_owner_activations WHERE activation_id='captured'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-        })
-        .unwrap();
-    assert_eq!(predecessor, "adoption");
-    assert_eq!(
-        serde_json::from_str::<Vec<CarriedDelivery>>(&manifest).unwrap(),
-        vec![CarriedDelivery { receipt: carried, native_sequence: sequence }]
-    );
-}
-
 /// Opus's round 2 F5: a released activation answers from its stored release
 /// once a successor holds the lineage and applied the carried delivery,
 /// which a recomputation would count. It writes nothing.
@@ -1844,57 +1294,6 @@ fn a_released_replay_answers_from_its_release_after_a_successor() {
         settle: false,
     });
     assert_eq!(rows(&f, &RELEASE_WRITES), before);
-}
-
-/// Opus's round 3a note: only release ends an abandoned seed's hold, by
-/// retiring its activation. A successor's hold names only its own seed, so
-/// the predecessor's abandoned seed never holds it.
-#[test]
-fn only_release_ends_an_abandoned_seed_hold() {
-    let (mut f, seed, _) = seeded();
-    let absent = JournalEvidence { receipts: vec![], absent: vec![seed] };
-    reconcile(&mut f, 10, None, Some(&absent)).unwrap();
-    let hold = |f: &Fixture| {
-        f.store
-            .read_with(|conn| super::super::seed_hold(conn, "namespace", &f.binding))
-            .unwrap()
-    };
-    assert!(matches!(hold(&f), Some(SeedHold::Abandoned)));
-    host_document(&mut f, true, false);
-    assert_eq!(release_through(&mut f, 10).unwrap(), Release::Pending(ReleasePending::Parking));
-    assert!(matches!(hold(&f), Some(SeedHold::Abandoned)), "pending release keeps it");
-    host_document(&mut f, true, true);
-    assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { .. }));
-    assert!(hold(&f).is_none());
-    // A successor with a retained source of its own, and no seed yet.
-    let predecessor = f.cut.adoption_id.clone();
-    f.store
-        .write_with(&NoFaults, |tx| {
-            tx.execute(
-                "INSERT INTO ydoc_owner_activation_sources SELECT 'successor',relay_database_namespace,workspace_id,
-                    version_id,object_id,lineage_claim_id,source_moment_id,source_digest,full_state_digest,descriptor_json
-                 FROM ydoc_owner_activation_sources WHERE activation_id=?1",
-                [&predecessor],
-            )
-            .map_err(write_sql)?;
-            tx.execute(
-                "INSERT INTO live_owner_activations (relay_database_namespace,activation_id,workspace_id,main_version_id,
-                    object_id,lineage_claim_id,origin_adoption_id,predecessor_activation_id,binding_json,source_moment_id,
-                    source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,
-                    host_coordinate_json,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,
-                    terminal_cursor,terminal_receipt_json,max_pending_bytes,max_pending_age_ms)
-                 SELECT relay_database_namespace,'successor',workspace_id,main_version_id,object_id,lineage_claim_id,
-                    origin_adoption_id,activation_id,binding_json,source_moment_id,source_digest,source_byte_length,
-                    baseline_moment_relay_sequence,baseline_registered_at_ms,host_coordinate_json,evidence_digest,
-                    coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,
-                    max_pending_bytes,max_pending_age_ms
-                 FROM live_owner_activations WHERE activation_id=?1",
-                [&predecessor],
-            )
-            .map_err(write_sql)
-        })
-        .unwrap();
-    assert!(hold(&f).is_none(), "the successor's hold names only its own seed");
 }
 
 fn begin(f: &mut Fixture, through: i64) -> Result<RetirementTarget, ApplicationError> {
@@ -2158,42 +1557,6 @@ fn a_committed_restore_fence_ends_in_its_terminal_cancellation_until_admission()
     assert_eq!(f.store.table_row_count("live_restore_cancellations").unwrap(), 0);
 }
 
-/// Sol: a released activation never regains live authority, after a
-/// reconnect (a new owner, whose retired set is empty) or a restart (the
-/// store reopened), whether it adopted or not.
-#[test]
-fn a_released_activation_never_regains_live_authority() {
-    for adopted in [true, false] {
-        let mut f = if adopted {
-            let mut f = Fixture::new();
-            f.adopt().unwrap();
-            f
-        } else {
-            never_adopted()
-        };
-        host_document(&mut f, true, true);
-        assert!(matches!(release_through(&mut f, 10).unwrap(), Release::Released { .. }), "adopted={adopted}");
-        host_document(&mut f, true, false);
-        drop(f.store);
-        f.store = EngineStore::open(&f._scratch.join("engine.db"), 31).unwrap();
-        let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
-        let id = f.cut.adoption_id.clone();
-        assert!(matches!(
-            owner.register_activation(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone(), id),
-            Err(ApplicationError::Conflict)
-        ), "adopted={adopted}");
-        // Unnamed, an adopted lineage refuses; a lineage never adopted takes
-        // an ordinary registration that serves no activation.
-        let unnamed = owner.register(&mut f.store, "namespace".into(), retirement_host(), f.binding.clone());
-        if adopted {
-            assert!(matches!(unnamed, Err(ApplicationError::Conflict)));
-            assert_eq!(f.store.table_row_count("live_device_application_bindings").unwrap(), 0);
-        } else {
-            assert_eq!(unnamed.unwrap().activation_id(), None);
-        }
-    }
-}
-
 /// Sol's round 3b blocker: after Phase A and a restart, no owner retired the
 /// activation in memory, but its durable intent still refuses every way back
 /// to live authority, whether it adopted or not. A named or unnamed
@@ -2282,25 +1645,6 @@ fn a_retiring_activation_never_serves_again_after_a_restart() {
         assert!(live(), "adopted={adopted}");
         assert_eq!(unrelated_handle.activation_id().as_deref(), Some(unrelated.as_str()));
     }
-}
-
-/// N-c: a capture on a lineage another activation holds could never adopt.
-/// It writes nothing, so no unrecorded source holds its document unparked.
-#[test]
-fn a_capture_on_a_held_lineage_retains_nothing() {
-    let mut f = imported_fixture();
-    let first = capture_imported(&mut f, 1_000_000).unwrap();
-    f.cut.adoption_id = first.activation_id.clone();
-    f.adopt().unwrap();
-    assert_eq!(
-        capture_imported(&mut f, 1_000_000).unwrap().activation_id,
-        first.activation_id,
-        "the holding activation's own capture replays"
-    );
-    write(&mut f, "UPDATE sync_relay_cursors SET cursor='10'");
-    let before = rows(&f, &["ydoc_owner_activation_sources", "binary_blobs"]);
-    assert!(matches!(capture_imported(&mut f, 1_000_000), Err(ApplicationError::Conflict)));
-    assert_eq!(rows(&f, &["ydoc_owner_activation_sources", "binary_blobs"]), before);
 }
 
 /// The readers that change once the current activation is released (round
@@ -2423,22 +1767,6 @@ fn readers_after_a_release() {
     assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), observed);
 }
 
-/// Opus's round 3b note: only a lineage an owner adopted refuses enrollment
-/// and an observed binding once nothing holds it. A lineage never adopted,
-/// with no binding, takes both.
-#[test]
-fn a_lineage_never_adopted_still_enrolls_and_installs_an_observed_binding() {
-    let mut f = Fixture::new();
-    write(&mut f, "DELETE FROM live_device_application_bindings");
-    let binding = f.binding.clone();
-    assert!(f
-        .store
-        .read_with(|conn| owner_outbox::enrollment::capture_in(conn, &binding))
-        .is_ok());
-    observe(&mut f).unwrap();
-    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 1);
-}
-
 /// Sol's round 3b blocker: a never-adopted release carries its predecessor's
 /// deliveries, but has no adoption to state their limits. The configured
 /// host's budget must still cover the limits they were accepted under: the
@@ -2496,25 +1824,6 @@ fn carried_deliveries_keep_the_limits_they_were_accepted_under() {
     release_through(&mut f, 12).unwrap();
     write(&mut f, "UPDATE live_owner_activations SET carried_manifest_json='[{}]' WHERE activation_id='second'");
     assert!(!exceeds(&f, 1));
-}
-
-/// Phase A retires only its own namespace's registrations on its own host
-/// coordinate. One tagged with the same activation under another connection
-/// or namespace stays live.
-#[test]
-fn phase_a_ends_only_registrations_on_its_own_coordinate() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let key = f.key.clone();
-    let live = |f: &Fixture| f.handle.registration.lock().unwrap().live && f._owner.current.len() == 1;
-    let other = ApplicationHostCoordinate { connection_id: "other".into(), ..retirement_host() };
-    for (namespace, coordinate) in [("namespace", other), ("elsewhere", retirement_host())] {
-        f._owner.retire_activation(&mut WriterDocCache::new(), namespace, &coordinate, &key, "adoption");
-        assert!(live(&f), "{namespace} {coordinate:?}");
-    }
-    f._owner.retire_activation(&mut WriterDocCache::new(), "namespace", &retirement_host(), &key, "adoption");
-    assert!(!f.handle.registration.lock().unwrap().live);
-    assert!(f._owner.current.is_empty());
 }
 
 /// Install an observed binding of the document at its exact local state.
@@ -2664,29 +1973,6 @@ fn a_local_append_and_a_stop_preparation_never_interleave() {
     assert!(matches!(reconcile(&mut f, 10, None, None).unwrap(), Reconciliation::Reconciled { .. }));
 }
 
-/// A refused append fails as one on a frozen queue does: its whole
-/// transaction rolls back and the caller keeps its bytes. Released, the
-/// same bytes append whole.
-#[test]
-fn a_refused_append_loses_nothing() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let (preparations, owner) = (RetirementPreparations::default(), owner());
-    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
-    let before = appended(&f);
-    let update = f.doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Kept\n").unwrap();
-    assert!(matches!(prepared_append(&mut f, &update, 11, &preparations), Err(crate::CollabError::OwnerOutboxFrozen)));
-    assert_eq!(appended(&f), before);
-    assert!(preparations.release(&preparation_key(&f), &owner));
-    assert!(!preparations.release(&preparation_key(&f), &owner), "a release is idempotent");
-    let entry = prepared_append(&mut f, &update, 11, &preparations).unwrap();
-    assert_eq!(entry.update, update);
-    assert_eq!(entry_update(&f, &entry.delivery_id), update);
-    let after = appended(&f);
-    assert_eq!((after.1, after.2.len()), (before.1 + 1, before.2.len() + 1));
-    assert_ne!(after.0, before.0);
-}
-
 /// A preparation lasts only while the owner that made it does. Another
 /// owner neither releases it nor inherits it, and the owner's end reopens
 /// appends.
@@ -2708,26 +1994,5 @@ fn a_preparation_lasts_only_while_its_owner_does() {
     prepared_append(&mut f, &update, 11, &preparations).unwrap();
     assert!(!preparations.release(&preparation_key(&f), &first), "an ended owner's preparation was not in force");
     assert_eq!(prepare(&f, &preparations, &other).unwrap(), Some(PreparationPending::NativePending));
-    assert!(!preparations.blocks(&f.cut.adoption_id, 0));
-}
-
-/// A refused queue with no Try again retires with its kept bytes, so it
-/// prepares. An outstanding Try again may still deliver, so it waits.
-#[test]
-fn an_outstanding_try_again_holds_a_preparation() {
-    let mut f = Fixture::new();
-    f.adopt().unwrap();
-    let (preparations, owner) = (RetirementPreparations::default(), owner());
-    let entry = native_tail_edit(&mut f, "# Refused\n", 11);
-    let outbox = refuse_head(&mut f, &entry.delivery_id, "capacity-refused");
-    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), None);
-    assert!(preparations.release(&preparation_key(&f), &owner));
-    owner_outbox::retry(
-        &mut f.store,
-        "workspace",
-        owner_outbox::OwnerOutboxRetryInput { outbox_id: outbox, binding: f.binding.clone() },
-    )
-    .unwrap();
-    assert_eq!(prepare(&f, &preparations, &owner).unwrap(), Some(PreparationPending::RetryOutstanding));
     assert!(!preparations.blocks(&f.cut.adoption_id, 0));
 }

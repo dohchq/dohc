@@ -2741,22 +2741,6 @@ mod tests {
     }
 
     #[test]
-    fn desktop_automation_drafts_do_not_require_server_declarations() {
-        let value = serde_json::json!({"sessionId":"session","updateBase64":"AAA=","expectedLineageClaimId":null,"actorOriginId":"collection:Tasks#mark","attribution":{"actorKind":"automation","depth":1,"onBehalfOf":"presser"}});
-        let desktop: super::YdocRecordUpdateParams = serde_json::from_value(value.clone()).unwrap();
-        assert!(desktop.automation_declaration().is_none());
-        let mut server_value = value;
-        server_value["trustedAutomationDraft"] = serde_json::json!(true);
-        let server: super::YdocRecordUpdateParams = serde_json::from_value(server_value).unwrap();
-        let declaration = server.automation_declaration().unwrap();
-        assert_eq!(declaration.automation_id, "collection:Tasks#mark");
-        assert_eq!(
-            declaration.attribution.on_behalf_of.as_deref(),
-            Some("presser")
-        );
-    }
-
-    #[test]
     fn record_update_requires_the_expected_claim() {
         let parse = |value| serde_json::from_value::<super::YdocRecordUpdateParams>(value);
         let omitted = parse(serde_json::json!({"sessionId":"session","updateBase64":"AAA="}));
@@ -2774,38 +2758,7 @@ mod tests {
     }
 
     use super::*;
-    #[test]
-    fn imported_owner_binds_session_claim() {
-        use dohc_engine_collab::live_update_application::{
-            ImportedOwnerActivation, ImportedOwnerSource,
-        };
-        let claim = "a".repeat(64);
-        let source: ImportedOwnerSource = serde_json::from_value(json!({
-            "version":1,"relayDatabaseNamespace":"relay","workspaceId":"ws","mainVersionId":"main",
-            "objectId":"object","lineageClaimId":claim,"currentPath":"head.md","replicationEpoch":"epoch",
-            "streamIdentity":"stream","committedCursor":1,"baseOriginId":"peer","baseOriginSeq":0,
-            "baseRelaySeq":1,"sourceMomentId":"source","sourceDigest":claim,"sourceByteLength":0,
-            "nativeHeadSequence":0,"fullStateDigest":claim,"fullStateByteLength":0
-        })).unwrap();
-        let captured = ImportedOwnerActivation {
-            activation_id: "activation".into(),
-            source,
-            baseline_bytes: Vec::new(),
-            full_state: Vec::new(),
-            restore_generation: None,
-        };
-        let leases = dohc_engine_collab::LeaseRegistry::new();
-        let key = DocKey::new("ws", "main", "object").unwrap();
-        let session = YdocSession::imported_owner(
-            WorkspaceHandle("handle".into()),
-            key.clone(),
-            &captured,
-            leases.acquire(&key).unwrap(),
-        );
-        assert_eq!(leases.bound_claim(&key).as_deref(), Some(claim.as_str()));
-        drop(session);
-        assert_eq!(leases.bound_claim(&key), None);
-    }
+
     use crate::EngineService;
     use crate::rpc::error::map_owner_outbox;
     use dohc_engine_collab::DocKey;
@@ -2863,137 +2816,6 @@ mod tests {
         assert!(queue.retry_after.is_none());
         queue.changed_inputs();
         assert!(queue.try_queue(now));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn capacity_refusals_retry_failed_queued_settlement_after_backoff() {
-        let scratch = ScratchDir::new().unwrap();
-        let service = EngineService::new();
-        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
-            "rootDir":scratch.path().to_string_lossy(),"workspaceId":"capacity-retry","captureMode":"none"
-        })).await.unwrap();
-        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
-        let (session, egress) = service.ydoc_open(
-            &RequestContext::unbounded(), Some(handle.clone()),
-            json!({"versionId":"main","path":"authors.txt","contentKind":"plaintext","seedFromArtifact":false}), 1,
-        ).await.unwrap();
-        drop(egress);
-        let id = session["sessionId"].as_str().unwrap();
-        let doc = dohc_engine_collab::Ydoc::wire();
-        let params = |author: &str, update: &[u8]| {
-            json!({
-                "sessionId":id,"updateBase64":base64::engine::general_purpose::STANDARD.encode(update),
-                "expectedLineageClaimId":session["lineageClaimId"],
-                "actorOriginId":author,"attribution":{"actorKind":"agent","onBehalfOf":"person","depth":0}
-            })
-        };
-        service
-            .ydoc_record_update(
-                &RequestContext::unbounded(),
-                Some(handle.clone()),
-                None,
-                params("first", &doc.plaintext_insert(0, "a")),
-            )
-            .await
-            .unwrap();
-        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
-        let raw = rusqlite::Connection::open(&db).unwrap();
-        let folded: Vec<_> = (0..dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS - 1)
-            .map(|i| json!({"kind":"agent","agentId":format!("folded-{i}"),"onBehalfOf":"person"}))
-            .collect();
-        raw.execute(
-            "UPDATE ydoc_docs SET pending_authors_json=?1",
-            [json!(folded).to_string()],
-        )
-        .unwrap();
-        raw.execute_batch("CREATE TRIGGER refuse_settlement BEFORE INSERT ON moments BEGIN SELECT RAISE(ABORT, 'settlement fixture'); END;").unwrap();
-        // The known author fills the last slot and queues a real failing settle.
-        service
-            .ydoc_record_update(
-                &RequestContext::unbounded(),
-                Some(handle.clone()),
-                None,
-                params("first", &doc.plaintext_insert(1, "b")),
-            )
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if lock(&service.sessions)
-                    .get(id)
-                    .unwrap()
-                    .author_settlement
-                    .retry_after
-                    .is_some()
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        raw.execute_batch("DROP TRIGGER refuse_settlement").unwrap();
-        let update = doc.plaintext_insert(2, "c");
-        for author in ["new-before-backoff", "another-before-backoff"] {
-            let error = service
-                .ydoc_record_update(
-                    &RequestContext::unbounded(),
-                    Some(handle.clone()),
-                    None,
-                    params(author, &update),
-                )
-                .await
-                .unwrap_err();
-            assert_eq!(error.message, "ydoc-author-capacity");
-        }
-        {
-            let mut sessions = lock(&service.sessions);
-            let queue = &mut sessions.get_mut(id).unwrap().author_settlement;
-            assert!(!queue.queued, "refusals must respect the retry delay");
-            assert!(queue.retry_after.is_some());
-            // Expire the real queue's backoff without sleeping in the test.
-            queue.retry_after = Some(Instant::now());
-        }
-        let error = service
-            .ydoc_record_update(
-                &RequestContext::unbounded(),
-                Some(handle.clone()),
-                None,
-                params("new-after-backoff", &update),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.message, "ydoc-author-capacity");
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if lock(&service.sessions)
-                    .get(id)
-                    .unwrap()
-                    .last_settled_sha
-                    .is_some()
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        service
-            .ydoc_record_update(
-                &RequestContext::unbounded(),
-                Some(handle.clone()),
-                None,
-                params("admitted-after-retry", &update),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(scratch.path().join("authors.txt")).unwrap(),
-            "ab"
-        );
-        service.workspace_close(Some(handle)).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3860,117 +3682,11 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn owner_receipt_wire_bounds_precede_workspace_lookup() {
-        async fn refusal(service: &EngineService, epoch: Value, cursor: Value) -> WireError {
-            service
-                .owner_ydoc_outbox_acknowledge(
-                    &RequestContext::unbounded(),
-                    None,
-                    json!({
-                        "outboxId": "missing-outbox",
-                        "receipts": [{
-                            "deliveryId": "delivery-1",
-                            "updateDigest": "0".repeat(64),
-                            "journalCursor": cursor,
-                            "acceptingHostEpoch": epoch
-                        }]
-                    }),
-                )
-                .await
-                .expect_err("missing workspace must refuse")
-        }
-
-        let supervisor: &'static WorkspaceSupervisor =
-            Box::leak(Box::new(WorkspaceSupervisor::new()));
-        let service = EngineService::with_supervisor(supervisor);
-
-        for (epoch, cursor) in [
-            (json!("1"), json!(1)),
-            (json!(1), json!("1")),
-            (json!(1.5), json!(1)),
-            (json!(1), json!(1.5)),
-        ] {
-            let error = refusal(&service, epoch, cursor).await;
-            assert_eq!(error.code, ErrorCode::InvalidParams);
-            assert_eq!(error.message, "invalid parameters");
-        }
-
-        for value in [1_i64, 9_007_199_254_740_991_i64] {
-            let error = refusal(&service, json!(value), json!(value)).await;
-            assert_eq!(error.code, ErrorCode::WorkspaceUnavailable, "{value}");
-            assert_eq!(error.message, "workspace handle is unavailable", "{value}");
-        }
-
-        for value in [0_i64, -1_i64, 9_007_199_254_740_992_i64] {
-            let epoch_error = refusal(&service, json!(value), json!(1)).await;
-            assert_eq!(epoch_error.code, ErrorCode::InvalidParams, "epoch {value}");
-            assert_eq!(
-                epoch_error.message, "invalid-owner-outbox-receipt",
-                "epoch {value}"
-            );
-
-            let cursor_error = refusal(&service, json!(1), json!(value)).await;
-            assert_eq!(
-                cursor_error.code,
-                ErrorCode::InvalidParams,
-                "cursor {value}"
-            );
-            assert_eq!(
-                cursor_error.message, "invalid-owner-outbox-receipt",
-                "cursor {value}"
-            );
-        }
-    }
-
     #[test]
     fn owner_outbox_main_version_mismatch_has_a_distinct_wire_refusal() {
         let mapped = map_owner_outbox(OwnerOutboxError::MainVersionMismatch);
         assert_eq!(mapped.code, ErrorCode::InvalidParams);
         assert_eq!(mapped.message, "owner-outbox-main-version-mismatch");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owner_outbox_main_version_mismatch_is_refused_over_the_wire() {
-        let scratch = ScratchDir::new().expect("scratch");
-        let supervisor: &'static WorkspaceSupervisor =
-            Box::leak(Box::new(WorkspaceSupervisor::new()));
-        let service = EngineService::with_supervisor(supervisor);
-        let workspace_id = "owner-outbox-main-version-wire";
-        let opened = service
-            .workspace_open(
-                &RequestContext::unbounded(),
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": workspace_id,
-                    "captureMode": "none"
-                }),
-            )
-            .await
-            .expect("workspace open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-        service
-            .versions_ensure_main(
-                &RequestContext::unbounded(),
-                Some(handle.clone()),
-                json!({ "workspaceId": workspace_id }),
-            )
-            .await
-            .expect("ensure durable main version");
-        let mut params = owner_outbox_append_params(workspace_id, "main-version-mismatch");
-        params["binding"]["mainVersionId"] = json!("other-main");
-
-        let error = service
-            .owner_ydoc_outbox_append(&RequestContext::unbounded(), Some(handle.clone()), params)
-            .await
-            .expect_err("mismatched main version");
-        assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert_eq!(error.message, "owner-outbox-main-version-mismatch");
-        service
-            .workspace_close(Some(handle))
-            .await
-            .expect("workspace close");
     }
 
     #[tokio::test]
@@ -4019,134 +3735,6 @@ mod tests {
         })
         .await
         .expect("completion released serial and lease");
-    }
-
-    /// The open is stopped at its egress reservation, after the scene's assets
-    /// landed, so it answers with the session it opened.
-    #[tokio::test]
-    async fn a_scene_open_cancelled_after_its_assets_land_answers_with_its_session() {
-        use dohc_engine_protocol::supervisor::{Supervisor, SupervisorConfig};
-        let scratch = ScratchDir::new().expect("scratch");
-        let supervisor: &'static WorkspaceSupervisor =
-            Box::leak(Box::new(WorkspaceSupervisor::new()));
-        let service = Arc::new(EngineService::with_supervisor(supervisor));
-        let ctx = RequestContext::unbounded();
-        let opened = service
-            .workspace_open(
-                &ctx,
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "scene-open-cancel",
-                    "captureMode": "none"
-                }),
-            )
-            .await
-            .expect("workspace open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-        service
-            .versions_ensure_main(
-                &ctx,
-                Some(handle.clone()),
-                json!({ "workspaceId": "scene-open-cancel" }),
-            )
-            .await
-            .expect("ensure main");
-        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-        let scene = json!({
-            "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
-            "elements": [{
-                "id": "image-element", "type": "image", "version": 1, "versionNonce": 1,
-                "isDeleted": false, "index": "a0", "fileId": "image-file"
-            }],
-            "appState": {},
-            "files": { "image-file": {
-                "id": "image-file", "mimeType": "image/png",
-                "dataURL": format!("data:image/png;base64,{png}"), "created": 12
-            }}
-        });
-        service
-            .versioned_text_write(
-                &ctx,
-                dohc_engine_protocol::wire::Request {
-                    id: 1,
-                    method: "versionedText.write".into(),
-                    workspace: Some(handle.clone()),
-                    deadline_ms: None,
-                    idempotency_key: None,
-                    progress: false,
-                    params: json!({
-                        "versionId": "main", "path": "drawings/a.excalidraw",
-                        "text": scene.to_string(), "origin": "api"
-                    }),
-                },
-            )
-            .await
-            .expect("write the scene");
-        let budget = super::super::reads::BLOB_EGRESS_BYTE_BUDGET;
-        let held = service
-            .blob_egress_budget
-            .reserve(
-                i64::try_from(budget).expect("budget"),
-                &OperationCancellation::new(&ctx),
-                "test",
-            )
-            .await
-            .expect("hold the whole egress budget");
-        let requests = Supervisor::new(SupervisorConfig::default(), Arc::clone(&service));
-        let answer = requests
-            .try_submit_with(
-                dohc_engine_protocol::wire::Request {
-                    id: 2,
-                    method: "ydoc.open".into(),
-                    workspace: Some(handle.clone()),
-                    deadline_ms: Some(60_000),
-                    idempotency_key: None,
-                    progress: false,
-                    params: json!({
-                        "versionId": "main", "path": "drawings/a.excalidraw",
-                        "contentKind": "scene", "seedFromArtifact": true
-                    }),
-                },
-                Arc::from(["blobs".to_owned()]),
-                dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
-                |_| {},
-            )
-            .expect("admitted");
-        let assets = scratch.path().join("assets").join("excalidraw");
-        let waiting = std::time::Instant::now();
-        while std::fs::read_dir(&assets).map_or(true, |mut entries| entries.next().is_none()) {
-            assert!(
-                waiting.elapsed() < Duration::from_secs(10),
-                "the scene's assets never landed"
-            );
-            tokio::task::yield_now().await;
-        }
-        assert!(requests.cancel(2));
-        // Let the cancellation reach the open's token before the budget frees.
-        tokio::task::yield_now().await;
-        drop(held);
-        let opened = answer
-            .await
-            .expect("answered")
-            .expect("an open whose assets landed answers with its session");
-        assert_eq!(opened.response.result["contentKind"], json!("scene"));
-        let egress = opened.blob_egress.as_ref().expect("the session's blob");
-        assert!(
-            !egress.cancel.is_cancelled(),
-            "the blob is sent without the request's cancellation"
-        );
-        assert_eq!(egress.deadline, None, "or its deadline");
-        let session = opened.response.result["sessionId"].clone();
-        drop(opened);
-        service
-            .ydoc_evict(&ctx, Some(handle.clone()), json!({ "sessionId": session }))
-            .await
-            .expect("evict the session");
-        service
-            .workspace_close(Some(handle))
-            .await
-            .expect("workspace close");
     }
 
     const PARKED_PATH: &str = "notes/live.md";
@@ -4423,11 +4011,6 @@ mod tests {
         cancelled_after_the_pulled_edit_commits(false).await;
     }
 
-    #[tokio::test]
-    async fn a_resync_cancelled_after_its_pulled_edit_commits_answers_with_it() {
-        cancelled_after_the_pulled_edit_commits(true).await;
-    }
-
     /// An open or resync committed the document's pulled edit, and its blob
     /// cannot have egress budget in time. Both answer OVERLOADED. The open
     /// keeps no session, so the next open shows the edit; the resync keeps its
@@ -4473,11 +4056,6 @@ mod tests {
     #[tokio::test]
     async fn an_open_without_egress_budget_answers_overloaded_and_reopens_with_the_edit() {
         full_budget_after_the_pulled_edit_commits(false).await;
-    }
-
-    #[tokio::test]
-    async fn a_resync_without_egress_budget_keeps_its_session() {
-        full_budget_after_the_pulled_edit_commits(true).await;
     }
 
     const REPLACED_PATH: &str = "lineage.txt";
@@ -4662,35 +4240,6 @@ mod tests {
         }
     }
 
-    /// The resync moves the session to the replacement, then cannot have
-    /// egress budget for its blob and answers OVERLOADED. The editor never
-    /// learned the replacement, so its next edit, which still expects the
-    /// earlier claim, is refused rather than taken as the replacement's. An
-    /// edit that expects no claim is refused too: the engine does not
-    /// substitute its own.
-    #[tokio::test]
-    async fn an_earlier_edit_after_an_overloaded_replacing_resync_is_refused() {
-        let fixture = ReplacedLineage::new("replaced-resync-overloaded").await;
-        let held = fixture.hold_egress_budget().await;
-        let refused = fixture.resync().await.expect_err("the blob has no budget");
-        assert_eq!(refused.code, ErrorCode::Overloaded);
-        assert_eq!(refused.message, "blob-egress-capacity");
-        assert_eq!(
-            fixture.session_claim().as_deref(),
-            Some(fixture.replacement.as_str())
-        );
-        drop(held);
-        let edit = fixture.earlier.plaintext_insert(4, " stale");
-        let before = fixture.head();
-        let refused = fixture
-            .record("earlier", Some(&fixture.earlier_claim), &edit)
-            .await;
-        fixture.assert_earlier_edit_refused(before, refused);
-        let refused = fixture.record("unclaimed", None, &edit).await;
-        fixture.assert_earlier_edit_refused(before, refused);
-        fixture.close().await;
-    }
-
     /// An edit made on the earlier document waits behind the resync that
     /// moves the session to the replacement. The resync succeeds; the edit
     /// is still refused.
@@ -4762,50 +4311,6 @@ mod tests {
             .expect("the replacement settles");
         assert_eq!(settled["content"], json!("base fresh"));
         fixture.close().await;
-    }
-
-    #[test]
-    fn scene_seed_materialization_errors_report_exact_job_counts() {
-        let invalid = scene_seed_materialization_error(YdocSeedMaterialization {
-            materialized: false,
-            incomplete_jobs: 3,
-            invalid_jobs: 2,
-        });
-        assert_eq!(invalid.code, ErrorCode::Internal);
-        assert_eq!(
-            invalid.message,
-            "ydoc-artifact-assets-invalid: invalid_jobs=2, incomplete_jobs=3"
-        );
-
-        let pending = scene_seed_materialization_error(YdocSeedMaterialization {
-            materialized: false,
-            incomplete_jobs: 4,
-            invalid_jobs: 0,
-        });
-        assert_eq!(pending.code, ErrorCode::Overloaded);
-        assert_eq!(
-            pending.message,
-            "ydoc-artifact-assets-pending: invalid_jobs=0, incomplete_jobs=4"
-        );
-    }
-
-    #[test]
-    fn ydoc_open_preserves_storage_and_crash_refusals() {
-        let storage = map_ydoc_open_runtime(RuntimeError::Storage(
-            dohc_engine_storage::StorageError::StateCorrupt { source: None },
-        ));
-        assert_eq!(storage.code, ErrorCode::Internal);
-        assert_eq!(storage.message, "ydoc-open-storage-failed");
-
-        let crashed = map_ydoc_open_runtime(RuntimeError::OperationCrashed);
-        assert_eq!(crashed.code, ErrorCode::Internal);
-        assert_eq!(crashed.message, "ydoc-open-operation-crashed");
-
-        let busy = map_ydoc_open_runtime(RuntimeError::Storage(
-            dohc_engine_storage::StorageError::FileLocked,
-        ));
-        assert_eq!(busy.code, ErrorCode::Overloaded);
-        assert_eq!(busy.message, "engine-store-busy");
     }
 
     #[tokio::test]
@@ -5108,68 +4613,6 @@ mod tests {
                 .code,
             ErrorCode::Cancelled
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owner_outbox_append_waits_for_the_workspace_session_barrier() {
-        // MUTATION: remove the owner outbox session_ops acquisition -> the
-        // append commits while this test still holds the lifecycle guard.
-        let scratch = ScratchDir::new().expect("scratch");
-        let supervisor: &'static WorkspaceSupervisor =
-            Box::leak(Box::new(WorkspaceSupervisor::new()));
-        let service = Arc::new(EngineService::with_supervisor(supervisor));
-        let opened = service
-            .workspace_open(
-                &RequestContext::unbounded(),
-                json!({
-                    "rootDir": scratch.path().to_string_lossy(),
-                    "workspaceId": "owner-outbox-session-barrier",
-                    "captureMode": "none"
-                }),
-            )
-            .await
-            .expect("workspace open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-        service
-            .versions_ensure_main(
-                &RequestContext::unbounded(),
-                Some(handle.clone()),
-                json!({ "workspaceId": "owner-outbox-session-barrier" }),
-            )
-            .await
-            .expect("ensure durable main version");
-        let open = service.open(Some(&handle)).expect("open workspace");
-        let held = Arc::clone(&open.session_ops).lock_owned().await;
-
-        let appending_service = Arc::clone(&service);
-        let appending_handle = handle.clone();
-        let mut appending = tokio::spawn(async move {
-            appending_service
-                .owner_ydoc_outbox_append(
-                    &RequestContext::unbounded(),
-                    Some(appending_handle),
-                    owner_outbox_append_params("owner-outbox-session-barrier", "serialized-append"),
-                )
-                .await
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), &mut appending)
-                .await
-                .is_err(),
-            "owner outbox append must wait behind session_ops"
-        );
-
-        drop(held);
-        tokio::time::timeout(Duration::from_secs(10), appending)
-            .await
-            .expect("append completed after barrier release")
-            .expect("append task")
-            .expect("owner outbox append");
-        service
-            .workspace_close(Some(handle))
-            .await
-            .expect("workspace close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

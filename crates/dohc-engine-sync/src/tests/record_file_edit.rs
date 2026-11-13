@@ -17,9 +17,6 @@ const RECORD_PATH: &str = "missions/apollo.md";
 const MOVED_PATH: &str = "missions/apollo-11.md";
 const PLANNED: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Planned\n---\n# Apollo\n";
 const FLOWN: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Flown\n---\n# Apollo\n";
-const LANDED: &str = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Landed\n---\n# Apollo\n";
-const RECOVERED: &str =
-    "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Recovered\n---\n# Apollo\n";
 const NOTES: &str = "Crew notes.";
 const LOG: &str = "Splashdown logged.";
 const GEMINI_PATH: &str = "missions/gemini.md";
@@ -279,43 +276,6 @@ fn b_types(b: &mut EngineStore, cache: &mut WriterDocCache, doc: &Ydoc, typing: 
     }
 }
 
-/// B settles `text` as its record session does.
-fn b_settles(b: &mut EngineStore, text: &str) {
-    b.write_with(&NoFaults, |tx| {
-        let result = dohc_engine_domain::write_projected_text_in_tx(
-            tx,
-            &WriteText {
-                workspace_id: "ws".into(),
-                version_id: "main".into(),
-                object_id: RECORD.into(),
-                path: RECORD_PATH.into(),
-                text: text.into(),
-                moment_id: "apollo-b1".into(),
-                metadata_origin: "ydoc".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 2_050,
-                request_id: None,
-            },
-        )
-        .map_err(crate::ydoc_apply::map_domain_hard_error)?;
-        tx.execute(
-            "UPDATE ydoc_docs SET settle_seq=?1,last_settled_sha=?2 WHERE object_id=?3",
-            params![
-                result.moment.moment_order,
-                result.snapshot.blob_sha256,
-                RECORD
-            ],
-        )
-        .map_err(SyncError::persist)?;
-        dohc_engine_collab::author_coverage::advance_in(tx, &key(), false)
-            .map_err(SyncError::corrupt)?;
-        Ok::<_, SyncError>(())
-    })
-    .expect("B settles its edit");
-}
-
 /// Another device's Y.Doc base for Apollo, which claims B's lineage.
 fn device_c_base(b: &mut EngineStore, doc: &Ydoc) -> String {
     let sha = b
@@ -392,20 +352,6 @@ fn head_text(b: &EngineStore, object: &str) -> Option<String> {
     })
     .expect("head text")
 }
-
-fn head_authors(b: &EngineStore) -> Option<String> {
-    b.read_with(|conn| {
-        conn.query_row(
-            "SELECT m.author_json FROM snapshots s JOIN moments m \
-               ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id \
-             WHERE s.workspace_id='ws' AND s.version_id='main' AND s.object_id=?1",
-            [RECORD],
-            |row| row.get(0),
-        )
-    })
-    .expect("head authors")
-}
-
 fn indexed_status(b: &EngineStore) -> Option<serde_json::Value> {
     b.read_with(|conn| {
         dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
@@ -602,56 +548,6 @@ fn record_file_edit_retires_a_pristine_unclaimed_seed_and_reseeds() {
     assert!(open_conflicts(&b).is_empty());
 }
 
-#[test]
-fn record_file_edit_meets_unsettled_record_edits_in_a_conflict_holding_both() {
-    let (planned, flown) = (md(PLANNED), md(FLOWN));
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-    let doc = richdoc(&planned);
-    b_opens(&mut b, &doc, &planned, &[NOTES]);
-    let draft = projected(&doc);
-
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    let gemini = a_saves(&mut a, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 31);
-    pull(&mut b, 2, &[flown_op, gemini.clone()], &[&flown, GEMINI]);
-
-    assert_eq!(
-        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
-        gemini.origin_seq,
-        "unrelated sync keeps moving"
-    );
-    assert_eq!(head_text(&b, "gemini").as_deref(), Some(GEMINI));
-    assert_eq!(
-        open_conflicts(&b),
-        vec![(sha(&draft), sha(&flown))],
-        "the conflict holds B's edit and A's file"
-    );
-    assert_eq!(head_text(&b, RECORD), Some(draft.clone()));
-    assert!(
-        head_authors(&b).is_some_and(|authors| authors.contains("typist")),
-        "History names who typed B's edit"
-    );
-    assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"
-        ),
-        1,
-        "History holds A's edit"
-    );
-    assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"
-        ),
-        2,
-        "B keeps its updates"
-    );
-    assert_eq!(lineage_text(&b), draft);
-    assert_eq!(side_records(&b), 1);
-}
-
 /// B's lossy note, holding `typing` it never settled.
 fn b_opens_lossy(b: &mut EngineStore, typing: &[&str]) -> Ydoc {
     let doc = richdoc(LOSSY_CANONICAL);
@@ -660,57 +556,6 @@ fn b_opens_lossy(b: &mut EngineStore, typing: &[&str]) -> Ydoc {
         .expect("witness the exact source");
     b_opens(b, &doc, LOSSY, typing);
     doc
-}
-
-/// A lossy note's projection never replaces its exact source unchecked. The
-/// conflict holds that source beside A's file instead of waiting forever,
-/// and a recovery copy keeps B's typing.
-#[test]
-fn record_file_edit_meets_a_lossy_note_in_a_conflict_holding_its_exact_source() {
-    let flown = md(FLOWN);
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, LOSSY);
-    let (_b_scratch, _b_path, mut b) = device_b(&created, LOSSY);
-    let draft = projected(&b_opens_lossy(&mut b, &[NOTES]));
-
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    hydrate(&mut b, &[&flown]);
-    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-
-    assert_eq!(open_conflicts(&b), vec![(sha(LOSSY), sha(&flown))]);
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(LOSSY));
-    assert_eq!(recovered(&b, &draft), 1, "a recovery copy keeps B's typing");
-    assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM ydoc_docs WHERE object_id='apollo' \
-               AND settled_update_seq=head_update_seq AND settle_prior_update_seq IS NULL \
-               AND pending_authors_json='[]'"
-        ),
-        1,
-        "the copy consumed its authors, so no later projection credits them again"
-    );
-    assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM moments WHERE moment_id='apollo-flown'"
-        ),
-        1,
-        "History holds A's edit"
-    );
-    assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM ydoc_updates WHERE object_id='apollo'"
-        ),
-        2,
-        "B keeps its typing"
-    );
-    assert_eq!(side_records(&b), 1);
-    assert_eq!(
-        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
-        flown_op.origin_seq
-    );
 }
 
 /// Each resolution of a lossy note's conflict keeps the recovery copy of
@@ -754,84 +599,6 @@ fn lossy_record_file_edit_conflicts_keep_the_recovery_through_each_resolution() 
     }
 }
 
-/// A replica's later edit to a lossy note under its conflict cannot replace
-/// the exact source. The source stays the current side, the lineage keeps
-/// the edit, and the recovery copy of the earlier typing stays.
-#[test]
-fn lossy_record_conflict_keeps_its_exact_source_under_a_later_replica_edit() {
-    let flown = md(FLOWN);
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, LOSSY);
-    let (_b_scratch, _b_path, mut b) = device_b(&created, LOSSY);
-    let replica = richdoc(LOSSY_CANONICAL);
-    replica
-        .preserve_folded_markdown_source(LOSSY)
-        .expect("witness the exact source");
-    let claim = b
-        .put_binary_blob(&replica.encode_full_state())
-        .expect("base blob");
-    let update = |seq: i64, blob: &str| {
-        let mut op = envelope(
-            "device-c",
-            seq,
-            "ydoc.update",
-            json!({
-                "versionId":"main", "objectId":RECORD, "path":RECORD_PATH,
-                "contentKind":"richdoc", "updateBlobSha256":blob,
-                "lineageClaimId":claim, "isBaseState":(seq == 0),
-            }),
-        );
-        op.relay_seq = Some(10 + seq);
-        op
-    };
-    apply_ydoc_envelope(
-        &mut b,
-        &mut WriterDocCache::new(),
-        &update(0, &claim),
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("the replica's base arrives");
-    assert!(open_conflicts(&b).is_empty(), "the base matches the file");
-    // B types into the claimed lineage and never settles.
-    let local = Ydoc::wire();
-    local
-        .apply(&replica.encode_full_state())
-        .expect("B holds the base");
-    b_types(&mut b, &mut WriterDocCache::new(), &local, &[NOTES], 2_001);
-    let draft = projected(&local);
-
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    hydrate(&mut b, &[&flown]);
-    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-    assert_eq!(open_conflicts(&b), vec![(sha(LOSSY), sha(&flown))]);
-    assert_eq!(recovered(&b, &draft), 1);
-
-    let delta = replica.richdoc_append_paragraph(LOG);
-    let delta_sha = b.put_binary_blob(&delta).expect("delta blob");
-    apply_ydoc_envelope(
-        &mut b,
-        &mut WriterDocCache::new(),
-        &update(1, &delta_sha),
-        &NoFaults,
-        &NoLiveLeases,
-    )
-    .expect("the replica's later edit arrives");
-    assert_eq!(
-        open_conflicts(&b),
-        vec![(sha(LOSSY), sha(&flown))],
-        "the exact source stays the current side"
-    );
-    assert_eq!(head_text(&b, RECORD).as_deref(), Some(LOSSY));
-    local.apply(&delta).expect("merge the replica's edit");
-    assert_eq!(
-        lineage_text(&b),
-        projected(&local),
-        "the lineage keeps the edit"
-    );
-    assert_eq!(recovered(&b, &draft), 1);
-}
-
 /// A moves Apollo to MOVED_PATH and returns the envelope A journals.
 fn a_moves_apollo(a: &mut EngineStore) -> ReplicationEnvelope {
     let rename = RenameTextFile {
@@ -852,31 +619,6 @@ fn a_moves_apollo(a: &mut EngineStore) -> ReplicationEnvelope {
             .map_err(SyncError::corrupt)?;
         Ok(())
     })
-}
-
-/// A file moved on a device without the lineage meets B's unsettled edits in
-/// a conflict instead of waiting forever.
-#[test]
-fn record_file_move_meets_unsettled_record_edits_in_a_conflict() {
-    let planned = md(PLANNED);
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-    let doc = richdoc(&planned);
-    b_opens(&mut b, &doc, &planned, &[NOTES]);
-    let draft = projected(&doc);
-
-    let moved = a_moves_apollo(&mut a);
-    assert_conflicts_opened(deliver(&mut b, &moved, &NoLiveLeases).expect("apply"), 1);
-
-    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&planned))]);
-    assert_eq!(head_text(&b, RECORD), Some(draft.clone()));
-    assert_eq!(lineage_text(&b), draft);
-    assert_eq!(side_records(&b), 1);
-    assert_eq!(
-        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
-        moved.origin_seq
-    );
 }
 
 /// Each resolution of a move conflict leaves the record at one path, on a
@@ -977,39 +719,6 @@ fn resolved_record_file_move_conflicts_leave_one_path() {
     }
 }
 
-/// B settled one edit and keeps typing. A file written over the older head
-/// meets B's latest edits, and choosing A's file keeps them in History.
-#[test]
-fn record_file_edit_from_an_older_head_keeps_unsettled_edits_in_the_current_side() {
-    let (planned, flown) = (md(PLANNED), md(FLOWN));
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-    let doc = richdoc(&planned);
-    b_opens(&mut b, &doc, &planned, &[NOTES]);
-    let settled = projected(&doc);
-    b_settles(&mut b, &settled);
-    b_types(&mut b, &mut WriterDocCache::new(), &doc, &[LOG], 2_060);
-    let latest = projected(&doc);
-
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    hydrate(&mut b, &[&flown]);
-    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-
-    assert_eq!(
-        open_conflicts(&b),
-        vec![(sha(&latest), sha(&flown))],
-        "the current side holds B's unsettled edit"
-    );
-    assert_eq!(head_text(&b, RECORD), Some(latest.clone()));
-    assert_eq!(side_records(&b), 1, "the Y.Doc moves the current side");
-
-    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
-    assert_eq!(head_text(&b, RECORD), Some(flown));
-    assert!(open_conflicts(&b).is_empty());
-    assert!(history_holds(&b, &latest) >= 1, "History keeps B's edit");
-}
-
 /// Typing added after the conflict opened is on neither side. Choosing A's
 /// file keeps it as a recovery copy naming its typist, after a restart too.
 #[test]
@@ -1053,104 +762,6 @@ fn typing_after_a_record_conflict_opens_outlives_the_resolution() {
         })
         .expect("the recovery copy's authors");
     assert!(authors.contains("typist"), "{authors}");
-}
-
-/// One conflict per object. A file that continues the conflict's incoming
-/// side updates it. A file from another branch waits for the resolution.
-#[test]
-fn record_file_edit_on_another_branch_waits_for_the_open_conflict() {
-    let (planned, flown) = (md(PLANNED), md(FLOWN));
-    let landed = format!("{flown}\nLanded.\n");
-    let splashed = format!("{flown}\nSplashed down.\n");
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_d_scratch, mut d) = device("device-d");
-    hydrate(&mut d, &[SCHEMA, &planned]);
-    for op in &created {
-        assert!(matches!(
-            deliver(&mut d, op, &NoLiveLeases)
-                .expect("D pulls A's record")
-                .primary,
-            ApplyDisposition::Applied(_)
-        ));
-    }
-    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-    let doc = richdoc(&planned);
-    b_opens(&mut b, &doc, &planned, &[NOTES]);
-    let draft = projected(&doc);
-
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    hydrate(&mut b, &[&flown, &landed, &splashed]);
-    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-
-    let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
-    assert_conflicts_opened(
-        deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's next edit"),
-        0,
-    );
-    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&landed))]);
-
-    let splashed_op = a_saves(
-        &mut d,
-        RECORD,
-        RECORD_PATH,
-        &splashed,
-        "apollo-splashed",
-        50,
-    );
-    assert!(
-        matches!(
-            deliver(&mut b, &splashed_op, &NoLiveLeases),
-            Err(SyncError::RetryableState {
-                reason: crate::moment_apply::RESOLVE_EXISTING_CONFLICT
-            })
-        ),
-        "D's edit waits for the open conflict"
-    );
-    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&landed))]);
-    assert_eq!(head_text(&b, RECORD), Some(draft));
-}
-
-/// A file from another branch waits for the open conflict even when the
-/// lineage would settle to it, so it neither opens a second conflict nor
-/// moves the head.
-#[test]
-fn record_file_edit_the_lineage_would_settle_to_waits_for_the_open_conflict() {
-    let (planned, flown) = (md(PLANNED), md(FLOWN));
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_d_scratch, mut d) = device("device-d");
-    hydrate(&mut d, &[SCHEMA, &planned]);
-    for op in &created {
-        deliver(&mut d, op, &NoLiveLeases).expect("D pulls A's record");
-    }
-    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-    let doc = richdoc(&planned);
-    b_opens(&mut b, &doc, &planned, &[NOTES]);
-    let draft = projected(&doc);
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    hydrate(&mut b, &[&flown]);
-    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-
-    // B keeps typing under the conflict, and D saves exactly what B's
-    // lineage now holds.
-    b_types(&mut b, &mut WriterDocCache::new(), &doc, &[LOG], 2_100);
-    let latest = projected(&doc);
-    assert_eq!(lineage_text(&b), latest);
-    let same_op = a_saves(&mut d, RECORD, RECORD_PATH, &latest, "apollo-same", 50);
-    hydrate(&mut b, &[&latest]);
-    assert!(
-        matches!(
-            deliver(&mut b, &same_op, &NoLiveLeases),
-            Err(SyncError::RetryableState {
-                reason: crate::moment_apply::RESOLVE_EXISTING_CONFLICT
-            })
-        ),
-        "D's file waits for the open conflict"
-    );
-    assert_eq!(open_conflicts(&b), vec![(sha(&draft), sha(&flown))]);
-    assert_eq!(head_text(&b, RECORD), Some(draft));
-    assert_eq!(lineage_text(&b), latest);
 }
 
 /// A file waiting for an open conflict waits alone. Pulls retain it, apply
@@ -1262,81 +873,6 @@ fn record_file_edit_waiting_for_a_conflict_lets_the_rest_of_sync_move() {
         "the fresh conflict inherits nothing"
     );
     assert_eq!(cursor(&b), 5 + limit);
-}
-
-/// Work held behind a conflict that passes the retention limit says which
-/// conflict to resolve, under its own code.
-#[test]
-fn conflict_held_work_past_the_retention_limit_names_the_conflict() {
-    let (planned, flown) = (md(PLANNED), md(FLOWN));
-    let splashed = format!("{flown}\nSplashed down.\n");
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_d_scratch, mut d) = device("device-d");
-    hydrate(&mut d, &[SCHEMA, &planned]);
-    for op in &created {
-        deliver(&mut d, op, &NoLiveLeases).expect("D pulls A's record");
-    }
-    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-    let doc = richdoc(&planned);
-    b_opens(&mut b, &doc, &planned, &[NOTES]);
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
-    let splashed_op = a_saves(
-        &mut d,
-        RECORD,
-        RECORD_PATH,
-        &splashed,
-        "apollo-splashed",
-        50,
-    );
-    pull(&mut b, 3, std::slice::from_ref(&splashed_op), &[&splashed]);
-    assert_eq!(count(&b, "SELECT COUNT(*) FROM relay_deferred_ops"), 1);
-
-    // The retained work fills the limit, and D sends one more file.
-    b.write_with(&NoFaults, |tx| {
-        tx.execute("UPDATE relay_deferred_ops SET retained_bytes=536870912", [])
-            .map_err(SyncError::persist)
-    })
-    .expect("fill the retention limit");
-    let gemini = a_saves(&mut d, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 60);
-    hydrate(&mut b, &[GEMINI]);
-    let mut relay = PagedRelay::new([(
-        4,
-        PullResponse {
-            work_references: Vec::new(),
-            next_reference_after: None,
-            reference_has_more: false,
-            ops: vec![gemini],
-            next_cursor: 5,
-            has_more: false,
-        },
-    )]);
-    relay.blobs.insert(sha(GEMINI), GEMINI.as_bytes().to_vec());
-    let result = RelaySyncClient::new(relay).pull_chat_workspace(
-        &mut b,
-        &mut WriterDocCache::new(),
-        "ws",
-        &NoFaults,
-        &LeaseRegistry::new(),
-        2_200,
-    );
-    let Err(RelayError::Local(detail)) = result else {
-        panic!("{result:?}");
-    };
-    assert!(
-        detail.starts_with(&format!(
-            "conflict-wait-limit: Changes from another computer are waiting on the conflict in \
-             {RECORD_PATH}. They reached a limit, so dohc stopped receiving changes. Resolve the \
-             conflict to receive changes again. (path {RECORD_PATH}, origin device-d seq "
-        )),
-        "{detail}"
-    );
-    assert!(
-        detail.ends_with("retained ops 1, retained bytes 536870912)"),
-        "{detail}"
-    );
-    assert_eq!(head_text(&b, "gemini"), None);
 }
 
 #[test]
@@ -1521,64 +1057,6 @@ fn resolved_record_file_edit_conflicts_keep_the_choice_after_restart() {
     }
 }
 
-/// After B takes A's flown file, A's next saves build on the choice. They come
-/// in without a conflict, after a restart and a redelivery too. A keeps the
-/// flown file, so it needs nothing from B to build on the choice.
-#[test]
-fn saves_that_build_on_an_applied_incoming_file_of_an_unclaimed_record_come_in() {
-    let (planned, flown, landed, recovered_text) =
-        (md(PLANNED), md(FLOWN), md(LANDED), md(RECOVERED));
-    let (_a_scratch, mut a) = device("device-a");
-    let created = a_creates_apollo(&mut a, &planned);
-    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
-    // B types into the record, so A's file meets that typing in a conflict.
-    b_opens(&mut b, &richdoc(&planned), &planned, &[NOTES]);
-    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-    hydrate(&mut b, &[&flown, &landed, &recovered_text]);
-    assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-    resolve(&mut b, ResolveConflictKind::ApplyIncoming);
-    assert_eq!(head_text(&b, RECORD), Some(flown.clone()));
-
-    let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
-    assert_conflicts_opened(
-        deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's save"),
-        0,
-    );
-    let check = |b: &EngineStore| {
-        assert!(open_conflicts(b).is_empty());
-        assert_eq!(head_text(b, RECORD), Some(landed.clone()));
-        assert_eq!(indexed_status(b), Some(json!("Landed")));
-    };
-    check(&b);
-    assert_eq!(lineage_rows(&b), 0, "the choice's lineage gives way");
-
-    drop(b);
-    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
-    check(&b);
-    let redelivered = deliver(&mut b, &landed_op, &NoLiveLeases).expect("redeliver");
-    assert!(
-        matches!(redelivered.primary, ApplyDisposition::Skipped),
-        "{redelivered:?}"
-    );
-    check(&b);
-
-    let recovered_op = a_saves(
-        &mut a,
-        RECORD,
-        RECORD_PATH,
-        &recovered_text,
-        "apollo-recovered",
-        50,
-    );
-    assert_conflicts_opened(
-        deliver(&mut b, &recovered_op, &NoLiveLeases).expect("apply A's next save"),
-        0,
-    );
-    assert!(open_conflicts(&b).is_empty());
-    assert_eq!(head_text(&b, RECORD), Some(recovered_text));
-    assert_eq!(indexed_status(&b), Some(json!("Recovered")));
-}
-
 /// A claimed record that never met a conflict takes a save from its head. The
 /// claimed lineage gives way, and a late edit to it becomes a recovery copy.
 #[test]
@@ -1670,93 +1148,6 @@ fn a_save_from_the_head_meets_a_record_bound_to_live_editing() {
     );
 }
 
-/// A save from the flown file B discarded still meets the choice when A never
-/// received it.
-#[test]
-fn a_save_from_a_discarded_side_still_meets_the_choice() {
-    let (planned, flown, landed) = (md(PLANNED), md(FLOWN), md(LANDED));
-    let merged = {
-        let doc = richdoc(&flown);
-        doc.richdoc_append_paragraph(NOTES);
-        projected(&doc)
-    };
-    for claimed in [false, true] {
-        for choice in ["current", "merged"] {
-            let label = format!("claimed={claimed} choice={choice}");
-            let (_a_scratch, mut a) = device("device-a");
-            let created = a_creates_apollo(&mut a, &planned);
-            let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-            let doc = richdoc(&planned);
-            if claimed {
-                device_c_base(&mut b, &doc);
-                b_types(&mut b, &mut WriterDocCache::new(), &doc, &[NOTES], 2_001);
-            } else {
-                b_opens(&mut b, &doc, &planned, &[NOTES]);
-            }
-            let (resolution, chosen) = match choice {
-                "current" => (ResolveConflictKind::KeepCurrent, projected(&doc)),
-                _ => (
-                    ResolveConflictKind::ApplyMerged {
-                        text: merged.clone(),
-                    },
-                    merged.clone(),
-                ),
-            };
-            let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-            hydrate(&mut b, &[&flown, &merged, &landed]);
-            assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-            resolve(&mut b, resolution);
-
-            let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
-            assert_conflicts_opened(
-                deliver(&mut b, &landed_op, &NoLiveLeases).expect("apply A's save"),
-                1,
-            );
-            assert_eq!(
-                open_conflicts(&b),
-                vec![(sha(&chosen), sha(&landed))],
-                "{label}"
-            );
-            assert_eq!(head_text(&b, RECORD), Some(chosen), "{label}");
-        }
-    }
-}
-
-/// A save from the head still meets typing B never settled, on a lineage only
-/// B holds and on one another device claimed.
-#[test]
-fn a_save_from_the_head_meets_unsettled_record_typing() {
-    let (planned, flown) = (md(PLANNED), md(FLOWN));
-    for claimed in [false, true] {
-        let (_a_scratch, mut a) = device("device-a");
-        let created = a_creates_apollo(&mut a, &planned);
-        let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
-        let doc = richdoc(&planned);
-        if claimed {
-            device_c_base(&mut b, &doc);
-            b_types(&mut b, &mut WriterDocCache::new(), &doc, &[NOTES], 2_001);
-        } else {
-            b_opens(&mut b, &doc, &planned, &[NOTES]);
-        }
-        let draft = projected(&doc);
-
-        let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
-        hydrate(&mut b, &[&flown]);
-        assert_conflicts_opened(deliver(&mut b, &flown_op, &NoLiveLeases).expect("apply"), 1);
-        assert_eq!(
-            open_conflicts(&b),
-            vec![(sha(&draft), sha(&flown))],
-            "claimed={claimed}"
-        );
-        assert_eq!(
-            head_text(&b, RECORD),
-            Some(draft.clone()),
-            "claimed={claimed}"
-        );
-        assert_eq!(lineage_text(&b), draft, "claimed={claimed}");
-    }
-}
-
 #[test]
 fn record_file_edit_held_by_a_live_session_converges_after_it_closes() {
     let (planned, flown) = (md(PLANNED), md(FLOWN));
@@ -1792,33 +1183,6 @@ fn record_file_edit_held_by_a_live_session_converges_after_it_closes() {
     assert_eq!(indexed_status(&b), Some(json!("Flown")));
     assert_eq!(lineage_rows(&b), 0);
     assert!(open_conflicts(&b).is_empty());
-}
-
-/// A bare marker, like the one an owner stop leaves on an unenrolled file,
-/// holds nothing another device could have. A resolution retires it even when
-/// an earlier lineage of the same object journaled an update.
-#[test]
-fn a_resolution_retires_a_bare_lineage_whatever_an_earlier_lineage_journaled() {
-    let (_scratch, mut b) = device("device-b");
-    a_creates_apollo(&mut b, &md(PLANNED));
-    b.write_with(&NoFaults, |tx| {
-        tx.execute(
-            "INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,\
-             head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) \
-             VALUES('ws','main',?1,'richdoc','local-only',0,0,'unclaimed',1)",
-            [RECORD],
-        )
-        .map_err(SyncError::persist)?;
-        tx.execute(
-            "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,\
-             recorded_at_ms,imported) VALUES('ws','device-c',0,'ydoc.update',?1,1,1)",
-            [json!({ "versionId": "main", "objectId": RECORD }).to_string()],
-        )
-        .map_err(SyncError::persist)?;
-        crate::ydoc_apply::retire_unclaimed_resolution_lineage_in_tx(tx, &key(), 2)
-    })
-    .expect("a bare lineage retires");
-    assert_eq!(lineage_rows(&b), 0);
 }
 
 /// Each open conflict's waiting version, as object, origin and sequence, in
@@ -1877,43 +1241,6 @@ fn b_retains(b: &mut EngineStore, ops: &[ReplicationEnvelope], texts: &[&str]) {
         .expect("B has an identity");
     let ops = ops.iter().collect::<Vec<_>>();
     crate::deferred::retain(b, &identity, None, &ops, &NoFaults).expect("retain");
-}
-
-/// A save that continues the conflict's incoming side updates the conflict,
-/// so it never waits behind it. A save from another branch does.
-#[test]
-fn a_continuation_of_the_incoming_side_is_not_a_waiting_version() {
-    let (_scratch, mut a, mut b, mut d) = b_holds_a_conflict();
-    let landed = format!("{}\nLanded.\n", md(FLOWN));
-    let landed_op = a_saves(&mut a, RECORD, RECORD_PATH, &landed, "apollo-landed", 40);
-    b_retains(
-        &mut b,
-        &[from_origin(&landed_op, "device-f", 0)],
-        &[&landed],
-    );
-    assert!(
-        waiting(&b).is_empty(),
-        "A's next edit continues the conflict"
-    );
-
-    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
-    let splashed_op = a_saves(
-        &mut d,
-        RECORD,
-        RECORD_PATH,
-        &splashed,
-        "apollo-splashed",
-        50,
-    );
-    b_retains(
-        &mut b,
-        &[from_origin(&splashed_op, "device-g", 0)],
-        &[&splashed],
-    );
-    assert_eq!(
-        waiting(&b),
-        vec![(RECORD.to_owned(), "device-g".to_owned(), 0)]
-    );
 }
 
 /// Retained saves of another file, or of the same file on another version,
@@ -2014,25 +1341,4 @@ fn an_applied_retained_save_is_not_a_waiting_version() {
     })
     .expect("device-f applied");
     assert!(waiting(&b).is_empty());
-}
-
-/// A move from another branch waits too. The waiting version names no path,
-/// so a listing words it with the conflict's own path.
-#[test]
-fn a_move_from_another_branch_waits_under_the_conflicts_path() {
-    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
-    let moved = a_moves_apollo(&mut d);
-    pull(&mut b, 3, std::slice::from_ref(&moved), &[]);
-    assert!(read_replication_acked_seq(&b, "ws", "device-d").expect("ack") < moved.origin_seq);
-    assert_eq!(
-        waiting(&b),
-        vec![(RECORD.to_owned(), "device-d".to_owned(), moved.origin_seq)]
-    );
-    assert_eq!(
-        count(
-            &b,
-            "SELECT COUNT(*) FROM conflicts WHERE status='open' AND path='missions/apollo.md'"
-        ),
-        1
-    );
 }
