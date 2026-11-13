@@ -413,11 +413,6 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         `Quit and reopen the dohc app. If Settings > Sync and sharing still shows ${deleted.email}, choose Disconnect.`,
       ].join("\n");
     }
-    case "chatLinks":
-    case "chatFileMentions":
-    case "linksEdges":
-    case "linksIn":
-    case "linksResolve":
     case "shareCopy":
     case "accessRefresh":
     case "accessObject":

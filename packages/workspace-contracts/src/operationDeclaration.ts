@@ -43,6 +43,21 @@ export type OperationFamily = Readonly<Record<string, OperationDeclaration>>;
 export const EVERY_MCP_LEVEL = ["owner", "view", "comment", "edit"] as const;
 export const CURSOR_FLAG = { name: "--cursor", value: "cursor", text: "Continue the previous page." } as const;
 
+// Names each declaration by a name its door must not repeat, such as a socket
+// verb or a tool, and fails at load on a repeat.
+export function byName<Declaration, Name extends string>(
+  declarations: readonly Declaration[],
+  name: (declaration: Declaration) => Name,
+): Readonly<Record<Name, Declaration>> {
+  const named: Partial<Record<Name, Declaration>> = {};
+  for (const declaration of declarations) {
+    const key = name(declaration);
+    if (Object.hasOwn(named, key)) throw new Error(`${key} is declared twice.`);
+    named[key] = declaration;
+  }
+  return named as Record<Name, Declaration>;
+}
+
 // Joins two tables that must not share a name. A shared name fails the
 // typecheck where both are known, and fails at load where they are not.
 export function distinct<A extends object, B extends object>(
