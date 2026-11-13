@@ -5576,7 +5576,7 @@ mod tests {
             agent_id: "p-agent-1".into(),
             agent_name: Some("Helper".into()),
             on_behalf_of: Some("owner-1".into()),
-            depth: Some(0),
+            depth: None,
         }]);
         sees(&mut update, &Ydoc::wire());
         ack(apply(&mut store, &mut cache, &handle, update.clone()));
@@ -5597,7 +5597,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
             serde_json::json!([
-                {"kind":"agent","agentId":"p-agent-1","agentName":"Helper","onBehalfOf":"owner-1","depth":0}
+                {"kind":"agent","agentId":"p-agent-1","agentName":"Helper","onBehalfOf":"owner-1"}
             ])
         );
     }
