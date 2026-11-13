@@ -991,13 +991,22 @@ describe("a workspace that leaves the list and the account's Notices", () => {
     const { server, store, ids, list } = setup({ files });
     list.replace({ status: "loading" });
     store.resume();
-    await server.read();
+    const early = await server.read();
     expect(ids()).toEqual(["a", "b"]);
     list.replace({ status: "failed", problem: "offline" });
     expect(ids()).toEqual(["a", "b"]);
     expect(files.lists.get(scope)).toHaveLength(2);
     // Once read, the list rules out the workspace it lacks.
     list.set([trip]);
+    expect(ids()).toEqual(["a"]);
+    expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
+    // The read begun before the list was read is older than it, so it starts again, and its late answer lands nothing.
+    const fresh = server.read();
+    early.answer(
+      200,
+      noticePageBody([relayRow("a"), relayRow("b", { workspaceId: "w2" })], { replace: true }),
+    );
+    expect((await fresh).path).toBe("/sync/notices?scope=phone&limit=100");
     expect(ids()).toEqual(["a"]);
     expect(files.lists.get(scope)).toMatchObject([{ noticeId: "a" }]);
   });

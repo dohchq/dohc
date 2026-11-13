@@ -673,7 +673,8 @@ export function createNoticeStore(options: {
     }
     if (dropped) saveList();
     const key = visibilityKey(list.state());
-    const changed = key !== null && lastKey !== null && key !== lastKey;
+    // The first list read restarts a read already on its way too: the relay answered that read before this list.
+    const changed = key !== null && key !== lastKey && (lastKey !== null || pull !== null);
     if (key !== null) lastKey = key;
     publish();
     if (changed) restart();
