@@ -12,7 +12,7 @@ const yjsProbe = vi.hoisted(() => ({
   encodeStateAsUpdateCalls: 0,
   encodeStateVectorCalls: 0,
   digestViews: [] as Uint8Array[],
-  beforeEncodeStateVector: undefined as (() => void) | undefined,
+  beforeEncodeStateVector: undefined as ((document: unknown) => void) | undefined,
 }));
 
 vi.mock("yjs", async (importOriginal) => {
@@ -36,7 +36,7 @@ vi.mock("yjs", async (importOriginal) => {
     },
     encodeStateVector: (...args: Parameters<typeof actual.encodeStateVector>) => {
       yjsProbe.encodeStateVectorCalls += 1;
-      yjsProbe.beforeEncodeStateVector?.();
+      yjsProbe.beforeEncodeStateVector?.(args[0]);
       return actual.encodeStateVector(...args);
     },
   };
@@ -1582,6 +1582,104 @@ describe("validateOrderedLiveUpdateCut", () => {
       off.mockRestore();
       cut.document.destroy();
     }
+  });
+
+  it("charges a merge that deletes text typed into a deleted paragraph a bounded amount more than the same edits in turn", () => {
+    const source = new Y.Doc({ gc: false });
+    source.clientID = 1;
+    const paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText("Shared")]);
+    source.getXmlFragment("body").insert(0, [paragraph]);
+    const checkpoint = Y.encodeStateAsUpdate(source);
+    source.destroy();
+    const edit = (
+      clientID: number,
+      received: readonly Uint8Array[],
+      change: (doc: Y.Doc) => void,
+    ) => {
+      const doc = new Y.Doc({ gc: false });
+      doc.clientID = clientID;
+      for (const update of [checkpoint, ...received]) Y.applyUpdate(doc, update);
+      const before = Y.encodeStateVector(doc);
+      change(doc);
+      const update = Y.encodeStateAsUpdate(doc, before);
+      doc.destroy();
+      return update;
+    };
+    // The suffix row: client 2 types "x" at the end of "Shared".
+    const typed = edit(2, [], (doc) => {
+      const text = (doc.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText;
+      text.insert(text.length, "x");
+    });
+    const deleteParagraph = (doc: Y.Doc) => doc.getXmlFragment("body").delete(0, 1);
+    // The cascade's candidate: client 3 deletes the paragraph before it has the "x". Its delete set names only
+    // client 1's paragraph, text and "Shared", so replaying both rows deletes the "x" with no row naming it.
+    const concurrent = edit(3, [], deleteParagraph);
+    // The twin's candidate: client 3 has the "x" when it deletes the paragraph. Deleting a type deletes the children
+    // it holds, so this delete set names the "x" too, and the final proof takes its equal path.
+    const inTurn = edit(3, [typed], deleteParagraph);
+    expect(Y.decodeUpdate(concurrent).ds.clients.has(2)).toBe(false);
+    expect(Y.decodeUpdate(inTurn).ds.clients.get(2)).toHaveLength(1);
+
+    const exactCost = (candidate: Uint8Array) => {
+      const input = { mode: "journal-candidate" as const, checkpoint, suffix: [typed], candidate };
+      const exact = accepted(validateOrderedLiveUpdateCut(input, highPolicy())).usage
+        .indexOperations;
+      accepted(validateOrderedLiveUpdateCut(input, highPolicy({ maxIndexOperations: exact })));
+      const oneLess = refused(
+        validateOrderedLiveUpdateCut(
+          input,
+          highPolicy({
+            maxIndexOperations: exact - 1,
+          }),
+        ),
+        "capacity-refused",
+        { kind: "final" },
+      );
+      expect(oneLess.usage.indexOperations).toBe(exact - 1);
+      return exact;
+    };
+    const cascade = exactCost(concurrent);
+    const twin = exactCost(inTurn);
+    // Both cuts replay to the same document, so they share every step except the delete comparison and its follow-on.
+    // The twin's own work only adds to its total: it decodes and retires one more declared range, and its delete
+    // comparison runs in full. The cascade's extra steps, for this input, are at most:
+    //   1  the delete comparison, which stops at the client count
+    //   6  impliedDeletes: 1 declared client, then client 1 (client, range, declared range) and client 2 (client, range)
+    //   3  deletedByMerge for client 2: entry, one search step over its one struct, that struct
+    //   4  retireSpans for the "x": one search step, the span, then subtractFromSpan's search step and range
+    //   0  unsafe points: neither client has any
+    const cascadeSteps = 1 + 6 + 3 + 4 + 0;
+    const measured = `cascade exact cost: cascade=${cascade} twin=${twin}`;
+    console.log(measured);
+    console.error(measured);
+    expect(cascade - twin).toBeLessThanOrEqual(cascadeSteps);
+  });
+
+  it("refuses a deletion in the replay that no update declares and no Yjs merge explains", () => {
+    // The replay's text is marked deleted outside any transaction just before its proof reads it. No update's delete
+    // set names it, the text holding it is live, and it is no map value.
+    const checkpoint = updateWithText("forged");
+    let marked = false;
+    yjsProbe.beforeEncodeStateVector = (document) => {
+      yjsProbe.beforeEncodeStateVector = undefined;
+      if (!(document instanceof Y.Doc)) throw new Error("expected the replay document");
+      const text = [...document.store.clients.values()]
+        .flat()
+        .find(
+          (struct): struct is Y.Item =>
+            struct instanceof Y.Item && struct.content instanceof Y.ContentString,
+        );
+      if (text === undefined) throw new Error("no text in the replay");
+      text.markDeleted();
+      marked = true;
+    };
+    refused(
+      validateOrderedLiveUpdateCut({ mode: "registration", checkpoint }, highPolicy()),
+      "invalid-update",
+      { kind: "final" },
+    );
+    expect(marked).toBe(true);
   });
 });
 
